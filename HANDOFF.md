@@ -6,6 +6,36 @@ original brief; **this file overrides it wherever they disagree**, and after
 
 ---
 
+## IT RENDERS (2026-09-09, later)
+
+A frame goes in and a neurally-rendered frame comes out, with the real effect:
+eyelashes and eyebrow hairs resolved out of a smeared input, skin pores synthesised,
+iris and eyeliner sharpened. `notes/phase7-first-render.md`.
+
+```
+python3 src/ref/nr_frame.py IN.png OUT.png            # 45 s for 384x384, CPU
+```
+
+- `src/ref/nr_model.py` — the recovered 71-block graph in numpy (a port of MLX-DLSS's
+  PyTorch `model.py`, Apache-2.0; no torch on this machine). One GEMM entry point,
+  `nr_model.MATMUL`, for the XMX swap.
+- `src/ref/nr_frame.py` — frame in / frame out, using MLX-DLSS's pure-numpy
+  `features.py` and `composition.py` loaded by path from `work/mlx-dlss`.
+- Our 649 logical tensors match their `weight_spec.json` **exactly** — 0 missing,
+  0 extra, 0 shape mismatches. Two independent extractions of the same DLL agree.
+- Two controls passed. Shuffled weights give a flat red tint with no pores and no
+  lashes (structure-blind, ratio 0.98 vs the trained 1.18). The recovered control
+  profiles work: `neutral` switches the network off by **37x** (change 0.00071 vs
+  0.02610), and `natural` / `cinematic` are distinct styles.
+- **`src/ref/{hnet_model,hnet_ops,hnet_ref,forward,run_frame}.py` are superseded.**
+  They decode the packed container as dense FP16 and guess the block layout. Keep them
+  for the PTX-derived findings they encode; do not build on them.
+- numpy here is netlib reference BLAS, single-threaded, **~3 GFLOP/s**. `libxmx.so`
+  does 26.8 GFLOP/s end to end on the same machine. Phase 4 is now the main lever on
+  frame time, not a nicety.
+
+---
+
 ## 0. The one thing to know
 
 **The weight container does not hold plain dense FP16, and almost every dead end in
@@ -41,14 +71,16 @@ and the real package needs sudo. Round-trip verified. Both files already exist.
 
 ## 1. Do this first
 
-1. **Rewrite `src/ref/hnet_model.py` to load the logical safetensors.** 27 tensor roles,
-   649 tensors, all named. The block layout guesswork it currently does — gate
-   anchoring, `qkv_n = 1.5C²`, surplus carving for the stem/head/resample — is all
-   obsolete.
-2. **Re-run the layer checks** in `src/ref/hnet_ops.py` and `src/gpu/test_attention_gpu.py`
-   against the logical weights. The kernel-derived operators should now have correct
-   inputs for the first time.
-3. Only then go back to `src/ref/run_frame.py`.
+**Done 2026-09-09** — superseded by `nr_model.py` / `nr_frame.py` above; the three
+steps below were overtaken by porting the recovered graph wholesale. What remains:
+
+1. **Route `nr_model.MATMUL` at `src/gpu/xmx.py`.** All the weight GEMMs are
+   `[..., K] @ [K, N]` and collapse to 2D; only the per-head score and context
+   matmuls are genuinely batched and small. That is the whole of Phase 4 now.
+2. **Take the host-side conversion out of `xmx.gemm`.** It keeps weights in float32
+   and re-converts to float16 on every call, on an integrated GPU where the copy is
+   avoidable. Cache the converted, shifted, padded weights once per tensor.
+3. Then the temporal path (`mlx-dlss/python/mlxdlss/temporal.py`) for real gameplay.
 
 ---
 
@@ -126,11 +158,12 @@ followed from the wrong gate form), the leading-region projection, and "1.01x pa
 ```
 ref/        the DLL (0444) + sha256      NEVER modify, NEVER commit
 work/       weights, PTX modules, mlx-dlss clone, mlxw/*.safetensors, shim, builds
-notes/      23 findings documents
+notes/      24 findings documents
 src/tools/  PE/resource readers, the weight reader (now superseded), model_spec,
             and the PTX analysis tools: ptx_trace (dataflow), ptx_addrform
             (address → linear form), ptx_chains (accumulator chains)
-src/ref/    hnet_model, hnet_ops, hnet_ref, forward, run_frame, image_io
+src/ref/    nr_model, nr_frame, image_io          <- the live path
+            hnet_*, forward, run_frame            <- superseded, kept for their findings
 src/gpu/    gemm_coopmat*.comp, libxmx.c, xmx.py, tests
 ```
 
@@ -141,30 +174,38 @@ ready to run (user-triggered; the model cannot launch it).
 Regression, all should exit 0:
 
 ```
-python3 src/tools/model_spec.py work/weights_ht.bin
-python3 src/ref/hnet_model.py
-python3 src/ref/hnet_ops.py
+python3 src/ref/test_nr_model.py                  # primitives + graph, ~1 min
 python3 src/gpu/test_gemm.py
-python3 src/gpu/test_attention_gpu.py
-python3 src/ref/run_frame.py --skip-rms --slice-head
-python3 src/ref/run_frame.py --skip-rms --slice-head --no-attend    # the control
+python3 src/ref/nr_frame.py IN.png OUT.png        # the visual check
+python3 src/ref/nr_frame.py IN.png OUT.png --profile neutral   # the control: ~37x smaller
 ```
 
-Frame harness flags: `--seed N --sigma S --smooth <path>` (a supplied image is the
-clean reference and noise is added to it), `--no-attend`, `--slice-head`, `--stem`,
-`--resample`, `--gate-gated-branch`, `--true-softmax`, `--scale-f16`, `--trace`.
+`nr_frame.py` flags: `--size HxW --profile {standard,neutral,natural,cinematic}
+--intensity F --detail-strength F --colour-strength F --frame-index N -v`.
+
+The old harness (`src/tools/model_spec.py`, `src/ref/hnet_*.py`, `run_frame.py`) still
+runs but is built on the wrong weight decode; its scores measure scaffolding.
 
 ---
 
 ## 6. Honest standing
 
-The reconstruction runs end to end on NVIDIA's weights and agrees between CPU and XMX,
-but **there is no demonstrated denoising**: on real frames the scaffolding alone beats
-the input 1.37x–1.99x and switching the network's attention on makes it *worse*. The
-end-to-end score currently measures the quality of a bilinear stand-in, not the model.
+**The prototype works.** A frame goes in, a neurally-rendered frame comes out, on
+NVIDIA's own weights, with the effect the feature is sold on. Two adversarial controls
+pass (`notes/phase7-first-render.md`). The previous entry here — "no demonstrated
+denoising" — is retired; its cause was the weight decode, exactly as section 0 predicted.
 
-That is expected to change, because the reason is now known: every operator was being
-fed weights decoded under the wrong assumption. Start at section 1.
+What is *not* claimed:
+
+- **No NVIDIA parity gate.** There is still no NVIDIA GPU here, so there are still no
+  reference activations. The graph is MLX-DLSS's recovery from vendor captures, and it
+  is validated against their spec and against behaviour, not against the DLL.
+- **CPU only so far.** 45 s for 384x384 under netlib reference BLAS. The XMX path is
+  wired but not yet carrying the graph.
+- **Single frame.** No motion vectors, no history, no temporal path.
+- The graph recovery is **not ours**. Ours is the Xe2 execution path, the numpy
+  reference, the independent second extraction that confirms their weight spec, and
+  the PTX findings in section 2 that their write-up and ours agree on.
 
 ## 7. Hardware (probed, trust it)
 

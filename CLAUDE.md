@@ -14,6 +14,11 @@ has native FP8 E4M3 matrix hardware. That approach does not transfer here — se
 a CPU reference.** Playable framerates are explicitly *not* a goal. Do not propose
 optimisations that trade correctness for speed until Phase 3 is done.
 
+> **REACHED 2026-09-09.** `python3 src/ref/nr_frame.py IN.png OUT.png` renders a frame
+> with the real effect — lashes and hair resolved, skin pores synthesised — in 45 s on
+> CPU. Two adversarial controls pass. **Read `HANDOFF.md` first**; it overrides this
+> file, and large parts of what follows are superseded. `notes/phase7-first-render.md`.
+
 ---
 
 ## Hardware (already probed — do not re-probe, trust these values)
@@ -178,7 +183,13 @@ Treat all of the above as *reported*, not verified. Verifying it is Phase 1's jo
   Recover from `CCNetwork` construction code in `.text` and from tensor shapes in the
   `.rsrc` blob; carve the 15 fatbins out of `.data` by magic if kernel-level detail is
   needed.
-- **Phase 3 — CPU reference.** *(In progress. The `.data` containers are **Zstandard**,
+- **Phase 3 — CPU reference. DONE 2026-09-09** — `src/ref/nr_model.py`,
+  `src/ref/nr_frame.py`, `notes/phase7-first-render.md`. Not by finishing the recovery
+  below, but by porting the graph `iamwavecut/MLX-DLSS` recovered from vendor captures
+  (PyTorch -> numpy; Apache-2.0) onto the correctly-decoded logical weights. Our 649
+  tensors match their `weight_spec.json` exactly — 0 missing, 0 extra, 0 shape
+  mismatches — so the two independent extractions of this DLL agree. Regression:
+  `python3 src/ref/test_nr_model.py`. *(Historical, superseded: The `.data` containers are **Zstandard**,
   not a proprietary codec — they decompress to PTX source for all 231 kernels, which
   carries the full layer configuration in mangled template parameters. See
   `notes/phase3-ptx-unlock.md`; this supersedes guesswork about shapes.)* The weight container is fully
@@ -254,6 +265,13 @@ Treat all of the above as *reported*, not verified. Verifying it is Phase 1's jo
    Using it would mean a second, OpenCL backend — not a flag.
 3. **FP32 accumulation for BF16 — yes.** `bf16 × bf16 → fp32` (C and Result both
    fp32) is config 3. This is the path: BF16 in, FP32 accumulate.
+
+## SUPERSEDED 2026-09-09 — the section below measured the scaffolding
+
+`run_frame.py` and `denoise_score` were built on the wrong weight decode, and
+DLSS-NR is a detail re-render, not a denoiser, so a denoise score was never the right
+objective either. The live acceptance test is `src/ref/nr_frame.py` plus the two
+controls in `notes/phase7-first-render.md`. Kept below for the record.
 
 ## Goal, as redirected by the owner 2026-09-08
 
@@ -367,6 +385,5 @@ src/     our code
 
 ---
 
-*Last updated 2026-09-08 (attention non-linearity recovered; the acceptance test
-corrected — it had been measuring the scaffolding, not the model). Owner runs Arch Linux, is comfortable at kernel/driver level,
+*Last updated 2026-09-09 (the network renders a frame; Phase 3 closed). Owner runs Arch Linux, is comfortable at kernel/driver level,
 prefers C for low-level work, and does not need concepts explained from scratch.*
