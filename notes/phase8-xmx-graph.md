@@ -88,17 +88,66 @@ values across four magnitude regimes:
 chain of elementwise passes. Swept on a 384x384 frame: 29.1 / 27.2 / 26.5 / 28.5 s at
 2^18 / 2^15 / 2^13 / 2^11.
 
+## The batched pipeline, and folding the branched feed-forward
+
+Two more pieces moved the rest of the arithmetic onto the GPU.
+
+**Batched GEMM.** The per-head score `Q @ K^T` and context `P @ V` are a different B
+per head and per window. A second pipeline puts the batch index on
+`gl_WorkGroupID.z` and gives each operand its own element stride, so the whole batch
+is one dispatch. The key needs no transpose copy: it is stored `(tokens, head_dim)`
+and `coopMatLoad` reads it column-major, which is the transpose — the `bt` push
+constant. Every shape in this graph is already tile-aligned (window tokens 64,
+head_dim 32), so `bmm_aligned` refuses anything else rather than padding.
+
+```
+batch=2304 64x32x64 bT=1   44.3 ms   numpy 212.5 ms   4.8x
+batch=2304 64x64x32        50.8 ms   numpy 202.0 ms   4.0x
+```
+
+**Folding the branched feed-forward.** Per output head the block computes
+`sum_br e4m3(gate(sum_ih x_ih @ W[oh, br, ih])) @ P[oh, br]`. Both sums are matrix
+products in disguise: stack `ih` down the rows and `br` across the columns and it is
+one `(C, 128)` expansion and one `(128, 32)` contraction, the gate and the publish
+passing through because they are elementwise. **296 GEMMs become 10** at C=256.
+
+The fold is exact linear algebra — 8.4e-07 on the expansion, 4.7e-07 on the
+projection. The E4M3 publish between the two stages amplifies that to ~1e-02 on the
+block output: the chaos above, now demonstrated inside a single block. So it is off
+in the reference and on in the backend. It does not move the end-to-end divergence at
+all — head RGB mean 0.017441 with the fold and without it, to six figures.
+
 ## Where a frame goes now
 
 384x384 Cyberpunk face crop, network extent 384x384:
 
-```
-                 before   after
-CPU  numpy        45.1 s   37.9 s
-XMX               29.5 s   22.2 s     2.03x against the original CPU baseline
-```
+| | CPU numpy | XMX |
+|---|---|---|
+| session start | 45.1 s | — |
+| GEMM hook + HOST_CACHED | 45.1 s | 29.5 s |
+| elementwise rewrites, chunk 2^13 | 37.9 s | 22.2 s |
+| batched attention | 37.7 s | 20.5 s |
+| folded branched FFN | 37.7 s | **16.8 s** |
 
-At 22.2 s: **4.86 s** GPU GEMM, **4.95 s** CPU batched attention matmuls, **12.4 s**
-elementwise numpy. The GEMMs are no longer the problem. Going much below this means
-moving the E4M3 publishes, the softmax and the window shuffles onto the GPU as well —
-a real compute-shader port of the graph, not a hook.
+**2.25x against the CPU reference, 2.68x against where the session started.**
+
+At 16.8 s: **4.89 s** GPU GEMM (1572 dispatches, 78.9 GFLOP), **0.02 s** CPU matmul,
+**11.9 s** elementwise numpy. All the arithmetic is on the GPU; 71 % of a frame is now
+E4M3 publishes, the softmax, the cosine normalise and the window shuffles, in numpy.
+Going below this means compute shaders for those too — a real port of the graph, not a
+hook on its GEMMs.
+
+A full **1280x720** frame renders at network extent 1280x768 in **94.6 s** (123.1 s
+before the last two changes) with a 9 GiB peak, no tiling artefacts and no colour
+shift, showing the same skin and material micro-detail as the 384 crop. Its change to
+the frame is 0.02504 mean before and after the optimisations, to five figures.
+
+Geometry is robust to whatever a game hands it — the extent is mirrored up to the next
+multiple of 64 with a 320 floor, and the noise channels are regenerated from network
+coordinates:
+
+```
+ 200x150 -> 320x320   12.8 s      383x129 -> 384x320   13.1 s
+  65x65  -> 320x320   11.0 s      129x720 -> 320x768   24.6 s
+ 100x400 -> 320x448   15.0 s
+```

@@ -13,8 +13,12 @@ eyelashes and eyebrow hairs resolved out of a smeared input, skin pores synthesi
 iris and eyeliner sharpened. `notes/phase7-first-render.md`.
 
 ```
-python3 src/ref/nr_frame.py IN.png OUT.png            # 45 s for 384x384, CPU
+python3 src/ref/nr_frame.py IN.png OUT.png --gpu      # 17 s for 384x384 on XMX
+python3 src/ref/nr_frame.py IN.png OUT.png            # 38 s, the CPU reference
 ```
+
+A full **1280x720** frame renders too, network extent 1280x768, 9 GiB peak, no tiling
+artefacts.
 
 - `src/ref/nr_model.py` — the recovered 71-block graph in numpy (a port of MLX-DLSS's
   PyTorch `model.py`, Apache-2.0; no torch on this machine). One GEMM entry point,
@@ -30,9 +34,16 @@ python3 src/ref/nr_frame.py IN.png OUT.png            # 45 s for 384x384, CPU
 - **`src/ref/{hnet_model,hnet_ops,hnet_ref,forward,run_frame}.py` are superseded.**
   They decode the packed container as dense FP16 and guess the block layout. Keep them
   for the PTX-derived findings they encode; do not build on them.
-- numpy here is netlib reference BLAS, single-threaded, **~3 GFLOP/s**. `libxmx.so`
-  does 26.8 GFLOP/s end to end on the same machine. Phase 4 is now the main lever on
-  frame time, not a nicety.
+- **Phase 4 is done too**: `src/gpu/nr_xmx.py` puts every GEMM on the XMX units,
+  the batched attention included. 384x384 goes 45.1 s -> 16.8 s. All the arithmetic
+  is on the GPU; 71 % of a frame is now elementwise numpy.
+  `notes/phase8-xmx-graph.md`.
+- **The graph is chaotic.** Perturbing the input by a relative 1e-06 moves the head
+  by 0.0118 mean on RGB, and by 1e-04 only 0.0156 — it saturates. The E4M3 publishes
+  are 6.25 %-step quantizers and about a hundred of them stand between input and
+  output. Bitwise CPU/GPU agreement is unattainable **by construction**, and so is
+  bitwise agreement with NVIDIA. Judge any change on the composed image and on the
+  controls, never per-element.
 
 ---
 
@@ -71,16 +82,24 @@ and the real package needs sudo. Round-trip verified. Both files already exist.
 
 ## 1. Do this first
 
-**Done 2026-09-09** — superseded by `nr_model.py` / `nr_frame.py` above; the three
-steps below were overtaken by porting the recovered graph wholesale. What remains:
+**Done 2026-09-09.** The graph runs, on CPU and on XMX. What is left, in order of
+value:
 
-1. **Route `nr_model.MATMUL` at `src/gpu/xmx.py`.** All the weight GEMMs are
-   `[..., K] @ [K, N]` and collapse to 2D; only the per-head score and context
-   matmuls are genuinely batched and small. That is the whole of Phase 4 now.
-2. **Take the host-side conversion out of `xmx.gemm`.** It keeps weights in float32
-   and re-converts to float16 on every call, on an integrated GPU where the copy is
-   avoidable. Cache the converted, shifted, padded weights once per tensor.
-3. Then the temporal path (`mlx-dlss/python/mlxdlss/temporal.py`) for real gameplay.
+1. **The elementwise work is 71 % of a frame** and it is all in numpy: the E4M3
+   publishes, the bit-affine softmax, the fragment-tree cosine normalise, the window
+   partition and reverse. Compute shaders for those would be the next real step, and
+   it is a port of the graph rather than a hook on its GEMMs. Note this needs the
+   activations to *stay* on the GPU between blocks — the win is not in any single
+   kernel but in not round-tripping through host memory 71 times.
+2. **The temporal path** (`work/mlx-dlss/python/mlxdlss/temporal.py`, pure numpy):
+   motion vectors, the reprojected history in channels 7-9, the sign-encoded validity
+   in 12-14, the five-tap history filter. This is what "run it in a game" actually
+   needs; the single-frame path is only the first frame of a sequence.
+3. **The DX12/Proton integration** (Phase 5). Nothing has been attempted here.
+
+Smaller, if wanted: `MIN_MACS` in `nr_xmx.py` was tuned against the reference BLAS
+and should be re-swept; `split_group_feed_forward` still issues `2*groups` GEMMs and
+could fold the same way the branched one now does.
 
 ---
 
@@ -97,7 +116,9 @@ steps below were overtaken by porting the recovered graph wholesale. What remain
 | **16-channel packing order**: ch4-6 colour, ch7-9 reprojected history (same affine `(x−a)·b`), ch12-14 sign-encoded validity. MLX-DLSS agrees independently | `notes/phase5-channel-order.md` |
 | Output head is **32 → 4**; three channels become display RGB | `notes/phase5-output-head.md` |
 | XMX flushes subnormal FP16 to zero; fixed by a per-tensor 2^k rescale | `notes/phase4-subnormal-flush.md` |
-| CPU and XMX agree to 9.7e-07 over 4.2M elements | `notes/phase4-end-to-end.md` |
+| **The graph amplifies any perturbation above ~1e-06 to a fixed floor** of 9-11 % of the head's sd. CPU vs XMX sits on that floor (0.0044 on the image, against MLX-DLSS's 0.0041-0.0048 gap to NVIDIA itself) | `notes/phase8-xmx-graph.md` |
+| Every GEMM weight converts to FP16 losslessly: 579 of the 649 logical tensors are stored F16 and the other 70 are `attn_scale`, which is not a GEMM operand | `notes/phase8-xmx-graph.md` |
+| ~~CPU and XMX agree to 9.7e-07 over 4.2M elements~~ — measured on a pass-through with no E4M3 publishes in it; does not transfer | `notes/phase4-end-to-end.md` |
 
 ---
 
@@ -174,9 +195,9 @@ ready to run (user-triggered; the model cannot launch it).
 Regression, all should exit 0:
 
 ```
-python3 src/ref/test_nr_model.py                  # primitives + graph, ~1 min
-python3 src/gpu/test_gemm.py
-python3 src/ref/nr_frame.py IN.png OUT.png        # the visual check
+python3 src/ref/test_nr_model.py                  # primitives + graph, ~40 s
+python3 src/gpu/test_gemm.py                      # worst rel 2.4e-06
+python3 src/ref/nr_frame.py IN.png OUT.png --gpu  # the visual check
 python3 src/ref/nr_frame.py IN.png OUT.png --profile neutral   # the control: ~37x smaller
 ```
 
@@ -200,8 +221,8 @@ What is *not* claimed:
 - **No NVIDIA parity gate.** There is still no NVIDIA GPU here, so there are still no
   reference activations. The graph is MLX-DLSS's recovery from vendor captures, and it
   is validated against their spec and against behaviour, not against the DLL.
-- **CPU only so far.** 45 s for 384x384 under netlib reference BLAS. The XMX path is
-  wired but not yet carrying the graph.
+- **Not fast.** 16.8 s for 384x384 on XMX, ~90 s for 720p. Every GEMM is on the GPU;
+  the remaining 71 % is elementwise numpy.
 - **Single frame.** No motion vectors, no history, no temporal path.
 - The graph recovery is **not ours**. Ours is the Xe2 execution path, the numpy
   reference, the independent second extraction that confirms their weight spec, and

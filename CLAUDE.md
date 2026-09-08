@@ -14,10 +14,14 @@ has native FP8 E4M3 matrix hardware. That approach does not transfer here — se
 a CPU reference.** Playable framerates are explicitly *not* a goal. Do not propose
 optimisations that trade correctness for speed until Phase 3 is done.
 
-> **REACHED 2026-09-09.** `python3 src/ref/nr_frame.py IN.png OUT.png` renders a frame
-> with the real effect — lashes and hair resolved, skin pores synthesised — in 45 s on
-> CPU. Two adversarial controls pass. **Read `HANDOFF.md` first**; it overrides this
-> file, and large parts of what follows are superseded. `notes/phase7-first-render.md`.
+> **REACHED 2026-09-09.** `python3 src/ref/nr_frame.py IN.png OUT.png --gpu` renders a
+> frame with the real effect — lashes and hair resolved, skin pores synthesised — in
+> **16.8 s** for 384x384 on the XMX units (38 s on the CPU reference), and a full
+> 1280x720 frame in about 90 s. Two adversarial controls pass. Phase 4 is done as well:
+> every GEMM, the batched attention included, runs through
+> `VK_KHR_cooperative_matrix`. **Read `HANDOFF.md` first**; it overrides this file, and
+> large parts of what follows are superseded.
+> `notes/phase7-first-render.md`, `notes/phase8-xmx-graph.md`.
 
 ---
 
@@ -212,7 +216,17 @@ Treat all of the above as *reported*, not verified. Verifying it is Phase 1's jo
   which is why the sizes never factored into `in x out`. The model was exported from
   PyTorch (ATen op names survive in `.rdata`). Codenames: feature CG2R, engine HNet,
   configs `crazy-cuckoo` and `hnet-vigilant-squid`.
-- **Phase 4 — GPU path.** *(Started, and already productive.)* Port to XMX via Vulkan
+- **Phase 4 — GPU path. DONE 2026-09-09** — `src/gpu/nr_xmx.py`,
+  `notes/phase8-xmx-graph.md`. Every GEMM in the recovered graph runs on XMX in FP16
+  with FP32 accumulate, the batched per-head attention included (a second pipeline with
+  the batch on `gl_WorkGroupID.z`; the key is read column-major so no transpose is
+  copied). 384x384: 45.1 s -> 16.8 s. The kernel itself measures **1348 GFLOP/s**.
+  Two findings dominate everything else here: `libxmx.c` was choosing the *uncached*
+  host-visible memory type, which ran readback at 80 MB/s and hid the kernel entirely
+  (one line, 100x on a large GEMM); and **the graph is chaotic** — a relative 1e-06
+  perturbation of the input moves the head as much as an FP16 GEMM does, because ~100
+  E4M3 publishes with a 6.25 % step stand between input and output. Bitwise agreement,
+  with the CPU or with NVIDIA, is unattainable by construction. *(Historical:* Port to XMX via Vulkan
   cooperative matrix in **FP16** (not BF16 — the weights ship as FP16), compute
   shaders, tiled. Validate layer-by-layer against Phase 3.
   `src/gpu/gemm_coopmat.comp` + `src/gpu/gemm_runner.c` run FP16 x FP16 -> FP32 GEMM
@@ -385,5 +399,6 @@ src/     our code
 
 ---
 
-*Last updated 2026-09-09 (the network renders a frame; Phase 3 closed). Owner runs Arch Linux, is comfortable at kernel/driver level,
+*Last updated 2026-09-09 (the network renders a frame, on the CPU and on XMX;
+Phases 3 and 4 closed). Owner runs Arch Linux, is comfortable at kernel/driver level,
 prefers C for low-level work, and does not need concepts explained from scratch.*
