@@ -1,0 +1,18 @@
+# NVIDIA's property — never committed, never redistributed. See CLAUDE.md "Rules".
+ref/
+work/
+*.dll
+*.exe
+*.7z
+
+# Derived from the DLL: the weight container and everything carved out of it.
+weights_ht.bin
+*.ptx
+*.cubin
+
+__pycache__/
+*.pyc
+
+# Third-party game screenshots: test material, not code. Kept out of the tree so a
+# cloud review does not carry copyrighted frames it has no use for.
+pngs/
