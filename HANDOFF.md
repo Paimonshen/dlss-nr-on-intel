@@ -38,12 +38,13 @@ artefacts.
   the batched attention included. 384x384 goes 45.1 s -> 16.8 s. All the arithmetic
   is on the GPU; 71 % of a frame is now elementwise numpy.
   `notes/phase8-xmx-graph.md`.
-- **The graph is chaotic.** Perturbing the input by a relative 1e-06 moves the head
-  by 0.0118 mean on RGB, and by 1e-04 only 0.0156 — it saturates. The E4M3 publishes
-  are 6.25 %-step quantizers and about a hundred of them stand between input and
-  output. Bitwise CPU/GPU agreement is unattainable **by construction**, and so is
-  bitwise agreement with NVIDIA. Judge any change on the composed image and on the
-  controls, never per-element.
+- **Per-element agreement is not a property a port can have.** Each precision regime
+  annihilates perturbations below its own working precision *exactly* and jumps
+  straight to 9-12 % of the head's sd above it — float32 flips between 1e-09 and
+  1e-07, half between 1e-05 and 1e-03. numpy's own float32 GEMM carries 5.2e-07 of
+  error, above the float32 threshold, so **any** correct float32 implementation would
+  diverge from this reference by the whole floor. Judge on the composed image and on
+  the controls, never per-element. `notes/phase9-numerics.md`.
 
 ---
 
@@ -116,8 +117,9 @@ could fold the same way the branched one now does.
 | **16-channel packing order**: ch4-6 colour, ch7-9 reprojected history (same affine `(x−a)·b`), ch12-14 sign-encoded validity. MLX-DLSS agrees independently | `notes/phase5-channel-order.md` |
 | Output head is **32 → 4**; three channels become display RGB | `notes/phase5-output-head.md` |
 | XMX flushes subnormal FP16 to zero; fixed by a per-tensor 2^k rescale | `notes/phase4-subnormal-flush.md` |
-| **The graph amplifies any perturbation above ~1e-06 to a fixed floor** of 9-11 % of the head's sd. CPU vs XMX sits on that floor (0.0044 on the image, against MLX-DLSS's 0.0041-0.0048 gap to NVIDIA itself) | `notes/phase8-xmx-graph.md` |
-| Every GEMM weight converts to FP16 losslessly: 579 of the 649 logical tensors are stored F16 and the other 70 are `attn_scale`, which is not a GEMM operand | `notes/phase8-xmx-graph.md` |
+| **Each precision regime has a sharp threshold**: below it a perturbation is annihilated exactly, above it the head jumps to 9-12 % of its sd. float32 ~1e-07, half ~1e-04. The half path is the **more stable** of the two | `notes/phase9-numerics.md` |
+| The whole CPU/XMX gap is the FP16 rounding of GEMM *activations*, and **97.3 % of them are already half-valued** — only 186 of 6987 calls are touched. Weights change nothing: 579 of 649 tensors are stored F16, the other 70 are `attn_scale`, not a GEMM operand | `notes/phase9-numerics.md` |
+| Batched attention and the folded branched FFN are **bit-identical** to the plain GEMM hook; the two 720p renders are pixel-identical | `notes/phase9-numerics.md` |
 | ~~CPU and XMX agree to 9.7e-07 over 4.2M elements~~ — measured on a pass-through with no E4M3 publishes in it; does not transfer | `notes/phase4-end-to-end.md` |
 
 ---
@@ -201,8 +203,13 @@ python3 src/ref/nr_frame.py IN.png OUT.png --gpu  # the visual check
 python3 src/ref/nr_frame.py IN.png OUT.png --profile neutral   # the control: ~37x smaller
 ```
 
-`nr_frame.py` flags: `--size HxW --profile {standard,neutral,natural,cinematic}
+`nr_frame.py` flags: `--gpu --size HxW --profile {standard,neutral,natural,cinematic}
 --intensity F --detail-strength F --colour-strength F --frame-index N -v`.
+
+`nr_xmx.install(fuse_branched=True, exact=False)`. `exact=True` carries activations
+half cannot hold as a sum of two halves — more accurate than the reference's own
+float32 GEMM — for 16.8 s -> 21.2 s. It moves the head gap from 0.0174 to 0.0124 and
+no further; see `notes/phase9-numerics.md` for why zero is not reachable.
 
 The old harness (`src/tools/model_spec.py`, `src/ref/hnet_*.py`, `run_frame.py`) still
 runs but is built on the wrong weight decode; its scores measure scaffolding.
