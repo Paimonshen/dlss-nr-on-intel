@@ -50,6 +50,14 @@ The **primary path is config 1, `fp16 × fp16 → fp32`** — the shipped weight
 
 ---
 
+## SUPERSEDED 2026-09-09 — see HANDOFF.md section 0
+
+**The section below is wrong.** The container holds *packed backend payloads* —
+permuted into `mma` fragment order and partly E4M3 — not plain dense FP16. Decoding
+them as FP16 gives values that correlate **−0.02** with the true logical tensors.
+`data_len == 2*n_elem` fixes the byte count, not the encoding. Use
+`work/mlxw/dlssnr-logical.safetensors` (649 named tensors). Kept below for the record.
+
 ## The weights are FP16 — there is no FP8 anywhere
 
 **Corrected 2026-09-07. This section previously said the model ships FP8 E4M3
