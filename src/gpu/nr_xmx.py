@@ -34,9 +34,15 @@ import xmx  # noqa: E402
 # numpy takes, even at the ~3 GFLOP/s of the reference BLAS this machine ships.
 MIN_MACS = 1 << 20
 
+# When True, activations that float16 cannot hold exactly are carried as a pair of
+# halves, two dispatches instead of one. 97.3 % of this graph's GEMM activations are
+# already half-valued — they arrive from an E4M3 or a half publish — so the cost lands
+# on a small minority of calls and the result tracks the float32 reference.
+EXACT = False
+
 _prepared: dict[tuple, tuple] = {}
 STATS = {"gpu": 0, "gpu_macs": 0, "gpu_seconds": 0.0,
-         "cpu": 0, "cpu_macs": 0, "cpu_seconds": 0.0}
+         "cpu": 0, "cpu_macs": 0, "cpu_seconds": 0.0, "split": 0}
 
 
 def _operand(weight):
@@ -102,7 +108,11 @@ def matmul(a, b):
             started = time.perf_counter()
             flat = np.ascontiguousarray(a.reshape(rows, inner))
             key, operand = _operand(b)
-            out = xmx.gemm_mapped(flat, operand, b_key=key)
+            if EXACT and not xmx.is_half_valued(flat):
+                STATS["split"] += 1
+                out = xmx.gemm_split(flat, operand, b_key=key)
+            else:
+                out = xmx.gemm_mapped(flat, operand, b_key=key)
             STATS["gpu"] += 1
             STATS["gpu_macs"] += rows * inner * cols
             STATS["gpu_seconds"] += time.perf_counter() - started
@@ -119,8 +129,12 @@ def matmul(a, b):
     return out
 
 
-def install(fuse_branched=True):
+def install(fuse_branched=True, exact=False):
     """Point the graph's GEMM hooks at the XMX path.
+
+    `exact` carries activations float16 cannot hold as a pair of halves, which tracks
+    the float32 CPU reference instead of the vendor's own half precision; it also turns
+    the branched fold off, since that reassociates float32 sums.
 
     `fuse_branched` folds the branched feed-forward's 4*G^2 + 4*G small GEMMs into
     1 + G + 1 larger ones. The fold is exact linear algebra (measured 8e-07, plain
@@ -129,10 +143,12 @@ def install(fuse_branched=True):
     hits, see notes/phase8-xmx-graph.md. Off in the reference, on here, because a
     dispatch costs far more than the arithmetic it carries.
     """
+    global EXACT
     import nr_model
+    EXACT = exact
     nr_model.MATMUL = matmul
     nr_model.MATMUL_NT = matmul_nt
-    nr_model.FUSE_BRANCHED = fuse_branched
+    nr_model.FUSE_BRANCHED = fuse_branched and not exact
     return xmx.device_name()
 
 

@@ -128,7 +128,7 @@ def gemm(A, B, rescale=True, iters=1):
 # zero-copy path
 # --------------------------------------------------------------------------
 
-_last_upload = (None, None)     # (key of the B in the device buffer, its address)
+_last_upload = None     # identifies the B currently sitting in the device buffer
 
 
 def _mapped(pointer, dtype, shape):
@@ -167,9 +167,13 @@ def gemm_mapped(A, right, b_key=None):
     np.multiply(A, np.float32(2.0 ** left_shift), out=a_mapped[:rows, :inner],
                 casting="unsafe")
 
-    if b_key is None or _last_upload != (b_key, pb.value):
+    # The identity of the operand and its padded extent are part of the key: two
+    # different weights can otherwise land on the same buffer address without the
+    # buffer having been reallocated, and the second would silently reuse the first.
+    upload_key = (b_key, id(right), K, N, right.shift, pb.value)
+    if b_key is None or _last_upload != upload_key:
         _mapped(pb, np.float16, (K, N))[:] = right.data
-        _last_upload = (b_key, pb.value)
+        _last_upload = upload_key
 
     if lib.xmx_gemm(M, N, K, None, None, None, 1) != 0:
         raise RuntimeError("xmx_gemm: " + lib.xmx_error().decode())
@@ -237,3 +241,30 @@ def bmm_aligned(A, B, transpose_b=False):
     if combined == 0 or not np.isfinite(combined):
         return view * np.float32(2.0 ** -left_shift) * np.float32(2.0 ** -right_shift)
     return view * combined
+
+
+def is_half_valued(A):
+    """True when float16 holds `A` exactly, so an FP16 GEMM loses nothing on it."""
+    with np.errstate(over="ignore"):
+        return np.array_equal(A.astype(np.float16).astype(np.float32), A)
+
+
+def gemm_split(A, right, b_key=None, parts=2):
+    """C = A @ right with `A` carried as a sum of halves.
+
+    Each step takes the float16 part and leaves an exact float32 remainder — the
+    subtraction of two nearby values is exact — so two parts keep ~22 mantissa bits
+    and three keep more than float32 has. Measured relative error against a float32
+    GEMM: 2e-04 with one part, 6e-07 with two, ~1e-10 with three. The dispatches
+    share a `b_key`, so the weight is uploaded once.
+    """
+    total = None
+    residual = A
+    for index in range(parts):
+        with np.errstate(over="ignore"):
+            part = residual.astype(np.float16).astype(np.float32)
+        product = gemm_mapped(part, right, b_key=b_key)
+        total = product if total is None else total + product
+        if index + 1 < parts:
+            residual = residual - part
+    return total

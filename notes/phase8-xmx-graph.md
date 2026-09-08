@@ -7,6 +7,11 @@ validate the first, and is the more important one.
 
 ## The graph amplifies any perturbation to a fixed floor
 
+*(Refined, and partly corrected, in `notes/phase9-numerics.md`: the gap is the FP16
+rounding of GEMM activations specifically — 186 of 6987 calls — the threshold depends
+on the working precision and is 1e-07 for float32 but 1e-04 for half, and the
+half-precision path is the more stable of the two. Read that note with this one.)*
+
 `nr_model` computes in float32 with the vendor's rounding points. Running the GEMMs in
 FP16 instead perturbs each one by ~3e-04 relative. The head then moves by mean 0.0174
 on the RGB channels — 12 % of its own sd. That looked like a bug.
@@ -35,8 +40,8 @@ Consequences, and they are not small:
   CPU vs XMX is mean 0.0044 on the image against the model's own change of 0.0261.
   MLX-DLSS report 0.0041-0.0048 MAE against NVIDIA on native game-face crops — the same
   number. The XMX path sits inside the noise floor of the whole reconstruction.
-- Chunk size is part of the numerics. A different `CHUNK_TOKENS` gives a different row
-  count to the BLAS, and one reassociated FMA is enough to flip a publish.
+- ~~Chunk size is part of the numerics.~~ **Withdrawn** — the CPU reference is
+  bit-identical at `CHUNK_TOKENS` 4096, 8192 and 131072. See `phase9-numerics.md`.
 
 ## Phase 4: the GEMMs
 
