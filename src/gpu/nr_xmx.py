@@ -119,10 +119,20 @@ def matmul(a, b):
     return out
 
 
-def install():
+def install(fuse_branched=True):
+    """Point the graph's GEMM hooks at the XMX path.
+
+    `fuse_branched` folds the branched feed-forward's 4*G^2 + 4*G small GEMMs into
+    1 + G + 1 larger ones. The fold is exact linear algebra (measured 8e-07, plain
+    float32 reassociation), but the E4M3 publish between the two stages amplifies
+    that to ~1e-02 on the block output — the same chaos every other perturbation
+    hits, see notes/phase8-xmx-graph.md. Off in the reference, on here, because a
+    dispatch costs far more than the arithmetic it carries.
+    """
     import nr_model
     nr_model.MATMUL = matmul
     nr_model.MATMUL_NT = matmul_nt
+    nr_model.FUSE_BRANCHED = fuse_branched
     return xmx.device_name()
 
 
