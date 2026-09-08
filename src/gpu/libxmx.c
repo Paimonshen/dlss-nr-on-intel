@@ -29,13 +29,22 @@ static struct {
 const char *xmx_error(void) { return g.err; }
 const char *xmx_device(void) { return g.name; }
 
+/* HOST_CACHED first, then anything host-visible.
+ *
+ * This machine offers memoryTypes[1] = DEVICE_LOCAL|HOST_VISIBLE|HOST_COHERENT and
+ * memoryTypes[2] = the same plus HOST_CACHED. Taking the first match landed on the
+ * uncached one, where reading the result back ran at ~80 MB/s and buried a 1.35
+ * TFLOP/s kernel: a 147456x32x128 GEMM spent 1073 ms moving 85 MB. */
 static uint32_t memtype(uint32_t bits, VkMemoryPropertyFlags want)
 {
 	VkPhysicalDeviceMemoryProperties mp;
 	vkGetPhysicalDeviceMemoryProperties(g.pd, &mp);
-	for (uint32_t i = 0; i < mp.memoryTypeCount; i++)
-		if ((bits & (1u << i)) && (mp.memoryTypes[i].propertyFlags & want) == want)
-			return i;
+	for (uint32_t pass = 0; pass < 2; pass++) {
+		VkMemoryPropertyFlags need = want | (pass ? 0 : VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
+		for (uint32_t i = 0; i < mp.memoryTypeCount; i++)
+			if ((bits & (1u << i)) && (mp.memoryTypes[i].propertyFlags & need) == need)
+				return i;
+	}
 	return UINT32_MAX;
 }
 
@@ -164,6 +173,22 @@ int xmx_init(const char *spv_path)
 	if ((r = vkCreateFence(g.dev, &fi, NULL, &g.fence))) FAIL("fence", r);
 
 	g.ready = 1;
+	return 0;
+}
+
+/* Zero-copy path: hand the caller the mapped operand buffers so it can build A in
+ * place and read C in place, instead of memcpying both across. On a shared-memory
+ * APU those copies buy nothing. `xmx_reserve` may reallocate, so the pointers it
+ * returns are valid only until the next call. */
+int xmx_reserve(unsigned M, unsigned N, unsigned K, void **pa, void **pb, void **pc)
+{
+	if (!g.ready) FAIL("not initialised", 0);
+	if (ensure(&g.A, (VkDeviceSize)M * K * 2) || ensure(&g.B, (VkDeviceSize)K * N * 2)
+	    || ensure(&g.C, (VkDeviceSize)M * N * 4))
+		return -1;
+	if (pa) *pa = g.A.p;
+	if (pb) *pb = g.B.p;
+	if (pc) *pc = g.C.p;
 	return 0;
 }
 

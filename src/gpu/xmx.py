@@ -34,6 +34,8 @@ def _load(spv="gemm_coopmat.spv"):
     lib.xmx_init.restype = ctypes.c_int
     lib.xmx_gemm.argtypes = [ctypes.c_uint] * 3 + [ctypes.c_void_p] * 3 + [ctypes.c_uint]
     lib.xmx_gemm.restype = ctypes.c_int
+    lib.xmx_reserve.argtypes = [ctypes.c_uint] * 3 + [ctypes.POINTER(ctypes.c_void_p)] * 3
+    lib.xmx_reserve.restype = ctypes.c_int
     lib.xmx_error.restype = ctypes.c_char_p
     lib.xmx_device.restype = ctypes.c_char_p
     if lib.xmx_init(str(ROOT / "work" / spv).encode()) != 0:
@@ -47,7 +49,16 @@ def device_name():
 
 
 def _shift(x):
-    mx = float(np.abs(np.asarray(x, dtype=np.float32)).max())
+    """The exact 2^k that lifts |x| just under the FP16 ceiling.
+
+    XMX flushes subnormal FP16 operands to zero and 27 % of this model is FP16
+    subnormal (notes/phase4-subnormal-flush.md); a power of two is lossless.
+    Two reductions rather than `abs(x).max()`, which allocates a whole temporary.
+    """
+    x = np.asarray(x)
+    if x.size == 0:
+        return 0
+    mx = max(float(x.max()), -float(x.min()))
     return int(np.floor(np.log2(FP16_MAX / mx))) if mx > 0 else 0
 
 
@@ -57,26 +68,108 @@ def _pad(a, m, n):
     return out
 
 
+class Operand:
+    """A tile-padded, power-of-two-rescaled FP16 operand, ready to dispatch.
+
+    Preparing a weight once and reusing it removes the float32 -> float16 cast and
+    the padding copy from the inner loop; only the memcpy into the mapped buffer
+    remains, and on an integrated GPU that is removable too.
+    """
+
+    __slots__ = ("data", "rows", "cols", "padded_rows", "padded_cols", "shift")
+
+    def __init__(self, array, *, is_b, rescale=True):
+        array = np.asarray(array)
+        self.rows, self.cols = array.shape
+        self.shift = _shift(array) if rescale else 0
+        scaled = (array.astype(np.float32) * np.float32(2.0 ** self.shift)).astype(np.float16)
+        self.padded_rows = -(-self.rows // (TK if is_b else TM)) * (TK if is_b else TM)
+        self.padded_cols = -(-self.cols // (TN if is_b else TK)) * (TN if is_b else TK)
+        if (self.padded_rows, self.padded_cols) == (self.rows, self.cols):
+            self.data = np.ascontiguousarray(scaled)
+        else:
+            self.data = np.ascontiguousarray(_pad(scaled, self.padded_rows, self.padded_cols))
+
+
+def prepare_b(B, rescale=True):
+    """Convert and pad a right-hand operand once, for reuse across calls."""
+    return Operand(B, is_b=True, rescale=rescale)
+
+
 def gemm(A, B, rescale=True, iters=1):
-    """C = A @ B, FP16 operands on XMX, FP32 accumulation, returned as float32."""
+    """C = A @ B, FP16 operands on XMX, FP32 accumulation, returned as float32.
+
+    `B` may be a prepared `Operand`, in which case its conversion is skipped.
+    """
     lib = _load()
-    A = np.asarray(A, dtype=np.float16)
-    B = np.asarray(B, dtype=np.float16)
-    M0, K0 = A.shape
-    K1, N0 = B.shape
-    assert K0 == K1, "inner dimensions disagree: %d vs %d" % (K0, K1)
-
-    ka = _shift(A) if rescale else 0
-    kb = _shift(B) if rescale else 0
-    As = (A.astype(np.float32) * 2.0 ** ka).astype(np.float16)
-    Bs = (B.astype(np.float32) * 2.0 ** kb).astype(np.float16)
-
-    M = -(-M0 // TM) * TM
-    N = -(-N0 // TN) * TN
-    K = -(-K0 // TK) * TK
-    Ap = np.ascontiguousarray(_pad(As, M, K))
-    Bp = np.ascontiguousarray(_pad(Bs, K, N))
+    left = A if isinstance(A, Operand) else Operand(A, is_b=False, rescale=rescale)
+    right = B if isinstance(B, Operand) else Operand(B, is_b=True, rescale=rescale)
+    assert left.cols == right.rows, ("inner dimensions disagree: %d vs %d"
+                                     % (left.cols, right.rows))
+    M, N, K = left.padded_rows, right.padded_cols, left.padded_cols
+    assert K == right.padded_rows, "operand padding disagrees on K"
     C = np.empty((M, N), dtype=np.float32)
-    if lib.xmx_gemm(M, N, K, Ap.ctypes.data, Bp.ctypes.data, C.ctypes.data, iters) != 0:
+    if lib.xmx_gemm(M, N, K, left.data.ctypes.data, right.data.ctypes.data,
+                    C.ctypes.data, iters) != 0:
         raise RuntimeError("xmx_gemm: " + lib.xmx_error().decode())
-    return C[:M0, :N0] / (2.0 ** (ka + kb))
+    out = C[:left.rows, :right.cols]
+    # Undone in two steps: a combined 2^-(ka+kb) can fall out of float32 range when
+    # both operands are tiny, and each half on its own cannot.
+    return out * np.float32(2.0 ** -left.shift) * np.float32(2.0 ** -right.shift)
+
+
+# --------------------------------------------------------------------------
+# zero-copy path
+# --------------------------------------------------------------------------
+
+_last_upload = (None, None)     # (key of the B in the device buffer, its address)
+
+
+def _mapped(pointer, dtype, shape):
+    count = int(np.prod(shape))
+    array = np.ctypeslib.as_array(
+        ctypes.cast(pointer, ctypes.POINTER(ctypes.c_uint16)), shape=(count * np.dtype(dtype).itemsize // 2,))
+    return array.view(dtype).reshape(shape)
+
+
+def gemm_mapped(A, right, b_key=None):
+    """C = A @ right, building A and reading C straight in the mapped buffers.
+
+    `right` must be a prepared `Operand`. `b_key` identifies it so a repeat of the
+    same weight skips its upload; pass None to always upload. The memory is
+    HOST_CACHED and shared with the GPU, so there is no staging copy on either side.
+    """
+    global _last_upload
+    lib = _load()
+    A = np.asarray(A, dtype=np.float32)
+    rows, inner = A.shape
+    if inner != right.rows:
+        raise ValueError("inner dimensions disagree: %d vs %d" % (inner, right.rows))
+    M = -(-rows // TM) * TM
+    K, N = right.padded_rows, right.padded_cols
+
+    pa, pb, pc = ctypes.c_void_p(), ctypes.c_void_p(), ctypes.c_void_p()
+    if lib.xmx_reserve(M, N, K, ctypes.byref(pa), ctypes.byref(pb), ctypes.byref(pc)) != 0:
+        raise RuntimeError("xmx_reserve: " + lib.xmx_error().decode())
+
+    left_shift = _shift(A)
+    a_mapped = _mapped(pa, np.float16, (M, K))
+    if K > inner:
+        a_mapped[:rows, inner:] = 0
+    if M > rows:
+        a_mapped[rows:, :] = 0
+    np.multiply(A, np.float32(2.0 ** left_shift), out=a_mapped[:rows, :inner],
+                casting="unsafe")
+
+    if b_key is None or _last_upload != (b_key, pb.value):
+        _mapped(pb, np.float16, (K, N))[:] = right.data
+        _last_upload = (b_key, pb.value)
+
+    if lib.xmx_gemm(M, N, K, None, None, None, 1) != 0:
+        raise RuntimeError("xmx_gemm: " + lib.xmx_error().decode())
+
+    view = _mapped(pc, np.float32, (M, N))[:rows, :right.cols]
+    combined = np.float32(2.0 ** -left_shift * 2.0 ** -right.shift)
+    if combined == 0 or not np.isfinite(combined):   # only when both operands are tiny
+        return view * np.float32(2.0 ** -left_shift) * np.float32(2.0 ** -right.shift)
+    return view * combined
