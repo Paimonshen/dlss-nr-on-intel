@@ -6,10 +6,11 @@ nr_xmx — run the recovered graph's GEMMs on the Xe2 XMX units.
 This module points that hook at `xmx.gemm`, which is FP16 x FP16 -> FP32 on the
 cooperative-matrix path (config 1 of notes/hw-coopmat.md).
 
-Two matmuls in the graph are *not* routed: the per-head score `Q @ K^T` and
-context `P @ V`. Both are genuinely batched — a different B per head and per
-window — and small enough (64x32x64) that a dispatch each costs more than numpy
-takes. They are a few percent of the arithmetic.
+The per-head score `Q @ K^T` and context `P @ V` are genuinely batched — a
+different B per head and per window — and go through the batched pipeline
+instead, one dispatch for the whole batch. Their shapes are already tile-aligned
+(window tokens 64, head_dim 32), and the key is consumed in the layout it already
+has: a cooperative-matrix load reads it column-major, so no transpose is copied.
 
 Right-hand operands are the model's weights, so their FP16 conversion, power-of-two
 rescale and tile padding are cached per tensor and done once.
@@ -55,6 +56,42 @@ def _operand(weight):
     return key, hit[1]
 
 
+def _batched(a, b, transpose_b):
+    """Route a rank-4 batched matmul, or return None to leave it on the CPU."""
+    if a.ndim != 4 or b.ndim != 4 or a.shape[:2] != b.shape[:2]:
+        return None
+    batch = a.shape[0] * a.shape[1]
+    rows, inner = a.shape[2], a.shape[3]
+    cols = b.shape[2] if transpose_b else b.shape[3]
+    if batch * rows * inner * cols < MIN_MACS:
+        return None
+    started = time.perf_counter()
+    try:
+        out = xmx.bmm_aligned(np.ascontiguousarray(a).reshape(batch, rows, inner),
+                              np.ascontiguousarray(b).reshape(batch, *b.shape[2:]),
+                              transpose_b=transpose_b)
+    except ValueError:
+        return None
+    STATS["gpu"] += 1
+    STATS["gpu_macs"] += batch * rows * inner * cols
+    STATS["gpu_seconds"] += time.perf_counter() - started
+    return out.reshape(a.shape[0], a.shape[1], rows, cols)
+
+
+def matmul_nt(a, b):
+    """a @ b^T over the last two axes."""
+    a = np.asarray(a, dtype=np.float32)
+    b = np.asarray(b, dtype=np.float32)
+    out = _batched(a, b, True)
+    if out is not None:
+        return out
+    started = time.perf_counter()
+    out = a @ b.swapaxes(-1, -2)
+    STATS["cpu"] += 1
+    STATS["cpu_seconds"] += time.perf_counter() - started
+    return out
+
+
 def matmul(a, b):
     a = np.asarray(a, dtype=np.float32)
     b = np.asarray(b, dtype=np.float32)
@@ -70,6 +107,9 @@ def matmul(a, b):
             STATS["gpu_macs"] += rows * inner * cols
             STATS["gpu_seconds"] += time.perf_counter() - started
             return out.reshape(*a.shape[:-1], cols)
+    routed = _batched(a, b, False)
+    if routed is not None:
+        return routed
     started = time.perf_counter()
     out = a @ b
     STATS["cpu"] += 1
@@ -82,12 +122,14 @@ def matmul(a, b):
 def install():
     import nr_model
     nr_model.MATMUL = matmul
+    nr_model.MATMUL_NT = matmul_nt
     return xmx.device_name()
 
 
 def uninstall():
     import nr_model
     nr_model.MATMUL = None
+    nr_model.MATMUL_NT = None
 
 
 def reset_stats():

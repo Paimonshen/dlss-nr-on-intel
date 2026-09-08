@@ -20,6 +20,7 @@ struct buf { VkBuffer b; VkDeviceMemory m; void *p; VkDeviceSize cap; };
 static struct {
 	VkInstance inst; VkPhysicalDevice pd; VkDevice dev; VkQueue q; uint32_t qi;
 	VkDescriptorSetLayout dsl; VkPipelineLayout pl; VkPipeline pipe;
+	VkPipelineLayout plb; VkPipeline pipeb;
 	VkDescriptorPool dpool; VkDescriptorSet set;
 	VkCommandPool cpool; VkCommandBuffer cb; VkFence fence;
 	struct buf A, B, C;
@@ -46,6 +47,29 @@ static uint32_t memtype(uint32_t bits, VkMemoryPropertyFlags want)
 				return i;
 	}
 	return UINT32_MAX;
+}
+
+static int build_pipeline(const char *spv_path, VkPipelineLayout layout, VkPipeline *out)
+{
+	FILE *f = fopen(spv_path, "rb");
+	if (!f) FAIL("cannot open spv", 0);
+	fseek(f, 0, SEEK_END); long len = ftell(f); fseek(f, 0, SEEK_SET);
+	void *code = malloc(len);
+	if (fread(code, 1, len, f) != (size_t)len) { fclose(f); free(code); FAIL("short spv read", 0); }
+	fclose(f);
+	VkShaderModuleCreateInfo smi = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+					 .codeSize = len, .pCode = code };
+	VkShaderModule sm;
+	VkResult r = vkCreateShaderModule(g.dev, &smi, NULL, &sm);
+	free(code);
+	if (r) FAIL("shader module", r);
+	VkComputePipelineCreateInfo cpi = { .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+		.stage = { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+			   .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = sm, .pName = "main" }, .layout = layout };
+	r = vkCreateComputePipelines(g.dev, VK_NULL_HANDLE, 1, &cpi, NULL, out);
+	vkDestroyShaderModule(g.dev, sm, NULL);
+	if (r) FAIL("pipeline", r);
+	return 0;
 }
 
 static int ensure(struct buf *b, VkDeviceSize size)
@@ -136,22 +160,8 @@ int xmx_init(const char *spv_path)
 					   .pushConstantRangeCount = 1, .pPushConstantRanges = &pcr };
 	if ((r = vkCreatePipelineLayout(g.dev, &pli, NULL, &g.pl))) FAIL("pipeline layout", r);
 
-	FILE *f = fopen(spv_path, "rb");
-	if (!f) FAIL("cannot open spv", 0);
-	fseek(f, 0, SEEK_END); long len = ftell(f); fseek(f, 0, SEEK_SET);
-	void *code = malloc(len);
-	if (fread(code, 1, len, f) != (size_t)len) { fclose(f); FAIL("short spv read", 0); }
-	fclose(f);
-	VkShaderModuleCreateInfo smi = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-					 .codeSize = len, .pCode = code };
-	VkShaderModule sm;
-	if ((r = vkCreateShaderModule(g.dev, &smi, NULL, &sm))) FAIL("shader module", r);
-	free(code);
-	VkComputePipelineCreateInfo cpi = { .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-		.stage = { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-			   .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = sm, .pName = "main" }, .layout = g.pl };
-	if ((r = vkCreateComputePipelines(g.dev, VK_NULL_HANDLE, 1, &cpi, NULL, &g.pipe))) FAIL("pipeline", r);
-	vkDestroyShaderModule(g.dev, sm, NULL);
+	if (build_pipeline(spv_path, g.pl, &g.pipe))
+		return -1;
 
 	VkDescriptorPoolSize ps = { .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 3 };
 	VkDescriptorPoolCreateInfo dpi = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
@@ -235,5 +245,67 @@ int xmx_gemm(unsigned M, unsigned N, unsigned K, const void *a, const void *b, v
 	r = vkWaitForFences(g.dev, 1, &g.fence, VK_TRUE, 60ull * 1000000000ull);
 	if (r) FAIL("fence wait", r);
 	if (c) memcpy(c, g.C.p, sc);
+	return 0;
+}
+
+
+/* The batched pipeline is built on first use: the extra shader takes seven push
+ * constants instead of three, so it needs its own pipeline layout. */
+int xmx_init_batched(const char *spv_path)
+{
+	if (!g.ready) FAIL("not initialised", 0);
+	if (g.pipeb) return 0;
+	VkPushConstantRange pcr = { .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT, .size = 28 };
+	VkPipelineLayoutCreateInfo pli = { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+					   .setLayoutCount = 1, .pSetLayouts = &g.dsl,
+					   .pushConstantRangeCount = 1, .pPushConstantRanges = &pcr };
+	VkResult r = vkCreatePipelineLayout(g.dev, &pli, NULL, &g.plb);
+	if (r) FAIL("batched pipeline layout", r);
+	return build_pipeline(spv_path, g.plb, &g.pipeb);
+}
+
+/* Byte capacities, so the caller can lay the three tensors out itself. */
+int xmx_reserve_bytes(unsigned long long a, unsigned long long b, unsigned long long c,
+		      void **pa, void **pb, void **pc)
+{
+	if (!g.ready) FAIL("not initialised", 0);
+	if (ensure(&g.A, a) || ensure(&g.B, b) || ensure(&g.C, c))
+		return -1;
+	if (pa) *pa = g.A.p;
+	if (pb) *pb = g.B.p;
+	if (pc) *pc = g.C.p;
+	return 0;
+}
+
+int xmx_gemm_batched(unsigned M, unsigned N, unsigned K, unsigned batch,
+		     unsigned sa, unsigned sb, unsigned sc, unsigned bt)
+{
+	if (!g.pipeb) FAIL("batched pipeline not built", 0);
+	VkDeviceSize sza = (VkDeviceSize)batch * sa * 2, szb = (VkDeviceSize)batch * sb * 2,
+		     szc = (VkDeviceSize)batch * sc * 4;
+	VkDescriptorBufferInfo dbi[3] = { { g.A.b, 0, sza }, { g.B.b, 0, szb }, { g.C.b, 0, szc } };
+	VkWriteDescriptorSet w[3];
+	for (int i = 0; i < 3; i++)
+		w[i] = (VkWriteDescriptorSet){ .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = g.set,
+					       .dstBinding = i, .descriptorCount = 1,
+					       .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &dbi[i] };
+	vkUpdateDescriptorSets(g.dev, 3, w, 0, NULL);
+
+	vkResetCommandBuffer(g.cb, 0);
+	VkCommandBufferBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+					.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT };
+	vkBeginCommandBuffer(g.cb, &bi);
+	vkCmdBindPipeline(g.cb, VK_PIPELINE_BIND_POINT_COMPUTE, g.pipeb);
+	vkCmdBindDescriptorSets(g.cb, VK_PIPELINE_BIND_POINT_COMPUTE, g.plb, 0, 1, &g.set, 0, NULL);
+	unsigned push[7] = { M, N, K, sa, sb, sc, bt };
+	vkCmdPushConstants(g.cb, g.plb, VK_SHADER_STAGE_COMPUTE_BIT, 0, 28, push);
+	vkCmdDispatch(g.cb, N / 16, M / 8, batch);
+	vkEndCommandBuffer(g.cb);
+	vkResetFences(g.dev, 1, &g.fence);
+	VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &g.cb };
+	VkResult r = vkQueueSubmit(g.q, 1, &si, g.fence);
+	if (r) FAIL("submit", r);
+	r = vkWaitForFences(g.dev, 1, &g.fence, VK_TRUE, 60ull * 1000000000ull);
+	if (r) FAIL("fence wait", r);
 	return 0;
 }

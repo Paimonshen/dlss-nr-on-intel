@@ -36,6 +36,12 @@ def _load(spv="gemm_coopmat.spv"):
     lib.xmx_gemm.restype = ctypes.c_int
     lib.xmx_reserve.argtypes = [ctypes.c_uint] * 3 + [ctypes.POINTER(ctypes.c_void_p)] * 3
     lib.xmx_reserve.restype = ctypes.c_int
+    lib.xmx_reserve_bytes.argtypes = [ctypes.c_ulonglong] * 3 + [ctypes.POINTER(ctypes.c_void_p)] * 3
+    lib.xmx_reserve_bytes.restype = ctypes.c_int
+    lib.xmx_init_batched.argtypes = [ctypes.c_char_p]
+    lib.xmx_init_batched.restype = ctypes.c_int
+    lib.xmx_gemm_batched.argtypes = [ctypes.c_uint] * 8
+    lib.xmx_gemm_batched.restype = ctypes.c_int
     lib.xmx_error.restype = ctypes.c_char_p
     lib.xmx_device.restype = ctypes.c_char_p
     if lib.xmx_init(str(ROOT / "work" / spv).encode()) != 0:
@@ -172,4 +178,62 @@ def gemm_mapped(A, right, b_key=None):
     combined = np.float32(2.0 ** -left_shift * 2.0 ** -right.shift)
     if combined == 0 or not np.isfinite(combined):   # only when both operands are tiny
         return view * np.float32(2.0 ** -left_shift) * np.float32(2.0 ** -right.shift)
+    return view * combined
+
+
+_batched_ready = False
+
+
+def _load_batched(spv="gemm_batched.spv"):
+    global _batched_ready
+    lib = _load()
+    if not _batched_ready:
+        if lib.xmx_init_batched(str(ROOT / "work" / spv).encode()) != 0:
+            raise RuntimeError("xmx_init_batched: " + lib.xmx_error().decode())
+        _batched_ready = True
+    return lib
+
+
+def bmm_aligned(A, B, transpose_b=False):
+    """C[i] = A[i] @ B[i] (or @ B[i]^T) for a batch of tile-aligned matrices.
+
+    A is (batch, M, K); B is (batch, K, N), or (batch, N, K) with `transpose_b`,
+    which is the layout an attention key already has — the cooperative-matrix load
+    reads it column-major, so no transpose copy is made.
+
+    Every dimension must already be a multiple of the tile, which for this graph
+    they are: window tokens are 64 and head_dim is 32. Raises otherwise, so the
+    caller can fall back.
+    """
+    lib = _load_batched()
+    A = np.asarray(A, dtype=np.float32)
+    B = np.asarray(B, dtype=np.float32)
+    if A.ndim != 3 or B.ndim != 3 or A.shape[0] != B.shape[0]:
+        raise ValueError("batched operands must be rank 3 and share a batch")
+    batch, rows, inner = A.shape
+    cols, inner_b = (B.shape[1], B.shape[2]) if transpose_b else (B.shape[2], B.shape[1])
+    if inner_b != inner:
+        raise ValueError("inner dimensions disagree: %d vs %d" % (inner, inner_b))
+    if rows % TM or cols % TN or inner % TK:
+        raise ValueError("batched GEMM needs %dx%dx%d-aligned shapes, got %dx%dx%d"
+                         % (TM, TN, TK, rows, cols, inner))
+
+    stride_a, stride_b, stride_c = rows * inner, cols * inner, rows * cols
+    pa, pb, pc = ctypes.c_void_p(), ctypes.c_void_p(), ctypes.c_void_p()
+    if lib.xmx_reserve_bytes(batch * stride_a * 2, batch * stride_b * 2,
+                             batch * stride_c * 4, ctypes.byref(pa), ctypes.byref(pb),
+                             ctypes.byref(pc)) != 0:
+        raise RuntimeError("xmx_reserve_bytes: " + lib.xmx_error().decode())
+    left_shift, right_shift = _shift(A), _shift(B)
+    np.multiply(A, np.float32(2.0 ** left_shift),
+                out=_mapped(pa, np.float16, A.shape), casting="unsafe")
+    np.multiply(B, np.float32(2.0 ** right_shift),
+                out=_mapped(pb, np.float16, B.shape), casting="unsafe")
+    if lib.xmx_gemm_batched(rows, cols, inner, batch, stride_a, stride_b, stride_c,
+                            1 if transpose_b else 0) != 0:
+        raise RuntimeError("xmx_gemm_batched: " + lib.xmx_error().decode())
+    view = _mapped(pc, np.float32, (batch, rows, cols))
+    combined = np.float32(2.0 ** -left_shift * 2.0 ** -right_shift)
+    if combined == 0 or not np.isfinite(combined):
+        return view * np.float32(2.0 ** -left_shift) * np.float32(2.0 ** -right_shift)
     return view * combined
