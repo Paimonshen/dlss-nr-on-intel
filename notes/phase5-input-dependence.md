@@ -82,6 +82,37 @@ that back. On content without such lines the scaffolding alone is a good low-pas
 The distortion floor of 0.0163 measured above is the same effect seen from the other
 direction, and it is the honest description of what the branch currently contributes.
 
+## Real game frames settle it
+
+Two Cyberpunk 2077 screenshots, taken as the clean reference with the same synthetic
+noise added. (The harness needed a fix first: given a file it had been setting
+`clean = img`, leaving the metric no noise to remove and making it degenerate.)
+
+```
+frame   sigma   input     attention ON      attention OFF     attention costs
+CP-01   0.06    0.05398   0.04395  1.228x   0.03521  1.533x      1.248x
+CP-01   0.12    0.10206   0.08165  1.250x   0.05129  1.990x      1.592x
+CP-02   0.06    0.05893   0.05025  1.173x   0.04300  1.370x      1.169x
+CP-02   0.12    0.11164   0.09378  1.190x   0.06349  1.758x      1.477x
+```
+
+The attention branch **costs 1.37x on average** on real content, in all four
+configurations. And the scaffolding alone denoises real frames well — 1.37x to 1.99x,
+improving as the noise grows, which is what a genuine denoiser does. With the branch on,
+the ratio is flat at ~1.2x regardless of noise, which is what a fixed distortion added
+to a good filter looks like.
+
+Across three independent image classes:
+
+```
+test_pattern, fixed-period lines   attention HELPS   1.39x    <- the only one
+smooth, no fixed periods           attention COSTS   1.53x
+real game frames (2 x 2)           attention COSTS   1.17-1.59x
+```
+
+Four measurements out of five say the branch hurts, and the one that says otherwise is
+the synthetic pattern whose fixed-period content the bilinear scaffolding destroys.
+
 ## Standing
 
 **No demonstrated denoising.** The reproducible facts are: a fixed distortion of ~0.016
@@ -90,4 +121,4 @@ sign reversal on a second. The scaffolding, not the model, is what removes noise
 
 Quoting "1.02x better" was wrong twice over — true only at one noise level and only on
 one image. This is the fifth hole found in this metric, and the first one found by the
-owner rather than by me.
+owner rather than by me — and the real frames that settled it were theirs too.

@@ -25,9 +25,13 @@ sigma ~0.048.
 **And the "attention helps, 1.39x swing" claim is withdrawn.** On a structurally
 different image (`--smooth`: low-frequency sinusoids, no fixed periods) the sign
 reverses — attention OFF scores 1.73x better than the input, attention ON only 1.13x,
-so the branch *costs* 1.53x, reproduced at two noise levels. The earlier swing was the
-branch repairing damage the bilinear scaffolding does to `test_pattern`'s fixed-period
-lines (every 17 and 23 pixels), not denoising. See `notes/phase5-input-dependence.md`.
+so the branch *costs* 1.53x, reproduced at two noise levels. **Confirmed on two real
+Cyberpunk frames at two noise levels: the branch costs 1.37x on average, all four
+configurations.** The scaffolding alone denoises real content 1.37x-1.99x, improving
+with noise as a real denoiser does; with the branch on the ratio is flat at ~1.2x. The
+earlier swing was the branch repairing damage the bilinear scaffolding does to
+`test_pattern`'s fixed-period lines (every 17 and 23 pixels), not denoising.
+Four of five image classes say the branch hurts. See `notes/phase5-input-dependence.md`.
 
 ---
 
