@@ -1,8 +1,15 @@
 #!/usr/bin/env bash
 # nr-photo — run a game with the DLSS-NR layer attached.
 #
-#   src/layer/nr-photo <game> [args]         a native Vulkan game
-#   src/layer/nr-photo --steam 1091500       print the Steam launch option to paste
+#   src/layer/nr-photo <game> [args]              a native Vulkan game
+#   src/layer/nr-photo --proton <appid> <exe> ...  a Steam game, through Proton directly
+#   src/layer/nr-photo --steam 1091500            print the Steam launch option to paste
+#
+# `--proton` is the one that has actually been driven end to end: Steam launches a game
+# as a child of the client, so the layer's environment does not reach it unless it is
+# set in the launch options; running Proton directly sidesteps that and needs no change
+# to the Steam configuration. The prefix has to exist, which means the game has been
+# started from Steam at least once.
 #
 # The pass fires while the trigger file exists and holds its result on screen until it
 # is removed, so it is a photo mode rather than a per-frame filter:
@@ -39,6 +46,32 @@ export VK_LAYER_PATH="$layer_dir" \
        ENABLE_NR_LAYER=1 \
        NR_LAYER_SOCKET="$socket" \
        NR_LAYER_TRIGGER="$trigger"
+
+if [ "${1:-}" = "--proton" ]; then
+    shift
+    appid="${1:?usage: nr-photo --proton <appid> <exe> [args]}"; shift
+    steam="${STEAM_ROOT:-$HOME/.local/share/Steam}"
+    # the game may live in any library the client knows about
+    prefix=""
+    for library in "$steam" $(sed -n 's/.*"path"[^"]*"\([^"]*\)".*/\1/p' \
+                              "$steam/steamapps/libraryfolders.vdf" 2>/dev/null); do
+        [ -d "$library/steamapps/compatdata/$appid" ] && prefix="$library/steamapps/compatdata/$appid"
+    done
+    if [ -z "$prefix" ]; then
+        echo "no Proton prefix for appid $appid — start it from Steam once first" >&2
+        exit 1
+    fi
+    proton="$(ls -d "$steam"/steamapps/common/Proton* \
+              $(dirname "$prefix")/common/Proton* 2>/dev/null | tail -1)/proton"
+    if [ ! -x "$proton" ]; then
+        echo "no Proton runtime found next to the prefix" >&2
+        exit 1
+    fi
+    export STEAM_COMPAT_CLIENT_INSTALL_PATH="$steam" STEAM_COMPAT_DATA_PATH="$prefix"
+    exe="${1:?usage: nr-photo --proton <appid> <exe> [args]}"; shift
+    cd "$(dirname "$exe")"
+    exec "$proton" run "./$(basename "$exe")" "$@"
+fi
 
 if [ "${1:-}" = "--steam" ]; then
     printf 'Paste this into the game'"'"'s Steam launch options:\n\n'

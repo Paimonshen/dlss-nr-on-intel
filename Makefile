@@ -9,9 +9,13 @@ SHADERS := work/gemm_resident.spv work/gemm_tiled.spv work/gemm_staged.spv \
            work/history.spv work/gemm_coopmat.spv work/gemm_batched.spv \
            work/gemm_f16acc.spv
 
-all: work/libxmx.so $(SHADERS)
+all: work/libxmx.so work/libnr_layer.so $(SHADERS)
 
 work/libxmx.so: src/gpu/libxmx.c
+	$(CC) $(CFLAGS) -shared -o $@ $< -lvulkan
+
+# The Vulkan layer that puts the pass inside a running game.
+work/libnr_layer.so: src/layer/nr_layer.c
 	$(CC) $(CFLAGS) -shared -o $@ $< -lvulkan
 
 work/gemm_resident.spv: src/gpu/gemm_resident.comp src/gpu/publish.glsl
