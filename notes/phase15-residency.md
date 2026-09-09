@@ -247,3 +247,38 @@ looking at the output, which is the only way either would have been found at all
 Nothing in the graph. The feature assembly, the head composition and the temporal path
 remain host-side numpy, which is right — they are per-frame, not per-block, and they
 are not where the time goes.
+
+---
+
+## The surroundings become the bottleneck, and the reprojection moves too
+
+With the graph at 1.56 s for 720p, the host-side temporal work is no longer a rounding
+error. Measured at 1280x720:
+
+| | ms |
+|---|---|
+| `sample_history`, the five-tap Catmull-Rom | **861** |
+| the rest of `make_temporal_features` | 350 |
+| `extend_features` onto the network extent | 182 |
+| `deterministic_noise`, three channels | 110 |
+| `compose_temporal` | 56 |
+
+The reprojection alone cost more than half of it, and it is a per-pixel gather, so
+`src/gpu/history.comp` takes it: **861 ms -> 2.8 ms, 316x.** It agrees with the
+reference to float32 rounding — mean 2e-07, correlation 1.00000000 — and the residual
+last bits are the sample coordinate, which a steep image gradient turns into at most
+5e-05. That is orders below the graph's own floor.
+
+Two things had to be exact rather than merely close: the five weighted taps are summed
+left to right in float32, and the sample coordinate is built the way the reference
+builds it. `precise` on both, because a contraction in either changes the answer more
+than the arithmetic suggests.
+
+`nr_temporal.install_gpu_history()` puts it in place of the reference's, so it is a
+drop-in. A 720p sequence goes from **3.0-4.0 s to 2.1-2.8 s** a frame, with the blend
+gate reporting identical alphas — 0.5895, 0.6249, 0.6248, 0.6155 — so nothing about the
+behaviour moved.
+
+What is left on the host per temporal frame is about 0.6 s: the feature assembly's
+colour scaling, the mirrored extension onto the network extent, the deterministic noise
+and the composition. All per-pixel and all portable, but each is now small.

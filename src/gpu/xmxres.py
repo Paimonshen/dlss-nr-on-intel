@@ -44,7 +44,7 @@ def _load():
     import xmx
     lib = xmx._load()                      # shares the instance, device and queue
     for name, args in (
-            ("xmx_res_init", [ctypes.c_char_p] * 3),
+            ("xmx_res_init", [ctypes.c_char_p] * 4),
             ("xmx_buf_create", [ctypes.c_ulonglong]),
             ("xmx_buf_destroy", [ctypes.c_int]),
             ("xmx_begin", []),
@@ -53,7 +53,8 @@ def _load():
             ("xmx_rec_unary", [ctypes.c_uint] + [ctypes.c_int] * 4
              + [ctypes.c_uint, ctypes.c_uint, ctypes.c_float] + [ctypes.c_uint] * 5),
             ("xmx_rec_row", [ctypes.c_uint] + [ctypes.c_int] * 3 + [ctypes.c_uint] * 5
-             + [ctypes.c_float])):
+             + [ctypes.c_float]),
+            ("xmx_rec_history", [ctypes.c_int] * 3 + [ctypes.c_uint] * 5)):
         getattr(lib, name).argtypes = args
         getattr(lib, name).restype = ctypes.c_int
     lib.xmx_buf_ptr.argtypes = [ctypes.c_int]
@@ -62,7 +63,8 @@ def _load():
     lib.xmx_buf_bytes.restype = ctypes.c_ulonglong
     if lib.xmx_res_init(str(ROOT / "work" / "gemm_resident.spv").encode(),
                         str(ROOT / "work" / "resident.spv").encode(),
-                        str(ROOT / "work" / "attention.spv").encode()) != 0:
+                        str(ROOT / "work" / "attention.spv").encode(),
+                        str(ROOT / "work" / "history.spv").encode()) != 0:
         raise RuntimeError("xmx_res_init: " + lib.xmx_error().decode())
     _lib = lib
     return lib
@@ -292,6 +294,20 @@ class Runtime:
         if self.lib.xmx_rec_row(SOFTMAX, source.id, target.id, source.id,
                                 int(rows), int(width), 0, 0, int(stride), float(cap)) != 0:
             raise RuntimeError("xmx_rec_row: " + self.lib.xmx_error().decode())
+        self.recorded += 1
+        return self
+
+    def sample_history(self, history, motion, target, height, width, channels=3,
+                       absolute=False):
+        """Reproject `history` with the recovered five-tap Catmull-Rom filter.
+
+        `motion` holds either the offsets, or the sample coordinates themselves when
+        `absolute`, which is the form `sample_history` in the reference takes.
+        """
+        if self.lib.xmx_rec_history(history.id, motion.id, target.id,
+                                    height * width, channels, height, width,
+                                    1 if absolute else 0) != 0:
+            raise RuntimeError("xmx_rec_history: " + self.lib.xmx_error().decode())
         self.recorded += 1
         return self
 

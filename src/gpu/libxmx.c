@@ -25,7 +25,7 @@ static struct {
 	VkCommandPool cpool; VkCommandBuffer cb; VkFence fence;
 	struct buf A, B, C;
 	/* resident path */
-	VkPipelineLayout rpl; VkPipeline rgemm, runary, rrow;
+	VkPipelineLayout rpl; VkPipeline rgemm, runary, rrow, rhistory;
 	VkCommandBuffer rcb; VkFence rfence; int recording, recorded, rready;
 	char name[256]; char err[256]; int ready;
 } g;
@@ -341,7 +341,8 @@ int xmx_gemm_batched(unsigned M, unsigned N, unsigned K, unsigned batch,
 /* passes; the point is not a faster kernel but the traffic that disappears.   */
 /* ------------------------------------------------------------------------- */
 
-int xmx_res_init(const char *gemm_spv, const char *unary_spv, const char *row_spv)
+int xmx_res_init(const char *gemm_spv, const char *unary_spv, const char *row_spv,
+		 const char *history_spv)
 {
 	if (!g.ready) FAIL("not initialised", 0);
 	if (g.rready) return 0;
@@ -351,7 +352,8 @@ int xmx_res_init(const char *gemm_spv, const char *unary_spv, const char *row_sp
 	VkResult r = vkCreatePipelineLayout(g.dev, &pli, NULL, &g.rpl);
 	if (r) FAIL("resident pipeline layout", r);
 	if (build_pipeline(gemm_spv, g.rpl, &g.rgemm) || build_pipeline(unary_spv, g.rpl, &g.runary)
-	    || build_pipeline(row_spv, g.rpl, &g.rrow))
+	    || build_pipeline(row_spv, g.rpl, &g.rrow)
+	    || build_pipeline(history_spv, g.rpl, &g.rhistory))
 		return -1;
 	VkCommandBufferAllocateInfo cba = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
 					    .commandPool = g.cpool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
@@ -496,6 +498,23 @@ int xmx_rec_row(unsigned kind, int a, int c, int d, unsigned rows, unsigned widt
 	vkCmdBindPipeline(g.rcb, VK_PIPELINE_BIND_POINT_COMPUTE, g.rrow);
 	vkCmdPushConstants(g.rcb, g.rpl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
 	vkCmdDispatch(g.rcb, (rows + 63) / 64, 1, 1);
+	barrier();
+	g.recorded++;
+	return 0;
+}
+
+/* The temporal path's five-tap reprojection: one invocation per pixel. */
+int xmx_rec_history(int history, int motion, int out, unsigned pixels, unsigned channels,
+		    unsigned height, unsigned width, unsigned absolute)
+{
+	if (!g.recording) FAIL("not recording", 0);
+	struct push p = { .a = addr_of(history), .b = addr_of(motion), .c = addr_of(out),
+			  .m = pixels, .n = channels, .k = height, .batch = width,
+			  .flags = absolute };
+	if (!p.a || !p.b || !p.c) FAIL("history operand is not a live buffer", 0);
+	vkCmdBindPipeline(g.rcb, VK_PIPELINE_BIND_POINT_COMPUTE, g.rhistory);
+	vkCmdPushConstants(g.rcb, g.rpl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
+	vkCmdDispatch(g.rcb, (pixels + 63) / 64, 1, 1);
 	barrier();
 	g.recorded++;
 	return 0;
