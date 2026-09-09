@@ -324,8 +324,8 @@ def record_window_attention(runtime, w, s, source):
                            narrow=True)
     runtime.gemm(s.q16, s.k16, s.scores, tokens, tokens, 32, batch=batch,
                  strides=(tokens * 32, tokens * 32, tokens * tokens), transpose_b=True)
-    runtime.add_bias(s.scores, w.bias, s.scores, batch * tokens * tokens, tokens, heads)
-    runtime.softmax(s.scores, s.probs16, batch * tokens, tokens, narrow=True)
+    runtime.softmax(s.scores, s.probs16, batch * tokens, tokens, narrow=True,
+                    bias=w.bias, heads=heads)
     runtime.gemm(s.probs16, s.v16, s.context, tokens, 32, tokens, batch=batch,
                  strides=(tokens * tokens, tokens * 32, tokens * 32))
     runtime.merge_heads(s.context, s.merged16, windows, tokens, channels, heads,

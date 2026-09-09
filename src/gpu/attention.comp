@@ -132,10 +132,14 @@ void cosine_publish(uint row, uint local) {
  * register, so the pair is coupled — the shift moves bits across the halves and the add
  * can carry between them — and the two elements cannot be computed apart.
  * See notes/phase5-softmax-found.md. */
-void weights_at(bool staged, uint base, uint i, out float w0, out float w1) {
+void weights_at(bool staged, uint base, uint bias, uint i, out float w0, out float w1) {
     uint bits[2];
     for (uint j = 0u; j < 2u; j++) {
         float logit = staged ? stage[base + i + j] : pc.a.v[base + i + j];
+        /* The per-head attention bias, added here rather than by a pass of its own:
+         * it is a few tens of kilobytes and stays in cache, so folding it in costs
+         * nothing and saves a whole read-modify-write of the scores. */
+        if ((pc.flags & 0x2000u) != 0u) logit += pc.b.v[bias + i + j];
         if (pc.p0 != 0.0) logit = clamp(logit, -pc.p0, pc.p0);
         precise float scaled = half_round(logit) * 0.044921875;
         scaled += 1.30078125;
@@ -172,11 +176,13 @@ void softmax(uint row, uint local) {
     uint stride = pc.sa != 0u ? pc.sa : pc.n;
     bool staged = stride == pc.n && stride <= 64u;
     uint base = staged ? local * stride : row * stride;
+    /* scores are (windows*heads, tokens, tokens) and the bias (heads, tokens, tokens) */
+    uint bias = ((row / pc.n) % max(pc.batch, 1u)) * pc.n * pc.n + (row % pc.n) * pc.n;
     if (!staged) for (uint i = pc.n; i < stride; i++) store(base + i, 0.0);
     float total = 0.0;
     float w0, w1;
     for (uint i = 0u; i < pc.n; i += 2u) {
-        weights_at(staged, base, i, w0, w1);
+        weights_at(staged, base, bias, i, w0, w1);
         /* The weights are parked where the logits were, so the normalising pass does
          * not repeat the bit-affine transform. Only shared memory can hold them: the
          * output buffer is the one being narrowed to float16, and a rounded weight
@@ -192,7 +198,7 @@ void softmax(uint row, uint local) {
             stage[base + i] = e4m3(hmul(stage[base + i], reciprocal));
     } else {
         for (uint i = 0u; i < pc.n; i += 2u) {
-            weights_at(false, base, i, w0, w1);
+            weights_at(false, base, bias, i, w0, w1);
             store(base + i,      e4m3(hmul(w0, reciprocal)));
             store(base + i + 1u, e4m3(hmul(w1, reciprocal)));
         }

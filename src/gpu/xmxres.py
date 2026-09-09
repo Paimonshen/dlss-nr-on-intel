@@ -58,7 +58,7 @@ def _load():
     import xmx
     lib = xmx._load()                      # shares the instance, device and queue
     for name, args in (
-            ("xmx_res_init", [ctypes.c_char_p] * 4),
+            ("xmx_res_init", [ctypes.c_char_p] * 5),
             ("xmx_buf_create", [ctypes.c_ulonglong]),
             ("xmx_buf_destroy", [ctypes.c_int]),
             ("xmx_begin", []),
@@ -66,7 +66,7 @@ def _load():
             ("xmx_rec_gemm", [ctypes.c_int] * 3 + [ctypes.c_uint] * 14),
             ("xmx_rec_unary", [ctypes.c_uint] + [ctypes.c_int] * 4
              + [ctypes.c_uint, ctypes.c_uint, ctypes.c_float] + [ctypes.c_uint] * 5),
-            ("xmx_rec_row", [ctypes.c_uint] + [ctypes.c_int] * 3 + [ctypes.c_uint] * 5
+            ("xmx_rec_row", [ctypes.c_uint] + [ctypes.c_int] * 4 + [ctypes.c_uint] * 5
              + [ctypes.c_float]),
             ("xmx_rec_history", [ctypes.c_int] * 3 + [ctypes.c_uint] * 5)):
         getattr(lib, name).argtypes = args
@@ -81,7 +81,8 @@ def _load():
            for name, default in (("XMX_GEMM_SPV", "gemm_resident.spv"),
                                  ("XMX_UNARY_SPV", "resident.spv"),
                                  ("XMX_ROW_SPV", "attention.spv"),
-                                 ("XMX_HISTORY_SPV", "history.spv"))]
+                                 ("XMX_HISTORY_SPV", "history.spv"),
+                                 ("XMX_TILED_SPV", "gemm_tiled.spv"))]
     if lib.xmx_res_init(*[p.encode() for p in spv]) != 0:
         raise RuntimeError("xmx_res_init: " + lib.xmx_error().decode())
     _lib = lib
@@ -318,14 +319,15 @@ class Runtime:
         """
         third = scale if scale is not None else source
         if self.lib.xmx_rec_row(COSINE_PUBLISH | _publish(0, narrow),
-                                source.id, target.id, third.id,
+                                source.id, source.id, target.id, third.id,
                                 int(rows), int(tokens), int(heads),
                                 1 if scale is not None else 0, 0, 0.0) != 0:
             raise RuntimeError("xmx_rec_row: " + self.lib.xmx_error().decode())
         self.recorded += 1
         return self
 
-    def softmax(self, source, target, rows, width, *, stride=0, cap=0.0, narrow=False):
+    def softmax(self, source, target, rows, width, *, stride=0, cap=0.0, narrow=False,
+                bias=None, heads=0):
         """The bit-affine softmax, one row per invocation.
 
         `stride` lets a row be wider than its token count, which the global blocks
@@ -333,8 +335,10 @@ class Runtime:
         multiple of the tile. `cap` is the symmetric logit clamp the vit_1d kernels
         apply.
         """
-        if self.lib.xmx_rec_row(SOFTMAX | _publish(0, narrow), source.id, target.id, source.id,
-                                int(rows), int(width), 0, 0, int(stride), float(cap)) != 0:
+        flags = SOFTMAX | _publish(0, narrow) | (0x2000 if bias is not None else 0)
+        if self.lib.xmx_rec_row(flags, source.id, (bias or source).id, target.id, source.id,
+                                int(rows), int(width), int(heads), 0,
+                                int(stride), float(cap)) != 0:
             raise RuntimeError("xmx_rec_row: " + self.lib.xmx_error().decode())
         self.recorded += 1
         return self

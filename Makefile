@@ -4,7 +4,7 @@
 
 GLSL    := glslangValidator --target-env vulkan1.3
 CFLAGS  := -O2 -fPIC -Wall -Wextra -Wno-unused-parameter -Iwork/vulkan-headers/include
-SHADERS := work/gemm_resident.spv work/resident.spv work/attention.spv \
+SHADERS := work/gemm_resident.spv work/gemm_tiled.spv work/resident.spv work/attention.spv \
            work/history.spv work/gemm_coopmat.spv work/gemm_batched.spv \
            work/gemm_f16acc.spv
 
@@ -15,6 +15,9 @@ work/libxmx.so: src/gpu/libxmx.c
 
 work/gemm_resident.spv: src/gpu/gemm_resident.comp
 	$(GLSL) -o $@ $<
+# the same source, with a 16x32 block of the output held in one subgroup's registers
+work/gemm_tiled.spv: src/gpu/gemm_resident.comp Makefile
+	$(GLSL) -DRM=2 -DRN=2 -o $@ $<
 work/resident.spv: src/gpu/resident.comp
 	$(GLSL) -o $@ $<
 work/attention.spv: src/gpu/attention.comp

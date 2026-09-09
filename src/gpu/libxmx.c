@@ -25,7 +25,8 @@ static struct {
 	VkCommandPool cpool; VkCommandBuffer cb; VkFence fence;
 	struct buf A, B, C;
 	/* resident path */
-	VkPipelineLayout rpl; VkPipeline rgemm, runary, rrow, rhistory;
+	VkPipelineLayout rpl; VkPipeline rgemm, rtiled, runary, rrow, rhistory;
+	unsigned tiling, tilem, tilen;
 	VkCommandBuffer rcb; VkFence rfence; int recording, recorded, rready;
 	char name[256]; char err[256]; int ready;
 } g;
@@ -342,7 +343,7 @@ int xmx_gemm_batched(unsigned M, unsigned N, unsigned K, unsigned batch,
 /* ------------------------------------------------------------------------- */
 
 int xmx_res_init(const char *gemm_spv, const char *unary_spv, const char *row_spv,
-		 const char *history_spv)
+		 const char *history_spv, const char *tiled_spv)
 {
 	if (!g.ready) FAIL("not initialised", 0);
 	if (g.rready) return 0;
@@ -353,8 +354,13 @@ int xmx_res_init(const char *gemm_spv, const char *unary_spv, const char *row_sp
 	if (r) FAIL("resident pipeline layout", r);
 	if (build_pipeline(gemm_spv, g.rpl, &g.rgemm) || build_pipeline(unary_spv, g.rpl, &g.runary)
 	    || build_pipeline(row_spv, g.rpl, &g.rrow)
-	    || build_pipeline(history_spv, g.rpl, &g.rhistory))
+	    || build_pipeline(history_spv, g.rpl, &g.rhistory)
+	    || build_pipeline(tiled_spv, g.rpl, &g.rtiled))
 		return -1;
+	const char *tile = getenv("XMX_TILE_K");
+	g.tiling = tile ? atoi(tile) : 1;
+	const char *bm = getenv("XMX_TILE_M"), *bn = getenv("XMX_TILE_N");
+	g.tilem = bm ? atoi(bm) : 16; g.tilen = bn ? atoi(bn) : 32;
 	VkCommandBufferAllocateInfo cba = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
 					    .commandPool = g.cpool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
 					    .commandBufferCount = 1 };
@@ -462,9 +468,20 @@ int xmx_rec_gemm(int a, int b, int c, unsigned M, unsigned N, unsigned K, unsign
 	 * support: A and B are half, and C is float unless the epilogue narrows it. */
 	p.a += (uint64_t)oa * 2; p.b += (uint64_t)ob * 2;
 	p.c += (uint64_t)oc * ((bt & 0x1000u) ? 2 : 4);
-	vkCmdBindPipeline(g.rcb, VK_PIPELINE_BIND_POINT_COMPUTE, g.rgemm);
+	/* The register-tiled kernel keeps a 16x32 block of the output in one subgroup's
+	 * registers, which needs both extents to be a whole block; the 8x16 kernel takes
+	 * everything else. Slice writes make the N test exact rather than conservative —
+	 * a tile past the slice would land in the neighbouring one.
+	 *
+	 * 16x32 and not larger: a 32x32 block halves the workgroup count again and is
+	 * *slower* in a frame, because the shapes here then stop having enough workgroups
+	 * to fill the machine. It still wins in isolation, which is why the two disagree.
+	 * The environment overrides exist so that trade can be re-measured. */
+	int tiled = M % g.tilem == 0 && N % g.tilen == 0 && K >= g.tiling;
+	vkCmdBindPipeline(g.rcb, VK_PIPELINE_BIND_POINT_COMPUTE, tiled ? g.rtiled : g.rgemm);
 	vkCmdPushConstants(g.rcb, g.rpl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
-	vkCmdDispatch(g.rcb, (N + 15) / 16, (M + 7) / 8, batch ? batch : 1);
+	if (tiled) vkCmdDispatch(g.rcb, N / g.tilen, M / g.tilem, batch ? batch : 1);
+	else       vkCmdDispatch(g.rcb, (N + 15) / 16, (M + 7) / 8, batch ? batch : 1);
 	barrier();
 	g.recorded++;
 	return 0;
@@ -488,11 +505,11 @@ int xmx_rec_unary(unsigned kind, int a, int b, int c, int d, unsigned n, unsigne
 
 /* Row-wise passes: the cosine publish reduces 32 channels through the kernel's own
  * fragment tree, the softmax reduces a window's tokens. One invocation per row. */
-int xmx_rec_row(unsigned kind, int a, int c, int d, unsigned rows, unsigned width,
+int xmx_rec_row(unsigned kind, int a, int b, int c, int d, unsigned rows, unsigned width,
 		unsigned heads, unsigned scaled, unsigned stride, float cap)
 {
 	if (!g.recording) FAIL("not recording", 0);
-	struct push p = { .a = addr_of(a), .c = addr_of(c), .d = addr_of(d),
+	struct push p = { .a = addr_of(a), .b = addr_of(b), .c = addr_of(c), .d = addr_of(d),
 			  .m = rows, .n = width, .k = scaled, .batch = heads, .flags = kind,
 			  .sa = stride, .p0 = cap };
 	if (!p.a || !p.c) FAIL("row operand is not a live buffer", 0);

@@ -46,7 +46,20 @@ layout(push_constant, scalar) uniform Push {
 
 const uint TM = 8, TN = 16, TK = 16;
 
-shared float stage[TM * TN];
+/* How many cooperative-matrix tiles one subgroup keeps in registers. The kernel is
+ * compiled twice: RM = RN = 1 for shapes whose extents are not a whole tile block, and
+ * RM = 4, RN = 2 otherwise. Every K step then loads RM fragments of A and RN of B to
+ * feed RM*RN multiply-accumulates, so the loads per unit of arithmetic fall by
+ * RM*RN/(RM+RN) — from 0.5 to 1.33 — and the workgroup count falls eightfold with it. */
+#ifndef RM
+#define RM 1
+#endif
+#ifndef RN
+#define RN 1
+#endif
+const uint BM = TM * RM, BN = TN * RN;
+
+shared float stage[BM * BN];
 
 /* The hardware float16 conversion, which `float(float16_t(x))` does not give: the
  * compiler folds that round trip away and leaves the value in float32, silently
@@ -80,7 +93,7 @@ float gate_activation(float x) {
 }
 
 void main() {
-    uint row = gl_WorkGroupID.y * TM, col = gl_WorkGroupID.x * TN;
+    uint row = gl_WorkGroupID.y * BM, col = gl_WorkGroupID.x * BN;
     if (row >= pc.m || col >= pc.n) return;
     uint batch = gl_WorkGroupID.z;
     uint ao = batch * pc.sa, bo = batch * pc.sb, co = batch * pc.sc;
@@ -91,57 +104,78 @@ void main() {
     uint ldb = pc.ldb != 0u ? pc.ldb : ((pc.flags & 1u) != 0u ? pc.k : pc.n);
     uint ldc = pc.ldc != 0u ? pc.ldc : pc.n;
 
-    coopmat<float, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator> acc =
-        coopmat<float, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator>(0.0);
-    coopmat<float16_t, gl_ScopeSubgroup, TM, TK, gl_MatrixUseA> a;
-    coopmat<float16_t, gl_ScopeSubgroup, TK, TN, gl_MatrixUseB> b;
+    coopmat<float, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator> acc[RM][RN];
+    for (uint i = 0; i < RM; i++)
+        for (uint j = 0; j < RN; j++)
+            acc[i][j] = coopmat<float, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator>(0.0);
+    coopmat<float16_t, gl_ScopeSubgroup, TM, TK, gl_MatrixUseA> a[RM];
+    coopmat<float16_t, gl_ScopeSubgroup, TK, TN, gl_MatrixUseB> b[RN];
 
+    /* The transposed test stays outside the K loop. Inside it, the loads stop being
+     * hoisted and the loop stops pipelining — worth 30 % of a frame when it was there. */
     if ((pc.flags & 1u) != 0u) {
         for (uint k = 0; k < pc.k; k += TK) {
-            coopMatLoad(a, pc.a.v, ao + row * lda + k, lda, gl_CooperativeMatrixLayoutRowMajor);
-            coopMatLoad(b, pc.b.v, bo + col * ldb + k, ldb, gl_CooperativeMatrixLayoutColumnMajor);
-            acc = coopMatMulAdd(a, b, acc);
+            for (uint i = 0; i < RM; i++)
+                coopMatLoad(a[i], pc.a.v, ao + (row + i * TM) * lda + k, lda,
+                            gl_CooperativeMatrixLayoutRowMajor);
+            for (uint j = 0; j < RN; j++)
+                coopMatLoad(b[j], pc.b.v, bo + (col + j * TN) * ldb + k, ldb,
+                            gl_CooperativeMatrixLayoutColumnMajor);
+            for (uint i = 0; i < RM; i++)
+                for (uint j = 0; j < RN; j++)
+                    acc[i][j] = coopMatMulAdd(a[i], b[j], acc[i][j]);
         }
     } else {
         for (uint k = 0; k < pc.k; k += TK) {
-            coopMatLoad(a, pc.a.v, ao + row * lda + k, lda, gl_CooperativeMatrixLayoutRowMajor);
-            coopMatLoad(b, pc.b.v, bo + k * ldb + col, ldb, gl_CooperativeMatrixLayoutRowMajor);
-            acc = coopMatMulAdd(a, b, acc);
+            for (uint i = 0; i < RM; i++)
+                coopMatLoad(a[i], pc.a.v, ao + (row + i * TM) * lda + k, lda,
+                            gl_CooperativeMatrixLayoutRowMajor);
+            for (uint j = 0; j < RN; j++)
+                coopMatLoad(b[j], pc.b.v, bo + k * ldb + col + j * TN, ldb,
+                            gl_CooperativeMatrixLayoutRowMajor);
+            for (uint i = 0; i < RM; i++)
+                for (uint j = 0; j < RN; j++)
+                    acc[i][j] = coopMatMulAdd(a[i], b[j], acc[i][j]);
         }
     }
+
     uint epilogue = (pc.flags >> 8) & 0xFu;
     bool narrow = (pc.flags & 0x1000u) != 0u;
     if (epilogue == 0u && !narrow) {
-        coopMatStore(acc, pc.c.v, co + row * ldc + col, ldc,
-                     gl_CooperativeMatrixLayoutRowMajor);
+        for (uint i = 0; i < RM; i++)
+            for (uint j = 0; j < RN; j++)
+                coopMatStore(acc[i][j], pc.c.v, co + (row + i * TM) * ldc + col + j * TN,
+                             ldc, gl_CooperativeMatrixLayoutRowMajor);
         return;
     }
-    coopMatStore(acc, stage, 0, TN, gl_CooperativeMatrixLayoutRowMajor);
-    /* One subgroup per workgroup, so a subgroup barrier is the whole barrier; the
-     * workgroup form costs a measurable slice of a pass this small. */
+    for (uint i = 0; i < RM; i++)
+        for (uint j = 0; j < RN; j++)
+            coopMatStore(acc[i][j], stage, i * TM * BN + j * TN, BN,
+                         gl_CooperativeMatrixLayoutRowMajor);
+    /* One subgroup per workgroup, so a subgroup barrier is the whole barrier. */
     subgroupMemoryBarrierShared();
     subgroupBarrier();
-    /* Four consecutive elements per lane, so the 32 lanes write eight whole rows of
-     * sixteen and the stores coalesce; one element per lane strided by 32 costs more
-     * than the epilogue saves. */
-    uint lane = gl_LocalInvocationID.x * 4u;
-    uint at = co + (row + lane / TN) * ldc + col + lane % TN;
-    vec4 out4;
-    for (uint i = 0; i < 4u; ++i) {
-        float value = stage[lane + i];
-        if (epilogue == 2u || epilogue == 3u) value = gate_activation(value);
-        if (epilogue == 1u || epilogue == 3u) value = e4m3(value);
-        if (epilogue == 4u) value = half_round(value);
-        out4[i] = value;
-    }
-    if (!narrow) {
-        for (uint i = 0; i < 4u; ++i) pc.c.v[at + i] = out4[i];
-    } else if ((at & 3u) == 0u && (uint(uint64_t(pc.c)) & 7u) == 0u) {
-        /* Four 16-bit stores are slower than the float32 store they replace; one
-         * 64-bit store is what makes the narrow output actually cheaper. */
-        Half4Buf(uint64_t(pc.c)).v4[at >> 2] = f16vec4(out4);
-    } else {
-        for (uint i = 0; i < 4u; ++i) HalfBuf(uint64_t(pc.c)).v[at + i] = float16_t(out4[i]);
+
+    /* Four consecutive elements per lane, so the stores coalesce; one element per lane
+     * strided across the tile costs more than the epilogue saves. */
+    for (uint e = gl_LocalInvocationID.x * 4u; e < BM * BN; e += 32u * 4u) {
+        vec4 out4;
+        for (uint i = 0; i < 4u; ++i) {
+            float value = stage[e + i];
+            if (epilogue == 2u || epilogue == 3u) value = gate_activation(value);
+            if (epilogue == 1u || epilogue == 3u) value = e4m3(value);
+            if (epilogue == 4u) value = half_round(value);
+            out4[i] = value;
+        }
+        uint at = co + (row + e / BN) * ldc + col + e % BN;
+        if (!narrow) {
+            for (uint i = 0; i < 4u; ++i) pc.c.v[at + i] = out4[i];
+        } else if ((at & 3u) == 0u && (uint(uint64_t(pc.c)) & 7u) == 0u) {
+            /* Four 16-bit stores are slower than the float32 store they replace; one
+             * 64-bit store is what makes the narrow output actually cheaper. */
+            Half4Buf(uint64_t(pc.c)).v4[at >> 2] = f16vec4(out4);
+        } else {
+            for (uint i = 0; i < 4u; ++i) HalfBuf(uint64_t(pc.c)).v[at + i] = float16_t(out4[i]);
+        }
     }
 }
-
