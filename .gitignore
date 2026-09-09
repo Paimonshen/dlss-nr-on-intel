@@ -1,6 +1,6 @@
 # NVIDIA's property — never committed, never redistributed. See CLAUDE.md "Rules".
-ref/
-work/
+/ref/
+/work/
 *.dll
 *.exe
 *.7z
@@ -15,4 +15,4 @@ __pycache__/
 
 # Third-party game screenshots: test material, not code. Kept out of the tree so a
 # cloud review does not carry copyrighted frames it has no use for.
-pngs/
+/pngs/
