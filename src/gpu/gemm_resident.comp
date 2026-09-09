@@ -1,4 +1,5 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
 /*
  * gemm_resident — the same cooperative-matrix GEMM as gemm_coopmat_batched.comp,
  * with its operands addressed by pointer instead of bound to descriptors, so it can
@@ -12,6 +13,8 @@
 #extension GL_KHR_memory_scope_semantics : require
 #extension GL_KHR_cooperative_matrix : require
 #extension GL_KHR_shader_subgroup_basic : require
+
+#include "publish.glsl"
 
 layout(local_size_x = 32) in;
 
@@ -61,36 +64,7 @@ const uint BM = TM * RM, BN = TN * RN;
 
 shared float stage[BM * BN];
 
-/* The hardware float16 conversion, which `float(float16_t(x))` does not give: the
- * compiler folds that round trip away and leaves the value in float32, silently
- * skipping every rounding point the vendor's graph depends on. `packHalf2x16` cannot
- * be elided because it changes the bit representation, and it is bit-exact against
- * numpy's float16 over ordinary values, half subnormals, and overflow to infinity
- * (`src/bench/half_probe.py`). Two instructions and no branches, against ten and two
- * branches for the version that did the exponent and mantissa by hand. */
-float half_round(float x) { return unpackHalf2x16(packHalf2x16(vec2(x, 0.0))).x; }
 
-float e4m3(float x) {
-    float magnitude = min(abs(x), 448.0);
-    int exponent = (floatBitsToInt(magnitude) >> 23) & 0xFF;
-    exponent = max(exponent, 121) - 3;
-    float step = intBitsToFloat(exponent << 23);
-    float reciprocal = intBitsToFloat((254 - exponent) << 23);
-    float rounded = roundEven(magnitude * reciprocal) * step;
-    return x < 0.0 ? -rounded : rounded;
-}
-
-float gate_activation(float x) {
-    precise float wide = half_round(x);
-    precise float clamped = clamp(wide, -4.0, 4.0);
-    precise float linear = abs(clamped) * -0.055908203125;
-    linear += 0.447265625;
-    linear = half_round(linear);
-    linear *= clamped;
-    linear += 0.89453125;
-    linear = half_round(linear);
-    return half_round(wide * linear);
-}
 
 void main() {
     uint row = gl_WorkGroupID.y * BM, col = gl_WorkGroupID.x * BN;

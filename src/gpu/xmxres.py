@@ -63,7 +63,7 @@ def _load():
     import xmx
     lib = xmx._load()                      # shares the instance, device and queue
     for name, args in (
-            ("xmx_res_init", [ctypes.c_char_p] * 5),
+            ("xmx_res_init", [ctypes.c_char_p] * 6),
             ("xmx_buf_create", [ctypes.c_ulonglong]),
             ("xmx_buf_destroy", [ctypes.c_int]),
             ("xmx_begin", []),
@@ -88,7 +88,8 @@ def _load():
                                  ("XMX_UNARY_SPV", "resident.spv"),
                                  ("XMX_ROW_SPV", "attention.spv"),
                                  ("XMX_HISTORY_SPV", "history.spv"),
-                                 ("XMX_TILED_SPV", "gemm_tiled.spv"))]
+                                 ("XMX_TILED_SPV", "gemm_tiled.spv"),
+                                 ("XMX_STAGED_SPV", "gemm_staged.spv"))]
     if lib.xmx_res_init(*[p.encode() for p in spv]) != 0:
         raise RuntimeError("xmx_res_init: " + lib.xmx_error().decode())
     _lib = lib

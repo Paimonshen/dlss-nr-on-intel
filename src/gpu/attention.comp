@@ -1,4 +1,5 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
 /*
  * attention — the row-wise operators: the cosine publish and the bit-affine softmax.
  *
@@ -17,6 +18,8 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #extension GL_KHR_shader_subgroup_basic : require
+
+#include "publish.glsl"
 
 layout(local_size_x = 32) in;
 
@@ -66,19 +69,7 @@ void scatter(uint base, uint count) {
 const uint COSINE_PUBLISH = 0u, SOFTMAX = 1u;
 const float COSINE_NORM_FLOOR = 0.00006198883056640625;
 
-/* The hardware float16 conversion; see the same function in resident.comp for why
- * `float(float16_t(x))` cannot be used and this can. */
-float half_round(float x) { return unpackHalf2x16(packHalf2x16(vec2(x, 0.0))).x; }
 
-float e4m3(float x) {
-    float magnitude = min(abs(x), 448.0);
-    int exponent = (floatBitsToInt(magnitude) >> 23) & 0xFF;
-    exponent = max(exponent, 121) - 3;
-    float step = intBitsToFloat(exponent << 23);
-    float reciprocal = intBitsToFloat((254 - exponent) << 23);
-    float rounded = roundEven(magnitude * reciprocal) * step;
-    return x < 0.0 ? -rounded : rounded;
-}
 
 /* half(l*r), half(l+r), half(l*r + acc) — each a float32 expression with one rounding
  * at the end, matching `_half_multiply` / `_half_add` / `_half_fma`. `precise` stops an
