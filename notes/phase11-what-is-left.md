@@ -1,6 +1,11 @@
 # What actually runs on the GPU, and what is left
 2026-09-09
 
+*Corrected 2026-09-09 by `notes/phase13-torch-and-blas.md`: the CPU column below is
+the netlib reference BLAS at ~3 GFLOP/s. Under OpenBLAS the CPU alone beats the XMX
+path, which makes residency the precondition for the GPU rather than an optimisation.
+The arithmetic ceiling is unaffected.*
+
 ## No — only the matrix multiplies are on the GPU
 
 Measured, with `nr_xmx` reporting bytes as well as time:

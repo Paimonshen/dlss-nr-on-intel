@@ -19,6 +19,7 @@ rescale and tile padding are cached per tensor and done once.
 """
 from __future__ import annotations
 
+import os
 import pathlib
 import sys
 import time
@@ -33,6 +34,42 @@ import xmx  # noqa: E402
 # Below this many multiply-accumulates the ~0.4 ms fixed dispatch cost exceeds what
 # numpy takes, even at the ~3 GFLOP/s of the reference BLAS this machine ships.
 MIN_MACS = 1 << 20
+
+# Arithmetic intensity, K*N/(K+N): multiply-accumulates per element moved across the
+# host boundary. The cooperative-matrix kernel itself beats any CPU here — 0.17 to
+# 1.4 ms on this graph's shapes — but a dispatch also writes A as float16 and reads C
+# back as float32 from the host, which costs 3 to 45 ms. Wide, shallow GEMMs (block 0's
+# 147456x32x128 is 1.2 GFLOP against a 75 MB result) are therefore host-bound and
+# belong on the CPU; deep, narrow ones (576x512x1536) are 2.8x faster on the GPU.
+# Measured break-even against OpenBLAS sits between 192 and 384; against the netlib
+# reference build there is none, because that CPU is 20x slower and the GPU wins on
+# every shape. So the right threshold depends on the BLAS numpy was linked against and
+# `calibrate()` picks it at install time. `NR_MIN_INTENSITY` overrides.
+# See notes/phase13-blas-baseline.md.
+MIN_INTENSITY = None
+
+
+def calibrate():
+    """Set `MIN_INTENSITY` from how fast this numpy's BLAS actually is.
+
+    One 512x512x512 sgemm, a few milliseconds. A netlib reference build lands around
+    3 GFLOP/s and wants everything on the GPU; an OpenBLAS build lands two orders
+    higher and should keep the wide, shallow GEMMs, where a dispatch is host-bound.
+    """
+    global MIN_INTENSITY
+    override = os.environ.get("NR_MIN_INTENSITY")
+    if override is not None:
+        MIN_INTENSITY = int(override)
+        return MIN_INTENSITY
+    size = 512
+    left = np.random.default_rng(0).standard_normal((size, size)).astype(np.float32)
+    right = np.ascontiguousarray(left.T)
+    left @ right
+    started = time.perf_counter()
+    left @ right
+    rate = 2 * size ** 3 / max(time.perf_counter() - started, 1e-9) / 1e9
+    MIN_INTENSITY = 0 if rate < 20.0 else 256
+    return MIN_INTENSITY
 
 # When True, activations that float16 cannot hold exactly are carried as a pair of
 # halves, two dispatches instead of one. 97.3 % of this graph's GEMM activations are
@@ -80,7 +117,8 @@ def _batched(a, b, transpose_b):
     batch = a.shape[0] * a.shape[1]
     rows, inner = a.shape[2], a.shape[3]
     cols = b.shape[2] if transpose_b else b.shape[3]
-    if batch * rows * inner * cols < MIN_MACS:
+    if (batch * rows * inner * cols < MIN_MACS
+            or inner * cols < MIN_INTENSITY * (inner + cols)):
         return None
     started = time.perf_counter()
     try:
@@ -111,12 +149,15 @@ def matmul_nt(a, b):
 
 
 def matmul(a, b):
+    if MIN_INTENSITY is None:
+        calibrate()
     a = np.asarray(a, dtype=np.float32)
     b = np.asarray(b, dtype=np.float32)
     if b.ndim == 2 and a.ndim >= 2 and a.shape[-1] == b.shape[0]:
         rows = int(np.prod(a.shape[:-1], dtype=np.int64))
         inner, cols = b.shape
-        if rows * inner * cols >= MIN_MACS:
+        if (rows * inner * cols >= MIN_MACS
+                and inner * cols >= MIN_INTENSITY * (inner + cols)):
             started = time.perf_counter()
             flat = np.ascontiguousarray(a.reshape(rows, inner))
             key, operand = _operand(b)
@@ -159,6 +200,8 @@ def install(fuse_branched=True, exact=False):
     global EXACT
     import nr_model
     EXACT = exact
+    if MIN_INTENSITY is None:
+        calibrate()
     nr_model.MATMUL = matmul
     nr_model.MATMUL_NT = matmul_nt
     nr_model.FUSE_BRANCHED = fuse_branched and not exact
@@ -184,5 +227,6 @@ def report():
         rate = 2 * macs / seconds / 1e9 if seconds > 0 else 0.0
         lines.append(f"  {where.upper()}  {calls:6d} calls  {2 * macs / 1e9:8.1f} GFLOP  "
                      f"{seconds:7.2f} s  {rate:7.1f} GFLOP/s")
-    lines.append(f"  host<->device {STATS['bytes'] / 1e9:.2f} GB in {STATS['gpu']} round trips")
+    lines.append(f"  host<->device {STATS['bytes'] / 1e9:.2f} GB in {STATS['gpu']} round trips"
+                 f"   (min intensity {MIN_INTENSITY})")
     return "\n".join(lines)

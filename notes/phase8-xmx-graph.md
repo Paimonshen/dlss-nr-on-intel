@@ -122,6 +122,13 @@ block output: the chaos above, now demonstrated inside a single block. So it is 
 in the reference and on in the backend. It does not move the end-to-end divergence at
 all — head RGB mean 0.017441 with the fold and without it, to six figures.
 
+## CORRECTION 2026-09-09 — the CPU baseline below is the netlib reference BLAS
+
+At ~3 GFLOP/s. A pip numpy links OpenBLAS and does 214 GFLOP/s, under which the CPU
+alone runs the same frame in 17.5 s and the XMX path in 18.3 s. The speedups in the
+table below are a GPU rescuing a bad baseline, not a GPU win.
+`notes/phase13-torch-and-blas.md`.
+
 ## Where a frame goes now
 
 384x384 Cyberpunk face crop, network extent 384x384:

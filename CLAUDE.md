@@ -16,8 +16,10 @@ optimisations that trade correctness for speed until Phase 3 is done.
 
 > **REACHED 2026-09-09.** `python3 src/ref/nr_frame.py IN.png OUT.png --gpu` renders a
 > frame with the real effect — lashes and hair resolved, skin pores synthesised — in
-> **16.8 s** for 384x384 on the XMX units (38 s on the CPU reference), and a full
-> 1280x720 frame in about 90 s. Two adversarial controls pass. Phase 4 is done as well:
+> about **17 s** for 384x384 and 95 s for 1280x720. The port is **bit-identical** to
+> MLX-DLSS's PyTorch original once both are given the same GEMM. Note the CPU baseline:
+> the system numpy is the netlib reference BLAS, and under OpenBLAS the CPU alone is
+> as fast as the XMX path (`notes/phase13-torch-and-blas.md`). Two adversarial controls pass. Phase 4 is done as well:
 > every GEMM, the batched attention included, runs through
 > `VK_KHR_cooperative_matrix`. **Read `HANDOFF.md` first**; it overrides this file, and
 > large parts of what follows are superseded.

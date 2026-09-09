@@ -35,10 +35,20 @@ artefacts.
 - **`src/ref/{hnet_model,hnet_ops,hnet_ref,forward,run_frame}.py` are superseded.**
   They decode the packed container as dense FP16 and guess the block layout. Keep them
   for the PTX-derived findings they encode; do not build on them.
-- **Phase 4 is done too**: `src/gpu/nr_xmx.py` puts every GEMM on the XMX units,
-  the batched attention included. 384x384 goes 45.1 s -> 16.8 s. All the arithmetic
-  is on the GPU; 71 % of a frame is now elementwise numpy.
-  `notes/phase8-xmx-graph.md`.
+- **Phase 4 is done**: `src/gpu/nr_xmx.py` puts every GEMM on the XMX units, the
+  batched attention included. `notes/phase8-xmx-graph.md`.
+- **But the GPU is not currently a win, and the numbers quoted for it were measured
+  against a crippled BLAS.** The system numpy is netlib reference, ~3 GFLOP/s; a pip
+  numpy is OpenBLAS at 214 GFLOP/s. On the 384 face: netlib CPU 38.0 s, netlib+XMX
+  17.0 s, **OpenBLAS CPU 17.5 s**, OpenBLAS+XMX 18.3 s. The kernel beats OpenBLAS on
+  every shape (0.17-1.4 ms against 0.9-12 ms) but the *path* loses most of them,
+  because a dispatch round-trips the activation through host memory. GPU residency is
+  therefore the **precondition** for the GPU being worth anything here, not an
+  optimisation on top. `notes/phase13-torch-and-blas.md`.
+- **The numpy port is bit-identical to MLX-DLSS's PyTorch original** — every primitive,
+  every layout operator, all four block families on real weights, and the whole
+  71-block forward, once the same GEMM is given to both.
+  `python3 src/ref/test_against_torch.py` under `work/venv`.
 - **Per-element agreement is not a property a port can have.** Each precision regime
   annihilates perturbations below its own working precision *exactly* and jumps
   straight to 9-12 % of the head's sd above it — float32 flips between 1e-09 and
@@ -87,12 +97,13 @@ and the real package needs sudo. Round-trip verified. Both files already exist.
 **Done 2026-09-09.** The graph runs, on CPU and on XMX. What is left, in order of
 value:
 
-1. **The elementwise work is 71 % of a frame** and it is all in numpy: the E4M3
-   publishes, the bit-affine softmax, the fragment-tree cosine normalise, the window
-   partition and reverse. Compute shaders for those would be the next real step, and
-   it is a port of the graph rather than a hook on its GEMMs. Note this needs the
-   activations to *stay* on the GPU between blocks — the win is not in any single
-   kernel but in not round-tripping through host memory 71 times.
+1. **GPU residency, and it is now the precondition rather than an optimisation.**
+   71 % of a frame is elementwise numpy — the E4M3 publishes, the bit-affine softmax,
+   the fragment-tree cosine normalise, the window partition and reverse — and every
+   GEMM round-trips its activation through host memory, which is why the XMX path does
+   not beat OpenBLAS. Compute shaders for those operators *plus* device-resident
+   activations between blocks. The win is not any single kernel; it is deleting
+   16.46 GB of traffic per 720p frame.
 2. ~~**The temporal path**~~ **DONE 2026-09-09** — `src/ref/nr_temporal.py`,
    `notes/phase12-temporal.md`. The history gate is the head's fourth channel, and it
    works: alpha goes 0.008 with no history -> **0.705** with correctly reprojected
@@ -202,6 +213,7 @@ Regression, all should exit 0:
 
 ```
 python3 src/ref/test_nr_model.py                  # primitives + graph, ~40 s
+work/venv/bin/python src/ref/test_against_torch.py # bit-identical to the original
 python3 src/gpu/test_gemm.py                      # worst rel 2.4e-06
 python3 src/ref/nr_frame.py IN.png OUT.png --gpu  # the visual check
 python3 src/ref/nr_frame.py IN.png OUT.png --profile neutral   # the control: ~37x smaller
@@ -244,8 +256,10 @@ What is *not* claimed:
 - **No NVIDIA parity gate.** There is still no NVIDIA GPU here, so there are still no
   reference activations. The graph is MLX-DLSS's recovery from vendor captures, and it
   is validated against their spec and against behaviour, not against the DLL.
-- **Not fast.** 16.8 s for 384x384 on XMX, ~90 s for 720p. Every GEMM is on the GPU;
-  the remaining 71 % is elementwise numpy.
+- **Not fast, and the GPU is not yet paying for itself.** 17.5 s for 384x384 on the
+  CPU under OpenBLAS, ~18 s with XMX, ~95 s for 720p. Every GEMM is on the GPU; the
+  remaining 71 % is elementwise numpy, and the round trips cost more than the kernel
+  saves.
 - **Single frame.** No motion vectors, no history, no temporal path.
 - The graph recovery is **not ours**. Ours is the Xe2 execution path, the numpy
   reference, the independent second extraction that confirms their weight spec, and
