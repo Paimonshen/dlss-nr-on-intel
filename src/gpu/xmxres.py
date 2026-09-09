@@ -40,6 +40,11 @@ COSINE_PUBLISH, SOFTMAX = 0, 1
 EPI_NONE, EPI_E4M3, EPI_GATE, EPI_GATE_E4M3, EPI_HALF = 0, 1, 2, 3, 4
 
 
+def _reads(a_half=False, b_half=False):
+    """Operand width bits: 15 marks `a` as float16, 16 marks `b`."""
+    return (0x8000 if a_half else 0) | (0x10000 if b_half else 0)
+
+
 def _publish(epilogue, narrow):
     """The publish half of a pass's flags: bits 8-11 the epilogue, bit 12 a half output.
 
@@ -197,11 +202,12 @@ class Runtime:
         return self
 
     def unary(self, kind, source, target, count, *, scale=1.0, second=None,
-              third=None, channels=0, epilogue=0, narrow=False, _dims=None, _pad=0):
+              third=None, channels=0, epilogue=0, narrow=False, a_half=False,
+              b_half=False, _dims=None, _pad=0):
         second = second if second is not None else source
         third = third if third is not None else source
         batch, height, width, across = _dims or (0, 0, 0, 0)
-        if self.lib.xmx_rec_unary(kind | _publish(epilogue, narrow),
+        if self.lib.xmx_rec_unary(kind | _publish(epilogue, narrow) | _reads(a_half, b_half),
                                   source.id, second.id, target.id, third.id,
                                   int(count), int(channels), float(scale),
                                   int(batch), int(height), int(width), int(across),
@@ -244,17 +250,19 @@ class Runtime:
         return self.unary(SCALE, source, target, count, scale=factor)
 
     def residual(self, branch, skip, cosine, target, count, channels, *, reverse=None,
-                 epilogue=0, narrow=False):
+                 epilogue=0, narrow=False, a_half=False, b_half=False):
         """target = branch + skip * cosine, one cosine per channel."""
         if reverse is not None:
             height, width, size, origin = reverse
             _, pw, (top, left) = self.window_extent(height, width, origin, size)
             return self.unary(RESIDUAL | 0x4000, branch, target, count, second=skip,
                               third=cosine, channels=channels, epilogue=epilogue,
-                              narrow=narrow, _dims=(size, height, width, pw // size),
+                              narrow=narrow, a_half=a_half, b_half=b_half,
+                              _dims=(size, height, width, pw // size),
                               _pad=(top << 16) | left)
         return self.unary(RESIDUAL, branch, target, count, second=skip, third=cosine,
-                          channels=channels, epilogue=epilogue, narrow=narrow)
+                          channels=channels, epilogue=epilogue, narrow=narrow,
+                          a_half=a_half, b_half=b_half)
 
     @staticmethod
     def window_extent(height, width, origin=(0, 0), size=8):
@@ -265,7 +273,7 @@ class Runtime:
         return padded_height, padded_width, (pad_top, pad_left)
 
     def partition(self, source, target, height, width, channels, size=8, origin=(0, 0),
-                  *, epilogue=0, narrow=False):
+                  *, epilogue=0, narrow=False, a_half=False):
         """NHWC -> (windows, tokens, channels), the shifted-window origin folded in.
 
         The vendor pads by up to one window before partitioning; rather than write that
@@ -274,6 +282,7 @@ class Runtime:
         ph, pw, (top, left) = self.window_extent(height, width, origin, size)
         return self.unary(PARTITION, source, target, ph * pw * channels,
                           channels=channels, scale=1.0, epilogue=epilogue, narrow=narrow,
+                          a_half=a_half,
                           _dims=(size, height, width, pw // size),
                           _pad=(top << 16) | left)
 
@@ -299,31 +308,36 @@ class Runtime:
                           channels=channels, epilogue=epilogue, narrow=narrow,
                           _dims=(heads, tokens, 0, 0))
 
-    def pool2(self, source, target, height, width, channels, *, epilogue=0, narrow=False):
+    def pool2(self, source, target, height, width, channels, *, epilogue=0, narrow=False,
+              a_half=False):
         """2x2 average pool, NHWC."""
         return self.unary(POOL2, source, target, (height // 2) * (width // 2) * channels,
-                          channels=channels, epilogue=epilogue, narrow=narrow,
+                          channels=channels, epilogue=epilogue, narrow=narrow, a_half=a_half,
                           _dims=(0, height, width, 0))
 
-    def upsample2(self, source, target, source_width, height, width, channels):
+    def upsample2(self, source, target, source_width, height, width, channels, *,
+                  a_half=False, narrow=False):
         """Nearest 2x upsample, cropped to (height, width)."""
         return self.unary(UPSAMPLE2, source, target, height * width * channels,
-                          channels=channels, _dims=(0, width, source_width, 0))
+                          channels=channels, a_half=a_half, narrow=narrow,
+                          _dims=(0, width, source_width, 0))
 
-    def pad_end(self, source, target, height, width, padded_height, padded_width, channels):
+    def pad_end(self, source, target, height, width, padded_height, padded_width, channels,
+                *, a_half=False, narrow=False):
         """Extend to a larger extent with zeros, as `pad_spatial_end` does."""
         return self.unary(PAD_END, source, target,
                           padded_height * padded_width * channels, channels=channels,
-                          _dims=(0, height, width, padded_width))
+                          a_half=a_half, narrow=narrow, _dims=(0, height, width, padded_width))
 
-    def scale_channel(self, source, factors, target, count, channels):
+    def scale_channel(self, source, factors, target, count, channels, *, a_half=False):
         """target = source * factors, one factor per channel."""
         return self.unary(SCALE_CHANNEL, source, target, count, channels=channels,
-                          third=factors)
+                          third=factors, a_half=a_half)
 
-    def add(self, left, right, target, count, *, epilogue=0, narrow=False):
+    def add(self, left, right, target, count, *, epilogue=0, narrow=False,
+            a_half=False, b_half=False):
         return self.unary(ADD, left, target, count, second=right, epilogue=epilogue,
-                          narrow=narrow)
+                          narrow=narrow, a_half=a_half, b_half=b_half)
 
     def add_bias(self, source, bias, target, count, tokens, heads):
         """scores + the per-head attention bias."""

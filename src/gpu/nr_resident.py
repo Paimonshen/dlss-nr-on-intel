@@ -244,14 +244,21 @@ class BlockScratch:
                 value.free()
 
 
-def record_feed_forward(runtime, w, s, source):
-    """The block's feed-forward, into `s.ffn`. Branched or plain, as the block is."""
+def record_feed_forward(runtime, w, s, source, source_half=False):
+    """The block's feed-forward, into `s.ffn`. Branched or plain, as the block is.
+
+    `source_half` says the block's input is already float16 — true whenever it is an
+    E4M3 publish, which is exact in half — so the widening pass in front of the first
+    GEMM is not needed and the residual reads the narrow buffer directly.
+    """
     pixels, channels = s.height * s.width, w.channels
-    runtime.to_half(source, s.value16, pixels * channels)
+    value16 = source if source_half else s.value16
+    if not source_half:
+        runtime.to_half(source, s.value16, pixels * channels)
     if w.branched:
         with runtime.independent():
             for head in range(w.groups):
-                runtime.gemm(s.value16, w.expand, s.hidden16, pixels, 128, channels,
+                runtime.gemm(value16, w.expand, s.hidden16, pixels, 128, channels,
                              leading=(0, 0, s.hidden_width),
                              offsets=(0, head * channels * 128, head * 128),
                              epilogue=xmxres.EPI_GATE_E4M3, narrow=True)
@@ -265,15 +272,16 @@ def record_feed_forward(runtime, w, s, source):
         # the fused multi-head kernels publish the residual before attention reads it,
         # which the residual now does on its way out
         runtime.residual(s.branch, source, w.ffn_cos, s.ffn, pixels * channels, channels,
-                         epilogue=xmxres.EPI_E4M3)
+                         epilogue=xmxres.EPI_E4M3, b_half=source_half)
     else:
-        runtime.gemm(s.value16, w.expand, s.hidden16, pixels, s.hidden_width, channels,
+        runtime.gemm(value16, w.expand, s.hidden16, pixels, s.hidden_width, channels,
                      epilogue=xmxres.EPI_GATE_E4M3, narrow=True)
         runtime.gemm(s.hidden16, w.branch, s.branch, pixels, channels, s.hidden_width)
-        runtime.residual(s.branch, source, w.ffn_cos, s.ffn, pixels * channels, channels)
+        runtime.residual(s.branch, source, w.ffn_cos, s.ffn, pixels * channels, channels,
+                         b_half=source_half)
 
 
-def record_split_feed_forward(runtime, w, s, source):
+def record_split_feed_forward(runtime, w, s, source, source_half=False):
     """The split family's core: e4m3(x @ first), then a per-64-group 64 -> 256 -> 64 MLP.
 
     The gate sits between the two group GEMMs with no publish, so the wide buffer is
@@ -281,8 +289,10 @@ def record_split_feed_forward(runtime, w, s, source):
     """
     pixels, channels, groups = s.height * s.width, w.channels, w.groups
     wide = groups * 256
-    runtime.to_half(source, s.value16, pixels * channels)
-    runtime.gemm(s.value16, w.first, s.heads16, pixels, channels, channels,
+    value16 = source if source_half else s.value16
+    if not source_half:
+        runtime.to_half(source, s.value16, pixels * channels)
+    runtime.gemm(value16, w.first, s.heads16, pixels, channels, channels,
                  epilogue=xmxres.EPI_E4M3, narrow=True)
     with runtime.independent():
         for group in range(groups):
@@ -297,7 +307,8 @@ def record_split_feed_forward(runtime, w, s, source):
                          offsets=(group * 256, group * 256 * 64, group * 64),
                          epilogue=xmxres.EPI_E4M3, narrow=True)
     runtime.gemm(s.core16, w.weight3, s.branch, pixels, channels, channels)
-    runtime.residual(s.branch, source, w.ffn_cos, s.ffn, pixels * channels, channels)
+    runtime.residual(s.branch, source, w.ffn_cos, s.ffn, pixels * channels, channels,
+                     b_half=source_half)
 
 
 def record_window_attention(runtime, w, s, source):
@@ -340,7 +351,8 @@ def record_window_attention(runtime, w, s, source):
     runtime.gemm(s.merged16, w.out, s.attended, windows * tokens, channels, channels)
 
 
-def record_block(runtime, w, s, source=None, target=None, publish=0):
+def record_block(runtime, w, s, source=None, target=None, publish=0, source_half=False,
+                 target_half=False):
     """A whole window block: feed-forward, attention, both residuals.
 
     `source` and `target` default to the scratch's own buffers; passing them lets one
@@ -352,14 +364,14 @@ def record_block(runtime, w, s, source=None, target=None, publish=0):
     target = target or s.out
     pixels = s.height * s.width
     if getattr(w, "split", False):
-        record_split_feed_forward(runtime, w, s, source)
+        record_split_feed_forward(runtime, w, s, source, source_half)
     else:
-        record_feed_forward(runtime, w, s, source)
+        record_feed_forward(runtime, w, s, source, source_half)
     record_window_attention(runtime, w, s, s.ffn)
     # the window reverse is the residual's own gather, not a pass of its own
     runtime.residual(s.attended, s.ffn, w.attn_cos, target, pixels * w.channels,
                      w.channels, reverse=(s.height, s.width, 8, w.origin),
-                     epilogue=publish)
+                     epilogue=publish, narrow=target_half)
 
 
 def run_block(runtime, w, s, value):
@@ -390,7 +402,7 @@ class Transition:
 
 
 def record_downsample(runtime, transition, scratch, source, target, height, width,
-                      channels, *, pad_to=0):
+                      channels, *, pad_to=0, source_half=False, target_half=False):
     """Pool the block's unpublished output, publish it, then project.
 
     The fused `ds` kernels pool the half-precision output before its E4M3 publish and
@@ -400,36 +412,41 @@ def record_downsample(runtime, transition, scratch, source, target, height, widt
         padded_height = -(-height // pad_to) * pad_to
         padded_width = -(-width // pad_to) * pad_to
         runtime.pad_end(source, scratch.padded, height, width, padded_height,
-                        padded_width, channels)
+                        padded_width, channels, a_half=source_half, narrow=source_half)
         source, height, width = scratch.padded, padded_height, padded_width
     half_height, half_width = height // 2, width // 2
     pixels = half_height * half_width
     runtime.pool2(source, scratch.pooled16, height, width, channels,
-                  epilogue=xmxres.EPI_E4M3, narrow=True)
+                  epilogue=xmxres.EPI_E4M3, narrow=True, a_half=source_half)
     runtime.gemm(scratch.pooled16, transition.weight0, target, pixels,
-                 transition.out_channels, channels, epilogue=xmxres.EPI_E4M3)
+                 transition.out_channels, channels, epilogue=xmxres.EPI_E4M3,
+                 narrow=target_half)
     return half_height, half_width
 
 
 def record_upsample_merge(runtime, transition, scratch, source, skip, target,
                           source_height, source_width, height, width, channels,
-                          out_channels):
+                          out_channels, *, source_half=False, skip_half=False,
+                          target_half=False):
     """Project, nearest-upsample onto the skip, add the scaled skip, publish.
 
     The fused `upsample` kernels read the merged tensor as E4M3, so the publish is
     part of the transition rather than of the block that follows.
     """
     source_pixels = source_height * source_width
-    runtime.to_half(source, scratch.projected16, source_pixels * channels)
-    runtime.gemm(scratch.projected16, transition.weight0, scratch.projected,
+    projected16 = source if source_half else scratch.projected16
+    if not source_half:
+        runtime.to_half(source, scratch.projected16, source_pixels * channels)
+    runtime.gemm(projected16, transition.weight0, scratch.projected,
                  source_pixels, out_channels, channels)
     with runtime.independent():
         runtime.upsample2(scratch.projected, scratch.upsampled, source_width, height,
                           width, out_channels)
         runtime.scale_channel(skip, transition.sine, scratch.scaled,
-                              height * width * out_channels, out_channels)
+                              height * width * out_channels, out_channels,
+                              a_half=skip_half)
     runtime.add(scratch.upsampled, scratch.scaled, target, height * width * out_channels,
-                epilogue=xmxres.EPI_E4M3)
+                epilogue=xmxres.EPI_E4M3, narrow=target_half)
 
 
 class TransitionScratch:
@@ -437,6 +454,7 @@ class TransitionScratch:
 
     def __init__(self, runtime, elements, half_elements):
         make = runtime.buffer
+        # `padded` holds whichever width its source has, so it is sized for float32
         self.padded = make(elements)
         self.pooled16 = make(elements, np.float16)
         self.projected = make(elements)
@@ -452,7 +470,7 @@ class TransitionScratch:
 
 
 def record_plain_downsample(runtime, edge, scratch, source, target, height, width,
-                            channels, *, pad_to=0):
+                            channels, *, pad_to=0, source_half=False, target_half=False):
     """`downsample()`: pool then project, with no publish between.
 
     Block 30's bridge into the bottleneck, which unlike the encoder's `ds` kernels
@@ -462,10 +480,10 @@ def record_plain_downsample(runtime, edge, scratch, source, target, height, widt
         padded_height = -(-height // pad_to) * pad_to
         padded_width = -(-width // pad_to) * pad_to
         runtime.pad_end(source, scratch.padded, height, width, padded_height,
-                        padded_width, channels)
+                        padded_width, channels, a_half=source_half, narrow=source_half)
         source, height, width = scratch.padded, padded_height, padded_width
     pixels = (height // 2) * (width // 2)
     runtime.pool2(source, scratch.pooled16, height, width, channels,
-                  epilogue=xmxres.EPI_HALF, narrow=True)
+                  epilogue=xmxres.EPI_HALF, narrow=True, a_half=source_half)
     runtime.gemm(scratch.pooled16, edge.weight0, target, pixels, edge.out_channels,
-                 channels, epilogue=xmxres.EPI_E4M3)
+                 channels, epilogue=xmxres.EPI_E4M3, narrow=target_half)

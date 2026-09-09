@@ -73,6 +73,17 @@ float gate_activation(float x) {
  * narrows the output to float16. Folding it in here is what lets `partition`,
  * `split_heads`, `merge_heads` and the row passes feed a GEMM directly, instead of
  * writing float32 for a `to_half` pass to read straight back. */
+/* An operand held as float16. A published value is E4M3 and therefore exact in half —
+ * measured, `src/bench/bf16_check.py` — so a buffer the graph publishes can be stored
+ * narrow and read back here with nothing lost. Bit 15 marks `a`, bit 16 marks `b`. */
+float load_a(uint index) {
+    return (pc.flags & 0x8000u) != 0u ? float(HalfBuf(uint64_t(pc.a)).v[index]) : pc.a.v[index];
+}
+
+float load_b(uint index) {
+    return (pc.flags & 0x10000u) != 0u ? float(HalfBuf(uint64_t(pc.b)).v[index]) : pc.b.v[index];
+}
+
 void store(uint index, float value) {
     uint epilogue = (pc.flags >> 8) & 0xFu;
     if (epilogue == 2u || epilogue == 3u) value = gate_activation(value);
@@ -116,7 +127,7 @@ void main() {
             at = (((py / size) * across + px / size) * size * size
                   + (py % size) * size + px % size) * channels + c;
         }
-        store(index, pc.a.v[at] + pc.b.v[index] * pc.d.v[index % pc.n]);
+        store(index, load_a(at) + load_b(index) * pc.d.v[index % pc.n]);
         return;
     }
     if (kind == PARTITION || kind == REVERSE) {
@@ -133,13 +144,13 @@ void main() {
             int y = int((window / across) * size + token / size) - int(pad_top);
             int x = int((window % across) * size + token % size) - int(pad_left);
             store(index, (y < 0 || x < 0 || y >= int(height) || x >= int(width))
-                ? 0.0 : pc.a.v[(uint(y) * width + uint(x)) * channels + c]);
+                ? 0.0 : load_a((uint(y) * width + uint(x)) * channels + c));
         } else {
             uint x = rest % width, y = rest / width;
             uint py = y + pad_top, px = x + pad_left;
             uint window = (py / size) * across + (px / size);
             uint token = (py % size) * size + (px % size);
-            store(index, pc.a.v[(window * size * size + token) * channels + c]);
+            store(index, load_a((window * size * size + token) * channels + c));
         }
         return;
     }
@@ -152,9 +163,9 @@ void main() {
         /* The reference adds the four taps column-first — (top-left + bottom-left) +
          * top-right + bottom-right — and float32 addition is not associative, so the
          * order is part of the answer. `precise` keeps the compiler from regrouping. */
-        precise float total = pc.a.v[base] + pc.a.v[base + width * channels];
-        total += pc.a.v[base + channels];
-        total += pc.a.v[base + (width + 1u) * channels];
+        precise float total = load_a(base) + load_a(base + width * channels);
+        total += load_a(base + channels);
+        total += load_a(base + (width + 1u) * channels);
         store(index, total * 0.25);
         return;
     }
@@ -164,7 +175,7 @@ void main() {
         uint channels = pc.n, target = pc.sa, source = pc.sb;
         uint c = index % channels, rest = index / channels;
         uint x = rest % target, y = rest / target;
-        store(index, pc.a.v[((y / 2u) * source + (x / 2u)) * channels + c]);
+        store(index, load_a(((y / 2u) * source + (x / 2u)) * channels + c));
         return;
     }
     if (kind == PAD_END) {
@@ -174,19 +185,19 @@ void main() {
         uint c = index % channels, rest = index / channels;
         uint x = rest % padded, y = rest / padded;
         store(index, (y < height && x < width)
-            ? pc.a.v[(y * width + x) * channels + c] : 0.0);
+            ? load_a((y * width + x) * channels + c) : 0.0);
         return;
     }
-    if (kind == SCALE_CHANNEL) { store(index, pc.a.v[index] * pc.d.v[index % pc.n]); return; }
-    if (kind == ADD)           { store(index, pc.a.v[index] + pc.b.v[index]); return; }
+    if (kind == SCALE_CHANNEL) { store(index, load_a(index) * pc.d.v[index % pc.n]); return; }
+    if (kind == ADD)           { store(index, load_a(index) + load_b(index)); return; }
     if (kind == SPLIT_HEADS) {
         // (windows, tokens, 3C) -> one of Q/K/V as (windows, heads, tokens, 32)
         uint channels = pc.n, heads = pc.batch, tokens = pc.sa, part = pc.sb;
         uint d = index % 32u, rest = index / 32u;
         uint token = rest % tokens; rest /= tokens;
         uint head = rest % heads, window = rest / heads;
-        store(index, pc.a.v[(window * tokens + token) * 3u * channels
-                               + part * channels + head * 32u + d]);
+        store(index, load_a((window * tokens + token) * 3u * channels
+                               + part * channels + head * 32u + d));
         return;
     }
     if (kind == MERGE_HEADS) {
@@ -194,16 +205,16 @@ void main() {
         uint channels = pc.n, heads = pc.batch, tokens = pc.sa;
         uint c = index % channels, rest = index / channels;
         uint token = rest % tokens, window = rest / tokens;
-        store(index, pc.a.v[((window * heads + c / 32u) * tokens + token) * 32u + c % 32u]);
+        store(index, load_a(((window * heads + c / 32u) * tokens + token) * 32u + c % 32u));
         return;
     }
     if (kind == ADD_BIAS) {
         // scores are (windows*heads, tokens, tokens); the bias is (heads, tokens, tokens)
         uint plane = pc.n * pc.n, inside = index % plane;
-        store(index, pc.a.v[index] + pc.d.v[((index / plane) % pc.batch) * plane + inside]);
+        store(index, load_a(index) + pc.d.v[((index / plane) % pc.batch) * plane + inside]);
         return;
     }
-    float value = pc.a.v[index] * pc.p0;
+    float value = load_a(index) * pc.p0;
     if (kind == E4M3)      store(index, e4m3(value));
     else if (kind == GATE) store(index, gate_activation(value));
     else if (kind == HALF) store(index, half_round(value));

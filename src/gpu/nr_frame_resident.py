@@ -139,9 +139,9 @@ class ResidentFrame:
         rt = self.rt
         import time as _time
 
-        def keep(name, buffer, count, shape=None):
+        def keep(name, buffer, count, shape=None, dtype=np.float32):
             if capture is not None:
-                data = buffer.view()[:count].copy()
+                data = buffer.view(dtype)[:count].astype(np.float32)
                 capture[name] = data if shape is None else data.reshape(shape)
 
         height, width = self.height, self.width
@@ -172,22 +172,25 @@ class ResidentFrame:
         stage[0] = "block0 + pool"
         block0 = self.block(0, 1)
         raw = self.buffer("block0", pixels * 32)
-        full_skip = self.buffer("full_skip", pixels * 32)
+        # Everything the graph publishes is E4M3, which is exact in float16, so every
+        # published buffer is stored narrow: half the traffic, and the widening pass in
+        # front of each block's first GEMM disappears. `src/bench/bf16_check.py`.
+        full_skip = self.buffer("full_skip", pixels * 32, np.float16)
         h, w, channels = self.levels[1]
-        value = self.buffer("l1", h * w * 32)
+        value = self.buffer("l1", h * w * 32, np.float16)
         rt.begin()
         R.record_block(rt, block0, self.scratch(block0, height, width),
                        source=stem, target=raw)
         # the post block's skip is block 0 published; the encoder pools the
         # *unpublished* output, so both come from `raw` and neither from the other
         with rt.independent():
-            rt.e4m3(raw, full_skip, pixels * 32)
-            rt.pool2(raw, value, height, width, 32, epilogue=xmxres.EPI_E4M3)
+            rt.e4m3_half(raw, full_skip, pixels * 32)
+            rt.pool2(raw, value, height, width, 32, epilogue=xmxres.EPI_E4M3, narrow=True)
         submit()
         keep("stem", stem, pixels * 32, (1, height, width, 32))
         keep("block0", raw, pixels * 32, (1, height, width, 32))
-        keep("full_skip", full_skip, pixels * 32, (1, height, width, 32))
-        keep("l1_in", value, h * w * 32, (1, h, w, 32))
+        keep("full_skip", full_skip, pixels * 32, (1, height, width, 32), np.float16)
+        keep("l1_in", value, h * w * 32, (1, h, w, 32), np.float16)
 
         skips, level = {}, 1
         for regular, transition, heads in ENCODER:
@@ -197,27 +200,31 @@ class ResidentFrame:
                 block = self.block(index, heads)
                 rt.begin()
                 R.record_block(rt, block, self.scratch(block, h, w), source=value,
-                               target=value, publish=xmxres.EPI_E4M3)
+                               target=value, publish=xmxres.EPI_E4M3,
+                               source_half=True, target_half=True)
                 submit()
-            keep(f"l{level}", value, h * w * channels, (1, h, w, channels))
-            skips[level] = self.buffer(f"skip{level}", h * w * channels)
-            skips[level].view()[:h * w * channels] = value.view()[:h * w * channels]
+            keep(f"l{level}", value, h * w * channels, (1, h, w, channels), np.float16)
+            skips[level] = self.buffer(f"skip{level}", h * w * channels, np.float16)
+            skips[level].view(np.float16)[:h * w * channels] = \
+                value.view(np.float16)[:h * w * channels]
 
             block = self.block(transition, heads)
             edge = self.edge(transition, "down")
             nh, nw, nchannels = self.levels[level + 1]
             unpublished = self.buffer("unpublished", h * w * channels)
-            nxt = self.buffer(f"l{level + 1}", nh * nw * nchannels)
+            nxt = self.buffer(f"l{level + 1}", nh * nw * nchannels, np.float16)
             padded = pad8(h) * pad8(w) * channels
             stage[0] = f"downsample L{level}->L{level + 1}"
             rt.begin()
             R.record_block(rt, block, self.scratch(block, h, w), source=value,
-                           target=unpublished)
+                           target=unpublished, source_half=True)
             R.record_downsample(rt, edge, self.transition_scratch(padded), unpublished,
-                                nxt, h, w, channels, pad_to=8 if transition == 22 else 0)
+                                nxt, h, w, channels, pad_to=8 if transition == 22 else 0,
+                                target_half=True)
             submit()
             value, level = nxt, level + 1
-            keep(f"l{level}_in", value, nh * nw * nchannels, (1, nh, nw, nchannels))
+            keep(f"l{level}_in", value, nh * nw * nchannels, (1, nh, nw, nchannels),
+                 np.float16)
 
         # the split family, then the bottleneck
         h, w, channels = self.levels[5]
@@ -226,17 +233,20 @@ class ResidentFrame:
             block = self.block(index, 16, "split")
             rt.begin()
             R.record_block(rt, block, self.scratch(block, h, w), source=value,
-                           target=value, publish=xmxres.EPI_E4M3)
+                           target=value, publish=xmxres.EPI_E4M3,
+                           source_half=True, target_half=True)
             submit()
-        keep("l5", value, h * w * channels, (1, h, w, channels))
-        split_skip = self.buffer("split_skip", h * w * channels)
-        split_skip.view()[:h * w * channels] = value.view()[:h * w * channels]
+        keep("l5", value, h * w * channels, (1, h, w, channels), np.float16)
+        split_skip = self.buffer("split_skip", h * w * channels, np.float16)
+        split_skip.view(np.float16)[:h * w * channels] = \
+            value.view(np.float16)[:h * w * channels]
 
         gh, gw, gchannels = self.levels[6]
-        deep = self.buffer("l6", gh * gw * gchannels)
+        deep = self.buffer("l6", gh * gw * gchannels, np.float16)
         rt.begin()
         R.record_plain_downsample(rt, self.bottleneck, self.transition_scratch(
-            pad8(h) * pad8(w) * channels), value, deep, h, w, channels, pad_to=8)
+            pad8(h) * pad8(w) * channels), value, deep, h, w, channels, pad_to=8,
+            source_half=True, target_half=True)
         submit()
 
         tokens = gh * gw
@@ -245,45 +255,55 @@ class ResidentFrame:
             block = self.block(index, 32, "global")
             scratch = self.scratch(block, gh, gw, tokens=tokens)
             rt.begin()
-            scratch.value.view()[:tokens * gchannels] = deep.view()[:tokens * gchannels]
+            # the bottleneck's own tensors are the graph's smallest, so it keeps
+            # float32 and its two edge copies carry the width — exact in both
+            # directions, since what crosses them is an E4M3 publish
+            scratch.value.view()[:tokens * gchannels] = \
+                deep.view(np.float16)[:tokens * gchannels]
             R.record_global_block(rt, block, scratch)
             rt.e4m3(scratch.out, scratch.out, scratch.padded * gchannels)
             submit()
-            deep.view()[:tokens * gchannels] = scratch.out.view()[:tokens * gchannels]
+            deep.view(np.float16)[:tokens * gchannels] = \
+                scratch.out.view()[:tokens * gchannels]
 
         # the decoder input merge, then the split family again
         rt.begin()
         R.record_upsample_merge(rt, self.decoder_input, self.transition_scratch(
-            h * w * channels), deep, split_skip, value, gh, gw, h, w, gchannels, channels)
+            h * w * channels), deep, split_skip, value, gh, gw, h, w, gchannels, channels,
+            source_half=True, skip_half=True, target_half=True)
         submit()
         stage[0] = "split blocks 40-47 (C=512)"
         for index in range(40, 48):
             block = self.block(index, 16, "split")
             rt.begin()
             R.record_block(rt, block, self.scratch(block, h, w), source=value,
-                           target=value, publish=xmxres.EPI_E4M3)
+                           target=value, publish=xmxres.EPI_E4M3,
+                           source_half=True, target_half=True)
             submit()
 
         for transition, regular, skip_level, heads in DECODER:
             stage[0] = f"decoder upsample -> L{skip_level}"
             sh, sw, schannels = self.levels[skip_level]
             edge = self.edge(transition, "up")
-            target = self.buffer(f"d{skip_level}", sh * sw * schannels)
+            target = self.buffer(f"d{skip_level}", sh * sw * schannels, np.float16)
             rt.begin()
             R.record_upsample_merge(rt, edge, self.transition_scratch(
                 sh * sw * max(channels, schannels)), value, skips[skip_level], target,
-                h, w, sh, sw, channels, schannels)
+                h, w, sh, sw, channels, schannels,
+                source_half=True, skip_half=True, target_half=True)
             block = self.block(transition, heads)
             R.record_block(rt, block, self.scratch(block, sh, sw), source=target,
-                           target=target, publish=xmxres.EPI_E4M3)
+                           target=target, publish=xmxres.EPI_E4M3,
+                           source_half=True, target_half=True)
             submit()
             value, h, w, channels = target, sh, sw, schannels
             for index in regular:
-                stage[0] = f"encoder L{level} blocks (C={channels})"
+                stage[0] = f"decoder L{skip_level} blocks (C={channels})"
                 block = self.block(index, heads)
                 rt.begin()
                 R.record_block(rt, block, self.scratch(block, h, w), source=value,
-                               target=value, publish=xmxres.EPI_E4M3)
+                               target=value, publish=xmxres.EPI_E4M3,
+                               source_half=True, target_half=True)
                 submit()
 
         # back to full resolution, merged with block 0's output, then the head
@@ -293,9 +313,10 @@ class ResidentFrame:
         block70 = self.block(70, 1)
         out = self.buffer("out", pixels * 32)
         rt.begin()
-        rt.upsample2(value, upsampled, w, height, width, 32)
+        rt.upsample2(value, upsampled, w, height, width, 32, a_half=True)
         rt.scale_channel(upsampled, self.merge_sin, merged, pixels * 32, 32)
-        rt.residual(merged, full_skip, self.merge_cos, merged, pixels * 32, 32)
+        rt.residual(merged, full_skip, self.merge_cos, merged, pixels * 32, 32,
+                    b_half=True)
         R.record_block(rt, block70, self.scratch(block70, height, width),
                        source=merged, target=out)
         rt.to_half(out, self.buffer("out16", pixels * 32, np.float16), pixels * 32)
