@@ -17,6 +17,22 @@ layout(local_size_x = 32) in;
 layout(buffer_reference, scalar, buffer_reference_align = 16) buffer HalfBuf  { float16_t v[]; };
 layout(buffer_reference, scalar, buffer_reference_align = 16) buffer FloatBuf { float     v[]; };
 
+/* No epilogue here, and that is not an oversight.
+ *
+ * Folding the gate and the E4M3 publish into the accumulator before the store would
+ * turn four trips over block 0's 503 MB hidden buffer into one. It cannot be done on
+ * this driver: **any** operation on the accumulator between `coopMatMulAdd` and
+ * `coopMatStore` scrambles where the elements land. Verified at the crudest level —
+ * `acc = acc * 2.0`, whole-matrix, no element access — which comes back with the
+ * values in the wrong places, and not even as a clean permutation. Element access,
+ * a fresh matrix, and the float16 conversion store all fail the same way, while an
+ * untouched accumulator stores correctly. Mesa 26.2.1 on ANV, cooperative matrix
+ * revision 2.
+ *
+ * The traffic is saved in `resident.comp` instead, by fusing the elementwise passes
+ * with each other rather than with the GEMM. See notes/phase18-fusion.md.
+ */
+
 layout(push_constant, scalar) uniform Push {
     HalfBuf a, b; FloatBuf c, d;
     uint m, n, k, batch;
@@ -44,7 +60,7 @@ void main() {
     coopmat<float16_t, gl_ScopeSubgroup, TM, TK, gl_MatrixUseA> a;
     coopmat<float16_t, gl_ScopeSubgroup, TK, TN, gl_MatrixUseB> b;
 
-    if (pc.flags != 0u) {
+    if ((pc.flags & 1u) != 0u) {
         for (uint k = 0; k < pc.k; k += TK) {
             coopMatLoad(a, pc.a.v, ao + row * lda + k, lda, gl_CooperativeMatrixLayoutRowMajor);
             coopMatLoad(b, pc.b.v, bo + col * ldb + k, ldb, gl_CooperativeMatrixLayoutColumnMajor);
@@ -57,5 +73,6 @@ void main() {
             acc = coopMatMulAdd(a, b, acc);
         }
     }
-    coopMatStore(acc, pc.c.v, co + row * ldc + col, ldc, gl_CooperativeMatrixLayoutRowMajor);
+    coopMatStore(acc, pc.c.v, co + row * ldc + col, ldc,
+                 gl_CooperativeMatrixLayoutRowMajor);
 }

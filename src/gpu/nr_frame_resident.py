@@ -135,8 +135,9 @@ class ResidentFrame:
 
     # -- the frame --------------------------------------------------------
 
-    def run(self, features, submits=None, capture=None):
+    def run(self, features, submits=None, capture=None, timing=None):
         rt = self.rt
+        import time as _time
 
         def keep(name, buffer, count, shape=None):
             if capture is not None:
@@ -147,8 +148,15 @@ class ResidentFrame:
         pixels = height * width
         counter = [0]
 
+        stage = ["stem"]
+
         def submit():
+            started = _time.perf_counter()
             counter[0] += rt.submit()
+            if timing is not None:
+                timing.setdefault(stage[0], [0.0, 0])
+                timing[stage[0]][0] += _time.perf_counter() - started
+                timing[stage[0]][1] += 1
 
         stem = self.buffer("stem", pixels * 32)
         source = self.buffer("features", pixels * 16)
@@ -161,6 +169,7 @@ class ResidentFrame:
 
         # block 0 runs at full resolution; its output is both the skip the post block
         # merges and, pooled, the encoder's input
+        stage[0] = "block0 + pool"
         block0 = self.block(0, 1)
         raw = self.buffer("block0", pixels * 32)
         full_skip = self.buffer("full_skip", pixels * 32)
@@ -184,6 +193,7 @@ class ResidentFrame:
         for regular, transition, heads in ENCODER:
             h, w, channels = self.levels[level]
             for index in regular:
+                stage[0] = f"encoder L{level} blocks (C={channels})"
                 block = self.block(index, heads)
                 rt.begin()
                 R.record_block(rt, block, self.scratch(block, h, w), source=value,
@@ -200,6 +210,7 @@ class ResidentFrame:
             unpublished = self.buffer("unpublished", h * w * channels)
             nxt = self.buffer(f"l{level + 1}", nh * nw * nchannels)
             padded = pad8(h) * pad8(w) * channels
+            stage[0] = f"downsample L{level}->L{level + 1}"
             rt.begin()
             R.record_block(rt, block, self.scratch(block, h, w), source=value,
                            target=unpublished)
@@ -211,6 +222,7 @@ class ResidentFrame:
 
         # the split family, then the bottleneck
         h, w, channels = self.levels[5]
+        stage[0] = "split blocks 23-30 (C=512)"
         for index in range(23, 31):
             block = self.block(index, 16, "split")
             rt.begin()
@@ -229,6 +241,7 @@ class ResidentFrame:
         submit()
 
         tokens = gh * gw
+        stage[0] = "global blocks 31-38 (C=1024)"
         for index in range(31, 39):
             block = self.block(index, 32, "global")
             scratch = self.scratch(block, gh, gw, tokens=tokens)
@@ -244,6 +257,7 @@ class ResidentFrame:
         R.record_upsample_merge(rt, self.decoder_input, self.transition_scratch(
             h * w * channels), deep, split_skip, value, gh, gw, h, w, gchannels, channels)
         submit()
+        stage[0] = "split blocks 40-47 (C=512)"
         for index in range(40, 48):
             block = self.block(index, 16, "split")
             rt.begin()
@@ -252,6 +266,7 @@ class ResidentFrame:
             submit()
 
         for transition, regular, skip_level, heads in DECODER:
+            stage[0] = f"decoder upsample -> L{skip_level}"
             sh, sw, schannels = self.levels[skip_level]
             edge = self.edge(transition, "up")
             target = self.buffer(f"d{skip_level}", sh * sw * schannels)
@@ -266,6 +281,7 @@ class ResidentFrame:
             submit()
             value, h, w, channels = target, sh, sw, schannels
             for index in regular:
+                stage[0] = f"encoder L{level} blocks (C={channels})"
                 block = self.block(index, heads)
                 rt.begin()
                 R.record_block(rt, block, self.scratch(block, h, w), source=value,
@@ -274,6 +290,7 @@ class ResidentFrame:
                 submit()
 
         # back to full resolution, merged with block 0's output, then the head
+        stage[0] = "block70 + head"
         merged = self.buffer("merged", pixels * 32)
         upsampled = self.buffer("upsampled", pixels * 32)
         block70 = self.block(70, 1)

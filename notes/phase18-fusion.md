@@ -1,0 +1,94 @@
+# Fusing the elementwise passes, a driver bug that stopped the better version, and
+# what 30 fps would actually take
+
+2026-09-09
+
+## Where the resident frame's time goes
+
+Per-submit timing of a 720p frame, by family:
+
+| | ms | share | submits |
+|---|---|---|---|
+| window blocks | 478 | 45.5 % | 36 |
+| transitions | 138 | 13.1 % | 8 |
+| stem, block 70 and the head | 135 | 12.8 % | 2 |
+| block 0 | 130 | 12.4 % | 1 |
+| split blocks | 70 | 6.7 % | 17 |
+| global blocks | 36 | 3.4 % | 9 |
+
+Nothing dominates, but the shape is clear: the cost sits in the **wide, shallow blocks
+at high resolution**, not in the deep narrow ones. Blocks 0 and 70 alone — one block
+each, at the full 1280x768 — are a quarter of the frame.
+
+That is traffic, not arithmetic. At full resolution with C=32 and a 128-wide hidden
+layer, one pass over the hidden buffer is 126 MB in float32.
+
+## The fusion, and the win
+
+The graph writes a float32 hidden buffer, gates it, publishes it as E4M3 and narrows it
+to half for the next GEMM — **four trips over the same buffer**. Those three
+elementwise passes fold into one that reads float32 and writes float16:
+
+```
+GATE_E4M3_HALF   out_f16 = e4m3(gate(in_f32))
+E4M3_HALF        out_f16 = e4m3(in_f32)
+GATE_HALF        out_f16 = half(gate(in_f32))
+```
+
+Legitimate without any approximation: an E4M3 value is exactly representable in half,
+and the gate already returns a half value, so the narrowing loses nothing either way.
+All three are bit-identical to the reference chain.
+
+**720p: 1560 ms -> 1231 ms**, passes 2966 -> 2630, with the result unchanged —
+correlation with the host reference still 0.981311 and the head's sd still 0.1833. The
+global blocks, whose hidden layer is 4096 wide, went from 136 ms to 36 ms.
+
+## The better version is blocked by a driver bug
+
+Folding the same work into the **GEMM's epilogue** — transforming the accumulator
+before it is ever written — would turn four trips over block 0's 503 MB buffer into
+one 252 MB write, about 13x less traffic rather than 2.6x.
+
+It cannot be done on this driver. **Any operation on the accumulator between
+`coopMatMulAdd` and `coopMatStore` scrambles the result.** Established at the crudest
+level available:
+
+| what was tried | result |
+|---|---|
+| untouched accumulator | correct |
+| `acc = acc * 2.0` — whole matrix, no element access | **wrong** |
+| `acc[i] = acc[i] * 2.0` with constant indices | wrong |
+| the same into a fresh matrix, then assigned back | wrong |
+| `coopmat<float16_t,...>(acc)` conversion store | wrong |
+
+The values are doubled but land in the wrong places, and not even as a clean
+permutation — a sorted comparison against `2 * correct` also fails, so elements are
+lost as well as moved. `acc.length()` reports the right 4, so the query works and only
+the store's mapping is wrong. Mesa 26.2.1, ANV on Lunar Lake, `VK_KHR_cooperative_matrix`
+revision 2.
+
+Worth reporting upstream; until then the epilogue lives in `resident.comp` instead,
+fused with the other elementwise passes rather than with the GEMM.
+
+## What 30 fps at 720p would actually take
+
+The owner's target is 30 fps at 720p — 33 ms a frame against today's 1231 ms, a factor
+of 37. Being straight about it:
+
+- **The arithmetic alone forbids it.** A 720p frame is 458.6 GFLOP. Even at a well-tuned
+  10 TFLOP/s — roughly a third of this iGPU's FP16 peak, and 7x better than our current
+  kernel — that is **46 ms, or 22 fps**, with zero time for anything else.
+- **The traffic forbids it too.** Activations are float32 in our buffers, and a frame
+  moves on the order of 10 GB through them. At the 23 GB/s this machine measures, that
+  is 435 ms before a single multiply.
+
+Both have room — the kernel has no shared-memory staging, no K-blocking and no register
+reuse, and the activations could be half rather than float32 throughout, which is what
+the vendor's own kernels do. Together those are plausibly 4-6x, which lands around
+200-300 ms: **3-5 fps at 720p**, not 30.
+
+30 fps is reachable at a **smaller extent**. Today's 320x320 is 180 ms; the same 4-6x
+puts it near 30-45 ms. So a face-sized or HUD-sized region at interactive rates is on
+the table, and a full 720p frame is not — on this chip, with this model, at this
+resolution. That is the same conclusion `notes/phase11-what-is-left.md` reached from
+the arithmetic alone, now with the traffic measured as well.

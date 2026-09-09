@@ -159,9 +159,7 @@ def record_global_block(runtime, w, s, source=None, target=None):
     channels, heads, padded = w.channels, w.heads, s.padded
     runtime.to_half(source, s.value16, padded * channels)
     runtime.gemm(s.value16, w.expand, s.hidden, padded, w.hidden_width, channels)
-    runtime.gate(s.hidden, s.hidden, padded * w.hidden_width)
-    runtime.e4m3(s.hidden, s.hidden, padded * w.hidden_width)
-    runtime.to_half(s.hidden, s.hidden16, padded * w.hidden_width)
+    runtime.gate_e4m3_half(s.hidden, s.hidden16, padded * w.hidden_width)
     runtime.gemm(s.hidden16, w.ffn_proj, s.branch, padded, channels, w.hidden_width)
     runtime.residual(s.branch, source, w.ffn_cos, s.ffn, padded * channels, channels)
 
@@ -172,8 +170,8 @@ def record_global_block(runtime, w, s, source=None, target=None):
     runtime.cosine_publish(s.q, s.q, heads * padded, tokens=padded, heads=heads,
                            scale=w.scale)
     runtime.cosine_publish(s.k, s.k, heads * padded, tokens=padded, heads=heads)
-    runtime.e4m3(s.v, s.v, padded * channels)
-    for part, half in ((s.q, s.q16), (s.k, s.k16), (s.v, s.v16)):
+    runtime.e4m3_half(s.v, s.v16, padded * channels)
+    for part, half in ((s.q, s.q16), (s.k, s.k16)):
         runtime.to_half(part, half, padded * channels)
     runtime.gemm(s.q16, s.k16, s.scores, padded, padded, 32, batch=heads,
                  strides=(padded * 32, padded * 32, padded * padded), transpose_b=True)
@@ -184,8 +182,7 @@ def record_global_block(runtime, w, s, source=None, target=None):
     runtime.gemm(s.probs16, s.v16, s.context, padded, 32, padded, batch=heads,
                  strides=(padded * padded, padded * 32, padded * 32))
     runtime.merge_heads(s.context, s.merged, 1, padded, channels, heads)
-    runtime.e4m3(s.merged, s.merged, padded * channels)
-    runtime.to_half(s.merged, s.merged16, padded * channels)
+    runtime.e4m3_half(s.merged, s.merged16, padded * channels)
     runtime.gemm(s.merged16, w.out, s.attention, padded, channels, channels)
     runtime.residual(s.attention, s.ffn, w.attn_cos, target, padded * channels, channels)
 
@@ -262,24 +259,19 @@ def record_feed_forward(runtime, w, s, source):
             runtime.gemm(s.value16, w.expand, s.hidden, pixels, 128, channels,
                          leading=(0, 0, s.hidden_width),
                          offsets=(0, head * channels * 128, head * 128))
-        runtime.gate(s.hidden, s.hidden, pixels * s.hidden_width)
-        runtime.e4m3(s.hidden, s.hidden, pixels * s.hidden_width)
-        runtime.to_half(s.hidden, s.hidden16, pixels * s.hidden_width)
+        runtime.gate_e4m3_half(s.hidden, s.hidden16, pixels * s.hidden_width)
         for head in range(w.groups):
             runtime.gemm(s.hidden16, w.branch, s.heads_out, pixels, 32, 128,
                          leading=(s.hidden_width, 0, channels),
                          offsets=(head * 128, head * 128 * 32, head * 32))
-        runtime.e4m3(s.heads_out, s.heads_out, pixels * channels)
-        runtime.to_half(s.heads_out, s.heads16, pixels * channels)
+        runtime.e4m3_half(s.heads_out, s.heads16, pixels * channels)
         runtime.gemm(s.heads16, w.ffn_out, s.branch, pixels, channels, channels)
         runtime.residual(s.branch, source, w.ffn_cos, s.ffn, pixels * channels, channels)
         # the fused multi-head kernels publish the residual before attention reads it
         runtime.e4m3(s.ffn, s.ffn, pixels * channels)
     else:
         runtime.gemm(s.value16, w.expand, s.hidden, pixels, s.hidden_width, channels)
-        runtime.gate(s.hidden, s.hidden, pixels * s.hidden_width)
-        runtime.e4m3(s.hidden, s.hidden, pixels * s.hidden_width)
-        runtime.to_half(s.hidden, s.hidden16, pixels * s.hidden_width)
+        runtime.gate_e4m3_half(s.hidden, s.hidden16, pixels * s.hidden_width)
         runtime.gemm(s.hidden16, w.branch, s.branch, pixels, channels, s.hidden_width)
         runtime.residual(s.branch, source, w.ffn_cos, s.ffn, pixels * channels, channels)
 
@@ -294,20 +286,17 @@ def record_split_feed_forward(runtime, w, s, source):
     wide = groups * 256
     runtime.to_half(source, s.value16, pixels * channels)
     runtime.gemm(s.value16, w.first, s.heads_out, pixels, channels, channels)
-    runtime.e4m3(s.heads_out, s.heads_out, pixels * channels)
-    runtime.to_half(s.heads_out, s.heads16, pixels * channels)
+    runtime.e4m3_half(s.heads_out, s.heads16, pixels * channels)
     for group in range(groups):
         runtime.gemm(s.heads16, w.expand, s.hidden, pixels, 256, 64,
                      leading=(channels, 0, wide),
                      offsets=(group * 64, group * 64 * 256, group * 256))
-    runtime.gate(s.hidden, s.hidden, pixels * wide)
-    runtime.to_half(s.hidden, s.hidden16, pixels * wide)
+    runtime.gate_half(s.hidden, s.hidden16, pixels * wide)
     for group in range(groups):
         runtime.gemm(s.hidden16, w.project, s.merged_core, pixels, 64, 256,
                      leading=(wide, 0, channels),
                      offsets=(group * 256, group * 256 * 64, group * 64))
-    runtime.e4m3(s.merged_core, s.merged_core, pixels * channels)
-    runtime.to_half(s.merged_core, s.core16, pixels * channels)
+    runtime.e4m3_half(s.merged_core, s.core16, pixels * channels)
     runtime.gemm(s.core16, w.weight3, s.branch, pixels, channels, channels)
     runtime.residual(s.branch, source, w.ffn_cos, s.ffn, pixels * channels, channels)
 
@@ -330,8 +319,8 @@ def record_window_attention(runtime, w, s, source):
     runtime.cosine_publish(s.q, s.q, batch * tokens, tokens=tokens, heads=heads,
                            scale=w.scale)
     runtime.cosine_publish(s.k, s.k, batch * tokens, tokens=tokens, heads=heads)
-    runtime.e4m3(s.v, s.v, windowed)
-    for part, half in ((s.q, s.q16), (s.k, s.k16), (s.v, s.v16)):
+    runtime.e4m3_half(s.v, s.v16, windowed)
+    for part, half in ((s.q, s.q16), (s.k, s.k16)):
         runtime.to_half(part, half, windowed)
     runtime.gemm(s.q16, s.k16, s.scores, tokens, tokens, 32, batch=batch,
                  strides=(tokens * 32, tokens * 32, tokens * tokens), transpose_b=True)
@@ -341,8 +330,7 @@ def record_window_attention(runtime, w, s, source):
     runtime.gemm(s.probs16, s.v16, s.context, tokens, 32, tokens, batch=batch,
                  strides=(tokens * tokens, tokens * 32, tokens * 32))
     runtime.merge_heads(s.context, s.merged, windows, tokens, channels, heads)
-    runtime.e4m3(s.merged, s.merged, windowed)
-    runtime.to_half(s.merged, s.merged16, windowed)
+    runtime.e4m3_half(s.merged, s.merged16, windowed)
     runtime.gemm(s.merged16, w.out, s.attended, windows * tokens, channels, channels)
     runtime.reverse(s.attended, s.attention, s.height, s.width, channels,
                     origin=w.origin)
@@ -409,8 +397,7 @@ def record_downsample(runtime, transition, scratch, source, target, height, widt
     half_height, half_width = height // 2, width // 2
     pixels = half_height * half_width
     runtime.pool2(source, scratch.pooled, height, width, channels)
-    runtime.e4m3(scratch.pooled, scratch.pooled, pixels * channels)
-    runtime.to_half(scratch.pooled, scratch.pooled16, pixels * channels)
+    runtime.e4m3_half(scratch.pooled, scratch.pooled16, pixels * channels)
     runtime.gemm(scratch.pooled16, transition.weight0, target, pixels,
                  transition.out_channels, channels)
     runtime.e4m3(target, target, pixels * transition.out_channels)

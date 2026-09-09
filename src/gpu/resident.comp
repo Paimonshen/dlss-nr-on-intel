@@ -33,7 +33,10 @@ layout(push_constant, scalar) uniform Push {
 const uint E4M3 = 0u, GATE = 1u, HALF = 2u, TO_HALF = 3u, SCALE = 4u,
            RESIDUAL = 5u, FROM_HALF = 6u, PARTITION = 7u, REVERSE = 8u, ADD_BIAS = 9u,
            SPLIT_HEADS = 10u, MERGE_HEADS = 11u, POOL2 = 12u, UPSAMPLE2 = 13u,
-           SCALE_CHANNEL = 14u, ADD = 15u, PAD_END = 16u;
+           SCALE_CHANNEL = 14u, ADD = 15u, PAD_END = 16u,
+           /* fused: one read of float32 and one write of float16 where the graph
+            * otherwise makes three round trips over the same buffer */
+           GATE_E4M3_HALF = 17u, E4M3_HALF = 18u, GATE_HALF = 19u;
 
 /* Rounding to half precision, done on the float32 exponent and mantissa.
  *
@@ -77,6 +80,15 @@ void main() {
     if (index >= pc.m) return;
     uint kind = pc.flags;
 
+    if (kind == GATE_E4M3_HALF || kind == E4M3_HALF || kind == GATE_HALF) {
+        float value = pc.a.v[index];
+        if (kind != E4M3_HALF) value = gate_activation(value);
+        if (kind != GATE_HALF) value = e4m3(value);
+        // an E4M3 value is exact in half, and the gate already returns a half value,
+        // so the narrowing here loses nothing either way
+        HalfBuf(uint64_t(pc.c)).v[index] = float16_t(value);
+        return;
+    }
     if (kind == TO_HALF) {
         HalfBuf(uint64_t(pc.c)).v[index] = float16_t(pc.a.v[index] * pc.p0);
         return;

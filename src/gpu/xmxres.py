@@ -31,7 +31,8 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 TM, TN, TK = 8, 16, 16
 
 (E4M3, GATE, HALF, TO_HALF, SCALE, RESIDUAL, FROM_HALF, PARTITION, REVERSE, ADD_BIAS,
- SPLIT_HEADS, MERGE_HEADS, POOL2, UPSAMPLE2, SCALE_CHANNEL, ADD, PAD_END) = range(17)
+ SPLIT_HEADS, MERGE_HEADS, POOL2, UPSAMPLE2, SCALE_CHANNEL, ADD, PAD_END,
+ GATE_E4M3_HALF, E4M3_HALF, GATE_HALF) = range(20)
 COSINE_PUBLISH, SOFTMAX = 0, 1
 
 _lib = None
@@ -158,8 +159,9 @@ class Runtime:
         if strides is None:
             strides = (rows * inner, cols * inner if transpose_b else inner * cols, rows * cols)
         lda, ldb, ldc = leading or (0, 0, 0)
+        flags = 1 if transpose_b else 0
         if self.lib.xmx_rec_gemm(a.id, b.id, c.id, rows, cols, inner, batch,
-                                 strides[0], strides[1], strides[2], 1 if transpose_b else 0,
+                                 strides[0], strides[1], strides[2], flags,
                                  lda, ldb, ldc, *offsets) != 0:
             raise RuntimeError("xmx_rec_gemm: " + self.lib.xmx_error().decode())
         self.recorded += 1
@@ -186,6 +188,20 @@ class Runtime:
 
     def half(self, source, target, count, scale=1.0):
         return self.unary(HALF, source, target, count, scale=scale)
+
+    def gate_e4m3_half(self, source, target, count):
+        """gate, publish and narrow in one read and one write.
+
+        The graph writes a float32 hidden buffer, gates it, publishes it and narrows
+        it to half — four trips over 503 MB at 720p in block 0 alone. This is one.
+        """
+        return self.unary(GATE_E4M3_HALF, source, target, count)
+
+    def e4m3_half(self, source, target, count):
+        return self.unary(E4M3_HALF, source, target, count)
+
+    def gate_half(self, source, target, count):
+        return self.unary(GATE_HALF, source, target, count)
 
     def to_half(self, source, target, count, scale=1.0):
         """float32 -> float16, for a GEMM operand."""
