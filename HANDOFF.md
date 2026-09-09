@@ -139,10 +139,19 @@ value:
    an Alchemist regression, and the only Xe2 rebuttal in it is a discrete B580 with
    GDDR6. Arc 140V on a UMA LPDDR5X pool is unmeasured in public and we have the
    numbers.)*
-2. **A real game, not `vkcube`.** The photo-mode loop is proven on a toy; the next
-   step is a title under Proton. DX12 goes DX12 -> VKD3D -> Vulkan on ANV, DX11 and
-   DX9 through DXVK, so the layer should attach unchanged. `src/layer/nr-photo --steam`
-   prints the launch option.
+2. ~~**A real game, not `vkcube`.**~~ **The pipeline is proven; the content is not** —
+   `notes/phase24-a-real-game.md`. The layer loads inside a Wine prefix, intercepts the
+   swapchain DXVK creates for a translated D3D11 game, and the frame comes back into the
+   game's own image: `[nr_layer] swapchain 1280x720 format 44` then `processed 1280x720`.
+   `src/layer/nr-photo --proton <appid> <exe>` is the reproducible way in.
+
+   **What is left is a frame worth looking at.** The one captured is a warning screen —
+   2D interface over pixel art. Reaching a face needs someone to drive the game's menus,
+   which is the one part of this that cannot be done unattended. **Dead or Alive 5**
+   (appid 311730, D3D11, installed) is the right target; its character models are exactly
+   what the model is trained on. Counter-Strike 2 is native Vulkan and would skip Proton
+   entirely, but it is VAC-protected — not somewhere to experiment with someone's
+   account.
 3. ~~**The temporal path**~~ **DONE 2026-09-09** — `src/ref/nr_temporal.py`,
    `notes/phase12-temporal.md`. The history gate is the head's fourth channel, and it
    works: alpha goes 0.008 with no history -> **0.705** with correctly reprojected
