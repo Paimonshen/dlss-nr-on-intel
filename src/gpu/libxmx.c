@@ -41,6 +41,7 @@ struct push {
 	uint64_t a, b, c, d;
 	uint32_t m, n, k, batch, sa, sb, sc, flags;
 	float p0, p1, p2, p3;
+	uint32_t lda, ldb, ldc, spare;
 };
 
 const char *xmx_error(void) { return g.err; }
@@ -445,13 +446,19 @@ static void barrier(void)
 }
 
 int xmx_rec_gemm(int a, int b, int c, unsigned M, unsigned N, unsigned K, unsigned batch,
-		 unsigned sa, unsigned sb, unsigned sc, unsigned bt)
+		 unsigned sa, unsigned sb, unsigned sc, unsigned bt,
+		 unsigned lda, unsigned ldb, unsigned ldc,
+		 unsigned oa, unsigned ob, unsigned oc)
 {
 	if (!g.recording) FAIL("not recording", 0);
 	struct push p = { .a = addr_of(a), .b = addr_of(b), .c = addr_of(c),
 			  .m = M, .n = N, .k = K, .batch = batch,
-			  .sa = sa, .sb = sb, .sc = sc, .flags = bt };
+			  .sa = sa, .sb = sb, .sc = sc, .flags = bt,
+			  .lda = lda, .ldb = ldb, .ldc = ldc };
 	if (!p.a || !p.b || !p.c) FAIL("gemm operand is not a live buffer", 0);
+	/* Element offsets are folded into the addresses, so a sub-matrix needs no shader
+	 * support: A and B are half, C is float. */
+	p.a += (uint64_t)oa * 2; p.b += (uint64_t)ob * 2; p.c += (uint64_t)oc * 4;
 	vkCmdBindPipeline(g.rcb, VK_PIPELINE_BIND_POINT_COMPUTE, g.rgemm);
 	vkCmdPushConstants(g.rcb, g.rpl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
 	vkCmdDispatch(g.rcb, (N + 15) / 16, (M + 7) / 8, batch ? batch : 1);
@@ -461,12 +468,12 @@ int xmx_rec_gemm(int a, int b, int c, unsigned M, unsigned N, unsigned K, unsign
 }
 
 int xmx_rec_unary(unsigned kind, int a, int b, int c, int d, unsigned n, unsigned channels,
-		  float p0, unsigned batch, unsigned sa, unsigned sb, unsigned sc)
+		  float p0, unsigned batch, unsigned sa, unsigned sb, unsigned sc, unsigned k)
 {
 	if (!g.recording) FAIL("not recording", 0);
 	struct push p = { .a = addr_of(a), .b = addr_of(b), .c = addr_of(c), .d = addr_of(d),
 			  .m = n, .n = channels, .flags = kind, .p0 = p0,
-			  .batch = batch, .sa = sa, .sb = sb, .sc = sc };
+			  .batch = batch, .sa = sa, .sb = sb, .sc = sc, .k = k };
 	if (!p.a || !p.c) FAIL("unary operand is not a live buffer", 0);
 	vkCmdBindPipeline(g.rcb, VK_PIPELINE_BIND_POINT_COMPUTE, g.runary);
 	vkCmdPushConstants(g.rcb, g.rpl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);

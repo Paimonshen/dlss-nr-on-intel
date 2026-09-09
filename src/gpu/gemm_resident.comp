@@ -22,6 +22,7 @@ layout(push_constant, scalar) uniform Push {
     uint m, n, k, batch;
     uint sa, sb, sc, flags;
     float p0, p1, p2, p3;
+    uint lda, ldb, ldc, spare;      // row strides; 0 means the dense default
 } pc;
 
 const uint TM = 8, TN = 16, TK = 16;
@@ -31,6 +32,12 @@ void main() {
     if (row >= pc.m || col >= pc.n) return;
     uint batch = gl_WorkGroupID.z;
     uint ao = batch * pc.sa, bo = batch * pc.sb, co = batch * pc.sc;
+    /* A row of a matrix need not be its width: the branched feed-forward writes each
+     * output head into a 32-column slice of a wider buffer, and the split feed-forward
+     * reads a 64-column slice of one. */
+    uint lda = pc.lda != 0u ? pc.lda : pc.k;
+    uint ldb = pc.ldb != 0u ? pc.ldb : (pc.flags != 0u ? pc.k : pc.n);
+    uint ldc = pc.ldc != 0u ? pc.ldc : pc.n;
 
     coopmat<float, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator> acc =
         coopmat<float, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator>(0.0);
@@ -39,16 +46,16 @@ void main() {
 
     if (pc.flags != 0u) {
         for (uint k = 0; k < pc.k; k += TK) {
-            coopMatLoad(a, pc.a.v, ao + row * pc.k + k, pc.k, gl_CooperativeMatrixLayoutRowMajor);
-            coopMatLoad(b, pc.b.v, bo + col * pc.k + k, pc.k, gl_CooperativeMatrixLayoutColumnMajor);
+            coopMatLoad(a, pc.a.v, ao + row * lda + k, lda, gl_CooperativeMatrixLayoutRowMajor);
+            coopMatLoad(b, pc.b.v, bo + col * ldb + k, ldb, gl_CooperativeMatrixLayoutColumnMajor);
             acc = coopMatMulAdd(a, b, acc);
         }
     } else {
         for (uint k = 0; k < pc.k; k += TK) {
-            coopMatLoad(a, pc.a.v, ao + row * pc.k + k, pc.k, gl_CooperativeMatrixLayoutRowMajor);
-            coopMatLoad(b, pc.b.v, bo + k * pc.n + col, pc.n, gl_CooperativeMatrixLayoutRowMajor);
+            coopMatLoad(a, pc.a.v, ao + row * lda + k, lda, gl_CooperativeMatrixLayoutRowMajor);
+            coopMatLoad(b, pc.b.v, bo + k * ldb + col, ldb, gl_CooperativeMatrixLayoutRowMajor);
             acc = coopMatMulAdd(a, b, acc);
         }
     }
-    coopMatStore(acc, pc.c.v, co + row * pc.n + col, pc.n, gl_CooperativeMatrixLayoutRowMajor);
+    coopMatStore(acc, pc.c.v, co + row * ldc + col, ldc, gl_CooperativeMatrixLayoutRowMajor);
 }

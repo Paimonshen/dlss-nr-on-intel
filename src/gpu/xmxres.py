@@ -49,9 +49,9 @@ def _load():
             ("xmx_buf_destroy", [ctypes.c_int]),
             ("xmx_begin", []),
             ("xmx_submit", []),
-            ("xmx_rec_gemm", [ctypes.c_int] * 3 + [ctypes.c_uint] * 8),
+            ("xmx_rec_gemm", [ctypes.c_int] * 3 + [ctypes.c_uint] * 14),
             ("xmx_rec_unary", [ctypes.c_uint] + [ctypes.c_int] * 4
-             + [ctypes.c_uint, ctypes.c_uint, ctypes.c_float] + [ctypes.c_uint] * 4),
+             + [ctypes.c_uint, ctypes.c_uint, ctypes.c_float] + [ctypes.c_uint] * 5),
             ("xmx_rec_row", [ctypes.c_uint] + [ctypes.c_int] * 3 + [ctypes.c_uint] * 4)):
         getattr(lib, name).argtypes = args
         getattr(lib, name).restype = ctypes.c_int
@@ -137,10 +137,14 @@ class Runtime:
         self.recorded = 0
         return self
 
-    def gemm(self, a, b, c, rows, cols, inner, *, batch=1, strides=None, transpose_b=False):
+    def gemm(self, a, b, c, rows, cols, inner, *, batch=1, strides=None, transpose_b=False,
+             leading=None, offsets=(0, 0, 0)):
         """C = A @ B for tile-aligned extents; A and B are float16, C float32.
 
-        `strides` are element counts per batch item, defaulting to the dense packing.
+        `strides` are element counts per batch item, defaulting to the dense packing;
+        `leading` overrides the row strides of A, B and C, and `offsets` shifts each
+        operand's base in elements, so a GEMM can read or write a slice of a wider
+        buffer — which is how the branched and split feed-forwards place their heads.
         Extents must already be multiples of 8 / 16 / 16: cooperative-matrix loads are
         not bounds-checked on this device (`cooperativeMatrixRobustBufferAccess` is
         false), so the padding has to be in the buffer, not in a guard.
@@ -150,20 +154,23 @@ class Runtime:
                 raise ValueError(f"{name}={extent} must be a multiple of {multiple}")
         if strides is None:
             strides = (rows * inner, cols * inner if transpose_b else inner * cols, rows * cols)
+        lda, ldb, ldc = leading or (0, 0, 0)
         if self.lib.xmx_rec_gemm(a.id, b.id, c.id, rows, cols, inner, batch,
-                                 strides[0], strides[1], strides[2], 1 if transpose_b else 0) != 0:
+                                 strides[0], strides[1], strides[2], 1 if transpose_b else 0,
+                                 lda, ldb, ldc, *offsets) != 0:
             raise RuntimeError("xmx_rec_gemm: " + self.lib.xmx_error().decode())
         self.recorded += 1
         return self
 
     def unary(self, kind, source, target, count, *, scale=1.0, second=None,
-              third=None, channels=0, _dims=None):
+              third=None, channels=0, _dims=None, _pad=0):
         second = second if second is not None else source
         third = third if third is not None else source
         batch, height, width, across = _dims or (0, 0, 0, 0)
         if self.lib.xmx_rec_unary(kind, source.id, second.id, target.id, third.id,
                                   int(count), int(channels), float(scale),
-                                  int(batch), int(height), int(width), int(across)) != 0:
+                                  int(batch), int(height), int(width), int(across),
+                                  int(_pad)) != 0:
             raise RuntimeError("xmx_rec_unary: " + self.lib.xmx_error().decode())
         self.recorded += 1
         return self
@@ -192,17 +199,33 @@ class Runtime:
         return self.unary(RESIDUAL, branch, target, count, second=skip, third=cosine,
                           channels=channels)
 
-    def partition(self, source, target, height, width, channels, size=8):
-        """NHWC -> (windows, tokens, channels)."""
-        return self.unary(PARTITION, source, target, height * width * channels,
-                          channels=channels, second=source, third=source,
-                          _dims=(size, height, width, width // size))
+    @staticmethod
+    def window_extent(height, width, origin=(0, 0), size=8):
+        """-> (padded height, padded width, pads) for a shifted-window partition."""
+        pad_top, pad_left = -origin[0], -origin[1]
+        padded_height = pad_top + height + (-(height + pad_top)) % size
+        padded_width = pad_left + width + (-(width + pad_left)) % size
+        return padded_height, padded_width, (pad_top, pad_left)
 
-    def reverse(self, source, target, height, width, channels, size=8):
-        """(windows, tokens, channels) -> NHWC."""
+    def partition(self, source, target, height, width, channels, size=8, origin=(0, 0)):
+        """NHWC -> (windows, tokens, channels), the shifted-window origin folded in.
+
+        The vendor pads by up to one window before partitioning; rather than write that
+        padded copy, the gather reads zero outside the image.
+        """
+        ph, pw, (top, left) = self.window_extent(height, width, origin, size)
+        return self.unary(PARTITION, source, target, ph * pw * channels,
+                          channels=channels, scale=1.0,
+                          _dims=(size, height, width, pw // size),
+                          _pad=(top << 16) | left)
+
+    def reverse(self, source, target, height, width, channels, size=8, origin=(0, 0)):
+        """(windows, tokens, channels) -> NHWC, cropping the shifted-window pad away."""
+        ph, pw, (top, left) = self.window_extent(height, width, origin, size)
         return self.unary(REVERSE, source, target, height * width * channels,
-                          channels=channels, second=source, third=source,
-                          _dims=(size, height, width, width // size))
+                          channels=channels, scale=1.0,
+                          _dims=(size, height, width, pw // size),
+                          _pad=(top << 16) | left)
 
     def split_heads(self, source, target, windows, tokens, channels, heads, part):
         """(windows, tokens, 3C) -> Q, K or V as (windows, heads, tokens, 32)."""

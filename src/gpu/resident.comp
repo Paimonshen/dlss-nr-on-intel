@@ -90,23 +90,27 @@ void main() {
         return;
     }
     if (kind == PARTITION || kind == REVERSE) {
-        // NHWC <-> (window, token, channel). n=channels, batch=window size,
-        // sa=height, sb=width, sc=windows across.
-        uint channels = pc.n, size = pc.batch, width = pc.sb, across = pc.sc;
+        /* NHWC <-> (window, token, channel), with the shifted-window origin folded in
+         * rather than materialised as a padded copy. `k` carries the pad as
+         * (top << 16) | left; a window that reaches outside the image reads zero, which
+         * is what `functional.pad` would have put there. */
+        uint channels = pc.n, size = pc.batch;
+        uint height = pc.sa, width = pc.sb, across = pc.sc;
+        uint pad_top = pc.k >> 16, pad_left = pc.k & 0xFFFFu;
         uint c = index % channels, rest = index / channels;
-        uint source;
         if (kind == PARTITION) {
             uint token = rest % (size * size), window = rest / (size * size);
-            uint y = (window / across) * size + token / size;
-            uint x = (window % across) * size + token % size;
-            source = (y * width + x) * channels + c;
+            int y = int((window / across) * size + token / size) - int(pad_top);
+            int x = int((window % across) * size + token % size) - int(pad_left);
+            pc.c.v[index] = (y < 0 || x < 0 || y >= int(height) || x >= int(width))
+                ? 0.0 : pc.a.v[(uint(y) * width + uint(x)) * channels + c];
         } else {
             uint x = rest % width, y = rest / width;
-            uint window = (y / size) * across + (x / size);
-            uint token = (y % size) * size + (x % size);
-            source = (window * size * size + token) * channels + c;
+            uint py = y + pad_top, px = x + pad_left;
+            uint window = (py / size) * across + (px / size);
+            uint token = (py % size) * size + (px % size);
+            pc.c.v[index] = pc.a.v[(window * size * size + token) * channels + c];
         }
-        pc.c.v[index] = pc.a.v[source];
         return;
     }
     if (kind == SPLIT_HEADS) {
