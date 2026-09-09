@@ -262,6 +262,14 @@ Treat all of the above as *reported*, not verified. Verifying it is Phase 1's jo
   rather than matrix-unit-bound. Optimisation stays deferred until Phase 3 correctness
   is settled, per the roadmap. The 6.3 s is not a frame time either: most of it is the
   CPU-side softmax and window shuffling in numpy.
+- **Phase 4b — Temporal. DONE 2026-09-09** — `src/ref/nr_temporal.py`,
+  `notes/phase12-temporal.md`. A sequence, not a still: the previous output reprojected
+  along motion vectors into feature channels 7-9 and blended back through the head's
+  fourth channel, `alpha = clamp(sigmoid(half(logit)) * half(0.73974609375), 0, 1)`.
+  The gate is learned and it discriminates — 0.008 with no history, **0.705** with
+  correct history, **0.032** when the motion is wrong, which is ghosting rejection.
+  Static-scene flicker falls 3.6x by the fourth frame (6.3x at the peak) with no
+  high-frequency loss.
 - **Phase 5 (later) — Integration.** Wire into a real game. Target: Control (DX12, has
   DLSS, light enough for this iGPU under Proton, and the most published RTX 50
   before/after comparisons to sanity-check against). Cyberpunk 2077 photo mode is the

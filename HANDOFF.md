@@ -15,6 +15,7 @@ iris and eyeliner sharpened. `notes/phase7-first-render.md`.
 ```
 python3 src/ref/nr_frame.py IN.png OUT.png --gpu      # 17 s for 384x384 on XMX
 python3 src/ref/nr_frame.py IN.png OUT.png            # 38 s, the CPU reference
+python3 src/ref/nr_temporal.py IN.png OUT --gpu --pan 6,0 --frames 4   # a sequence
 ```
 
 A full **1280x720** frame renders too, network extent 1280x768, 9 GiB peak, no tiling
@@ -92,10 +93,13 @@ value:
    it is a port of the graph rather than a hook on its GEMMs. Note this needs the
    activations to *stay* on the GPU between blocks — the win is not in any single
    kernel but in not round-tripping through host memory 71 times.
-2. **The temporal path** (`work/mlx-dlss/python/mlxdlss/temporal.py`, pure numpy):
-   motion vectors, the reprojected history in channels 7-9, the sign-encoded validity
-   in 12-14, the five-tap history filter. This is what "run it in a game" actually
-   needs; the single-frame path is only the first frame of a sequence.
+2. ~~**The temporal path**~~ **DONE 2026-09-09** — `src/ref/nr_temporal.py`,
+   `notes/phase12-temporal.md`. The history gate is the head's fourth channel, and it
+   works: alpha goes 0.008 with no history -> **0.705** with correctly reprojected
+   history (ceiling 0.7397) -> **0.032** when the motion is wrong. Flicker on a static
+   scene falls 3.6x by frame 3 and 6.3x at the peak, with no high-frequency loss.
+   Optical-flow motion and processing_scale != 1 still need OpenCV/Pillow, which this
+   machine lacks; engine motion works.
 3. **The DX12/Proton integration** (Phase 5). Nothing has been attempted here.
 
 Smaller, if wanted: `MIN_MACS` in `nr_xmx.py` was tuned against the reference BLAS
@@ -185,7 +189,7 @@ notes/      24 findings documents
 src/tools/  PE/resource readers, the weight reader (now superseded), model_spec,
             and the PTX analysis tools: ptx_trace (dataflow), ptx_addrform
             (address → linear form), ptx_chains (accumulator chains)
-src/ref/    nr_model, nr_frame, image_io          <- the live path
+src/ref/    nr_model, nr_frame, nr_temporal, image_io   <- the live path
             hnet_*, forward, run_frame            <- superseded, kept for their findings
 src/gpu/    gemm_coopmat*.comp, libxmx.c, xmx.py, tests
 ```
