@@ -178,78 +178,40 @@ and the real package needs sudo. Round-trip verified. Both files already exist.
 
 ## 1. Do this first
 
-**Done 2026-09-09.** The graph runs, on CPU and on XMX. What is left, in order of
+The graph runs, on CPU and on XMX, and the kernel work is finished. **720p is 495 ms
+and dead stable — 494/494/494 across three processes.** What is left, in order of
 value:
 
-1. ~~**The GEMM kernel's operand staging.**~~ **DONE and it does not pay** —
-   `notes/phase22-staging-and-storage.md`. `src/gpu/gemm_staged.comp` exists, is
-   correct, and wins 19-24 % on deep-K shapes; it loses 44 % on the shallow-K, huge-M
-   shapes this graph actually spends its GEMM time on. Gated at K >= 128 the frame is
-   unchanged. Storing every published buffer as float16 is done too, and also changed
-   nothing measurable. **The frame is no longer bandwidth-bound** — 30.9 GB in ~600 ms
-   is 50 GB/s against a ~90 GB/s ceiling — and both halves are latency-bound.
-   **And the GEMM's ceiling is now understood** — `notes/phase26-the-register-ceiling.md`.
-   All 64 XMX engines are busy (throughput scales linearly to 256 workgroups, four per
-   engine, and flattens exactly there), but each is ~90 % idle because a SIMD32 subgroup
-   runs out of registers: one accumulator is 4 of the 128 GRF, so a 16x32 block already
-   spills and a 32x64 block spills 474 times **in the old universal shaders**.
-   **Phase27 removes the 16x32 spills by specializing operation flags** and saves
-   13–18% at 720p without changing any result. The old conclusion that only OpenCL
-   could help was too strong. `cl_intel_subgroup_2d_block_io` and wider DPAS shapes
-   remain a possible OpenCL research direction, requiring a second backend.
+1. **A frame worth looking at, from a real game.** The pipeline is proven end to end
+   under Proton and DXVK (`notes/phase24-a-real-game.md`): the layer loads inside a Wine
+   prefix, intercepts the swapchain, and the frame comes back into the game's own image.
+   The one captured so far is a warning screen. Reaching a face needs someone to drive a
+   game's menus — the only part of this that cannot be done unattended. **Dead or Alive 5**
+   (appid 311730, D3D11, installed) is the right target.
+   `src/layer/nr-photo --proton <appid> <exe>` is the way in.
 
-   **Phase28 also removes per-block submissions and repeated Python recording.**
-   The old phase25 fit (`20 ms + 632 ms per megapixel`) predates both changes and
-   cannot describe today's fixed overhead. Current paired timings are at the top.
-   They still do not demonstrate real-time rendering. Profile the specialized,
-   replayed graph before choosing another kernel change. The historical reasoning
-   below is retained as evidence of earlier experiments, not a current cost split.
+2. **Upstream what belongs upstream.** The **Mesa/ANV cooperative-matrix store bug** is
+   live in 26.2.1 and unreported: any arithmetic on an accumulator between
+   `coopMatMulAdd` and `coopMatStore` scrambles the result, with a two-line reproducer
+   and a five-variant table in `notes/phase18-fusion.md`. Second, llama.cpp issue #13530
+   has coopmat disabled for all Intel on the strength of an Alchemist regression, and
+   its only Xe2 rebuttal is a discrete B580 with GDDR6; Arc 140V on a UMA LPDDR5X pool
+   is unmeasured in public and this project has the numbers.
 
-   *A 720p frame is ~600 ms, and*
-   `src/bench/split_cost.py` splits it almost exactly in half: **327 ms of GEMM,
-   366 ms of everything else.** The second half is close to its floor — the passes run
-   at 50-90 GB/s against a ~90 GB/s ceiling — and the first is not: 459.6 GFLOP in
-   327 ms is **1.4 TFLOP/s, 4.4 % of the ~32 TFLOP/s peak**. The kernel now keeps a
-   16x32 block of the output in registers, but still has **no shared-memory staging of
-   the operands**, which is the one lever left. Two things already tried and rejected
-   with numbers, so do not repeat them: a 32x32 register block (faster in isolation,
-   *slower* in a frame — occupancy) and software pipelining the K loop (619 -> 760 ms —
-   register pressure). `notes/phase21-fusion-and-tiling.md`.
-   *(No longer blocked: the coopmat epilogue works if the accumulator is stored
-   untouched to shared memory first and transformed there — llama.cpp's `mul_mm.comp`
-   does the same. The underlying **Mesa/ANV bug is still live in 26.2.1 and unreported**;
-   there is a two-line reproducer and a five-variant table in `notes/phase18-fusion.md`,
-   and it is the one piece of this work that clearly belongs upstream. A second one, if
-   wanted: llama.cpp issue #13530 has coopmat disabled for all Intel on the strength of
-   an Alchemist regression, and the only Xe2 rebuttal in it is a discrete B580 with
-   GDDR6. Arc 140V on a UMA LPDDR5X pool is unmeasured in public and we have the
-   numbers.)*
-2. ~~**A real game, not `vkcube`.**~~ **The pipeline is proven; the content is not** —
-   `notes/phase24-a-real-game.md`. The layer loads inside a Wine prefix, intercepts the
-   swapchain DXVK creates for a translated D3D11 game, and the frame comes back into the
-   game's own image: `[nr_layer] swapchain 1280x720 format 44` then `processed 1280x720`.
-   `src/layer/nr-photo --proton <appid> <exe>` is the reproducible way in.
+3. **If more speed is wanted, measure before choosing.** The frame now splits
+   **221 ms of GEMM against 290 ms of everything else** (`src/bench/split_cost.py`), and
+   the extent curve is **17 ms + 488 ms per megapixel** — down from 20 + 632 before
+   specialization and replay. Things already tried, with numbers, that should not be
+   repeated: shared-memory operand staging (phase 22), integer weights (phase 23),
+   register blocks past 16x32 and software pipelining the K loop (phases 21 and 26),
+   and storing published buffers as float16 (phase 22 — correct, and no faster).
+   The open ones: **attention layout/conversion fusion**, and OpenCL's
+   `cl_intel_subgroup_2d_block_io` and wider DPAS shapes, which are on this machine and
+   unreachable from Vulkan — a second backend, not a flag.
 
-   **What is left is a frame worth looking at.** The one captured is a warning screen —
-   2D interface over pixel art. Reaching a face needs someone to drive the game's menus,
-   which is the one part of this that cannot be done unattended. **Dead or Alive 5**
-   (appid 311730, D3D11, installed) is the right target; its character models are exactly
-   what the model is trained on. Counter-Strike 2 is native Vulkan and would skip Proton
-   entirely, but it is VAC-protected — not somewhere to experiment with someone's
-   account.
-3. ~~**The temporal path**~~ **DONE 2026-09-09** — `src/ref/nr_temporal.py`,
-   `notes/phase12-temporal.md`. The history gate is the head's fourth channel, and it
-   works: alpha goes 0.008 with no history -> **0.705** with correctly reprojected
-   history (ceiling 0.7397) -> **0.032** when the motion is wrong. Flicker on a static
-   scene falls 3.6x by frame 3 and 6.3x at the peak, with no high-frequency loss.
-   Optical-flow motion and processing_scale != 1 still need OpenCV/Pillow, which this
-   machine lacks; engine motion works.
-4. ~~**The DX12/Proton integration**~~ — the door turned out to be a Vulkan layer
-   rather than an NGX hook; see item 2.
-
-**Already done:** published inter-block buffers use float16 (phase22); per-block
-host copies/fences and repeated command recording are removed (phase28). Tuning
-`MIN_MACS` concerns the superseded `nr_xmx.py` hook path, not the resident default.
+**Real time is still not on the table.** At `17 ms + 488 ms/Mpixel`, 30 fps needs about
+a 243x137 extent and 15 fps about 425x239. On this hardware with this graph, DLSS-NR is
+a photo mode — which is what the Vulkan layer delivers.
 
 ---
 
