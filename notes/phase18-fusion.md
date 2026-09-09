@@ -45,6 +45,14 @@ global blocks, whose hidden layer is 4096 wide, went from 136 ms to 36 ms.
 
 ## The better version is blocked by a driver bug
 
+> **SUPERSEDED 2026-09-09 by `notes/phase21-fusion-and-tiling.md`.** The bug is real
+> and the table below still reproduces, but the conclusion drawn from it was one step
+> too far. The corruption is in the *arithmetic*, not in the store: an untouched
+> accumulator reaches **shared memory** intact, and the epilogue can then be applied to
+> ordinary scalars on the way out. Every epilogue is bit-exact that way
+> (`src/gpu/test_epilogue.py`), and the GEMM now carries one.
+
+
 Folding the same work into the **GEMM's epilogue** — transforming the accumulator
 before it is ever written — would turn four trips over block 0's 503 MB buffer into
 one 252 MB write, about 13x less traffic rather than 2.6x.
@@ -85,6 +93,12 @@ The corrected version follows.)*
 - **The traffic.** About 10 GB of activations a frame, at the **69-91 GB/s** the GPU
   actually reaches: **110-145 ms**, and roughly half that if activations were half
   rather than float32, which is what the vendor's own kernels do.
+
+> **SUPERSEDED 2026-09-09 by `notes/phase21-fusion-and-tiling.md`.** The "about 10 GB
+> of activations" below is low by six times: counting the passes as recorded, the frame
+> moved ~65 GB, three quarters of it in the elementwise half. It *was* bandwidth-bound.
+> The per-dispatch fixed cost is 4.5 us, so 2000 dispatches is 9 ms — dispatch overhead
+> was never the problem.
 
 The measured frame is 1025 ms, so most of it is neither peak FLOPs nor peak bandwidth:
 it is dispatch overhead and poor occupancy on the many small shapes. That is the

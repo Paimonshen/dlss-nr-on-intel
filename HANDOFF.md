@@ -13,13 +13,17 @@ eyelashes and eyebrow hairs resolved out of a smeared input, skin pores synthesi
 iris and eyeliner sharpened. `notes/phase7-first-render.md`.
 
 ```
-python3 src/ref/nr_frame.py IN.png OUT.png --resident        # 0.26 s — the fast path
+make                                                         # libxmx.so and six shaders
+python3 src/ref/nr_frame.py IN.png OUT.png --resident        # 0.13 s — the fast path
 python3 src/ref/nr_temporal.py IN.png OUT --resident --pan 6,0 --frames 5
 work/venv/bin/python src/ref/nr_frame.py IN.png OUT.png --accel   # 10 s, best on CPU
 python3 src/ref/nr_frame.py IN.png OUT.png                   # 38 s, netlib reference
 ```
 
-A full **1280x720** frame renders too, network extent 1280x768, no tiling artefacts.
+A full **1280x720** frame renders in **0.61-0.66 s** (network extent 1280x768) and
+**1920x1080** in **2.9 s**, with no tiling artefacts. Quote the band, not a single
+number: run to run varies about 8 %, and a first frame after the GPU has idled costs
+two to four times more while the clock ramps.
 
 - `src/ref/nr_model.py` — the recovered 71-block graph in numpy (a port of MLX-DLSS's
   PyTorch `model.py`, Apache-2.0; no torch on this machine). One GEMM entry point,
@@ -103,19 +107,19 @@ and the real package needs sudo. Round-trip verified. Both files already exist.
 **Done 2026-09-09.** The graph runs, on CPU and on XMX. What is left, in order of
 value:
 
-1. **The GEMM kernel, which is where the remaining performance is.** It measures
-   2584 GFLOP/s, **8.1 %** of this GPU's FP16 peak, because the shader has no
-   shared-memory staging, no K-blocking and no register reuse — every workgroup
-   re-reads both operands for one 8x16 tile. Of a 1025 ms 720p frame only ~300 ms is
-   genuinely bounded (177 arithmetic, 110-145 traffic); the other **~700 ms is
-   dispatch overhead and occupancy** on the graph's many small shapes. A
-   well-optimised version plausibly reaches 100-200 ms, and 30 fps needs about a
-   640x384 extent. Second lever: activations as half rather than float32, which is
-   what the vendor's own kernels do and would halve the traffic.
-   *(Blocked, and worth knowing: folding the elementwise work into the GEMM epilogue
-   would be the bigger win, but any operation on the accumulator between
-   `coopMatMulAdd` and `coopMatStore` scrambles the result on Mesa 26.2.1 / ANV. See
-   `notes/phase18-fusion.md` — worth reporting upstream.)*
+1. **The GEMM kernel's operand staging.** A 720p frame is now **613 ms**, and
+   `work/bench/split_cost.py` splits it almost exactly in half: **327 ms of GEMM,
+   366 ms of everything else.** The second half is close to its floor — the passes run
+   at 50-90 GB/s against a ~90 GB/s ceiling — and the first is not: 459.6 GFLOP in
+   327 ms is **1.4 TFLOP/s, 4.4 % of the ~32 TFLOP/s peak**. The kernel now keeps a
+   16x32 block of the output in registers, but still has **no shared-memory staging of
+   the operands**, which is the one lever left. Two things already tried and rejected
+   with numbers, so do not repeat them: a 32x32 register block (faster in isolation,
+   *slower* in a frame — occupancy) and software pipelining the K loop (619 -> 760 ms —
+   register pressure). `notes/phase21-fusion-and-tiling.md`.
+   *(No longer blocked: the coopmat epilogue works if the accumulator is stored
+   untouched to shared memory first and transformed there. Still worth reporting the
+   underlying Mesa/ANV bug upstream.)*
 2. **A real game, not `vkcube`.** The photo-mode loop is proven on a toy; the next
    step is a title under Proton. DX12 goes DX12 -> VKD3D -> Vulkan on ANV, DX11 and
    DX9 through DXVK, so the layer should attach unchanged. `src/layer/nr-photo --steam`
@@ -130,9 +134,12 @@ value:
 4. ~~**The DX12/Proton integration**~~ — the door turned out to be a Vulkan layer
    rather than an NGX hook; see item 2.
 
-Smaller, if wanted: `MIN_MACS` in `nr_xmx.py` was tuned against the reference BLAS
-and should be re-swept; `split_group_feed_forward` still issues `2*groups` GEMMs and
-could fold the same way the branched one now does.
+Smaller, if wanted: **store the published inter-block buffers as float16.** An E4M3
+value is exact in half, so every buffer a block publishes could be half with no loss —
+that removes the remaining 263 M elements of `to_half` and halves the residual's skip
+read. Worth roughly 2.6 GB of a ~26 GB frame; the work is threading a "this operand is
+half" flag through the residual, partition, pool2 and upsample readers.
+`MIN_MACS` in `nr_xmx.py` was tuned against the reference BLAS and should be re-swept.
 
 ---
 
@@ -276,11 +283,11 @@ What is *not* claimed:
 - **No NVIDIA parity gate.** There is still no NVIDIA GPU here, so there are still no
   reference activations. The graph is MLX-DLSS's recovery from vendor captures, and it
   is validated against their spec and against behaviour, not against the DLL.
-- **The whole graph is resident on the GPU**: **0.18 s** at 384x384 and **~1.03 s**
-  at 720p after the elementwise fusion, head correlation 0.9918 with the CPU
-  reference and a visually indistinguishable picture.
+- **The whole graph is resident on the GPU**: **0.13 s** at 384x384, **0.61 s** at
+  720p and **2.9 s** at 1080p, head correlation 0.9918 with the CPU reference and a
+  visually indistinguishable picture. 5.6 GB of device buffers at 720p.
   `src/gpu/nr_frame_resident.py`, `notes/phase15-residency.md`,
-  `notes/phase18-fusion.md`.
+  `notes/phase18-fusion.md`, `notes/phase21-fusion-and-tiling.md`.
 - **It runs in a game.** A Vulkan layer captures the presented frame, a daemon runs
   the model, and the result goes back into the swapchain — a photo mode, triggered by
   a file. Verified end to end on `vkcube`.
@@ -292,7 +299,8 @@ What is *not* claimed:
 - **The machine's real limits, measured** (`notes/phase20-machine-limits.md`):
   **70-91 GB/s** of memory bandwidth against 136.5 theoretical, the GPU holding its
   **1950 MHz ceiling** throughout a run at 46-48 C, and our GEMM at **8.1 %** of the
-  ~32 TFLOP/s FP16 peak. Earlier notes quoted 23 GB/s, which was single-threaded
+  ~32 TFLOP/s FP16 peak on a large isolated shape — **4.4 %** averaged over the
+  frame's real shapes. Earlier notes quoted 23 GB/s, which was single-threaded
   numpy and wrong by 3x. The slack is in our kernel, not the chip. Every GEMM is on the GPU; the
   remaining 71 % is elementwise numpy, and the round trips cost more than the kernel
   saves.
