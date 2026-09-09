@@ -206,6 +206,18 @@ python3 src/ref/nr_frame.py IN.png OUT.png --profile neutral   # the control: ~3
 `nr_frame.py` flags: `--gpu --size HxW --profile {standard,neutral,natural,cinematic}
 --intensity F --detail-strength F --colour-strength F --frame-index N -v`.
 
+**Controls** (`notes/phase10-controls.md`). Free, post-network — one pass covers the
+whole range: `--intensity` (exactly linear, 0 an exact no-op, clamped to [0,1]),
+`--detail-strength` / `--colour-strength` (the change is 0.0049 high frequency against
+0.0249 low, so `--colour-strength 0` is detail with no tonal shift; past
+`--detail-strength 2` it over-sharpens), `--intensity-ladder` renders once and writes
+one file per value. Costing a pass each: `--style-index` (a different character, corr
+0.50 with style 0 at index 1 — but only 0-8 are sane, 64 gives a magenta cast),
+`--local-tone` / `--local-structure` (smooth monotone gains, colour-neutral and safe to
+over-drive: tone reaches 1.24x at 2.0, structure peaks near 1.5), `--skin-structure`,
+`--auto-mask`, `--control-mask`. Model A/B/C is **not** reproducible — the shipped
+weights prove only slot 0.
+
 `nr_xmx.install(fuse_branched=True, exact=False)`. `exact=True` carries activations
 half cannot hold as a sum of two halves — more accurate than the reference's own
 float32 GEMM — for 16.8 s -> 21.2 s. It moves the head gap from 0.0174 to 0.0124 and
