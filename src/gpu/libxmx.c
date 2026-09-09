@@ -24,8 +24,24 @@ static struct {
 	VkDescriptorPool dpool; VkDescriptorSet set;
 	VkCommandPool cpool; VkCommandBuffer cb; VkFence fence;
 	struct buf A, B, C;
+	/* resident path */
+	VkPipelineLayout rpl; VkPipeline rgemm, runary;
+	VkCommandBuffer rcb; VkFence rfence; int recording, recorded, rready;
 	char name[256]; char err[256]; int ready;
 } g;
+
+/* Device-resident buffers. The graph's activations live here between blocks instead
+ * of being read back to the host after every GEMM; on a shared-memory APU the mapping
+ * is HOST_CACHED, so the host can still write inputs and read outputs in place. */
+#define MAX_RBUF 512
+struct rbuf { VkBuffer b; VkDeviceMemory m; void *p; VkDeviceAddress addr; VkDeviceSize size; int live; };
+static struct rbuf rbufs[MAX_RBUF];
+
+struct push {
+	uint64_t a, b, c, d;
+	uint32_t m, n, k, batch, sa, sb, sc, flags;
+	float p0, p1, p2, p3;
+};
 
 const char *xmx_error(void) { return g.err; }
 const char *xmx_device(void) { return g.name; }
@@ -129,9 +145,13 @@ int xmx_init(const char *spv_path)
 
 	VkPhysicalDeviceCooperativeMatrixFeaturesKHR cm = {
 		.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR, .cooperativeMatrix = VK_TRUE };
+	/* bufferDeviceAddress lets the resident path pass operands as 64-bit pointers in
+	 * push constants, so a whole block of dispatches records into one command buffer
+	 * without a descriptor pool. scalarBlockLayout matches the shaders' layout. */
 	VkPhysicalDeviceVulkan12Features v12 = {
 		.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES, .pNext = &cm,
-		.vulkanMemoryModel = VK_TRUE, .vulkanMemoryModelDeviceScope = VK_TRUE, .shaderFloat16 = VK_TRUE };
+		.vulkanMemoryModel = VK_TRUE, .vulkanMemoryModelDeviceScope = VK_TRUE, .shaderFloat16 = VK_TRUE,
+		.bufferDeviceAddress = VK_TRUE, .scalarBlockLayout = VK_TRUE };
 	VkPhysicalDeviceVulkan11Features v11 = {
 		.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES, .pNext = &v12,
 		.storageBuffer16BitAccess = VK_TRUE };
@@ -308,4 +328,162 @@ int xmx_gemm_batched(unsigned M, unsigned N, unsigned K, unsigned batch,
 	r = vkWaitForFences(g.dev, 1, &g.fence, VK_TRUE, 60ull * 1000000000ull);
 	if (r) FAIL("fence wait", r);
 	return 0;
+}
+
+/* ------------------------------------------------------------------------- */
+/* The resident runtime.                                                      */
+/*                                                                            */
+/* Operands are 64-bit device addresses in the push constants rather than      */
+/* descriptor bindings, so recording is just push-and-dispatch and a whole     */
+/* block's dispatches go into one command buffer with one fence at the end,    */
+/* instead of one submit per GEMM. Activations stay in device buffers between  */
+/* passes; the point is not a faster kernel but the traffic that disappears.   */
+/* ------------------------------------------------------------------------- */
+
+int xmx_res_init(const char *gemm_spv, const char *unary_spv)
+{
+	if (!g.ready) FAIL("not initialised", 0);
+	if (g.rready) return 0;
+	VkPushConstantRange pcr = { .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT, .size = sizeof(struct push) };
+	VkPipelineLayoutCreateInfo pli = { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+					   .pushConstantRangeCount = 1, .pPushConstantRanges = &pcr };
+	VkResult r = vkCreatePipelineLayout(g.dev, &pli, NULL, &g.rpl);
+	if (r) FAIL("resident pipeline layout", r);
+	if (build_pipeline(gemm_spv, g.rpl, &g.rgemm) || build_pipeline(unary_spv, g.rpl, &g.runary))
+		return -1;
+	VkCommandBufferAllocateInfo cba = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+					    .commandPool = g.cpool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+					    .commandBufferCount = 1 };
+	if ((r = vkAllocateCommandBuffers(g.dev, &cba, &g.rcb))) FAIL("resident command buffer", r);
+	VkFenceCreateInfo fi = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+	if ((r = vkCreateFence(g.dev, &fi, NULL, &g.rfence))) FAIL("resident fence", r);
+	g.rready = 1;
+	return 0;
+}
+
+int xmx_buf_create(unsigned long long bytes)
+{
+	if (!g.rready) FAIL("resident runtime not initialised", 0);
+	int id = -1;
+	for (int i = 0; i < MAX_RBUF; i++)
+		if (!rbufs[i].live) { id = i; break; }
+	if (id < 0) FAIL("out of buffer slots", 0);
+	struct rbuf *rb = &rbufs[id];
+	VkBufferCreateInfo bi = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = bytes ? bytes : 4,
+				  .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+					   | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT };
+	VkResult r = vkCreateBuffer(g.dev, &bi, NULL, &rb->b);
+	if (r) FAIL("vkCreateBuffer (resident)", r);
+	VkMemoryRequirements mr;
+	vkGetBufferMemoryRequirements(g.dev, rb->b, &mr);
+	uint32_t mt = memtype(mr.memoryTypeBits,
+			      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+	if (mt == UINT32_MAX) FAIL("no host-visible memory type", 0);
+	VkMemoryAllocateFlagsInfo fl = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO,
+					 .flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT };
+	VkMemoryAllocateInfo ai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = &fl,
+				    .allocationSize = mr.size, .memoryTypeIndex = mt };
+	if ((r = vkAllocateMemory(g.dev, &ai, NULL, &rb->m))) FAIL("vkAllocateMemory (resident)", r);
+	vkBindBufferMemory(g.dev, rb->b, rb->m, 0);
+	if ((r = vkMapMemory(g.dev, rb->m, 0, VK_WHOLE_SIZE, 0, &rb->p))) FAIL("vkMapMemory (resident)", r);
+	VkBufferDeviceAddressInfo ai2 = { .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = rb->b };
+	rb->addr = vkGetBufferDeviceAddress(g.dev, &ai2);
+	rb->size = bi.size;
+	rb->live = 1;
+	return id;
+}
+
+void *xmx_buf_ptr(int id)
+{
+	return (id >= 0 && id < MAX_RBUF && rbufs[id].live) ? rbufs[id].p : NULL;
+}
+
+unsigned long long xmx_buf_bytes(int id)
+{
+	return (id >= 0 && id < MAX_RBUF && rbufs[id].live) ? (unsigned long long)rbufs[id].size : 0;
+}
+
+int xmx_buf_destroy(int id)
+{
+	if (id < 0 || id >= MAX_RBUF || !rbufs[id].live) return 0;
+	vkUnmapMemory(g.dev, rbufs[id].m);
+	vkDestroyBuffer(g.dev, rbufs[id].b, NULL);
+	vkFreeMemory(g.dev, rbufs[id].m, NULL);
+	rbufs[id] = (struct rbuf){ 0 };
+	return 0;
+}
+
+static VkDeviceAddress addr_of(int id)
+{
+	return (id >= 0 && id < MAX_RBUF && rbufs[id].live) ? rbufs[id].addr : 0;
+}
+
+int xmx_begin(void)
+{
+	if (!g.rready) FAIL("resident runtime not initialised", 0);
+	vkResetCommandBuffer(g.rcb, 0);
+	VkCommandBufferBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+					.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT };
+	VkResult r = vkBeginCommandBuffer(g.rcb, &bi);
+	if (r) FAIL("begin resident recording", r);
+	g.recording = 1;
+	g.recorded = 0;
+	return 0;
+}
+
+/* One global barrier between passes. Over-synchronised — consecutive independent
+ * dispatches could overlap — but every pass here consumes the previous one's output,
+ * so tracking finer dependencies would buy nothing. */
+static void barrier(void)
+{
+	VkMemoryBarrier mb = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+			       .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+			       .dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT };
+	vkCmdPipelineBarrier(g.rcb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+			     VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+}
+
+int xmx_rec_gemm(int a, int b, int c, unsigned M, unsigned N, unsigned K, unsigned batch,
+		 unsigned sa, unsigned sb, unsigned sc, unsigned bt)
+{
+	if (!g.recording) FAIL("not recording", 0);
+	struct push p = { .a = addr_of(a), .b = addr_of(b), .c = addr_of(c),
+			  .m = M, .n = N, .k = K, .batch = batch,
+			  .sa = sa, .sb = sb, .sc = sc, .flags = bt };
+	if (!p.a || !p.b || !p.c) FAIL("gemm operand is not a live buffer", 0);
+	vkCmdBindPipeline(g.rcb, VK_PIPELINE_BIND_POINT_COMPUTE, g.rgemm);
+	vkCmdPushConstants(g.rcb, g.rpl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
+	vkCmdDispatch(g.rcb, (N + 15) / 16, (M + 7) / 8, batch ? batch : 1);
+	barrier();
+	g.recorded++;
+	return 0;
+}
+
+int xmx_rec_unary(unsigned kind, int a, int b, int c, int d, unsigned n, unsigned channels, float p0)
+{
+	if (!g.recording) FAIL("not recording", 0);
+	struct push p = { .a = addr_of(a), .b = addr_of(b), .c = addr_of(c), .d = addr_of(d),
+			  .m = n, .n = channels, .flags = kind, .p0 = p0 };
+	if (!p.a || !p.c) FAIL("unary operand is not a live buffer", 0);
+	vkCmdBindPipeline(g.rcb, VK_PIPELINE_BIND_POINT_COMPUTE, g.runary);
+	vkCmdPushConstants(g.rcb, g.rpl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
+	vkCmdDispatch(g.rcb, (n + 255) / 256, 1, 1);
+	barrier();
+	g.recorded++;
+	return 0;
+}
+
+int xmx_submit(void)
+{
+	if (!g.recording) FAIL("not recording", 0);
+	g.recording = 0;
+	VkResult r = vkEndCommandBuffer(g.rcb);
+	if (r) FAIL("end resident recording", r);
+	vkResetFences(g.dev, 1, &g.rfence);
+	VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1,
+			    .pCommandBuffers = &g.rcb };
+	if ((r = vkQueueSubmit(g.q, 1, &si, g.rfence))) FAIL("resident submit", r);
+	if ((r = vkWaitForFences(g.dev, 1, &g.rfence, VK_TRUE, 60ull * 1000000000ull)))
+		FAIL("resident fence wait", r);
+	return g.recorded;
 }

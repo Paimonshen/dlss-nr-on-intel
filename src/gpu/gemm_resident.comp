@@ -1,0 +1,54 @@
+#version 450
+/*
+ * gemm_resident — the same cooperative-matrix GEMM as gemm_coopmat_batched.comp,
+ * with its operands addressed by pointer instead of bound to descriptors, so it can
+ * be recorded alongside the elementwise passes in one command buffer.
+ */
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_KHR_memory_scope_semantics : require
+#extension GL_KHR_cooperative_matrix : require
+
+layout(local_size_x = 32) in;
+
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer HalfBuf  { float16_t v[]; };
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer FloatBuf { float     v[]; };
+
+layout(push_constant, scalar) uniform Push {
+    HalfBuf a, b; FloatBuf c, d;
+    uint m, n, k, batch;
+    uint sa, sb, sc, flags;
+    float p0, p1, p2, p3;
+} pc;
+
+const uint TM = 8, TN = 16, TK = 16;
+
+void main() {
+    uint row = gl_WorkGroupID.y * TM, col = gl_WorkGroupID.x * TN;
+    if (row >= pc.m || col >= pc.n) return;
+    uint batch = gl_WorkGroupID.z;
+    uint ao = batch * pc.sa, bo = batch * pc.sb, co = batch * pc.sc;
+
+    coopmat<float, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator> acc =
+        coopmat<float, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator>(0.0);
+    coopmat<float16_t, gl_ScopeSubgroup, TM, TK, gl_MatrixUseA> a;
+    coopmat<float16_t, gl_ScopeSubgroup, TK, TN, gl_MatrixUseB> b;
+
+    if (pc.flags != 0u) {
+        for (uint k = 0; k < pc.k; k += TK) {
+            coopMatLoad(a, pc.a.v, ao + row * pc.k + k, pc.k, gl_CooperativeMatrixLayoutRowMajor);
+            coopMatLoad(b, pc.b.v, bo + col * pc.k + k, pc.k, gl_CooperativeMatrixLayoutColumnMajor);
+            acc = coopMatMulAdd(a, b, acc);
+        }
+    } else {
+        for (uint k = 0; k < pc.k; k += TK) {
+            coopMatLoad(a, pc.a.v, ao + row * pc.k + k, pc.k, gl_CooperativeMatrixLayoutRowMajor);
+            coopMatLoad(b, pc.b.v, bo + k * pc.n + col, pc.n, gl_CooperativeMatrixLayoutRowMajor);
+            acc = coopMatMulAdd(a, b, acc);
+        }
+    }
+    coopMatStore(acc, pc.c.v, co + row * pc.n + col, pc.n, gl_CooperativeMatrixLayoutRowMajor);
+}

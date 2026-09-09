@@ -1,0 +1,96 @@
+#version 450
+/*
+ * resident — the elementwise half of the graph, addressed by pointer.
+ *
+ * Every buffer arrives as a 64-bit device address in the push constants, so there
+ * are no descriptor sets and a whole block's worth of dispatches can be recorded
+ * into one command buffer without touching a descriptor pool. On this shared-memory
+ * APU the buffers are HOST_CACHED, so "upload" is an address rather than a transfer.
+ *
+ * `precise` is not decoration here: the vendor's gate rounds to half between the
+ * multiply and the add, and an FMA contraction would skip that rounding and give a
+ * different answer from the reference.
+ */
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+layout(local_size_x = 256) in;
+
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer HalfBuf  { float16_t v[]; };
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer FloatBuf { float     v[]; };
+
+layout(push_constant, scalar) uniform Push {
+    FloatBuf a, b, c, d;
+    uint m, n, k, batch;
+    uint sa, sb, sc, flags;
+    float p0, p1, p2, p3;
+} pc;
+
+// kinds
+const uint E4M3 = 0u, GATE = 1u, HALF = 2u, TO_HALF = 3u, SCALE = 4u,
+           RESIDUAL = 5u, FROM_HALF = 6u;
+
+/* Rounding to half precision, done on the float32 exponent and mantissa.
+ *
+ * `float(float16_t(x))` looks like the obvious way and is not: the compiler folds the
+ * round trip away and the value stays float32, which silently skipped every rounding
+ * point the vendor's gate depends on. This form cannot be elided. Round-half-even at
+ * bit 13, the float16 subnormal range at its fixed 2^-24 step, overflow to infinity. */
+float half_round(float x) {
+    float magnitude = abs(x);
+    if (magnitude >= 65520.0) return x < 0.0 ? -1.0 / 0.0 : 1.0 / 0.0;
+    if (magnitude < 6.103515625e-05) return roundEven(x * 16777216.0) * 5.9604644775390625e-08;
+    int bits = floatBitsToInt(x);
+    bits = (bits + (0x0FFF + ((bits >> 13) & 1))) & ~0x1FFF;
+    return intBitsToFloat(bits);
+}
+
+float e4m3(float x) {
+    float magnitude = min(abs(x), 448.0);
+    int exponent = (floatBitsToInt(magnitude) >> 23) & 0xFF;
+    exponent = max(exponent, 121) - 3;                 // 121-3 = the 2^-9 subnormal step
+    float step = intBitsToFloat(exponent << 23);
+    float reciprocal = intBitsToFloat((254 - exponent) << 23);
+    float rounded = roundEven(magnitude * reciprocal) * step;
+    return x < 0.0 ? -rounded : rounded;
+}
+
+float gate_activation(float x) {
+    precise float wide = half_round(x);
+    precise float clamped = clamp(wide, -4.0, 4.0);
+    precise float linear = abs(clamped) * -0.055908203125;
+    linear += 0.447265625;
+    linear = half_round(linear);
+    linear *= clamped;
+    linear += 0.89453125;
+    linear = half_round(linear);
+    return half_round(wide * linear);
+}
+
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    if (index >= pc.m) return;
+    uint kind = pc.flags;
+
+    if (kind == TO_HALF) {
+        HalfBuf(uint64_t(pc.c)).v[index] = float16_t(pc.a.v[index] * pc.p0);
+        return;
+    }
+    if (kind == FROM_HALF) {
+        pc.c.v[index] = float(HalfBuf(uint64_t(pc.a)).v[index]) * pc.p0;
+        return;
+    }
+    if (kind == RESIDUAL) {
+        // out = branch + skip * cosine, the cosine one value per channel
+        pc.c.v[index] = pc.a.v[index] + pc.b.v[index] * pc.d.v[index % pc.n];
+        return;
+    }
+    float value = pc.a.v[index] * pc.p0;
+    if (kind == E4M3)      pc.c.v[index] = e4m3(value);
+    else if (kind == GATE) pc.c.v[index] = gate_activation(value);
+    else if (kind == HALF) pc.c.v[index] = half_round(value);
+    else                   pc.c.v[index] = value;
+}
