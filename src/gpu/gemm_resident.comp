@@ -51,6 +51,18 @@ layout(push_constant, scalar) uniform Push {
 
 const uint TM = 8, TN = 16, TK = 16;
 
+/* The accumulator's type. Config 1 (`fp16 x fp16 -> fp32`) is what this project has
+ * always used and is 400-800x more accurate than the original; config 0
+ * (`fp16 x fp16 -> fp16`) is what NVIDIA's own kernels do — zero of 218 PTX kernels
+ * carry an FP32 accumulator (notes/phase4-accumulation-choice.md). It is also half the
+ * registers: one 8x16 tile is 4 GRF in float32 and 2 in float16, which is the exact
+ * constraint that caps the register block (notes/phase26-the-register-ceiling.md). */
+#ifdef ACC16
+#define ACC float16_t
+#else
+#define ACC float
+#endif
+
 /* How many cooperative-matrix tiles one subgroup keeps in registers. The kernel is
  * compiled twice: RM = RN = 1 for shapes whose extents are not a whole tile block, and
  * RM = 2, RN = 2 otherwise. Every K step then loads RM fragments of A and RN of B to
@@ -64,7 +76,7 @@ const uint TM = 8, TN = 16, TK = 16;
 #endif
 const uint BM = TM * RM, BN = TN * RN;
 
-shared float stage[BM * BN];
+shared ACC stage[BM * BN];
 
 
 
@@ -80,10 +92,10 @@ void main() {
     uint ldb = pc.ldb != 0u ? pc.ldb : ((operation_flags() & 1u) != 0u ? pc.k : pc.n);
     uint ldc = pc.ldc != 0u ? pc.ldc : pc.n;
 
-    coopmat<float, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator> acc[RM][RN];
+    coopmat<ACC, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator> acc[RM][RN];
     for (uint i = 0; i < RM; i++)
         for (uint j = 0; j < RN; j++)
-            acc[i][j] = coopmat<float, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator>(0.0);
+            acc[i][j] = coopmat<ACC, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator>(0.0);
     coopmat<float16_t, gl_ScopeSubgroup, TM, TK, gl_MatrixUseA> a[RM];
     coopmat<float16_t, gl_ScopeSubgroup, TK, TN, gl_MatrixUseB> b[RN];
 
@@ -117,6 +129,11 @@ void main() {
 
     uint epilogue = (operation_flags() >> 8) & 0xFu;
     bool narrow = (operation_flags() & 0x1000u) != 0u;
+    /* A float16 accumulator cannot take the direct store: the destination is float32
+     * and converting a cooperative matrix is one of the five things the driver bug
+     * scrambles (notes/phase18-fusion.md). It goes through the shared-memory stage,
+     * where the conversion happens on ordinary scalars. */
+#ifndef ACC16
     if (epilogue == 0u && !narrow) {
         for (uint i = 0; i < RM; i++)
             for (uint j = 0; j < RN; j++)
@@ -124,6 +141,7 @@ void main() {
                              ldc, gl_CooperativeMatrixLayoutRowMajor);
         return;
     }
+#endif
     for (uint i = 0; i < RM; i++)
         for (uint j = 0; j < RN; j++)
             coopMatStore(acc[i][j], stage, i * TM * BN + j * TN, BN,
@@ -137,7 +155,7 @@ void main() {
     for (uint e = gl_LocalInvocationID.x * 4u; e < BM * BN; e += 32u * 4u) {
         vec4 out4;
         for (uint i = 0; i < 4u; ++i) {
-            float value = stage[e + i];
+            float value = float(stage[e + i]);
             if (epilogue == 2u || epilogue == 3u) value = gate_activation(value);
             if (epilogue == 1u || epilogue == 3u) value = e4m3(value);
             if (epilogue == 4u) value = half_round(value);
