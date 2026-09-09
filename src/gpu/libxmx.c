@@ -33,7 +33,7 @@ static struct {
 /* Device-resident buffers. The graph's activations live here between blocks instead
  * of being read back to the host after every GEMM; on a shared-memory APU the mapping
  * is HOST_CACHED, so the host can still write inputs and read outputs in place. */
-#define MAX_RBUF 512
+#define MAX_RBUF 8192
 struct rbuf { VkBuffer b; VkDeviceMemory m; void *p; VkDeviceAddress addr; VkDeviceSize size; int live; };
 static struct rbuf rbufs[MAX_RBUF];
 

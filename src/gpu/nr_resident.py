@@ -205,8 +205,11 @@ class BlockScratch:
 
     def __init__(self, runtime, weights, height, width):
         channels, heads = weights.channels, weights.heads
-        padded_height, padded_width, _ = runtime.window_extent(
-            height, width, weights.origin)
+        # Sized for the largest window count any origin can produce, so blocks at the
+        # same level share one scratch even though their shifts differ. Getting this
+        # wrong is silent: a shifted block has more windows than an unshifted one and
+        # would write past the end of buffers cut to the unshifted size.
+        padded_height, padded_width, _ = runtime.window_extent(height, width, (-4, -4))
         self.height, self.width = height, width
         self.tokens = 64
         self.windows = (padded_height // 8) * (padded_width // 8)
@@ -310,31 +313,37 @@ def record_split_feed_forward(runtime, w, s, source):
 
 
 def record_window_attention(runtime, w, s, source):
-    """Window attention over `source`, into `s.attention`."""
+    """Window attention over `source`, into `s.attention`.
+
+    The window count follows this block's own origin, not the scratch's worst case.
+    """
     channels, heads, tokens = w.channels, w.heads, s.tokens
-    windowed = s.windows * tokens * channels
+    padded_height, padded_width, _ = runtime.window_extent(s.height, s.width, w.origin)
+    windows = (padded_height // 8) * (padded_width // 8)
+    batch = windows * heads
+    windowed = windows * tokens * channels
     runtime.partition(source, s.win, s.height, s.width, channels, origin=w.origin)
     runtime.to_half(s.win, s.win16, windowed)
-    runtime.gemm(s.win16, w.qkv, s.proj, s.windows * tokens, 3 * channels, channels)
+    runtime.gemm(s.win16, w.qkv, s.proj, windows * tokens, 3 * channels, channels)
     for index, part in enumerate((s.q, s.k, s.v)):
-        runtime.split_heads(s.proj, part, s.windows, tokens, channels, heads, index)
-    runtime.cosine_publish(s.q, s.q, s.batch * tokens, tokens=tokens, heads=heads,
+        runtime.split_heads(s.proj, part, windows, tokens, channels, heads, index)
+    runtime.cosine_publish(s.q, s.q, batch * tokens, tokens=tokens, heads=heads,
                            scale=w.scale)
-    runtime.cosine_publish(s.k, s.k, s.batch * tokens, tokens=tokens, heads=heads)
+    runtime.cosine_publish(s.k, s.k, batch * tokens, tokens=tokens, heads=heads)
     runtime.e4m3(s.v, s.v, windowed)
     for part, half in ((s.q, s.q16), (s.k, s.k16), (s.v, s.v16)):
         runtime.to_half(part, half, windowed)
-    runtime.gemm(s.q16, s.k16, s.scores, tokens, tokens, 32, batch=s.batch,
+    runtime.gemm(s.q16, s.k16, s.scores, tokens, tokens, 32, batch=batch,
                  strides=(tokens * 32, tokens * 32, tokens * tokens), transpose_b=True)
-    runtime.add_bias(s.scores, w.bias, s.scores, s.batch * tokens * tokens, tokens, heads)
-    runtime.softmax(s.scores, s.scores, s.batch * tokens, tokens)
-    runtime.to_half(s.scores, s.probs16, s.batch * tokens * tokens)
-    runtime.gemm(s.probs16, s.v16, s.context, tokens, 32, tokens, batch=s.batch,
+    runtime.add_bias(s.scores, w.bias, s.scores, batch * tokens * tokens, tokens, heads)
+    runtime.softmax(s.scores, s.scores, batch * tokens, tokens)
+    runtime.to_half(s.scores, s.probs16, batch * tokens * tokens)
+    runtime.gemm(s.probs16, s.v16, s.context, tokens, 32, tokens, batch=batch,
                  strides=(tokens * tokens, tokens * 32, tokens * 32))
-    runtime.merge_heads(s.context, s.merged, s.windows, tokens, channels, heads)
+    runtime.merge_heads(s.context, s.merged, windows, tokens, channels, heads)
     runtime.e4m3(s.merged, s.merged, windowed)
     runtime.to_half(s.merged, s.merged16, windowed)
-    runtime.gemm(s.merged16, w.out, s.attended, s.windows * tokens, channels, channels)
+    runtime.gemm(s.merged16, w.out, s.attended, windows * tokens, channels, channels)
     runtime.reverse(s.attended, s.attention, s.height, s.width, channels,
                     origin=w.origin)
 
@@ -446,3 +455,24 @@ class TransitionScratch:
             value = getattr(self, name)
             if isinstance(value, xmxres.Buffer):
                 value.free()
+
+
+def record_plain_downsample(runtime, edge, scratch, source, target, height, width,
+                            channels, *, pad_to=0):
+    """`downsample()`: pool then project, with no publish between.
+
+    Block 30's bridge into the bottleneck, which unlike the encoder's `ds` kernels
+    does not republish the pooled tensor before the projection.
+    """
+    if pad_to:
+        padded_height = -(-height // pad_to) * pad_to
+        padded_width = -(-width // pad_to) * pad_to
+        runtime.pad_end(source, scratch.padded, height, width, padded_height,
+                        padded_width, channels)
+        source, height, width = scratch.padded, padded_height, padded_width
+    pixels = (height // 2) * (width // 2)
+    runtime.pool2(source, scratch.pooled, height, width, channels)
+    runtime.to_half(scratch.pooled, scratch.pooled16, pixels * channels)
+    runtime.gemm(scratch.pooled16, edge.weight0, target, pixels, edge.out_channels,
+                 channels)
+    runtime.e4m3(target, target, pixels * edge.out_channels)

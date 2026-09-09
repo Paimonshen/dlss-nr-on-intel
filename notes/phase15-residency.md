@@ -198,3 +198,52 @@ The transitions — average pool, the learned and nearest upsamples, the decoder
 the stem and the output head, and the frame-level orchestration that would record a
 whole graph rather than a block. Those are the remaining pieces before a resident frame
 can be timed end to end.
+
+---
+
+## The whole graph, resident: 0.26 s at 384x384 and 1.56 s at 720p
+
+`src/gpu/nr_frame_resident.py` records the entire 71-block graph on the device. The
+stem writes a device buffer, every block, transition and skip reads and writes device
+buffers, and only the head comes back. **2966 passes** for a frame.
+
+| | best CPU | resident | |
+|---|---|---|---|
+| 384x384 | 12.69 s | **0.26 s** | **48x** |
+| 1280x720 | 64.4 s | **1.56 s** | **41x** |
+
+Peak resident-set 1.0 GB at 720p. Correlation with the CPU reference is **0.9918** on
+the head, its sd 0.1377 against 0.1395, and the composed images differ by 0.0032 while
+each moves the frame by 0.0260 and 0.0263 — the same effect, and visually
+indistinguishable.
+
+For the day's arc at 720p: 123.1 s with the first GEMM hook, 94.6 s with batched
+attention, 64.4 s on the CPU once the BLAS and the rounding were fixed, **1.56 s**
+resident. `notes/phase11-what-is-left.md` put the arithmetic floor at 340 ms; we are
+within **4.6x** of it, and what remains between is the elementwise passes' own
+bandwidth rather than any round trip.
+
+### Two bugs worth recording
+
+**Block 0's publish order.** The post block's full-resolution skip is block 0's output
+*published*, and the encoder pools its output *unpublished*. Deriving one from the
+other — publishing in place and then pooling the published buffer — is wrong, and the
+whole frame came out anti-correlated (-0.04).
+
+**A scratch shared across window origins.** Blocks at one level share their working
+buffers, and the cache key did not include the window origin. A shifted block has more
+windows than an unshifted one — 21x21 against 20x20 at this level — so blocks 2 and 3
+wrote past the end of buffers cut to block 1's size. The failure was quiet: the graph
+still ran and still produced a picture, with the correlation decaying level by level
+(0.97 at L1 down to 0.16 at L5) and the standard deviation inflating. Now the scratch
+is sized for the largest window count any origin can produce and each block computes
+its own count.
+
+Both were found by comparing level by level against the reference rather than by
+looking at the output, which is the only way either would have been found at all.
+
+### What is still on the host
+
+Nothing in the graph. The feature assembly, the head composition and the temporal path
+remain host-side numpy, which is right — they are per-frame, not per-block, and they
+are not where the time goes.
