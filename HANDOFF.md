@@ -19,8 +19,7 @@ work/venv/bin/python src/ref/nr_frame.py IN.png OUT.png --accel   # 10 s, best o
 python3 src/ref/nr_frame.py IN.png OUT.png                   # 38 s, netlib reference
 ```
 
-A full **1280x720** frame renders too, network extent 1280x768, 9 GiB peak, no tiling
-artefacts.
+A full **1280x720** frame renders too, network extent 1280x768, no tiling artefacts.
 
 - `src/ref/nr_model.py` — the recovered 71-block graph in numpy (a port of MLX-DLSS's
   PyTorch `model.py`, Apache-2.0; no torch on this machine). One GEMM entry point,
@@ -38,14 +37,12 @@ artefacts.
   for the PTX-derived findings they encode; do not build on them.
 - **Phase 4 is done**: `src/gpu/nr_xmx.py` puts every GEMM on the XMX units, the
   batched attention included. `notes/phase8-xmx-graph.md`.
-- **But the GPU is not currently a win, and the numbers quoted for it were measured
-  against a crippled BLAS.** The system numpy is netlib reference, ~3 GFLOP/s; a pip
-  numpy is OpenBLAS at 214 GFLOP/s. On the 384 face: netlib CPU 38.0 s, netlib+XMX
-  17.0 s, **OpenBLAS CPU 17.5 s**, OpenBLAS+XMX 18.3 s. The kernel beats OpenBLAS on
-  every shape (0.17-1.4 ms against 0.9-12 ms) but the *path* loses most of them,
-  because a dispatch round-trips the activation through host memory. GPU residency is
-  therefore the **precondition** for the GPU being worth anything here, not an
-  optimisation on top. `notes/phase13-torch-and-blas.md`.
+- **`src/gpu/nr_xmx.py` (the GEMM-hook path) is superseded by residency** and kept
+  only for comparison. It lost to a good CPU BLAS, because a dispatch round-trips its
+  activation through host memory; that is what made residency the precondition rather
+  than an optimisation. The CPU baselines are worth remembering: the system numpy is
+  netlib reference at ~3 GFLOP/s, a pip numpy is OpenBLAS at 214, and on the 384 face
+  netlib CPU is 38.0 s against OpenBLAS CPU 17.5 s. `notes/phase13-torch-and-blas.md`.
 - **The numpy port is bit-identical to MLX-DLSS's PyTorch original** — every primitive,
   every layout operator, all four block families on real weights, and the whole
   71-block forward, once the same GEMM is given to both.
@@ -106,17 +103,32 @@ and the real package needs sudo. Round-trip verified. Both files already exist.
 **Done 2026-09-09.** The graph runs, on CPU and on XMX. What is left, in order of
 value:
 
-1. ~~**GPU residency**~~ **DONE 2026-09-09** — `notes/phase15-residency.md`. The whole
-   71-block graph records on the device, 2966 passes, and the CLIs take `--resident`.
-   What is left of performance is the elementwise passes' own bandwidth, not traffic.
-2. ~~**The temporal path**~~ **DONE 2026-09-09** — `src/ref/nr_temporal.py`,
+1. **The GEMM kernel, which is where the remaining performance is.** It measures
+   2584 GFLOP/s, **8.1 %** of this GPU's FP16 peak, because the shader has no
+   shared-memory staging, no K-blocking and no register reuse — every workgroup
+   re-reads both operands for one 8x16 tile. Of a 1025 ms 720p frame only ~300 ms is
+   genuinely bounded (177 arithmetic, 110-145 traffic); the other **~700 ms is
+   dispatch overhead and occupancy** on the graph's many small shapes. A
+   well-optimised version plausibly reaches 100-200 ms, and 30 fps needs about a
+   640x384 extent. Second lever: activations as half rather than float32, which is
+   what the vendor's own kernels do and would halve the traffic.
+   *(Blocked, and worth knowing: folding the elementwise work into the GEMM epilogue
+   would be the bigger win, but any operation on the accumulator between
+   `coopMatMulAdd` and `coopMatStore` scrambles the result on Mesa 26.2.1 / ANV. See
+   `notes/phase18-fusion.md` — worth reporting upstream.)*
+2. **A real game, not `vkcube`.** The photo-mode loop is proven on a toy; the next
+   step is a title under Proton. DX12 goes DX12 -> VKD3D -> Vulkan on ANV, DX11 and
+   DX9 through DXVK, so the layer should attach unchanged. `src/layer/nr-photo --steam`
+   prints the launch option.
+3. ~~**The temporal path**~~ **DONE 2026-09-09** — `src/ref/nr_temporal.py`,
    `notes/phase12-temporal.md`. The history gate is the head's fourth channel, and it
    works: alpha goes 0.008 with no history -> **0.705** with correctly reprojected
    history (ceiling 0.7397) -> **0.032** when the motion is wrong. Flicker on a static
    scene falls 3.6x by frame 3 and 6.3x at the peak, with no high-frequency loss.
    Optical-flow motion and processing_scale != 1 still need OpenCV/Pillow, which this
    machine lacks; engine motion works.
-3. **The DX12/Proton integration** (Phase 5). Nothing has been attempted here.
+4. ~~**The DX12/Proton integration**~~ — the door turned out to be a Vulkan layer
+   rather than an NGX hook; see item 2.
 
 Smaller, if wanted: `MIN_MACS` in `nr_xmx.py` was tuned against the reference BLAS
 and should be re-swept; `split_group_feed_forward` still issues `2*groups` GEMMs and
@@ -205,7 +217,9 @@ notes/      24 findings documents
 src/tools/  PE/resource readers, the weight reader (now superseded), model_spec,
             and the PTX analysis tools: ptx_trace (dataflow), ptx_addrform
             (address → linear form), ptx_chains (accumulator chains)
-src/ref/    nr_model, nr_frame, nr_temporal, image_io   <- the live path
+src/ref/    nr_model, nr_frame, nr_temporal, nr_display, nr_accel, image_io
+src/gpu/    xmxres, nr_resident, nr_frame_resident   <- the device path
+src/layer/  nr_layer.c, nr_daemon.py, nr-photo       <- into a game
             hnet_*, forward, run_frame            <- superseded, kept for their findings
 src/gpu/    gemm_coopmat*.comp, libxmx.c, xmx.py, tests
 ```
@@ -217,8 +231,9 @@ ready to run (user-triggered; the model cannot launch it).
 Regression, all should exit 0:
 
 ```
-python3 src/ref/test_nr_model.py                  # primitives + graph, ~40 s
+python3 src/ref/test_nr_model.py                  # primitives, codec, temporal, graph
 work/venv/bin/python src/ref/test_against_torch.py # bit-identical to the original
+python3 src/gpu/test_resident.py                  # the device path, ~2 min
 python3 src/gpu/test_gemm.py                      # worst rel 2.4e-06
 python3 src/ref/nr_frame.py IN.png OUT.png --gpu  # the visual check
 python3 src/ref/nr_frame.py IN.png OUT.png --profile neutral   # the control: ~37x smaller
@@ -261,11 +276,24 @@ What is *not* claimed:
 - **No NVIDIA parity gate.** There is still no NVIDIA GPU here, so there are still no
   reference activations. The graph is MLX-DLSS's recovery from vendor captures, and it
   is validated against their spec and against behaviour, not against the DLL.
-- **The whole graph is resident on the GPU**: **0.26 s** at 384x384 and **1.56 s**
-  at 720p, 48x and 41x against the best CPU configuration, head correlation 0.9918.
-  `src/gpu/nr_frame_resident.py`, `notes/phase15-residency.md`. That is within 4.6x
-  of the arithmetic floor in `notes/phase11-what-is-left.md`, so full-frame real-time
-  is still out of reach and always was — the model's arithmetic against this iGPU. Every GEMM is on the GPU; the
+- **The whole graph is resident on the GPU**: **0.18 s** at 384x384 and **~1.03 s**
+  at 720p after the elementwise fusion, head correlation 0.9918 with the CPU
+  reference and a visually indistinguishable picture.
+  `src/gpu/nr_frame_resident.py`, `notes/phase15-residency.md`,
+  `notes/phase18-fusion.md`.
+- **It runs in a game.** A Vulkan layer captures the presented frame, a daemon runs
+  the model, and the result goes back into the swapchain — a photo mode, triggered by
+  a file. Verified end to end on `vkcube`.
+  `src/layer/`, `notes/phase17-integration-landscape.md`, `notes/phase19-photo-mode.md`.
+- **HDR is handled**: `src/ref/nr_display.py`, the recovered display codec — encode a
+  linear-HDR frame to an sRGB proxy with a soft knee, run the model, fold it back by
+  luminance ratio onto the untouched original. Clamping instead destroys 97 % of the
+  highlight structure. `notes/phase16-hdr.md`.
+- **The machine's real limits, measured** (`notes/phase20-machine-limits.md`):
+  **70-91 GB/s** of memory bandwidth against 136.5 theoretical, the GPU holding its
+  **1950 MHz ceiling** throughout a run at 46-48 C, and our GEMM at **8.1 %** of the
+  ~32 TFLOP/s FP16 peak. Earlier notes quoted 23 GB/s, which was single-threaded
+  numpy and wrong by 3x. The slack is in our kernel, not the chip. Every GEMM is on the GPU; the
   remaining 71 % is elementwise numpy, and the round trips cost more than the kernel
   saves.
 - **Single frame.** No motion vectors, no history, no temporal path.
