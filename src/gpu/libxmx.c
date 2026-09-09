@@ -27,6 +27,7 @@ static struct {
 	/* resident path */
 	VkPipelineLayout rpl; VkPipeline rgemm, rtiled, runary, rrow, rhistory;
 	unsigned tiling, tilem, tilen;
+	int syncing;
 	VkCommandBuffer rcb; VkFence rfence; int recording, recorded, rready;
 	char name[256]; char err[256]; int ready;
 } g;
@@ -438,19 +439,34 @@ int xmx_begin(void)
 	if (r) FAIL("begin resident recording", r);
 	g.recording = 1;
 	g.recorded = 0;
+	g.syncing = 1;
 	return 0;
 }
 
-/* One global barrier between passes. Over-synchronised — consecutive independent
- * dispatches could overlap — but every pass here consumes the previous one's output,
- * so tracking finer dependencies would buy nothing. */
+/* One global barrier between passes. Most passes consume the previous one's output,
+ * so this is right by default; where a run of dispatches is known to be independent —
+ * the per-head GEMMs of a branched feed-forward write disjoint slices, the three head
+ * splits read one buffer and write three — `xmx_sync(0)` suppresses it and `xmx_sync(1)`
+ * closes the run with a single barrier. */
 static void barrier(void)
 {
+	if (!g.syncing) return;
 	VkMemoryBarrier mb = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
 			       .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
 			       .dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT };
 	vkCmdPipelineBarrier(g.rcb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
 			     VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+}
+
+/* Suppress or restore the barrier between dispatches. Restoring emits one, closing the
+ * independent run. */
+int xmx_sync(int on)
+{
+	if (!g.recording) FAIL("not recording", 0);
+	int was = g.syncing;
+	g.syncing = on;
+	if (on && !was) barrier();
+	return 0;
 }
 
 int xmx_rec_gemm(int a, int b, int c, unsigned M, unsigned N, unsigned K, unsigned batch,

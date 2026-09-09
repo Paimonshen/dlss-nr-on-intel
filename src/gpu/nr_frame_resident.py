@@ -180,9 +180,9 @@ class ResidentFrame:
                        source=stem, target=raw)
         # the post block's skip is block 0 published; the encoder pools the
         # *unpublished* output, so both come from `raw` and neither from the other
-        rt.e4m3(raw, full_skip, pixels * 32)
-        rt.pool2(raw, value, height, width, 32)
-        rt.e4m3(value, value, h * w * 32)
+        with rt.independent():
+            rt.e4m3(raw, full_skip, pixels * 32)
+            rt.pool2(raw, value, height, width, 32, epilogue=xmxres.EPI_E4M3)
         submit()
         keep("stem", stem, pixels * 32, (1, height, width, 32))
         keep("block0", raw, pixels * 32, (1, height, width, 32))
@@ -197,8 +197,7 @@ class ResidentFrame:
                 block = self.block(index, heads)
                 rt.begin()
                 R.record_block(rt, block, self.scratch(block, h, w), source=value,
-                               target=value)
-                rt.e4m3(value, value, h * w * channels)
+                               target=value, publish=xmxres.EPI_E4M3)
                 submit()
             keep(f"l{level}", value, h * w * channels, (1, h, w, channels))
             skips[level] = self.buffer(f"skip{level}", h * w * channels)
@@ -226,8 +225,8 @@ class ResidentFrame:
         for index in range(23, 31):
             block = self.block(index, 16, "split")
             rt.begin()
-            R.record_block(rt, block, self.scratch(block, h, w), source=value, target=value)
-            rt.e4m3(value, value, h * w * channels)
+            R.record_block(rt, block, self.scratch(block, h, w), source=value,
+                           target=value, publish=xmxres.EPI_E4M3)
             submit()
         keep("l5", value, h * w * channels, (1, h, w, channels))
         split_skip = self.buffer("split_skip", h * w * channels)
@@ -261,8 +260,8 @@ class ResidentFrame:
         for index in range(40, 48):
             block = self.block(index, 16, "split")
             rt.begin()
-            R.record_block(rt, block, self.scratch(block, h, w), source=value, target=value)
-            rt.e4m3(value, value, h * w * channels)
+            R.record_block(rt, block, self.scratch(block, h, w), source=value,
+                           target=value, publish=xmxres.EPI_E4M3)
             submit()
 
         for transition, regular, skip_level, heads in DECODER:
@@ -276,8 +275,7 @@ class ResidentFrame:
                 h, w, sh, sw, channels, schannels)
             block = self.block(transition, heads)
             R.record_block(rt, block, self.scratch(block, sh, sw), source=target,
-                           target=target)
-            rt.e4m3(target, target, sh * sw * schannels)
+                           target=target, publish=xmxres.EPI_E4M3)
             submit()
             value, h, w, channels = target, sh, sw, schannels
             for index in regular:
@@ -285,8 +283,7 @@ class ResidentFrame:
                 block = self.block(index, heads)
                 rt.begin()
                 R.record_block(rt, block, self.scratch(block, h, w), source=value,
-                               target=value)
-                rt.e4m3(value, value, h * w * channels)
+                               target=value, publish=xmxres.EPI_E4M3)
                 submit()
 
         # back to full resolution, merged with block 0's output, then the head

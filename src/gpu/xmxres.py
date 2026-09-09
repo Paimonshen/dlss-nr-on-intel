@@ -62,6 +62,7 @@ def _load():
             ("xmx_buf_create", [ctypes.c_ulonglong]),
             ("xmx_buf_destroy", [ctypes.c_int]),
             ("xmx_begin", []),
+            ("xmx_sync", [ctypes.c_int]),
             ("xmx_submit", []),
             ("xmx_rec_gemm", [ctypes.c_int] * 3 + [ctypes.c_uint] * 14),
             ("xmx_rec_unary", [ctypes.c_uint] + [ctypes.c_int] * 4
@@ -159,6 +160,16 @@ class Runtime:
         self.recorded = 0
         return self
 
+    def independent(self):
+        """A `with` block whose dispatches are known not to depend on one another.
+
+        Everything inside records without a barrier between; leaving the block emits
+        one. The graph has several such runs — a branched feed-forward's per-head GEMMs
+        write disjoint slices of one buffer, the three head splits read one buffer and
+        write three — and on small dispatches the overlap is worth having.
+        """
+        return _Independent(self)
+
     def gemm(self, a, b, c, rows, cols, inner, *, batch=1, strides=None, transpose_b=False,
              leading=None, offsets=(0, 0, 0), epilogue=0, narrow=False):
         """C = A @ B for tile-aligned extents; A and B are float16, C float32.
@@ -232,17 +243,18 @@ class Runtime:
     def scale(self, source, target, count, factor):
         return self.unary(SCALE, source, target, count, scale=factor)
 
-    def residual(self, branch, skip, cosine, target, count, channels, *, reverse=None):
+    def residual(self, branch, skip, cosine, target, count, channels, *, reverse=None,
+                 epilogue=0, narrow=False):
         """target = branch + skip * cosine, one cosine per channel."""
         if reverse is not None:
             height, width, size, origin = reverse
             _, pw, (top, left) = self.window_extent(height, width, origin, size)
             return self.unary(RESIDUAL | 0x4000, branch, target, count, second=skip,
-                              third=cosine, channels=channels,
-                              _dims=(size, height, width, pw // size),
+                              third=cosine, channels=channels, epilogue=epilogue,
+                              narrow=narrow, _dims=(size, height, width, pw // size),
                               _pad=(top << 16) | left)
         return self.unary(RESIDUAL, branch, target, count, second=skip, third=cosine,
-                          channels=channels)
+                          channels=channels, epilogue=epilogue, narrow=narrow)
 
     @staticmethod
     def window_extent(height, width, origin=(0, 0), size=8):
@@ -309,8 +321,9 @@ class Runtime:
         return self.unary(SCALE_CHANNEL, source, target, count, channels=channels,
                           third=factors)
 
-    def add(self, left, right, target, count):
-        return self.unary(ADD, left, target, count, second=right)
+    def add(self, left, right, target, count, *, epilogue=0, narrow=False):
+        return self.unary(ADD, left, target, count, second=right, epilogue=epilogue,
+                          narrow=narrow)
 
     def add_bias(self, source, bias, target, count, tokens, heads):
         """scores + the per-head attention bias."""
@@ -369,3 +382,18 @@ class Runtime:
         if count < 0:
             raise RuntimeError("xmx_submit: " + self.lib.xmx_error().decode())
         return count
+
+
+class _Independent:
+    __slots__ = ("runtime",)
+
+    def __init__(self, runtime):
+        self.runtime = runtime
+
+    def __enter__(self):
+        self.runtime.lib.xmx_sync(0)
+        return self.runtime
+
+    def __exit__(self, *exc):
+        self.runtime.lib.xmx_sync(1)
+        return False

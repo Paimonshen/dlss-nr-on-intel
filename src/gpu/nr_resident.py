@@ -165,15 +165,17 @@ def record_global_block(runtime, w, s, source=None, target=None):
 
     runtime.to_half(s.ffn, s.ffn16, padded * channels)
     runtime.gemm(s.ffn16, w.qkv, s.proj, padded, 3 * channels, channels)
-    for index, part in enumerate((s.q16, s.k16)):
-        runtime.split_heads(s.proj, part, 1, padded, channels, heads, index,
-                            epilogue=xmxres.EPI_HALF, narrow=True)
-    runtime.split_heads(s.proj, s.v16, 1, padded, channels, heads, 2,
-                        epilogue=xmxres.EPI_E4M3, narrow=True)
-    runtime.cosine_publish(s.q16, s.q16, heads * padded, tokens=padded, heads=heads,
-                           scale=w.scale, narrow=True, from_half=True)
-    runtime.cosine_publish(s.k16, s.k16, heads * padded, tokens=padded, heads=heads,
-                           narrow=True, from_half=True)
+    with runtime.independent():
+        for index, part in enumerate((s.q16, s.k16)):
+            runtime.split_heads(s.proj, part, 1, padded, channels, heads, index,
+                                epilogue=xmxres.EPI_HALF, narrow=True)
+        runtime.split_heads(s.proj, s.v16, 1, padded, channels, heads, 2,
+                            epilogue=xmxres.EPI_E4M3, narrow=True)
+    with runtime.independent():
+        runtime.cosine_publish(s.q16, s.q16, heads * padded, tokens=padded, heads=heads,
+                               scale=w.scale, narrow=True, from_half=True)
+        runtime.cosine_publish(s.k16, s.k16, heads * padded, tokens=padded, heads=heads,
+                               narrow=True, from_half=True)
     runtime.gemm(s.q16, s.k16, s.scores, padded, padded, 32, batch=heads,
                  strides=(padded * 32, padded * 32, padded * padded), transpose_b=True)
     # no attention bias here, and the logits are clamped symmetrically
@@ -254,20 +256,23 @@ def record_feed_forward(runtime, w, s, source):
     pixels, channels = s.height * s.width, w.channels
     runtime.to_half(source, s.value16, pixels * channels)
     if w.branched:
-        for head in range(w.groups):
-            runtime.gemm(s.value16, w.expand, s.hidden16, pixels, 128, channels,
-                         leading=(0, 0, s.hidden_width),
-                         offsets=(0, head * channels * 128, head * 128),
-                         epilogue=xmxres.EPI_GATE_E4M3, narrow=True)
-        for head in range(w.groups):
-            runtime.gemm(s.hidden16, w.branch, s.heads16, pixels, 32, 128,
-                         leading=(s.hidden_width, 0, channels),
-                         offsets=(head * 128, head * 128 * 32, head * 32),
-                         epilogue=xmxres.EPI_E4M3, narrow=True)
+        with runtime.independent():
+            for head in range(w.groups):
+                runtime.gemm(s.value16, w.expand, s.hidden16, pixels, 128, channels,
+                             leading=(0, 0, s.hidden_width),
+                             offsets=(0, head * channels * 128, head * 128),
+                             epilogue=xmxres.EPI_GATE_E4M3, narrow=True)
+        with runtime.independent():
+            for head in range(w.groups):
+                runtime.gemm(s.hidden16, w.branch, s.heads16, pixels, 32, 128,
+                             leading=(s.hidden_width, 0, channels),
+                             offsets=(head * 128, head * 128 * 32, head * 32),
+                             epilogue=xmxres.EPI_E4M3, narrow=True)
         runtime.gemm(s.heads16, w.ffn_out, s.branch, pixels, channels, channels)
-        runtime.residual(s.branch, source, w.ffn_cos, s.ffn, pixels * channels, channels)
-        # the fused multi-head kernels publish the residual before attention reads it
-        runtime.e4m3(s.ffn, s.ffn, pixels * channels)
+        # the fused multi-head kernels publish the residual before attention reads it,
+        # which the residual now does on its way out
+        runtime.residual(s.branch, source, w.ffn_cos, s.ffn, pixels * channels, channels,
+                         epilogue=xmxres.EPI_E4M3)
     else:
         runtime.gemm(s.value16, w.expand, s.hidden16, pixels, s.hidden_width, channels,
                      epilogue=xmxres.EPI_GATE_E4M3, narrow=True)
@@ -286,16 +291,18 @@ def record_split_feed_forward(runtime, w, s, source):
     runtime.to_half(source, s.value16, pixels * channels)
     runtime.gemm(s.value16, w.first, s.heads16, pixels, channels, channels,
                  epilogue=xmxres.EPI_E4M3, narrow=True)
-    for group in range(groups):
-        runtime.gemm(s.heads16, w.expand, s.hidden16, pixels, 256, 64,
-                     leading=(channels, 0, wide),
-                     offsets=(group * 64, group * 64 * 256, group * 256),
-                     epilogue=xmxres.EPI_GATE, narrow=True)
-    for group in range(groups):
-        runtime.gemm(s.hidden16, w.project, s.core16, pixels, 64, 256,
-                     leading=(wide, 0, channels),
-                     offsets=(group * 256, group * 256 * 64, group * 64),
-                     epilogue=xmxres.EPI_E4M3, narrow=True)
+    with runtime.independent():
+        for group in range(groups):
+            runtime.gemm(s.heads16, w.expand, s.hidden16, pixels, 256, 64,
+                         leading=(channels, 0, wide),
+                         offsets=(group * 64, group * 64 * 256, group * 256),
+                         epilogue=xmxres.EPI_GATE, narrow=True)
+    with runtime.independent():
+        for group in range(groups):
+            runtime.gemm(s.hidden16, w.project, s.core16, pixels, 64, 256,
+                         leading=(wide, 0, channels),
+                         offsets=(group * 256, group * 256 * 64, group * 64),
+                         epilogue=xmxres.EPI_E4M3, narrow=True)
     runtime.gemm(s.core16, w.weight3, s.branch, pixels, channels, channels)
     runtime.residual(s.branch, source, w.ffn_cos, s.ffn, pixels * channels, channels)
 
@@ -315,18 +322,20 @@ def record_window_attention(runtime, w, s, source):
     runtime.partition(source, s.win16, s.height, s.width, channels, origin=w.origin,
                       narrow=True)
     runtime.gemm(s.win16, w.qkv, s.proj, windows * tokens, 3 * channels, channels)
-    for index, part in enumerate((s.q16, s.k16)):
-        runtime.split_heads(s.proj, part, windows, tokens, channels, heads, index,
-                            epilogue=xmxres.EPI_HALF, narrow=True)
-    # V's publish is the split itself: a permutation and an elementwise round commute
-    runtime.split_heads(s.proj, s.v16, windows, tokens, channels, heads, 2,
-                        epilogue=xmxres.EPI_E4M3, narrow=True)
+    with runtime.independent():
+        for index, part in enumerate((s.q16, s.k16)):
+            runtime.split_heads(s.proj, part, windows, tokens, channels, heads, index,
+                                epilogue=xmxres.EPI_HALF, narrow=True)
+        # V's publish is the split itself: a permutation and a round commute
+        runtime.split_heads(s.proj, s.v16, windows, tokens, channels, heads, 2,
+                            epilogue=xmxres.EPI_E4M3, narrow=True)
     # the cosine publish rounds its input to half first, so reading the split's own
     # half output is the same value it would have computed from float32
-    runtime.cosine_publish(s.q16, s.q16, batch * tokens, tokens=tokens, heads=heads,
-                           scale=w.scale, narrow=True, from_half=True)
-    runtime.cosine_publish(s.k16, s.k16, batch * tokens, tokens=tokens, heads=heads,
-                           narrow=True, from_half=True)
+    with runtime.independent():
+        runtime.cosine_publish(s.q16, s.q16, batch * tokens, tokens=tokens, heads=heads,
+                               scale=w.scale, narrow=True, from_half=True)
+        runtime.cosine_publish(s.k16, s.k16, batch * tokens, tokens=tokens, heads=heads,
+                               narrow=True, from_half=True)
     runtime.gemm(s.q16, s.k16, s.scores, tokens, tokens, 32, batch=batch,
                  strides=(tokens * 32, tokens * 32, tokens * tokens), transpose_b=True)
     runtime.softmax(s.scores, s.probs16, batch * tokens, tokens, narrow=True,
@@ -338,11 +347,13 @@ def record_window_attention(runtime, w, s, source):
     runtime.gemm(s.merged16, w.out, s.attended, windows * tokens, channels, channels)
 
 
-def record_block(runtime, w, s, source=None, target=None):
+def record_block(runtime, w, s, source=None, target=None, publish=0):
     """A whole window block: feed-forward, attention, both residuals.
 
     `source` and `target` default to the scratch's own buffers; passing them lets one
-    level's blocks chain into the next without a copy.
+    level's blocks chain into the next without a copy. `publish` is the epilogue the
+    closing residual applies, which is how a block's output is published without a
+    second pass over it.
     """
     source = source or s.value
     target = target or s.out
@@ -354,7 +365,8 @@ def record_block(runtime, w, s, source=None, target=None):
     record_window_attention(runtime, w, s, s.ffn)
     # the window reverse is the residual's own gather, not a pass of its own
     runtime.residual(s.attended, s.ffn, w.attn_cos, target, pixels * w.channels,
-                     w.channels, reverse=(s.height, s.width, 8, w.origin))
+                     w.channels, reverse=(s.height, s.width, 8, w.origin),
+                     epilogue=publish)
 
 
 def run_block(runtime, w, s, value):
@@ -418,12 +430,13 @@ def record_upsample_merge(runtime, transition, scratch, source, skip, target,
     runtime.to_half(source, scratch.projected16, source_pixels * channels)
     runtime.gemm(scratch.projected16, transition.weight0, scratch.projected,
                  source_pixels, out_channels, channels)
-    runtime.upsample2(scratch.projected, scratch.upsampled, source_width, height, width,
-                      out_channels)
-    runtime.scale_channel(skip, transition.sine, scratch.scaled, height * width * out_channels,
-                          out_channels)
-    runtime.add(scratch.upsampled, scratch.scaled, target, height * width * out_channels)
-    runtime.e4m3(target, target, height * width * out_channels)
+    with runtime.independent():
+        runtime.upsample2(scratch.projected, scratch.upsampled, source_width, height,
+                          width, out_channels)
+        runtime.scale_channel(skip, transition.sine, scratch.scaled,
+                              height * width * out_channels, out_channels)
+    runtime.add(scratch.upsampled, scratch.scaled, target, height * width * out_channels,
+                epilogue=xmxres.EPI_E4M3)
 
 
 class TransitionScratch:
