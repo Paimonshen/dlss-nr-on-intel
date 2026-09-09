@@ -158,8 +158,8 @@ def record_global_block(runtime, w, s, source=None, target=None):
     target = target or s.out
     channels, heads, padded = w.channels, w.heads, s.padded
     runtime.to_half(source, s.value16, padded * channels)
-    runtime.gemm(s.value16, w.expand, s.hidden, padded, w.hidden_width, channels)
-    runtime.gate_e4m3_half(s.hidden, s.hidden16, padded * w.hidden_width)
+    runtime.gemm(s.value16, w.expand, s.hidden16, padded, w.hidden_width, channels,
+                 epilogue=xmxres.EPI_GATE_E4M3, narrow=True)
     runtime.gemm(s.hidden16, w.ffn_proj, s.branch, padded, channels, w.hidden_width)
     runtime.residual(s.branch, source, w.ffn_cos, s.ffn, padded * channels, channels)
 
@@ -256,22 +256,22 @@ def record_feed_forward(runtime, w, s, source):
     runtime.to_half(source, s.value16, pixels * channels)
     if w.branched:
         for head in range(w.groups):
-            runtime.gemm(s.value16, w.expand, s.hidden, pixels, 128, channels,
+            runtime.gemm(s.value16, w.expand, s.hidden16, pixels, 128, channels,
                          leading=(0, 0, s.hidden_width),
-                         offsets=(0, head * channels * 128, head * 128))
-        runtime.gate_e4m3_half(s.hidden, s.hidden16, pixels * s.hidden_width)
+                         offsets=(0, head * channels * 128, head * 128),
+                         epilogue=xmxres.EPI_GATE_E4M3, narrow=True)
         for head in range(w.groups):
-            runtime.gemm(s.hidden16, w.branch, s.heads_out, pixels, 32, 128,
+            runtime.gemm(s.hidden16, w.branch, s.heads16, pixels, 32, 128,
                          leading=(s.hidden_width, 0, channels),
-                         offsets=(head * 128, head * 128 * 32, head * 32))
-        runtime.e4m3_half(s.heads_out, s.heads16, pixels * channels)
+                         offsets=(head * 128, head * 128 * 32, head * 32),
+                         epilogue=xmxres.EPI_E4M3, narrow=True)
         runtime.gemm(s.heads16, w.ffn_out, s.branch, pixels, channels, channels)
         runtime.residual(s.branch, source, w.ffn_cos, s.ffn, pixels * channels, channels)
         # the fused multi-head kernels publish the residual before attention reads it
         runtime.e4m3(s.ffn, s.ffn, pixels * channels)
     else:
-        runtime.gemm(s.value16, w.expand, s.hidden, pixels, s.hidden_width, channels)
-        runtime.gate_e4m3_half(s.hidden, s.hidden16, pixels * s.hidden_width)
+        runtime.gemm(s.value16, w.expand, s.hidden16, pixels, s.hidden_width, channels,
+                     epilogue=xmxres.EPI_GATE_E4M3, narrow=True)
         runtime.gemm(s.hidden16, w.branch, s.branch, pixels, channels, s.hidden_width)
         runtime.residual(s.branch, source, w.ffn_cos, s.ffn, pixels * channels, channels)
 
@@ -285,18 +285,18 @@ def record_split_feed_forward(runtime, w, s, source):
     pixels, channels, groups = s.height * s.width, w.channels, w.groups
     wide = groups * 256
     runtime.to_half(source, s.value16, pixels * channels)
-    runtime.gemm(s.value16, w.first, s.heads_out, pixels, channels, channels)
-    runtime.e4m3_half(s.heads_out, s.heads16, pixels * channels)
+    runtime.gemm(s.value16, w.first, s.heads16, pixels, channels, channels,
+                 epilogue=xmxres.EPI_E4M3, narrow=True)
     for group in range(groups):
-        runtime.gemm(s.heads16, w.expand, s.hidden, pixels, 256, 64,
+        runtime.gemm(s.heads16, w.expand, s.hidden16, pixels, 256, 64,
                      leading=(channels, 0, wide),
-                     offsets=(group * 64, group * 64 * 256, group * 256))
-    runtime.gate_half(s.hidden, s.hidden16, pixels * wide)
+                     offsets=(group * 64, group * 64 * 256, group * 256),
+                     epilogue=xmxres.EPI_GATE, narrow=True)
     for group in range(groups):
-        runtime.gemm(s.hidden16, w.project, s.merged_core, pixels, 64, 256,
+        runtime.gemm(s.hidden16, w.project, s.core16, pixels, 64, 256,
                      leading=(wide, 0, channels),
-                     offsets=(group * 256, group * 256 * 64, group * 64))
-    runtime.e4m3_half(s.merged_core, s.core16, pixels * channels)
+                     offsets=(group * 256, group * 256 * 64, group * 64),
+                     epilogue=xmxres.EPI_E4M3, narrow=True)
     runtime.gemm(s.core16, w.weight3, s.branch, pixels, channels, channels)
     runtime.residual(s.branch, source, w.ffn_cos, s.ffn, pixels * channels, channels)
 
@@ -399,8 +399,7 @@ def record_downsample(runtime, transition, scratch, source, target, height, widt
     runtime.pool2(source, scratch.pooled, height, width, channels)
     runtime.e4m3_half(scratch.pooled, scratch.pooled16, pixels * channels)
     runtime.gemm(scratch.pooled16, transition.weight0, target, pixels,
-                 transition.out_channels, channels)
-    runtime.e4m3(target, target, pixels * transition.out_channels)
+                 transition.out_channels, channels, epilogue=xmxres.EPI_E4M3)
     return half_height, half_width
 
 
@@ -461,5 +460,4 @@ def record_plain_downsample(runtime, edge, scratch, source, target, height, widt
     runtime.pool2(source, scratch.pooled, height, width, channels)
     runtime.to_half(scratch.pooled, scratch.pooled16, pixels * channels)
     runtime.gemm(scratch.pooled16, edge.weight0, target, pixels, edge.out_channels,
-                 channels)
-    runtime.e4m3(target, target, pixels * edge.out_channels)
+                 channels, epilogue=xmxres.EPI_E4M3)

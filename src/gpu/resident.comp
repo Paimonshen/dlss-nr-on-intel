@@ -38,20 +38,14 @@ const uint E4M3 = 0u, GATE = 1u, HALF = 2u, TO_HALF = 3u, SCALE = 4u,
             * otherwise makes three round trips over the same buffer */
            GATE_E4M3_HALF = 17u, E4M3_HALF = 18u, GATE_HALF = 19u;
 
-/* Rounding to half precision, done on the float32 exponent and mantissa.
- *
- * `float(float16_t(x))` looks like the obvious way and is not: the compiler folds the
- * round trip away and the value stays float32, which silently skipped every rounding
- * point the vendor's gate depends on. This form cannot be elided. Round-half-even at
- * bit 13, the float16 subnormal range at its fixed 2^-24 step, overflow to infinity. */
-float half_round(float x) {
-    float magnitude = abs(x);
-    if (magnitude >= 65520.0) return x < 0.0 ? -1.0 / 0.0 : 1.0 / 0.0;
-    if (magnitude < 6.103515625e-05) return roundEven(x * 16777216.0) * 5.9604644775390625e-08;
-    int bits = floatBitsToInt(x);
-    bits = (bits + (0x0FFF + ((bits >> 13) & 1))) & ~0x1FFF;
-    return intBitsToFloat(bits);
-}
+/* The hardware float16 conversion. `float(float16_t(x))` is the obvious spelling and
+ * the compiler folds it away, leaving the value in float32 — the bug that once made
+ * every vendor rounding point in this graph silently vanish. `packHalf2x16` changes
+ * the bit representation so it cannot be elided, and it is bit-exact against numpy's
+ * float16 over ordinary values, half subnormals and overflow to infinity
+ * (`work/bench/half_probe.py`): two instructions and no branches, where doing the
+ * exponent and mantissa by hand took ten and two branches. */
+float half_round(float x) { return unpackHalf2x16(packHalf2x16(vec2(x, 0.0))).x; }
 
 float e4m3(float x) {
     float magnitude = min(abs(x), 448.0);

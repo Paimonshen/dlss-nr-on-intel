@@ -459,8 +459,9 @@ int xmx_rec_gemm(int a, int b, int c, unsigned M, unsigned N, unsigned K, unsign
 			  .lda = lda, .ldb = ldb, .ldc = ldc };
 	if (!p.a || !p.b || !p.c) FAIL("gemm operand is not a live buffer", 0);
 	/* Element offsets are folded into the addresses, so a sub-matrix needs no shader
-	 * support: A and B are half, C is float. */
-	p.a += (uint64_t)oa * 2; p.b += (uint64_t)ob * 2; p.c += (uint64_t)oc * 4;
+	 * support: A and B are half, and C is float unless the epilogue narrows it. */
+	p.a += (uint64_t)oa * 2; p.b += (uint64_t)ob * 2;
+	p.c += (uint64_t)oc * ((bt & 0x100u) ? 2 : 4);
 	vkCmdBindPipeline(g.rcb, VK_PIPELINE_BIND_POINT_COMPUTE, g.rgemm);
 	vkCmdPushConstants(g.rcb, g.rpl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
 	vkCmdDispatch(g.rcb, (N + 15) / 16, (M + 7) / 8, batch ? batch : 1);

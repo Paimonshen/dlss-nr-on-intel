@@ -23,6 +23,7 @@ an output is an address, not a transfer.
 from __future__ import annotations
 
 import ctypes
+import os
 import pathlib
 
 import numpy as np
@@ -34,6 +35,9 @@ TM, TN, TK = 8, 16, 16
  SPLIT_HEADS, MERGE_HEADS, POOL2, UPSAMPLE2, SCALE_CHANNEL, ADD, PAD_END,
  GATE_E4M3_HALF, E4M3_HALF, GATE_HALF) = range(20)
 COSINE_PUBLISH, SOFTMAX = 0, 1
+
+# GEMM epilogues, applied to the accumulator on its way out of the kernel
+EPI_NONE, EPI_E4M3, EPI_GATE, EPI_GATE_E4M3, EPI_HALF = 0, 1, 2, 3, 4
 
 _lib = None
 
@@ -62,10 +66,14 @@ def _load():
     lib.xmx_buf_ptr.restype = ctypes.c_void_p
     lib.xmx_buf_bytes.argtypes = [ctypes.c_int]
     lib.xmx_buf_bytes.restype = ctypes.c_ulonglong
-    if lib.xmx_res_init(str(ROOT / "work" / "gemm_resident.spv").encode(),
-                        str(ROOT / "work" / "resident.spv").encode(),
-                        str(ROOT / "work" / "attention.spv").encode(),
-                        str(ROOT / "work" / "history.spv").encode()) != 0:
+    # The shader paths take an environment override so a variant can be measured
+    # against the shipped one without editing the tree.
+    spv = [os.environ.get(name) or str(ROOT / "work" / default)
+           for name, default in (("XMX_GEMM_SPV", "gemm_resident.spv"),
+                                 ("XMX_UNARY_SPV", "resident.spv"),
+                                 ("XMX_ROW_SPV", "attention.spv"),
+                                 ("XMX_HISTORY_SPV", "history.spv"))]
+    if lib.xmx_res_init(*[p.encode() for p in spv]) != 0:
         raise RuntimeError("xmx_res_init: " + lib.xmx_error().decode())
     _lib = lib
     return lib
@@ -142,7 +150,7 @@ class Runtime:
         return self
 
     def gemm(self, a, b, c, rows, cols, inner, *, batch=1, strides=None, transpose_b=False,
-             leading=None, offsets=(0, 0, 0)):
+             leading=None, offsets=(0, 0, 0), epilogue=0, narrow=False):
         """C = A @ B for tile-aligned extents; A and B are float16, C float32.
 
         `strides` are element counts per batch item, defaulting to the dense packing;
@@ -159,7 +167,7 @@ class Runtime:
         if strides is None:
             strides = (rows * inner, cols * inner if transpose_b else inner * cols, rows * cols)
         lda, ldb, ldc = leading or (0, 0, 0)
-        flags = 1 if transpose_b else 0
+        flags = (1 if transpose_b else 0) | (int(epilogue) << 4) | (0x100 if narrow else 0)
         if self.lib.xmx_rec_gemm(a.id, b.id, c.id, rows, cols, inner, batch,
                                  strides[0], strides[1], strides[2], flags,
                                  lda, ldb, ldc, *offsets) != 0:

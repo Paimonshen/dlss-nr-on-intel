@@ -30,14 +30,9 @@ layout(push_constant, scalar) uniform Push {
 const uint COSINE_PUBLISH = 0u, SOFTMAX = 1u;
 const float COSINE_NORM_FLOOR = 0.00006198883056640625;
 
-float half_round(float x) {
-    float magnitude = abs(x);
-    if (magnitude >= 65520.0) return x < 0.0 ? -1.0 / 0.0 : 1.0 / 0.0;
-    if (magnitude < 6.103515625e-05) return roundEven(x * 16777216.0) * 5.9604644775390625e-08;
-    int bits = floatBitsToInt(x);
-    bits = (bits + (0x0FFF + ((bits >> 13) & 1))) & ~0x1FFF;
-    return intBitsToFloat(bits);
-}
+/* The hardware float16 conversion; see the same function in resident.comp for why
+ * `float(float16_t(x))` cannot be used and this can. */
+float half_round(float x) { return unpackHalf2x16(packHalf2x16(vec2(x, 0.0))).x; }
 
 float e4m3(float x) {
     float magnitude = min(abs(x), 448.0);

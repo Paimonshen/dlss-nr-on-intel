@@ -11,26 +11,29 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #extension GL_KHR_memory_scope_semantics : require
 #extension GL_KHR_cooperative_matrix : require
+#extension GL_KHR_shader_subgroup_basic : require
 
 layout(local_size_x = 32) in;
 
 layout(buffer_reference, scalar, buffer_reference_align = 16) buffer HalfBuf  { float16_t v[]; };
 layout(buffer_reference, scalar, buffer_reference_align = 16) buffer FloatBuf { float     v[]; };
+layout(buffer_reference, scalar, buffer_reference_align = 8)  buffer Half4Buf { f16vec4   v4[]; };
 
-/* No epilogue here, and that is not an oversight.
+/* The epilogue is staged through shared memory, and that is the whole trick.
  *
- * Folding the gate and the E4M3 publish into the accumulator before the store would
- * turn four trips over block 0's 503 MB hidden buffer into one. It cannot be done on
- * this driver: **any** operation on the accumulator between `coopMatMulAdd` and
- * `coopMatStore` scrambles where the elements land. Verified at the crudest level —
- * `acc = acc * 2.0`, whole-matrix, no element access — which comes back with the
- * values in the wrong places, and not even as a clean permutation. Element access,
- * a fresh matrix, and the float16 conversion store all fail the same way, while an
- * untouched accumulator stores correctly. Mesa 26.2.1 on ANV, cooperative matrix
- * revision 2.
+ * Folding the publish into the accumulator directly cannot be done on this driver:
+ * **any** operation on a cooperative matrix between `coopMatMulAdd` and `coopMatStore`
+ * scrambles where the elements land. Verified at the crudest level — `acc = acc * 2.0`,
+ * whole-matrix, no element access — which comes back with the values in the wrong
+ * places, and not even as a clean permutation. Element access, a fresh matrix and the
+ * float16 conversion store all fail the same way, while an untouched accumulator
+ * stores correctly. Mesa 26.2.1 on ANV, cooperative matrix revision 2.
  *
- * The traffic is saved in `resident.comp` instead, by fusing the elementwise passes
- * with each other rather than with the GEMM. See notes/phase18-fusion.md.
+ * But the bug is in the arithmetic, not in the store: an untouched accumulator reaches
+ * *shared* memory intact, and the transform can then be done on ordinary scalars. That
+ * turns four trips over block 0's 503 MB hidden buffer into one 252 MB write. Every
+ * epilogue is bit-exact against the same chain run as a separate pass
+ * (`work/bench/test_epilogue.py`).
  */
 
 layout(push_constant, scalar) uniform Push {
@@ -43,6 +46,39 @@ layout(push_constant, scalar) uniform Push {
 
 const uint TM = 8, TN = 16, TK = 16;
 
+shared float stage[TM * TN];
+
+/* The hardware float16 conversion, which `float(float16_t(x))` does not give: the
+ * compiler folds that round trip away and leaves the value in float32, silently
+ * skipping every rounding point the vendor's graph depends on. `packHalf2x16` cannot
+ * be elided because it changes the bit representation, and it is bit-exact against
+ * numpy's float16 over ordinary values, half subnormals, and overflow to infinity
+ * (`work/bench/half_probe.py`). Two instructions and no branches, against ten and two
+ * branches for the version that did the exponent and mantissa by hand. */
+float half_round(float x) { return unpackHalf2x16(packHalf2x16(vec2(x, 0.0))).x; }
+
+float e4m3(float x) {
+    float magnitude = min(abs(x), 448.0);
+    int exponent = (floatBitsToInt(magnitude) >> 23) & 0xFF;
+    exponent = max(exponent, 121) - 3;
+    float step = intBitsToFloat(exponent << 23);
+    float reciprocal = intBitsToFloat((254 - exponent) << 23);
+    float rounded = roundEven(magnitude * reciprocal) * step;
+    return x < 0.0 ? -rounded : rounded;
+}
+
+float gate_activation(float x) {
+    precise float wide = half_round(x);
+    precise float clamped = clamp(wide, -4.0, 4.0);
+    precise float linear = abs(clamped) * -0.055908203125;
+    linear += 0.447265625;
+    linear = half_round(linear);
+    linear *= clamped;
+    linear += 0.89453125;
+    linear = half_round(linear);
+    return half_round(wide * linear);
+}
+
 void main() {
     uint row = gl_WorkGroupID.y * TM, col = gl_WorkGroupID.x * TN;
     if (row >= pc.m || col >= pc.n) return;
@@ -52,7 +88,7 @@ void main() {
      * output head into a 32-column slice of a wider buffer, and the split feed-forward
      * reads a 64-column slice of one. */
     uint lda = pc.lda != 0u ? pc.lda : pc.k;
-    uint ldb = pc.ldb != 0u ? pc.ldb : (pc.flags != 0u ? pc.k : pc.n);
+    uint ldb = pc.ldb != 0u ? pc.ldb : ((pc.flags & 1u) != 0u ? pc.k : pc.n);
     uint ldc = pc.ldc != 0u ? pc.ldc : pc.n;
 
     coopmat<float, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator> acc =
@@ -73,6 +109,39 @@ void main() {
             acc = coopMatMulAdd(a, b, acc);
         }
     }
-    coopMatStore(acc, pc.c.v, co + row * ldc + col, ldc,
-                 gl_CooperativeMatrixLayoutRowMajor);
+    uint epilogue = (pc.flags >> 4) & 0xFu;
+    bool narrow = (pc.flags & 0x100u) != 0u;
+    if (epilogue == 0u && !narrow) {
+        coopMatStore(acc, pc.c.v, co + row * ldc + col, ldc,
+                     gl_CooperativeMatrixLayoutRowMajor);
+        return;
+    }
+    coopMatStore(acc, stage, 0, TN, gl_CooperativeMatrixLayoutRowMajor);
+    /* One subgroup per workgroup, so a subgroup barrier is the whole barrier; the
+     * workgroup form costs a measurable slice of a pass this small. */
+    subgroupMemoryBarrierShared();
+    subgroupBarrier();
+    /* Four consecutive elements per lane, so the 32 lanes write eight whole rows of
+     * sixteen and the stores coalesce; one element per lane strided by 32 costs more
+     * than the epilogue saves. */
+    uint lane = gl_LocalInvocationID.x * 4u;
+    uint at = co + (row + lane / TN) * ldc + col + lane % TN;
+    vec4 out4;
+    for (uint i = 0; i < 4u; ++i) {
+        float value = stage[lane + i];
+        if (epilogue == 2u || epilogue == 3u) value = gate_activation(value);
+        if (epilogue == 1u || epilogue == 3u) value = e4m3(value);
+        if (epilogue == 4u) value = half_round(value);
+        out4[i] = value;
+    }
+    if (!narrow) {
+        for (uint i = 0; i < 4u; ++i) pc.c.v[at + i] = out4[i];
+    } else if ((at & 3u) == 0u && (uint(uint64_t(pc.c)) & 7u) == 0u) {
+        /* Four 16-bit stores are slower than the float32 store they replace; one
+         * 64-bit store is what makes the narrow output actually cheaper. */
+        Half4Buf(uint64_t(pc.c)).v4[at >> 2] = f16vec4(out4);
+    } else {
+        for (uint i = 0; i < 4u; ++i) HalfBuf(uint64_t(pc.c)).v[at + i] = float16_t(out4[i]);
+    }
 }
+
