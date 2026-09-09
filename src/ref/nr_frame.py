@@ -70,15 +70,24 @@ compose_detail = composition_mod.compose_detail
 AutomaticMask = features_mod.AutomaticMask
 
 
+# What the vendor's own panel starts at, which is not what MLX-DLSS's profiles use:
+# structure 1.5 rather than 1.0, skin structure 2.0, and the automatic mask on.
+# Recovered from the shipped control surface, not from the DLL —
+# `notes/phase30-control-atlas.md`.
+VENDOR_DEFAULTS = {"normalized_style": 0.0, "local_tone_strength": 1.0,
+                   "local_structure_strength": 1.5}
+VENDOR_AUTOMATIC_MASK = (2.0, -1.0)     # skin structure, automatic-mask structure
+
+
 def controls(profile="standard", style_index=None, local_tone=None,
              local_structure=None):
     """The three conditioning scalars, a profile plus any explicit overrides.
 
     `style_index` is the vendor's integer style, normalised by 1/128; the profiles
     are style 0 / 1 / 2 with tone and structure at 1, and `neutral` is style 0 with
-    both at 0.
+    both at 0. `vendor` is what the shipped panel starts at.
     """
-    values = dict(PROFILES[profile])
+    values = dict(VENDOR_DEFAULTS if profile == "vendor" else PROFILES[profile])
     if style_index is not None:
         values["normalized_style"] = style_index / 128.0
     if local_tone is not None:
@@ -172,8 +181,26 @@ def compose(head, color, *, intensity=1.0, detail_strength=1.0, colour_strength=
     `intensity` blends the model's picture against the source, per pixel when a
     ControlMask supplies its red channel. `detail_strength` and `colour_strength`
     then re-weight the high and low frequencies of whatever change remains.
+
+    Above 1 the blend extrapolates past the model's own picture. MLX-DLSS's
+    `compose_head` clamps it, so anything over 1 was silently a no-op here; the
+    vendor's panel goes to 2 and ships screenshots at 1.66
+    (`notes/phase30-control-atlas.md`). At or below 1 this is bit-identical to the
+    clamped path — the extrapolation only replaces the final blend, and the residual,
+    its half rounding and the [0,1] clamp on the result are unchanged.
     """
-    composed = compose_head(head, color, control_mask=control_mask, intensity=intensity)
+    if intensity > 1.0:
+        head = np.asarray(head, dtype=np.float32)
+        color = np.asarray(color, dtype=np.float32)
+        residual = features_mod.half(head[..., :3]) * np.float32(0.25)
+        predicted = np.clip(color + residual, 0, 1)
+        blend = np.float32(intensity)
+        if control_mask is not None:
+            blend = np.asarray(control_mask, dtype=np.float32)[..., :1] * blend
+        composed = np.clip(color + blend * (predicted - color), 0, 1).astype(np.float32)
+    else:
+        composed = compose_head(head, color, control_mask=control_mask,
+                                intensity=intensity)
     return compose_detail(color, composed, detail_strength=detail_strength,
                           colour_strength=colour_strength, radius=detail_radius)
 
@@ -199,16 +226,18 @@ def main():
                         help="preset for style/tone/structure; overridden by the flags below")
     parser.add_argument("--style-index", type=int,
                         help="vendor style index, normalised by 1/128 (0, 1, 2 are the presets)")
-    parser.add_argument("--local-tone", type=float, help="local tone strength, 0..1")
+    parser.add_argument("--local-tone", type=float,
+                        help="local tone strength, 0..2 (the vendor's range; default 1.0)")
     parser.add_argument("--local-structure", type=float,
-                        help="local structure strength, 0..1")
+                        help="local structure strength, 0..2 (vendor default 1.5)")
     parser.add_argument("--skin-structure", type=float,
                         help="skin structure strength; enables automatic masking, -1 to follow local structure")
     parser.add_argument("--auto-mask", type=float,
                         help="automatic-mask structure strength; -1 to follow local structure")
     parser.add_argument("--control-mask", help="per-pixel RGB mask: red intensity, green tone, blue structure")
     parser.add_argument("--intensity", type=float, default=1.0,
-                        help="blend of the model's picture against the source, 0..1")
+                        help="blend of the model's picture against the source, 0..2; "
+                             "above 1 extrapolates past the model's own picture")
     parser.add_argument("--intensity-ladder",
                         help="comma-separated intensities; renders once and writes one file each")
     parser.add_argument("--detail-strength", type=float, default=1.0)
