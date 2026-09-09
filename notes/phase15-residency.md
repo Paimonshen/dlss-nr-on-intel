@@ -95,3 +95,53 @@ The arithmetic ceiling from `notes/phase11-what-is-left.md` is unchanged: 340 ms
 720p frame at the kernel's measured throughput, so full-frame real-time remains out of
 reach by about 20x. What residency buys is the distance between today's 64.4 s and that
 floor.
+
+---
+
+## Later the same day: the whole attention path, bit-identical
+
+The remaining row-wise and permutation operators are done, so a complete window
+attention now runs on the device in **19 passes and one submit**.
+
+`src/gpu/attention.comp` holds the two reductions. Both had to have their order
+*measured* rather than assumed:
+
+- **The softmax's total is not accumulated in half.** `sum(dtype=float16)` in numpy —
+  and in torch — runs the reduction sequentially in **float32** and rounds once at the
+  end. An eight-accumulator pairwise tree, the obvious guess from numpy's internals,
+  does not match; a plain float32 sequential sum does. The comment in `nr_model` that
+  said otherwise is corrected.
+- **The cosine normalise** uses the kernel's own fragment tree, which is a fixed shape
+  of half operations rather than any reduction library's order, and transcribes
+  directly.
+
+The softmax shader also needs its own float32 to float16 bit conversion, because the
+vendor's approximation reinterprets the half bit pattern as an integer, shifts it and
+adds `0x7FF88000`.
+
+`resident.comp` gained the permutations: window partition and reverse, the head split
+that turns `(windows, tokens, 3C)` into Q, K or V as `(windows, heads, tokens, 32)`,
+the merge back, and the per-head bias add.
+
+### Verification, and a pleasant surprise
+
+Feeding the reference's float32 projection to both sides isolates the port from the one
+real difference, the qkv GEMM's float16 activation. Every stage is then **bit-identical**:
+the two cosine publishes, the E4M3 of V, the softmax, the context, the merge publish and
+the output.
+
+That includes both **batched GEMMs**, which was not obvious: the device multiplies in
+float16 and accumulates in float32 in a different order from numpy. It agrees exactly
+because the operands are E4M3-published — four mantissa bits, so products carry eight —
+and a sum of 32 or 64 such products is *exact* in float32 whatever the order. The
+vendor's own quantisation is what makes the reduction order stop mattering.
+
+End to end, from an ordinary float32 block input, the attention differs from the float32
+reference by 3.0e-02 and from the half-input reference by 2.2e-03 — all of it the qkv
+GEMM's operands, and **1.98 ms against the host's 37.60 ms, 18.9x**.
+
+### Still on the host
+
+The branched and split feed-forwards' concatenations, the pools and upsamples, the
+decoder merges, the shifted-window padding, and the frame-level dispatch that would
+record a whole graph rather than a block.

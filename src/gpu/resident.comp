@@ -31,7 +31,8 @@ layout(push_constant, scalar) uniform Push {
 
 // kinds
 const uint E4M3 = 0u, GATE = 1u, HALF = 2u, TO_HALF = 3u, SCALE = 4u,
-           RESIDUAL = 5u, FROM_HALF = 6u;
+           RESIDUAL = 5u, FROM_HALF = 6u, PARTITION = 7u, REVERSE = 8u, ADD_BIAS = 9u,
+           SPLIT_HEADS = 10u, MERGE_HEADS = 11u;
 
 /* Rounding to half precision, done on the float32 exponent and mantissa.
  *
@@ -86,6 +87,50 @@ void main() {
     if (kind == RESIDUAL) {
         // out = branch + skip * cosine, the cosine one value per channel
         pc.c.v[index] = pc.a.v[index] + pc.b.v[index] * pc.d.v[index % pc.n];
+        return;
+    }
+    if (kind == PARTITION || kind == REVERSE) {
+        // NHWC <-> (window, token, channel). n=channels, batch=window size,
+        // sa=height, sb=width, sc=windows across.
+        uint channels = pc.n, size = pc.batch, width = pc.sb, across = pc.sc;
+        uint c = index % channels, rest = index / channels;
+        uint source;
+        if (kind == PARTITION) {
+            uint token = rest % (size * size), window = rest / (size * size);
+            uint y = (window / across) * size + token / size;
+            uint x = (window % across) * size + token % size;
+            source = (y * width + x) * channels + c;
+        } else {
+            uint x = rest % width, y = rest / width;
+            uint window = (y / size) * across + (x / size);
+            uint token = (y % size) * size + (x % size);
+            source = (window * size * size + token) * channels + c;
+        }
+        pc.c.v[index] = pc.a.v[source];
+        return;
+    }
+    if (kind == SPLIT_HEADS) {
+        // (windows, tokens, 3C) -> one of Q/K/V as (windows, heads, tokens, 32)
+        uint channels = pc.n, heads = pc.batch, tokens = pc.sa, part = pc.sb;
+        uint d = index % 32u, rest = index / 32u;
+        uint token = rest % tokens; rest /= tokens;
+        uint head = rest % heads, window = rest / heads;
+        pc.c.v[index] = pc.a.v[(window * tokens + token) * 3u * channels
+                               + part * channels + head * 32u + d];
+        return;
+    }
+    if (kind == MERGE_HEADS) {
+        // (windows, heads, tokens, 32) -> (windows, tokens, C)
+        uint channels = pc.n, heads = pc.batch, tokens = pc.sa;
+        uint c = index % channels, rest = index / channels;
+        uint token = rest % tokens, window = rest / tokens;
+        pc.c.v[index] = pc.a.v[((window * heads + c / 32u) * tokens + token) * 32u + c % 32u];
+        return;
+    }
+    if (kind == ADD_BIAS) {
+        // scores are (windows*heads, tokens, tokens); the bias is (heads, tokens, tokens)
+        uint plane = pc.n * pc.n, inside = index % plane;
+        pc.c.v[index] = pc.a.v[index] + pc.d.v[((index / plane) % pc.batch) * plane + inside];
         return;
     }
     float value = pc.a.v[index] * pc.p0;

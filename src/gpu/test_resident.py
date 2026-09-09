@@ -136,12 +136,143 @@ def test_chain(runtime, weights, tokens=4096):
         buffer.free()
 
 
+def test_attention(runtime, weights, block=9, heads=4, height=24, width=32):
+    """The whole attention path, both sides starting from the same projection.
+
+    Feeding the reference's float32 projection to the device isolates the port from
+    the one real difference — the qkv GEMM's float16 activation — and every stage
+    then has to agree exactly.
+    """
+    print("window attention, stage by stage from a shared projection")
+    rng = np.random.default_rng(2)
+    prefix = f"block{block}.layer0"
+    qkv = weights[f"{prefix}.qkv_weight"]
+    projection = weights[f"{prefix}.projection_weight"]
+    bias = weights[f"{prefix}.attn_bias"]
+    scale = weights[f"{prefix}.attn_scale"]
+    channels, size, tokens = projection.shape[0], 8, 64
+    windows = (height // size) * (width // size)
+    batch = windows * heads
+    value = (rng.standard_normal((1, height, width, channels)) * 0.3).astype(np.float32)
+
+    partitioned = M.partition_windows(value, size)
+    projected = partitioned @ qkv
+    head_shape = (windows, tokens, heads, 32)
+    parts = [np.ascontiguousarray(part.reshape(head_shape).transpose(0, 2, 1, 3))
+             for part in np.split(projected, 3, axis=-1)]
+    query = M.vendor_cosine_publish(parts[0], scale)
+    key = M.vendor_cosine_publish(parts[1])
+    values = M.e4m3(parts[2])
+    scores = (query.reshape(batch, tokens, 32)
+              @ key.reshape(batch, tokens, 32).transpose(0, 2, 1))
+    scores = scores + np.tile(bias, (windows, 1, 1))
+    probabilities = M.vendor_approximate_softmax(scores)
+    context = probabilities @ values.reshape(batch, tokens, 32)
+    merged = M.e4m3(context.reshape(windows, heads, tokens, 32)
+                    .transpose(0, 2, 1, 3).reshape(windows, tokens, channels))
+    expected = M.reverse_windows(merged @ projection, batch_count=1, height=height,
+                                 width=width, window_size=size)
+
+    n = windows * tokens * channels
+    device = {name: runtime.buffer(n) for name in ("q", "k", "v", "merged", "attended")}
+    device.update({name: runtime.buffer(n, np.float16) for name in ("q16", "k16", "v16", "m16")})
+    device["proj"] = runtime.buffer_from(projected)
+    device["scores"] = runtime.buffer(batch * tokens * tokens)
+    device["p16"] = runtime.buffer(batch * tokens * tokens, np.float16)
+    device["ctx"] = runtime.buffer(batch * tokens * 32)
+    device["out"] = runtime.buffer(height * width * channels)
+    device["bias"] = runtime.buffer_from(bias)
+    device["scale"] = runtime.buffer_from(scale)
+    device["wp"] = runtime.buffer_from(projection, np.float16)
+
+    runtime.begin()
+    for index, name in enumerate(("q", "k", "v")):
+        runtime.split_heads(device["proj"], device[name], windows, tokens, channels,
+                            heads, index)
+    runtime.cosine_publish(device["q"], device["q"], batch * tokens, tokens=tokens,
+                           heads=heads, scale=device["scale"])
+    runtime.cosine_publish(device["k"], device["k"], batch * tokens, tokens=tokens,
+                           heads=heads)
+    runtime.e4m3(device["v"], device["v"], n)
+    for name in ("q", "k", "v"):
+        runtime.to_half(device[name], device[name + "16"], n)
+    runtime.gemm(device["q16"], device["k16"], device["scores"], tokens, tokens, 32,
+                 batch=batch, strides=(tokens * 32, tokens * 32, tokens * tokens),
+                 transpose_b=True)
+    runtime.add_bias(device["scores"], device["bias"], device["scores"],
+                     batch * tokens * tokens, tokens, heads)
+    runtime.softmax(device["scores"], device["scores"], batch * tokens, tokens)
+    runtime.to_half(device["scores"], device["p16"], batch * tokens * tokens)
+    runtime.gemm(device["p16"], device["v16"], device["ctx"], tokens, 32, tokens,
+                 batch=batch, strides=(tokens * tokens, tokens * 32, tokens * 32))
+    runtime.merge_heads(device["ctx"], device["merged"], windows, tokens, channels, heads)
+    runtime.e4m3(device["merged"], device["merged"], n)
+    runtime.to_half(device["merged"], device["m16"], n)
+    runtime.gemm(device["m16"], device["wp"], device["attended"], windows * tokens,
+                 channels, channels)
+    runtime.reverse(device["attended"], device["out"], height, width, channels, size)
+    passes = runtime.submit()
+    check("the attention path records as one submit", passes == 19, f"{passes} passes")
+
+    for name, buffer, want in (
+            ("cosine publish Q", device["q"], query),
+            ("cosine publish K", device["k"], key),
+            ("e4m3 V", device["v"], values),
+            ("softmax(scores)", device["scores"], probabilities),
+            ("context", device["ctx"], context),
+            ("merged publish", device["merged"], merged),
+            ("attention output", device["out"], expected)):
+        check(name, np.array_equal(buffer.view(shape=want.shape), want))
+    for buffer in device.values():
+        buffer.free()
+
+
+def test_permutations(runtime):
+    print("window and head permutations")
+    rng = np.random.default_rng(3)
+    height, width, channels, heads = 24, 32, 128, 4
+    value = rng.standard_normal((1, height, width, channels)).astype(np.float32)
+    source = runtime.buffer_from(value)
+    windowed = runtime.buffer(value.size)
+    back = runtime.buffer(value.size)
+    runtime.begin()
+    runtime.partition(source, windowed, height, width, channels)
+    runtime.reverse(windowed, back, height, width, channels)
+    runtime.submit()
+    expected = M.partition_windows(value, 8)
+    check("partition_windows", np.array_equal(windowed.view(shape=expected.shape), expected))
+    check("reverse_windows round trip",
+          np.array_equal(back.view(shape=value.shape), value))
+
+    windows, tokens = expected.shape[0], 64
+    projected = rng.standard_normal((windows, tokens, 3 * channels)).astype(np.float32)
+    device = runtime.buffer_from(projected)
+    parts = [runtime.buffer(windows * tokens * channels) for _ in range(3)]
+    merged = runtime.buffer(windows * tokens * channels)
+    context = rng.standard_normal((windows, heads, tokens, 32)).astype(np.float32)
+    device_context = runtime.buffer_from(context)
+    runtime.begin()
+    for index, part in enumerate(parts):
+        runtime.split_heads(device, part, windows, tokens, channels, heads, index)
+    runtime.merge_heads(device_context, merged, windows, tokens, channels, heads)
+    runtime.submit()
+    for index, (name, part) in enumerate(zip("qkv", np.split(projected, 3, axis=-1))):
+        want = part.reshape(windows, tokens, heads, 32).transpose(0, 2, 1, 3)
+        check(f"split_heads {name}", np.array_equal(parts[index].view(shape=want.shape), want))
+    want = context.transpose(0, 2, 1, 3).reshape(windows, tokens, channels)
+    check("merge_heads", np.array_equal(merged.view(shape=want.shape), want))
+    for buffer in [source, windowed, back, device, merged, device_context, *parts]:
+        buffer.free()
+
+
 def main():
     runtime = xmxres.Runtime()
     test_operators(runtime)
+    test_permutations(runtime)
     if WEIGHTS.exists():
         weights, _ = M.load_logical(WEIGHTS)
         test_chain(runtime, weights)
+        test_attention(runtime, weights)
     else:
         print(f"weights not found at {WEIGHTS}; skipping the chain")
     print()

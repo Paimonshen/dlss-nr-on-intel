@@ -25,7 +25,7 @@ static struct {
 	VkCommandPool cpool; VkCommandBuffer cb; VkFence fence;
 	struct buf A, B, C;
 	/* resident path */
-	VkPipelineLayout rpl; VkPipeline rgemm, runary;
+	VkPipelineLayout rpl; VkPipeline rgemm, runary, rrow;
 	VkCommandBuffer rcb; VkFence rfence; int recording, recorded, rready;
 	char name[256]; char err[256]; int ready;
 } g;
@@ -340,7 +340,7 @@ int xmx_gemm_batched(unsigned M, unsigned N, unsigned K, unsigned batch,
 /* passes; the point is not a faster kernel but the traffic that disappears.   */
 /* ------------------------------------------------------------------------- */
 
-int xmx_res_init(const char *gemm_spv, const char *unary_spv)
+int xmx_res_init(const char *gemm_spv, const char *unary_spv, const char *row_spv)
 {
 	if (!g.ready) FAIL("not initialised", 0);
 	if (g.rready) return 0;
@@ -349,7 +349,8 @@ int xmx_res_init(const char *gemm_spv, const char *unary_spv)
 					   .pushConstantRangeCount = 1, .pPushConstantRanges = &pcr };
 	VkResult r = vkCreatePipelineLayout(g.dev, &pli, NULL, &g.rpl);
 	if (r) FAIL("resident pipeline layout", r);
-	if (build_pipeline(gemm_spv, g.rpl, &g.rgemm) || build_pipeline(unary_spv, g.rpl, &g.runary))
+	if (build_pipeline(gemm_spv, g.rpl, &g.rgemm) || build_pipeline(unary_spv, g.rpl, &g.runary)
+	    || build_pipeline(row_spv, g.rpl, &g.rrow))
 		return -1;
 	VkCommandBufferAllocateInfo cba = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
 					    .commandPool = g.cpool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
@@ -459,15 +460,34 @@ int xmx_rec_gemm(int a, int b, int c, unsigned M, unsigned N, unsigned K, unsign
 	return 0;
 }
 
-int xmx_rec_unary(unsigned kind, int a, int b, int c, int d, unsigned n, unsigned channels, float p0)
+int xmx_rec_unary(unsigned kind, int a, int b, int c, int d, unsigned n, unsigned channels,
+		  float p0, unsigned batch, unsigned sa, unsigned sb, unsigned sc)
 {
 	if (!g.recording) FAIL("not recording", 0);
 	struct push p = { .a = addr_of(a), .b = addr_of(b), .c = addr_of(c), .d = addr_of(d),
-			  .m = n, .n = channels, .flags = kind, .p0 = p0 };
+			  .m = n, .n = channels, .flags = kind, .p0 = p0,
+			  .batch = batch, .sa = sa, .sb = sb, .sc = sc };
 	if (!p.a || !p.c) FAIL("unary operand is not a live buffer", 0);
 	vkCmdBindPipeline(g.rcb, VK_PIPELINE_BIND_POINT_COMPUTE, g.runary);
 	vkCmdPushConstants(g.rcb, g.rpl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
 	vkCmdDispatch(g.rcb, (n + 255) / 256, 1, 1);
+	barrier();
+	g.recorded++;
+	return 0;
+}
+
+/* Row-wise passes: the cosine publish reduces 32 channels through the kernel's own
+ * fragment tree, the softmax reduces a window's tokens. One invocation per row. */
+int xmx_rec_row(unsigned kind, int a, int c, int d, unsigned rows, unsigned width,
+		unsigned heads, unsigned scaled)
+{
+	if (!g.recording) FAIL("not recording", 0);
+	struct push p = { .a = addr_of(a), .c = addr_of(c), .d = addr_of(d),
+			  .m = rows, .n = width, .k = scaled, .batch = heads, .flags = kind };
+	if (!p.a || !p.c) FAIL("row operand is not a live buffer", 0);
+	vkCmdBindPipeline(g.rcb, VK_PIPELINE_BIND_POINT_COMPUTE, g.rrow);
+	vkCmdPushConstants(g.rcb, g.rpl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
+	vkCmdDispatch(g.rcb, (rows + 63) / 64, 1, 1);
 	barrier();
 	g.recorded++;
 	return 0;

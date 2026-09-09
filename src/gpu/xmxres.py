@@ -30,7 +30,9 @@ import numpy as np
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 TM, TN, TK = 8, 16, 16
 
-E4M3, GATE, HALF, TO_HALF, SCALE, RESIDUAL, FROM_HALF = range(7)
+(E4M3, GATE, HALF, TO_HALF, SCALE, RESIDUAL, FROM_HALF, PARTITION, REVERSE, ADD_BIAS,
+ SPLIT_HEADS, MERGE_HEADS) = range(12)
+COSINE_PUBLISH, SOFTMAX = 0, 1
 
 _lib = None
 
@@ -42,14 +44,15 @@ def _load():
     import xmx
     lib = xmx._load()                      # shares the instance, device and queue
     for name, args in (
-            ("xmx_res_init", [ctypes.c_char_p, ctypes.c_char_p]),
+            ("xmx_res_init", [ctypes.c_char_p] * 3),
             ("xmx_buf_create", [ctypes.c_ulonglong]),
             ("xmx_buf_destroy", [ctypes.c_int]),
             ("xmx_begin", []),
             ("xmx_submit", []),
             ("xmx_rec_gemm", [ctypes.c_int] * 3 + [ctypes.c_uint] * 8),
             ("xmx_rec_unary", [ctypes.c_uint] + [ctypes.c_int] * 4
-             + [ctypes.c_uint, ctypes.c_uint, ctypes.c_float])):
+             + [ctypes.c_uint, ctypes.c_uint, ctypes.c_float] + [ctypes.c_uint] * 4),
+            ("xmx_rec_row", [ctypes.c_uint] + [ctypes.c_int] * 3 + [ctypes.c_uint] * 4)):
         getattr(lib, name).argtypes = args
         getattr(lib, name).restype = ctypes.c_int
     lib.xmx_buf_ptr.argtypes = [ctypes.c_int]
@@ -57,7 +60,8 @@ def _load():
     lib.xmx_buf_bytes.argtypes = [ctypes.c_int]
     lib.xmx_buf_bytes.restype = ctypes.c_ulonglong
     if lib.xmx_res_init(str(ROOT / "work" / "gemm_resident.spv").encode(),
-                        str(ROOT / "work" / "resident.spv").encode()) != 0:
+                        str(ROOT / "work" / "resident.spv").encode(),
+                        str(ROOT / "work" / "attention.spv").encode()) != 0:
         raise RuntimeError("xmx_res_init: " + lib.xmx_error().decode())
     _lib = lib
     return lib
@@ -153,11 +157,13 @@ class Runtime:
         return self
 
     def unary(self, kind, source, target, count, *, scale=1.0, second=None,
-              third=None, channels=0):
+              third=None, channels=0, _dims=None):
         second = second if second is not None else source
         third = third if third is not None else source
+        batch, height, width, across = _dims or (0, 0, 0, 0)
         if self.lib.xmx_rec_unary(kind, source.id, second.id, target.id, third.id,
-                                  int(count), int(channels), float(scale)) != 0:
+                                  int(count), int(channels), float(scale),
+                                  int(batch), int(height), int(width), int(across)) != 0:
             raise RuntimeError("xmx_rec_unary: " + self.lib.xmx_error().decode())
         self.recorded += 1
         return self
@@ -185,6 +191,55 @@ class Runtime:
         """target = branch + skip * cosine, one cosine per channel."""
         return self.unary(RESIDUAL, branch, target, count, second=skip, third=cosine,
                           channels=channels)
+
+    def partition(self, source, target, height, width, channels, size=8):
+        """NHWC -> (windows, tokens, channels)."""
+        return self.unary(PARTITION, source, target, height * width * channels,
+                          channels=channels, second=source, third=source,
+                          _dims=(size, height, width, width // size))
+
+    def reverse(self, source, target, height, width, channels, size=8):
+        """(windows, tokens, channels) -> NHWC."""
+        return self.unary(REVERSE, source, target, height * width * channels,
+                          channels=channels, second=source, third=source,
+                          _dims=(size, height, width, width // size))
+
+    def split_heads(self, source, target, windows, tokens, channels, heads, part):
+        """(windows, tokens, 3C) -> Q, K or V as (windows, heads, tokens, 32)."""
+        return self.unary(SPLIT_HEADS, source, target, windows * tokens * channels,
+                          channels=channels, _dims=(heads, tokens, part, 0))
+
+    def merge_heads(self, source, target, windows, tokens, channels, heads):
+        """(windows, heads, tokens, 32) -> (windows, tokens, C)."""
+        return self.unary(MERGE_HEADS, source, target, windows * tokens * channels,
+                          channels=channels, _dims=(heads, tokens, 0, 0))
+
+    def add_bias(self, source, bias, target, count, tokens, heads):
+        """scores + the per-head attention bias."""
+        return self.unary(ADD_BIAS, source, target, count, channels=tokens,
+                          third=bias, _dims=(heads, 0, 0, 0))
+
+    def cosine_publish(self, source, target, rows, *, tokens=0, heads=0, scale=None):
+        """Normalise rows of 32 through the kernel's fragment tree, then publish as E4M3.
+
+        With `scale` the query path also multiplies by its head's `attn_scale`; rows are
+        ordered (batch, head, token), so the head follows from the row index.
+        """
+        third = scale if scale is not None else source
+        if self.lib.xmx_rec_row(COSINE_PUBLISH, source.id, target.id, third.id,
+                                int(rows), int(tokens), int(heads),
+                                1 if scale is not None else 0) != 0:
+            raise RuntimeError("xmx_rec_row: " + self.lib.xmx_error().decode())
+        self.recorded += 1
+        return self
+
+    def softmax(self, source, target, rows, width):
+        """The bit-affine softmax approximation, one row per invocation."""
+        if self.lib.xmx_rec_row(SOFTMAX, source.id, target.id, source.id,
+                                int(rows), int(width), 0, 0) != 0:
+            raise RuntimeError("xmx_rec_row: " + self.lib.xmx_error().decode())
+        self.recorded += 1
+        return self
 
     def submit(self):
         count = self.lib.xmx_submit()
