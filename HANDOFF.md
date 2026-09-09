@@ -13,8 +13,9 @@ eyelashes and eyebrow hairs resolved out of a smeared input, skin pores synthesi
 iris and eyeliner sharpened. `notes/phase7-first-render.md`.
 
 ```
+work/venv/bin/python src/ref/nr_frame.py IN.png OUT.png --accel   # 10 s, the fastest
 python3 src/ref/nr_frame.py IN.png OUT.png --gpu      # 17 s for 384x384 on XMX
-python3 src/ref/nr_frame.py IN.png OUT.png            # 38 s, the CPU reference
+python3 src/ref/nr_frame.py IN.png OUT.png            # 38 s, system numpy is netlib
 python3 src/ref/nr_temporal.py IN.png OUT --gpu --pan 6,0 --frames 4   # a sequence
 ```
 
@@ -56,6 +57,14 @@ artefacts.
   error, above the float32 threshold, so **any** correct float32 implementation would
   diverge from this reference by the whole floor. Judge on the composed image and on
   the controls, never per-element. `notes/phase9-numerics.md`.
+
+---
+
+- **The NPU is not worth using.** Present and driver-ready (`/dev/accel/accel0`,
+  `intel_vpu`), but the GPU is the faster engine in this SoC (67 TOPS against 48), our
+  own shader runs at 4 % of it, all three engines share one memory pool so the actual
+  bottleneck does not move, and the graph's bit-level ops do not fit an NPU compiler's
+  operator set. `notes/phase14-npu-and-rounding.md`.
 
 ---
 
@@ -256,8 +265,11 @@ What is *not* claimed:
 - **No NVIDIA parity gate.** There is still no NVIDIA GPU here, so there are still no
   reference activations. The graph is MLX-DLSS's recovery from vendor captures, and it
   is validated against their spec and against behaviour, not against the DLL.
-- **Not fast, and the GPU is not yet paying for itself.** 17.5 s for 384x384 on the
-  CPU under OpenBLAS, ~18 s with XMX, ~95 s for 720p. Every GEMM is on the GPU; the
+- **Not fast, and the GPU is not yet paying for itself.** Best is **10.2 s** for
+  384x384 and **64.4 s** for 720p — OpenBLAS numpy plus `nr_accel`, which swaps the
+  half and E4M3 rounding for torch's SIMD conversions (bit-identical, verified over
+  every representable value; pin torch to **one** thread, eight is 3x slower).
+  XMX adds nothing on top. Every GEMM is on the GPU; the
   remaining 71 % is elementwise numpy, and the round trips cost more than the kernel
   saves.
 - **Single frame.** No motion vectors, no history, no temporal path.
