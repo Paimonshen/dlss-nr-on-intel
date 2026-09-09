@@ -24,11 +24,14 @@ engine we already use.
 headroom in the hardware we are already on — no shared-memory staging, no K-blocking,
 no register reuse in the shader — before a second accelerator is worth discussing.
 
-**3. Everything shares one memory pool, which is the actual bottleneck.** Measured on
-this machine: 23.5 GB/s for a float32 copy, 13.5 GB/s for a scaled copy, 9.8 GB/s for a
-pure read. A 720p frame currently moves **16.46 GB** across the host boundary. The NPU
-sits behind the same memory controller, so relocating the arithmetic changes nothing
-about the number that is actually limiting us.
+**3. Everything shares one memory pool.** *(Corrected 2026-09-09 —
+`notes/phase20-machine-limits.md`. The figures first written here, 23.5 GB/s for a copy
+and 9.8 GB/s for a read, were **single-threaded numpy** and are not the machine's
+bandwidth. One core cannot saturate an on-package LPDDR5X controller: eight give
+**70.8 GB/s** on STREAM triad, and the GPU itself reaches **69-91 GB/s**, against
+136.5 GB/s theoretical.)* A 720p frame moved **16.46 GB** across the host boundary at
+the time, which residency has since deleted. The NPU sits behind the same controller,
+so relocating the arithmetic would not change the number that limits us.
 
 That cuts the other way too, and it is the real opportunity the owner was pointing at:
 because it is one physical pool, a device-resident implementation needs **no copies at

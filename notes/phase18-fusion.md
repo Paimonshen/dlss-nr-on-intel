@@ -75,20 +75,22 @@ fused with the other elementwise passes rather than with the GEMM.
 The owner's target is 30 fps at 720p — 33 ms a frame against today's 1231 ms, a factor
 of 37. Being straight about it:
 
-- **The arithmetic alone forbids it.** A 720p frame is 458.6 GFLOP. Even at a well-tuned
-  10 TFLOP/s — roughly a third of this iGPU's FP16 peak, and 7x better than our current
-  kernel — that is **46 ms, or 22 fps**, with zero time for anything else.
-- **The traffic forbids it too.** Activations are float32 in our buffers, and a frame
-  moves on the order of 10 GB through them. At the 23 GB/s this machine measures, that
-  is 435 ms before a single multiply.
+*(Revised 2026-09-09 by `notes/phase20-machine-limits.md`: the bandwidth figure this
+section originally used was single-threaded numpy and understated the machine by 3x.
+The corrected version follows.)*
 
-Both have room — the kernel has no shared-memory staging, no K-blocking and no register
-reuse, and the activations could be half rather than float32 throughout, which is what
-the vendor's own kernels do. Together those are plausibly 4-6x, which lands around
-200-300 ms: **3-5 fps at 720p**, not 30.
+- **The arithmetic.** A 720p frame is 458.6 GFLOP. Our GEMM measures 2584 GFLOP/s on a
+  large shape — **8.1 %** of this iGPU's ~32 TFLOP/s FP16 peak — which is 177 ms. At a
+  normal 30-40 % of peak it would be **40-50 ms**.
+- **The traffic.** About 10 GB of activations a frame, at the **69-91 GB/s** the GPU
+  actually reaches: **110-145 ms**, and roughly half that if activations were half
+  rather than float32, which is what the vendor's own kernels do.
 
-30 fps is reachable at a **smaller extent**. Today's 320x320 is 180 ms; the same 4-6x
-puts it near 30-45 ms. So a face-sized or HUD-sized region at interactive rates is on
-the table, and a full 720p frame is not — on this chip, with this model, at this
-resolution. That is the same conclusion `notes/phase11-what-is-left.md` reached from
-the arithmetic alone, now with the traffic measured as well.
+The measured frame is 1025 ms, so most of it is neither peak FLOPs nor peak bandwidth:
+it is dispatch overhead and poor occupancy on the many small shapes. That is the
+encouraging part — the slack is in our code, not in the chip.
+
+A well-optimised implementation plausibly lands at **100-200 ms, 5-10 fps at 720p**.
+30 fps needs about a **640x384** extent, which is a sensible internal resolution for a
+720p output, or a face-sized region, where today's 320x320 would land in single-digit
+milliseconds.
