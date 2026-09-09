@@ -116,6 +116,16 @@ value:
    unchanged. Storing every published buffer as float16 is done too, and also changed
    nothing measurable. **The frame is no longer bandwidth-bound** — 30.9 GB in ~600 ms
    is 50 GB/s against a ~90 GB/s ceiling — and both halves are latency-bound.
+   **And the GEMM's ceiling is now understood** — `notes/phase26-the-register-ceiling.md`.
+   All 64 XMX engines are busy (throughput scales linearly to 256 workgroups, four per
+   engine, and flattens exactly there), but each is ~90 % idle because a SIMD32 subgroup
+   runs out of registers: one accumulator is 4 of the 128 GRF, so a 16x32 block already
+   spills and a 32x64 block spills 474 times. That single fact explains the failed
+   register tiling, the failed operand staging, and the 4.4 % of peak. **The only lever
+   with a factor left in it is OpenCL** — `cl_intel_subgroup_2d_block_io` and the wider
+   DPAS shapes are on this machine and unreachable from Vulkan. A second backend, not a
+   flag.
+
    What is actually left is smaller than it looks. **A smaller extent does not buy a
    frame rate** — measured, `notes/phase25-the-frame-rate-wall.md`: the frame is
    `20 ms + 632 ms per megapixel`, so 640x384 is **191 ms (5.2 fps)**, not the 30 fps
@@ -329,9 +339,11 @@ What is *not* claimed:
   highlight structure. `notes/phase16-hdr.md`.
 - **The machine's real limits, measured** (`notes/phase20-machine-limits.md`):
   **70-91 GB/s** of memory bandwidth against 136.5 theoretical, the GPU holding its
-  **1950 MHz ceiling** throughout a run at 46-48 C, and our GEMM at **8.1 %** of the
-  ~32 TFLOP/s FP16 peak on a large isolated shape — **4.4 %** averaged over the
-  frame's real shapes. Earlier notes quoted 23 GB/s, which was single-threaded
+  **1950 MHz ceiling** throughout a run at 46-48 C, and our GEMM at **8-12 %** of the
+  ~32 TFLOP/s FP16 peak — **4.4 %** averaged over the frame's real shapes. That ceiling
+  is the register file, not the kernel (`notes/phase26-the-register-ceiling.md`): the
+  GPU has **64** XMX engines, all of them busy, each mostly idle. Earlier notes quoted
+  23 GB/s, which was single-threaded
   numpy and wrong by 3x. The slack is in our kernel, not the chip. Every GEMM is on the GPU; the
   remaining 71 % is elementwise numpy, and the round trips cost more than the kernel
   saves.
