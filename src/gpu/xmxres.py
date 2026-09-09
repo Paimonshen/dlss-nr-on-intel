@@ -52,7 +52,8 @@ def _load():
             ("xmx_rec_gemm", [ctypes.c_int] * 3 + [ctypes.c_uint] * 14),
             ("xmx_rec_unary", [ctypes.c_uint] + [ctypes.c_int] * 4
              + [ctypes.c_uint, ctypes.c_uint, ctypes.c_float] + [ctypes.c_uint] * 5),
-            ("xmx_rec_row", [ctypes.c_uint] + [ctypes.c_int] * 3 + [ctypes.c_uint] * 4)):
+            ("xmx_rec_row", [ctypes.c_uint] + [ctypes.c_int] * 3 + [ctypes.c_uint] * 5
+             + [ctypes.c_float])):
         getattr(lib, name).argtypes = args
         getattr(lib, name).restype = ctypes.c_int
     lib.xmx_buf_ptr.argtypes = [ctypes.c_int]
@@ -251,15 +252,21 @@ class Runtime:
         third = scale if scale is not None else source
         if self.lib.xmx_rec_row(COSINE_PUBLISH, source.id, target.id, third.id,
                                 int(rows), int(tokens), int(heads),
-                                1 if scale is not None else 0) != 0:
+                                1 if scale is not None else 0, 0, 0.0) != 0:
             raise RuntimeError("xmx_rec_row: " + self.lib.xmx_error().decode())
         self.recorded += 1
         return self
 
-    def softmax(self, source, target, rows, width):
-        """The bit-affine softmax approximation, one row per invocation."""
+    def softmax(self, source, target, rows, width, *, stride=0, cap=0.0):
+        """The bit-affine softmax, one row per invocation.
+
+        `stride` lets a row be wider than its token count, which the global blocks
+        need: their token count is the bottleneck's pixel count and need not be a
+        multiple of the tile. `cap` is the symmetric logit clamp the vit_1d kernels
+        apply.
+        """
         if self.lib.xmx_rec_row(SOFTMAX, source.id, target.id, source.id,
-                                int(rows), int(width), 0, 0) != 0:
+                                int(rows), int(width), 0, 0, int(stride), float(cap)) != 0:
             raise RuntimeError("xmx_rec_row: " + self.lib.xmx_error().decode())
         self.recorded += 1
         return self

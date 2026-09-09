@@ -145,3 +145,56 @@ GEMM's operands, and **1.98 ms against the host's 37.60 ms, 18.9x**.
 The branched and split feed-forwards' concatenations, the pools and upsamples, the
 decoder merges, the shifted-window padding, and the frame-level dispatch that would
 record a whole graph rather than a block.
+
+---
+
+## All three block families, one submit each
+
+`src/gpu/nr_resident.py` now records a whole block of any family as a single command
+buffer. Correlation with the reference is above **0.9998** everywhere; against the
+reference with its GEMM operands rounded to half — which is what the device actually
+computes — the spread runs from bit-identical to 4e-02.
+
+| block | family | heads | C | passes | corr | vs half-ref | vs float32 ref | speedup |
+|---|---|---|---|---|---|---|---|---|
+| 1 | window | 1 | 32 | 30 | 0.999996 | 5.3e-05 | 1.6e-02 | 7.5x |
+| 2 | window, shifted | 1 | 32 | 30 | 0.999982 | **6.9e-08** | 4.9e-02 | 9.8x |
+| 6 | window, shifted | 2 | 64 | 36 | 0.999841 | 6.5e-03 | 5.9e-02 | 15.1x |
+| 9 | window | 4 | 128 | 40 | 0.999881 | **0.0** | 3.7e-02 | 24.0x |
+| 20 | window, shifted | 8 | 256 | 48 | 0.999833 | 3.3e-02 | 5.1e-02 | 21.9x |
+| 23 | split | 16 | 512 | 49 | 0.999909 | 6.9e-03 | 5.6e-02 | 21.9x |
+| 44 | split | 16 | 512 | 49 | 0.999925 | 4.2e-02 | 4.2e-02 | 24.4x |
+| 31 | global | 32 | 1024 | 27 | 0.999818 | 4.5e-02 | 4.5e-02 | 7.3x |
+| 38 | global | 32 | 1024 | 27 | 0.999770 | 5.0e-02 | 5.0e-02 | 15.3x |
+
+The maxima look large and the correlations say why: a difference of one E4M3 quantum is
+6.25 % of a cell, so a handful of flipped cells out of half a million sets the maximum
+while leaving the correlation at five nines. Checked directly on the split feed-forward,
+stage by stage: correlation **0.99999999** at the first projection, **1.00000000** at
+the gated group expansion, 0.99999999 after the group projection. The slices, strides
+and offsets are right; the deviation is the avalanche of `notes/phase9-numerics.md`.
+
+### What each family needed
+
+**Branched (blocks 5-22).** Each output head's GEMM writes straight into a 32-column
+slice of one wide buffer, and the whole thing is published in a single dense pass —
+legitimate because the E4M3 publish is elementwise, so per-head-then-concatenate equals
+concatenate-then-publish.
+
+**Split (23-30, 40-47).** `e4m3(x @ first)`, then a per-64-channel-group 64 -> 256 -> 64
+MLP. The gate sits between the two group GEMMs with no publish between, so the wide
+buffer is gated in one pass and the group outputs are published together.
+
+**Global (31-38).** No windows and no bias, but two things the window path does not
+have: the `vit_1d` kernels' **symmetric logit clamp at +-3**, and a token count that is
+the bottleneck's pixel count and so need not be a multiple of the cooperative-matrix
+tile. The softmax therefore takes a row stride separate from its token count, and zeros
+the padding so the following P@V contributes nothing from it. `sqrt(head_dim)` is folded
+into the per-head scale on the host.
+
+### Still on the host
+
+The transitions — average pool, the learned and nearest upsamples, the decoder merges —
+the stem and the output head, and the frame-level orchestration that would record a
+whole graph rather than a block. Those are the remaining pieces before a resident frame
+can be timed end to end.

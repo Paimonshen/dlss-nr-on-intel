@@ -27,11 +27,41 @@ import nr_model  # noqa: E402
 import xmxres  # noqa: E402
 
 
+class SplitBlockWeights:
+    """A split-family block (23-30, 40-47): four layers, sixteen heads, C=512."""
+
+    def __init__(self, runtime, weights, index):
+        self.index, self.heads = index, 16
+        self.origin = nr_model.recovered_window_origin(index)
+        self.projection = weights[f"block{index}.layer3.projection_weight"]
+        self.channels = self.projection.shape[0]
+        self.groups = self.channels // 64
+        bias = weights[f"block{index}.layer2.attn_bias"]
+        if nr_model.uses_fragment_swizzle(index, 16):
+            bias = nr_model.recover_attention_bias_layout(bias)
+        self.first = runtime.buffer_from(weights[f"block{index}.layer0.first_projection_weight"],
+                                         np.float16)
+        self.expand = runtime.buffer_from(weights[f"block{index}.layer0.group_expand_weight"],
+                                          np.float16)
+        self.project = runtime.buffer_from(weights[f"block{index}.layer0.group_project_weight"],
+                                           np.float16)
+        self.weight3 = runtime.buffer_from(weights[f"block{index}.layer1.weight3"], np.float16)
+        self.ffn_cos = runtime.buffer_from(weights[f"block{index}.layer1.ffn_cos_skip"])
+        self.qkv = runtime.buffer_from(weights[f"block{index}.layer2.qkv_weight"], np.float16)
+        self.scale = runtime.buffer_from(weights[f"block{index}.layer2.attn_scale"])
+        self.bias = runtime.buffer_from(bias)
+        self.out = runtime.buffer_from(self.projection, np.float16)
+        self.attn_cos = runtime.buffer_from(weights[f"block{index}.layer3.attn_cos_skip"])
+        self.branched = False
+        self.split = True
+
+
 class BlockWeights:
     """One block's weights, uploaded once and kept on the device."""
 
     def __init__(self, runtime, weights, index, *, heads):
         prefix = f"block{index}.layer0"
+        self.split = False
         self.index, self.heads = index, heads
         self.origin = nr_model.recovered_window_origin(index)
         self.projection = weights[f"{prefix}.projection_weight"]
@@ -66,6 +96,108 @@ class BlockWeights:
             self.ffn_out = None
 
 
+class GlobalBlockWeights:
+    """A bottleneck block (31-38): every token attends to every other, 32 heads, C=1024."""
+
+    def __init__(self, runtime, weights, index):
+        import math
+        self.index, self.heads, self.split, self.branched = index, 32, False, False
+        self.projection = weights[f"block{index}.layer4.projection_weight"]
+        self.channels = self.projection.shape[0]
+        self.expand = runtime.buffer_from(weights[f"block{index}.layer0.weight"], np.float16)
+        self.ffn_proj = runtime.buffer_from(weights[f"block{index}.layer1.weight"], np.float16)
+        self.hidden_width = weights[f"block{index}.layer0.weight"].shape[1]
+        self.ffn_cos = runtime.buffer_from(weights[f"block{index}.layer1.ffn_cos_skip"])
+        self.qkv = runtime.buffer_from(weights[f"block{index}.layer2.qkv_weight"], np.float16)
+        # the global kernels fold sqrt(head_dim) into the per-head scale
+        scale = (weights[f"block{index}.layer2.attn_scale"]
+                 * np.float32(math.sqrt(self.channels // self.heads)))
+        self.scale = runtime.buffer_from(scale)
+        self.out = runtime.buffer_from(self.projection, np.float16)
+        self.attn_cos = runtime.buffer_from(weights[f"block{index}.layer4.attn_cos_skip"])
+        self.logit_cap = nr_model.GLOBAL_ATTENTION_LOGIT_CAP
+
+
+class GlobalScratch:
+    """Working buffers for one bottleneck block over `tokens` tokens."""
+
+    def __init__(self, runtime, weights, tokens):
+        channels, heads = weights.channels, weights.heads
+        # the token count is the bottleneck's pixel count and need not be tile-aligned
+        self.tokens, self.padded = tokens, xmxres.align(tokens, 16)
+        padded, hidden = self.padded, weights.hidden_width
+        make = runtime.buffer
+        self.value = make(padded * channels).zero()
+        self.value16 = make(padded * channels, np.float16)
+        self.hidden = make(padded * hidden)
+        self.hidden16 = make(padded * hidden, np.float16)
+        self.branch = make(padded * channels)
+        self.ffn = make(padded * channels)
+        self.ffn16 = make(padded * channels, np.float16)
+        self.proj = make(padded * channels * 3)
+        self.q, self.k, self.v = (make(padded * channels) for _ in range(3))
+        self.q16, self.k16, self.v16 = (make(padded * channels, np.float16) for _ in range(3))
+        self.scores = make(heads * padded * padded)
+        self.probs16 = make(heads * padded * padded, np.float16)
+        self.context = make(heads * padded * 32)
+        self.merged = make(padded * channels)
+        self.merged16 = make(padded * channels, np.float16)
+        self.attention = make(padded * channels)
+        self.out = make(padded * channels)
+
+    def free(self):
+        for name in dir(self):
+            value = getattr(self, name)
+            if isinstance(value, xmxres.Buffer):
+                value.free()
+
+
+def record_global_block(runtime, w, s):
+    """A bottleneck block: the wide feed-forward, then attention over every token."""
+    channels, heads, padded = w.channels, w.heads, s.padded
+    runtime.to_half(s.value, s.value16, padded * channels)
+    runtime.gemm(s.value16, w.expand, s.hidden, padded, w.hidden_width, channels)
+    runtime.gate(s.hidden, s.hidden, padded * w.hidden_width)
+    runtime.e4m3(s.hidden, s.hidden, padded * w.hidden_width)
+    runtime.to_half(s.hidden, s.hidden16, padded * w.hidden_width)
+    runtime.gemm(s.hidden16, w.ffn_proj, s.branch, padded, channels, w.hidden_width)
+    runtime.residual(s.branch, s.value, w.ffn_cos, s.ffn, padded * channels, channels)
+
+    runtime.to_half(s.ffn, s.ffn16, padded * channels)
+    runtime.gemm(s.ffn16, w.qkv, s.proj, padded, 3 * channels, channels)
+    for index, part in enumerate((s.q, s.k, s.v)):
+        runtime.split_heads(s.proj, part, 1, padded, channels, heads, index)
+    runtime.cosine_publish(s.q, s.q, heads * padded, tokens=padded, heads=heads,
+                           scale=w.scale)
+    runtime.cosine_publish(s.k, s.k, heads * padded, tokens=padded, heads=heads)
+    runtime.e4m3(s.v, s.v, padded * channels)
+    for part, half in ((s.q, s.q16), (s.k, s.k16), (s.v, s.v16)):
+        runtime.to_half(part, half, padded * channels)
+    runtime.gemm(s.q16, s.k16, s.scores, padded, padded, 32, batch=heads,
+                 strides=(padded * 32, padded * 32, padded * padded), transpose_b=True)
+    # no attention bias here, and the logits are clamped symmetrically
+    runtime.softmax(s.scores, s.scores, heads * padded, s.tokens,
+                    stride=padded, cap=w.logit_cap)
+    runtime.to_half(s.scores, s.probs16, heads * padded * padded)
+    runtime.gemm(s.probs16, s.v16, s.context, padded, 32, padded, batch=heads,
+                 strides=(padded * padded, padded * 32, padded * 32))
+    runtime.merge_heads(s.context, s.merged, 1, padded, channels, heads)
+    runtime.e4m3(s.merged, s.merged, padded * channels)
+    runtime.to_half(s.merged, s.merged16, padded * channels)
+    runtime.gemm(s.merged16, w.out, s.attention, padded, channels, channels)
+    runtime.residual(s.attention, s.ffn, w.attn_cos, s.out, padded * channels, channels)
+
+
+def run_global_block(runtime, w, s, value):
+    """Host convenience: `value` is (tokens, channels)."""
+    tokens, channels = value.shape
+    s.value.view(shape=(s.padded, channels))[:tokens] = value
+    runtime.begin()
+    record_global_block(runtime, w, s)
+    passes = runtime.submit()
+    return s.out.view(shape=(s.padded, channels))[:tokens].copy(), passes
+
+
 class BlockScratch:
     """Working buffers for one block at one extent, allocated once and reused."""
 
@@ -81,6 +213,8 @@ class BlockScratch:
         windowed = self.windows * self.tokens * channels
         hidden = weights.groups * 128 if weights.branched else weights.expand.nbytes // 2 // channels
 
+        if getattr(weights, "split", False):
+            hidden = weights.groups * 256
         make = runtime.buffer
         self.value = make(pixels * channels)
         self.value16 = make(pixels * channels, np.float16)
@@ -103,6 +237,8 @@ class BlockScratch:
         self.attended = make(windowed)
         self.attention = make(pixels * channels)
         self.out = make(pixels * channels)
+        self.merged_core = make(pixels * channels)
+        self.core16 = make(pixels * channels, np.float16)
         self.hidden_width = hidden
 
     def free(self):
@@ -143,6 +279,34 @@ def record_feed_forward(runtime, w, s):
         runtime.residual(s.branch, s.value, w.ffn_cos, s.ffn, pixels * channels, channels)
 
 
+def record_split_feed_forward(runtime, w, s):
+    """The split family's core: e4m3(x @ first), then a per-64-group 64 -> 256 -> 64 MLP.
+
+    The gate sits between the two group GEMMs with no publish, so the wide buffer is
+    gated in one dense pass; the group outputs are published once, together.
+    """
+    pixels, channels, groups = s.height * s.width, w.channels, w.groups
+    wide = groups * 256
+    runtime.to_half(s.value, s.value16, pixels * channels)
+    runtime.gemm(s.value16, w.first, s.heads_out, pixels, channels, channels)
+    runtime.e4m3(s.heads_out, s.heads_out, pixels * channels)
+    runtime.to_half(s.heads_out, s.heads16, pixels * channels)
+    for group in range(groups):
+        runtime.gemm(s.heads16, w.expand, s.hidden, pixels, 256, 64,
+                     leading=(channels, 0, wide),
+                     offsets=(group * 64, group * 64 * 256, group * 256))
+    runtime.gate(s.hidden, s.hidden, pixels * wide)
+    runtime.to_half(s.hidden, s.hidden16, pixels * wide)
+    for group in range(groups):
+        runtime.gemm(s.hidden16, w.project, s.merged_core, pixels, 64, 256,
+                     leading=(wide, 0, channels),
+                     offsets=(group * 256, group * 256 * 64, group * 64))
+    runtime.e4m3(s.merged_core, s.merged_core, pixels * channels)
+    runtime.to_half(s.merged_core, s.core16, pixels * channels)
+    runtime.gemm(s.core16, w.weight3, s.branch, pixels, channels, channels)
+    runtime.residual(s.branch, s.value, w.ffn_cos, s.ffn, pixels * channels, channels)
+
+
 def record_window_attention(runtime, w, s, source):
     """Window attention over `source`, into `s.attention`."""
     channels, heads, tokens = w.channels, w.heads, s.tokens
@@ -176,7 +340,10 @@ def record_window_attention(runtime, w, s, source):
 def record_block(runtime, w, s):
     """A whole window block: feed-forward, attention, both residuals."""
     pixels = s.height * s.width
-    record_feed_forward(runtime, w, s)
+    if getattr(w, "split", False):
+        record_split_feed_forward(runtime, w, s)
+    else:
+        record_feed_forward(runtime, w, s)
     record_window_attention(runtime, w, s, s.ffn)
     runtime.residual(s.attention, s.ffn, w.attn_cos, s.out, pixels * w.channels,
                      w.channels)

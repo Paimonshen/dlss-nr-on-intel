@@ -92,14 +92,23 @@ void cosine_publish(uint row) {
 }
 
 void softmax(uint row) {
-    uint base = row * pc.n;
+    /* `n` is the real token count and `sa` the row stride, which differ for the
+     * global blocks: their token count is the bottleneck's pixel count and need not
+     * be a multiple of the cooperative-matrix tile, so the scores are padded. The pad
+     * must not enter the sum, and is zeroed so the following P@V contributes nothing.
+     * `p0` is the symmetric logit clamp the vit_1d kernels apply; 0 means none. */
+    uint stride = pc.sa != 0u ? pc.sa : pc.n;
+    uint base = row * stride;
+    for (uint i = pc.n; i < stride; i++) pc.c.v[base + i] = 0.0;
     // the affine map into the exponent's linear region, clamped
     // (see notes/phase5-softmax-found.md)
     float total = 0.0;
     for (uint i = 0u; i < pc.n; i += 2u) {
         uint bits[2];
         for (uint j = 0u; j < 2u; j++) {
-            precise float scaled = half_round(pc.a.v[base + i + j]) * 0.044921875;
+            float logit = pc.a.v[base + i + j];
+            if (pc.p0 != 0.0) logit = clamp(logit, -pc.p0, pc.p0);
+            precise float scaled = half_round(logit) * 0.044921875;
             scaled += 1.30078125;
             float affine = clamp(scaled, 1.03125, 1.5693359375);
             // the float16 bit pattern of the affine value

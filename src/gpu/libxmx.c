@@ -486,11 +486,12 @@ int xmx_rec_unary(unsigned kind, int a, int b, int c, int d, unsigned n, unsigne
 /* Row-wise passes: the cosine publish reduces 32 channels through the kernel's own
  * fragment tree, the softmax reduces a window's tokens. One invocation per row. */
 int xmx_rec_row(unsigned kind, int a, int c, int d, unsigned rows, unsigned width,
-		unsigned heads, unsigned scaled)
+		unsigned heads, unsigned scaled, unsigned stride, float cap)
 {
 	if (!g.recording) FAIL("not recording", 0);
 	struct push p = { .a = addr_of(a), .c = addr_of(c), .d = addr_of(d),
-			  .m = rows, .n = width, .k = scaled, .batch = heads, .flags = kind };
+			  .m = rows, .n = width, .k = scaled, .batch = heads, .flags = kind,
+			  .sa = stride, .p0 = cap };
 	if (!p.a || !p.c) FAIL("row operand is not a live buffer", 0);
 	vkCmdBindPipeline(g.rcb, VK_PIPELINE_BIND_POINT_COMPUTE, g.rrow);
 	vkCmdPushConstants(g.rcb, g.rpl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);

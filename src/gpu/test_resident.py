@@ -265,6 +265,77 @@ def test_permutations(runtime):
         buffer.free()
 
 
+def test_blocks(runtime, weights):
+    """Whole blocks, all three families, against the model's own dispatch.
+
+    Compared twice: against the reference as written, and against it with every GEMM
+    operand rounded to half. The second is what the device actually computes, so it
+    isolates the port; the first is the FP16 cost, which the E4M3 publishes amplify
+    into whole quanta on a few cells — hence correlation as well as a maximum.
+    """
+    import nr_resident
+
+    def half(array):
+        with np.errstate(over="ignore"):
+            return np.asarray(array, np.float32).astype(np.float16).astype(np.float32)
+
+    model = M.NeuralRenderingModel(weights)
+    previous = M.FUSE_BRANCHED
+    M.FUSE_BRANCHED = True
+    print("whole blocks, one submit each")
+    cases = [("window", index, heads) for index, heads in
+             ((1, 1), (2, 1), (6, 2), (9, 4), (20, 8))]
+    cases += [("split", 23, 16), ("split", 44, 16)]
+    cases += [("global", 31, 32), ("global", 38, 32)]
+    rng = np.random.default_rng(4)
+    for family, index, heads in cases:
+        if family == "global":
+            block = nr_resident.GlobalBlockWeights(runtime, weights, index)
+            height, width = 6, 10
+            scratch = nr_resident.GlobalScratch(runtime, block, height * width)
+        elif family == "split":
+            block = nr_resident.SplitBlockWeights(runtime, weights, index)
+            height, width = 16, 24
+            scratch = nr_resident.BlockScratch(runtime, block, height, width)
+        else:
+            block = nr_resident.BlockWeights(runtime, weights, index, heads=heads)
+            height, width = 24, 32
+            scratch = nr_resident.BlockScratch(runtime, block, height, width)
+        value = (rng.standard_normal((1, height, width, block.channels))
+                 * 0.3).astype(np.float32)
+
+        M.MATMUL = None
+        if family == "global":
+            expected = model._global(value, index)
+        elif family == "split":
+            expected = model._split_window(value, index)
+        else:
+            expected = model._window(value, index, head_count=heads, publish=False)
+        M.MATMUL = lambda a, b: half(a) @ half(b)
+        expected_half = (model._global(value, index) if family == "global" else
+                         model._split_window(value, index) if family == "split" else
+                         model._window(value, index, head_count=heads, publish=False))
+        M.MATMUL = None
+
+        if family == "global":
+            flat, passes = nr_resident.run_global_block(
+                runtime, block, scratch, value.reshape(-1, block.channels))
+            result = M.e4m3(flat).reshape(value.shape)
+        else:
+            result, passes = nr_resident.run_block(runtime, block, scratch, value)
+            if family == "split":
+                result = M.e4m3(result)
+        scale = float(np.abs(expected).max())
+        correlation = float(np.corrcoef(result.ravel(), expected.ravel())[0, 1])
+        plumbing = float(np.abs(result - expected_half).max()) / scale
+        check(f"block {index:2d} ({family}, {heads} heads, C={block.channels})",
+              correlation > 0.999 and plumbing < 0.15,
+              f"{passes} passes, corr {correlation:.6f}, vs half-ref {plumbing:.1e}, "
+              f"vs f32 {float(np.abs(result - expected).max()) / scale:.1e}")
+        scratch.free()
+    M.FUSE_BRANCHED = previous
+
+
 def main():
     runtime = xmxres.Runtime()
     test_operators(runtime)
@@ -273,6 +344,7 @@ def main():
         weights, _ = M.load_logical(WEIGHTS)
         test_chain(runtime, weights)
         test_attention(runtime, weights)
+        test_blocks(runtime, weights)
     else:
         print(f"weights not found at {WEIGHTS}; skipping the chain")
     print()
