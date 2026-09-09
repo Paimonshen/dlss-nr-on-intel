@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# nr-photo — run a game with the DLSS-NR layer attached.
+#
+#   src/layer/nr-photo <game> [args]         a native Vulkan game
+#   src/layer/nr-photo --steam 1091500       print the Steam launch option to paste
+#
+# The pass fires while the trigger file exists and holds its result on screen until it
+# is removed, so it is a photo mode rather than a per-frame filter:
+#
+#   touch /tmp/nr_trigger     # freeze and enhance
+#   rm    /tmp/nr_trigger     # back to the game
+#
+# Start the daemon first; it holds the model, so it costs a second once rather than
+# per frame:  python3 src/layer/nr_daemon.py
+set -euo pipefail
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+layer_dir="${NR_LAYER_DIR:-$root/work/layer}"
+socket="${NR_LAYER_SOCKET:-/tmp/nr_layer.sock}"
+trigger="${NR_LAYER_TRIGGER:-/tmp/nr_trigger}"
+
+if [ ! -f "$root/work/libnr_layer.so" ]; then
+    echo "building the layer" >&2
+    cc -O2 -shared -fPIC -I "$root/work/vulkan-headers/include" \
+       -o "$root/work/libnr_layer.so" "$root/src/layer/nr_layer.c" -lvulkan
+fi
+mkdir -p "$layer_dir"
+sed "s|LIBRARY_PATH_PLACEHOLDER|$root/work/libnr_layer.so|" \
+    "$root/src/layer/VkLayer_dlss_nr.json" > "$layer_dir/VkLayer_dlss_nr.json"
+
+# The socket path has to fit in sun_path, 108 bytes — a long scratch directory will
+# silently truncate and the layer will report no daemon.
+if [ "${#socket}" -ge 100 ]; then
+    echo "socket path is $((${#socket})) characters; keep it under 100" >&2
+    exit 1
+fi
+
+export VK_LAYER_PATH="$layer_dir" \
+       VK_INSTANCE_LAYERS=VK_LAYER_dlssnr_intel \
+       ENABLE_NR_LAYER=1 \
+       NR_LAYER_SOCKET="$socket" \
+       NR_LAYER_TRIGGER="$trigger"
+
+if [ "${1:-}" = "--steam" ]; then
+    printf 'Paste this into the game'"'"'s Steam launch options:\n\n'
+    printf '  VK_LAYER_PATH=%s VK_INSTANCE_LAYERS=VK_LAYER_dlssnr_intel ENABLE_NR_LAYER=1 NR_LAYER_SOCKET=%s NR_LAYER_TRIGGER=%s %%command%%\n\n' \
+           "$layer_dir" "$socket" "$trigger"
+    printf 'Then: touch %s to enhance, rm %s to release.\n' "$trigger" "$trigger"
+    exit 0
+fi
+exec "$@"

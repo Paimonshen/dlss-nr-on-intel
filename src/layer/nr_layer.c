@@ -25,6 +25,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/un.h>
 #include <vulkan/vulkan.h>
 #include <vulkan/vk_layer.h>
 
@@ -41,6 +45,9 @@ struct device_data {
 	VkBuffer staging;
 	VkDeviceSize staging_size;
 	void *mapped;
+	unsigned char *result;          /* the processed frame, held while the trigger is up */
+	VkDeviceSize result_size;
+	int holding;
 	PFN_vkGetDeviceProcAddr get_device_proc;
 	PFN_vkQueuePresentKHR present;
 	PFN_vkCreateSwapchainKHR create_swapchain;
@@ -65,6 +72,46 @@ static VkInstance layer_instance;
 static unsigned long frame_counter;
 static const char *capture_path;
 static long capture_every;
+static const char *socket_path;
+static const char *trigger_path;
+
+/* The frame goes to a daemon over a Unix socket rather than being processed in
+ * process: the implementation is Python and this is a shared object living inside the
+ * game. For a photo mode the game is meant to stall anyway, so the round trip is free;
+ * a per-frame pass would need the graph ported to C. */
+static int exchange(const void *header, size_t header_size, const void *payload,
+		    size_t payload_size, void *reply)
+{
+	int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+	if (fd < 0) return -1;
+	struct sockaddr_un address = { .sun_family = AF_UNIX };
+	snprintf(address.sun_path, sizeof address.sun_path, "%s", socket_path);
+	if (connect(fd, (struct sockaddr *)&address, sizeof address) < 0) {
+		fprintf(stderr, "[nr_layer] no daemon at %s\n", socket_path);
+		close(fd);
+		return -1;
+	}
+	const unsigned char *out = header;
+	for (size_t sent = 0; sent < header_size; ) {
+		ssize_t n = write(fd, out + sent, header_size - sent);
+		if (n <= 0) { close(fd); return -1; }
+		sent += (size_t)n;
+	}
+	out = payload;
+	for (size_t sent = 0; sent < payload_size; ) {
+		ssize_t n = write(fd, out + sent, payload_size - sent);
+		if (n <= 0) { close(fd); return -1; }
+		sent += (size_t)n;
+	}
+	unsigned char *in = reply;
+	for (size_t got = 0; got < payload_size; ) {
+		ssize_t n = read(fd, in + got, payload_size - got);
+		if (n <= 0) { close(fd); return -1; }
+		got += (size_t)n;
+	}
+	close(fd);
+	return 0;
+}
 
 static struct device_data *find_device(VkDevice device)
 {
@@ -116,9 +163,13 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateInstance(const VkInstanceCreateInfo *inf
 		 * to be kept. */
 		layer_instance = *instance;
 		capture_path = getenv("NR_LAYER_CAPTURE");
+		socket_path = getenv("NR_LAYER_SOCKET");
+		trigger_path = getenv("NR_LAYER_TRIGGER");
 		const char *every = getenv("NR_LAYER_EVERY");
 		capture_every = every ? strtol(every, NULL, 10) : 0;
-		fprintf(stderr, "[nr_layer] active; capture=%s every=%ld\n",
+		fprintf(stderr, "[nr_layer] active; socket=%s trigger=%s capture=%s every=%ld\n",
+			socket_path ? socket_path : "(none)",
+			trigger_path ? trigger_path : "(none)",
 			capture_path ? capture_path : "(off)", capture_every);
 	}
 	return r;
@@ -171,7 +222,7 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateSwapchainKHR(VkDevice device,
 	struct device_data *data = find_device(device);
 	if (!data) return VK_ERROR_INITIALIZATION_FAILED;
 	VkSwapchainCreateInfoKHR patched = *info;
-	patched.imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+	patched.imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
 	VkResult r = data->create_swapchain(device, &patched, allocator, swapchain);
 	if (r != VK_SUCCESS)
 		r = data->create_swapchain(device, info, allocator, swapchain);
@@ -213,19 +264,16 @@ static uint32_t memory_type(struct device_data *data, uint32_t bits,
 	return UINT32_MAX;
 }
 
-/* Copy the presented image into a host-visible buffer and write it out.
+/* Move the presented frame between the swapchain image and a host-visible buffer.
  *
- * `vkQueueWaitIdle` before the copy is the blunt way to be sure the frame is
- * finished: the proper route is to wait on the present's own semaphores, which means
- * taking them over from the application. For an on-demand capture the stall costs a
- * frame and nothing else, so the blunt way is the honest one until the pass runs
- * every frame. */
-static int nr_layer_capture(struct device_data *data, struct swapchain_data *chain,
-			    VkQueue queue, uint32_t index, const char *path)
+ * `vkQueueWaitIdle` around the transfer is the blunt way to know the frame is
+ * finished: the proper route waits on the present's own semaphores, which means taking
+ * them over from the application. For a photo mode the game is meant to stall anyway,
+ * so the stall is the point rather than a cost. It has to change before the pass runs
+ * every frame.
+ */
+static int ensure_resources(struct device_data *data, VkDeviceSize needed)
 {
-	if (index >= chain->image_count) return -1;
-	VkDeviceSize needed = (VkDeviceSize)chain->extent.width * chain->extent.height * 4;
-
 	if (!data->pool) {
 		VkCommandPoolCreateInfo info = {
 			.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
@@ -235,51 +283,60 @@ static int nr_layer_capture(struct device_data *data, struct swapchain_data *cha
 			data->get_device_proc(data->device, "vkCreateCommandPool");
 		if (create(data->device, &info, NULL, &data->pool) != VK_SUCCESS) return -1;
 	}
-	if (data->staging_size < needed) {
-		PFN_vkCreateBuffer create_buffer = (PFN_vkCreateBuffer)
-			data->get_device_proc(data->device, "vkCreateBuffer");
-		PFN_vkGetBufferMemoryRequirements requirements = (PFN_vkGetBufferMemoryRequirements)
-			data->get_device_proc(data->device, "vkGetBufferMemoryRequirements");
-		PFN_vkAllocateMemory allocate = (PFN_vkAllocateMemory)
-			data->get_device_proc(data->device, "vkAllocateMemory");
-		PFN_vkBindBufferMemory bind = (PFN_vkBindBufferMemory)
-			data->get_device_proc(data->device, "vkBindBufferMemory");
-		PFN_vkMapMemory map = (PFN_vkMapMemory)
-			data->get_device_proc(data->device, "vkMapMemory");
-		VkBufferCreateInfo info = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-					    .size = needed,
-					    .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT };
-		if (create_buffer(data->device, &info, NULL, &data->staging) != VK_SUCCESS)
-			return -1;
-		VkMemoryRequirements mr;
-		requirements(data->device, data->staging, &mr);
-		uint32_t type = memory_type(data, mr.memoryTypeBits,
-					    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
-					    | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
-					    | VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
-		if (type == UINT32_MAX)
-			type = memory_type(data, mr.memoryTypeBits,
-					   VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
-					   | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-		if (type == UINT32_MAX) return -1;
-		VkMemoryAllocateInfo allocation = {
-			.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-			.allocationSize = mr.size, .memoryTypeIndex = type };
-		if (allocate(data->device, &allocation, NULL, &data->staging_memory) != VK_SUCCESS)
-			return -1;
-		bind(data->device, data->staging, data->staging_memory, 0);
-		map(data->device, data->staging_memory, 0, VK_WHOLE_SIZE, 0, &data->mapped);
-		data->staging_size = needed;
-	}
+	if (data->staging_size >= needed) return 0;
 
+	PFN_vkCreateBuffer create_buffer = (PFN_vkCreateBuffer)
+		data->get_device_proc(data->device, "vkCreateBuffer");
+	PFN_vkGetBufferMemoryRequirements requirements = (PFN_vkGetBufferMemoryRequirements)
+		data->get_device_proc(data->device, "vkGetBufferMemoryRequirements");
+	PFN_vkAllocateMemory allocate = (PFN_vkAllocateMemory)
+		data->get_device_proc(data->device, "vkAllocateMemory");
+	PFN_vkBindBufferMemory bind = (PFN_vkBindBufferMemory)
+		data->get_device_proc(data->device, "vkBindBufferMemory");
+	PFN_vkMapMemory map = (PFN_vkMapMemory)
+		data->get_device_proc(data->device, "vkMapMemory");
+	VkBufferCreateInfo info = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+				    .size = needed,
+				    .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT
+					     | VK_BUFFER_USAGE_TRANSFER_SRC_BIT };
+	if (create_buffer(data->device, &info, NULL, &data->staging) != VK_SUCCESS) return -1;
+	VkMemoryRequirements mr;
+	requirements(data->device, data->staging, &mr);
+	uint32_t type = memory_type(data, mr.memoryTypeBits,
+				    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+				    | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+				    | VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
+	if (type == UINT32_MAX)
+		type = memory_type(data, mr.memoryTypeBits,
+				   VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+				   | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+	if (type == UINT32_MAX) return -1;
+	VkMemoryAllocateInfo allocation = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+					    .allocationSize = mr.size, .memoryTypeIndex = type };
+	if (allocate(data->device, &allocation, NULL, &data->staging_memory) != VK_SUCCESS)
+		return -1;
+	bind(data->device, data->staging, data->staging_memory, 0);
+	map(data->device, data->staging_memory, 0, VK_WHOLE_SIZE, 0, &data->mapped);
+	data->staging_size = needed;
+	free(data->result);
+	data->result = malloc((size_t)needed);
+	data->result_size = needed;
+	return data->result ? 0 : -1;
+}
+
+static int transfer(struct device_data *data, struct swapchain_data *chain, VkQueue queue,
+		    uint32_t index, int to_image)
+{
 	PFN_vkAllocateCommandBuffers allocate_commands = (PFN_vkAllocateCommandBuffers)
 		data->get_device_proc(data->device, "vkAllocateCommandBuffers");
 	PFN_vkBeginCommandBuffer begin = (PFN_vkBeginCommandBuffer)
 		data->get_device_proc(data->device, "vkBeginCommandBuffer");
 	PFN_vkCmdPipelineBarrier barrier = (PFN_vkCmdPipelineBarrier)
 		data->get_device_proc(data->device, "vkCmdPipelineBarrier");
-	PFN_vkCmdCopyImageToBuffer copy = (PFN_vkCmdCopyImageToBuffer)
+	PFN_vkCmdCopyImageToBuffer copy_out = (PFN_vkCmdCopyImageToBuffer)
 		data->get_device_proc(data->device, "vkCmdCopyImageToBuffer");
+	PFN_vkCmdCopyBufferToImage copy_in = (PFN_vkCmdCopyBufferToImage)
+		data->get_device_proc(data->device, "vkCmdCopyBufferToImage");
 	PFN_vkEndCommandBuffer end = (PFN_vkEndCommandBuffer)
 		data->get_device_proc(data->device, "vkEndCommandBuffer");
 	PFN_vkQueueSubmit submit = (PFN_vkQueueSubmit)
@@ -299,27 +356,35 @@ static int nr_layer_capture(struct device_data *data, struct swapchain_data *cha
 		.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
 		.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT };
 	begin(commands, &beginning);
-	VkImageMemoryBarrier to_source = {
+
+	VkImageLayout working = to_image ? VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
+					 : VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+	VkImageMemoryBarrier into = {
 		.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
 		.srcAccessMask = VK_ACCESS_MEMORY_READ_BIT,
-		.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
+		.dstAccessMask = to_image ? VK_ACCESS_TRANSFER_WRITE_BIT
+					  : VK_ACCESS_TRANSFER_READ_BIT,
 		.oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-		.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+		.newLayout = working,
 		.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
 		.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
 		.image = chain->images[index],
 		.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
 	barrier(commands, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-		VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &to_source);
+		VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &into);
+
 	VkBufferImageCopy region = {
 		.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
 		.imageExtent = { chain->extent.width, chain->extent.height, 1 } };
-	copy(commands, chain->images[index], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-	     data->staging, 1, &region);
-	VkImageMemoryBarrier back = to_source;
-	back.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+	if (to_image)
+		copy_in(commands, data->staging, chain->images[index], working, 1, &region);
+	else
+		copy_out(commands, chain->images[index], working, data->staging, 1, &region);
+
+	VkImageMemoryBarrier back = into;
+	back.srcAccessMask = into.dstAccessMask;
 	back.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT;
-	back.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+	back.oldLayout = working;
 	back.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
 	barrier(commands, VK_PIPELINE_STAGE_TRANSFER_BIT,
 		VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, NULL, 0, NULL, 1, &back);
@@ -331,18 +396,34 @@ static int nr_layer_capture(struct device_data *data, struct swapchain_data *cha
 	submit(queue, 1, &submission, VK_NULL_HANDLE);
 	wait(queue);
 	free_commands(data->device, data->pool, 1, &commands);
+	return 0;
+}
 
-	FILE *file = fopen(path, "wb");
-	if (!file) return -1;
-	/* A header the Python side can read without guessing: magic, extent, format. */
+static int process_frame(struct device_data *data, struct swapchain_data *chain,
+			 VkQueue queue, uint32_t index)
+{
+	VkDeviceSize needed = (VkDeviceSize)chain->extent.width * chain->extent.height * 4;
+	if (ensure_resources(data, needed)) return -1;
+	if (transfer(data, chain, queue, index, 0)) return -1;
+
 	uint32_t header[4] = { 0x304E524Eu, chain->extent.width, chain->extent.height,
 			       (uint32_t)chain->format };
-	fwrite(header, sizeof header, 1, file);
-	fwrite(data->mapped, 1, (size_t)needed, file);
-	fclose(file);
-	fprintf(stderr, "[nr_layer] captured frame %lu -> %s (%ux%u, format %d)\n",
-		frame_counter, path, chain->extent.width, chain->extent.height,
-		chain->format);
+	if (capture_path) {
+		FILE *file = fopen(capture_path, "wb");
+		if (file) {
+			fwrite(header, sizeof header, 1, file);
+			fwrite(data->mapped, 1, (size_t)needed, file);
+			fclose(file);
+		}
+	}
+	if (!socket_path) return -1;
+	if (exchange(header, sizeof header, data->mapped, (size_t)needed, data->result)) {
+		fprintf(stderr, "[nr_layer] the daemon did not answer; frame unchanged\n");
+		return -1;
+	}
+	memcpy(data->mapped, data->result, (size_t)needed);
+	fprintf(stderr, "[nr_layer] processed %ux%u\n", chain->extent.width,
+		chain->extent.height);
 	return 0;
 }
 
@@ -352,16 +433,32 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
 	frame_counter++;
 	struct device_data *data = NULL;
 	for (int i = 0; i < 8; i++) if (devices[i].device) { data = &devices[i]; break; }
-	if (data && capture_path && capture_every > 0
-	    && frame_counter % (unsigned long)capture_every == 0) {
-		for (uint32_t i = 0; i < info->swapchainCount; i++) {
-			struct swapchain_data *chain = find_swapchain(info->pSwapchains[i]);
-			if (chain)
-				nr_layer_capture(data, chain, queue, info->pImageIndices[i],
-						 capture_path);
+	if (!data) return VK_ERROR_INITIALIZATION_FAILED;
+
+	/* A file is the trigger, not a key: it works the same on X11 and Wayland, needs
+	 * no input hooking inside another process's window, and can be set from a script
+	 * or a hotkey daemon. While it exists the processed frame is held on screen. */
+	int wanted = trigger_path && access(trigger_path, F_OK) == 0;
+	if (!wanted && capture_every > 0)
+		wanted = frame_counter % (unsigned long)capture_every == 0;
+
+	for (uint32_t i = 0; i < info->swapchainCount; i++) {
+		struct swapchain_data *chain = find_swapchain(info->pSwapchains[i]);
+		if (!chain) continue;
+		uint32_t index = info->pImageIndices[i];
+		if (wanted && !data->holding) {
+			if (process_frame(data, chain, queue, index) == 0) {
+				data->holding = 1;
+				transfer(data, chain, queue, index, 1);
+			}
+		} else if (wanted && data->holding) {
+			memcpy(data->mapped, data->result, (size_t)data->result_size);
+			transfer(data, chain, queue, index, 1);
+		} else if (!wanted) {
+			data->holding = 0;
 		}
 	}
-	return data ? data->present(queue, info) : VK_ERROR_INITIALIZATION_FAILED;
+	return data->present(queue, info);
 }
 
 #define INTERCEPT(name) if (!strcmp(pName, "vk" #name)) return (PFN_vkVoidFunction)nr_##name
