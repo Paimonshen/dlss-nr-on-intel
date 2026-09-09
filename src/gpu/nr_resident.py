@@ -129,18 +129,15 @@ class GlobalScratch:
         make = runtime.buffer
         self.value = make(padded * channels).zero()
         self.value16 = make(padded * channels, np.float16)
-        self.hidden = make(padded * hidden)
         self.hidden16 = make(padded * hidden, np.float16)
         self.branch = make(padded * channels)
         self.ffn = make(padded * channels)
         self.ffn16 = make(padded * channels, np.float16)
         self.proj = make(padded * channels * 3)
-        self.q, self.k, self.v = (make(padded * channels) for _ in range(3))
         self.q16, self.k16, self.v16 = (make(padded * channels, np.float16) for _ in range(3))
         self.scores = make(heads * padded * padded)
         self.probs16 = make(heads * padded * padded, np.float16)
         self.context = make(heads * padded * 32)
-        self.merged = make(padded * channels)
         self.merged16 = make(padded * channels, np.float16)
         self.attention = make(padded * channels)
         self.out = make(padded * channels)
@@ -219,28 +216,24 @@ class BlockScratch:
 
         if getattr(weights, "split", False):
             hidden = weights.groups * 256
+        # Every buffer a block wrote in float32 only to read it straight back went
+        # away when the publishes moved into the pass that produces the value.
         make = runtime.buffer
         self.value = make(pixels * channels)
         self.value16 = make(pixels * channels, np.float16)
-        self.hidden = make(pixels * hidden)
         self.hidden16 = make(pixels * hidden, np.float16)
-        self.heads_out = make(pixels * channels)
         self.heads16 = make(pixels * channels, np.float16)
         self.branch = make(pixels * channels)
         self.ffn = make(pixels * channels)
-        self.win = make(windowed)
         self.win16 = make(windowed, np.float16)
         self.proj = make(windowed * 3)
-        self.q, self.k, self.v = (make(windowed) for _ in range(3))
         self.q16, self.k16, self.v16 = (make(windowed, np.float16) for _ in range(3))
         self.scores = make(self.batch * self.tokens * self.tokens)
         self.probs16 = make(self.batch * self.tokens * self.tokens, np.float16)
         self.context = make(self.batch * self.tokens * 32)
-        self.merged = make(windowed)
         self.merged16 = make(windowed, np.float16)
         self.attended = make(windowed)
         self.out = make(pixels * channels)
-        self.merged_core = make(pixels * channels)
         self.core16 = make(pixels * channels, np.float16)
         self.hidden_width = hidden
 
@@ -445,7 +438,6 @@ class TransitionScratch:
     def __init__(self, runtime, elements, half_elements):
         make = runtime.buffer
         self.padded = make(elements)
-        self.pooled = make(elements)
         self.pooled16 = make(elements, np.float16)
         self.projected = make(elements)
         self.projected16 = make(elements, np.float16)
