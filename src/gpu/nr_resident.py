@@ -152,16 +152,18 @@ class GlobalScratch:
                 value.free()
 
 
-def record_global_block(runtime, w, s):
+def record_global_block(runtime, w, s, source=None, target=None):
     """A bottleneck block: the wide feed-forward, then attention over every token."""
+    source = source or s.value
+    target = target or s.out
     channels, heads, padded = w.channels, w.heads, s.padded
-    runtime.to_half(s.value, s.value16, padded * channels)
+    runtime.to_half(source, s.value16, padded * channels)
     runtime.gemm(s.value16, w.expand, s.hidden, padded, w.hidden_width, channels)
     runtime.gate(s.hidden, s.hidden, padded * w.hidden_width)
     runtime.e4m3(s.hidden, s.hidden, padded * w.hidden_width)
     runtime.to_half(s.hidden, s.hidden16, padded * w.hidden_width)
     runtime.gemm(s.hidden16, w.ffn_proj, s.branch, padded, channels, w.hidden_width)
-    runtime.residual(s.branch, s.value, w.ffn_cos, s.ffn, padded * channels, channels)
+    runtime.residual(s.branch, source, w.ffn_cos, s.ffn, padded * channels, channels)
 
     runtime.to_half(s.ffn, s.ffn16, padded * channels)
     runtime.gemm(s.ffn16, w.qkv, s.proj, padded, 3 * channels, channels)
@@ -185,7 +187,7 @@ def record_global_block(runtime, w, s):
     runtime.e4m3(s.merged, s.merged, padded * channels)
     runtime.to_half(s.merged, s.merged16, padded * channels)
     runtime.gemm(s.merged16, w.out, s.attention, padded, channels, channels)
-    runtime.residual(s.attention, s.ffn, w.attn_cos, s.out, padded * channels, channels)
+    runtime.residual(s.attention, s.ffn, w.attn_cos, target, padded * channels, channels)
 
 
 def run_global_block(runtime, w, s, value):
@@ -248,10 +250,10 @@ class BlockScratch:
                 value.free()
 
 
-def record_feed_forward(runtime, w, s):
+def record_feed_forward(runtime, w, s, source):
     """The block's feed-forward, into `s.ffn`. Branched or plain, as the block is."""
     pixels, channels = s.height * s.width, w.channels
-    runtime.to_half(s.value, s.value16, pixels * channels)
+    runtime.to_half(source, s.value16, pixels * channels)
     if w.branched:
         for head in range(w.groups):
             runtime.gemm(s.value16, w.expand, s.hidden, pixels, 128, channels,
@@ -267,7 +269,7 @@ def record_feed_forward(runtime, w, s):
         runtime.e4m3(s.heads_out, s.heads_out, pixels * channels)
         runtime.to_half(s.heads_out, s.heads16, pixels * channels)
         runtime.gemm(s.heads16, w.ffn_out, s.branch, pixels, channels, channels)
-        runtime.residual(s.branch, s.value, w.ffn_cos, s.ffn, pixels * channels, channels)
+        runtime.residual(s.branch, source, w.ffn_cos, s.ffn, pixels * channels, channels)
         # the fused multi-head kernels publish the residual before attention reads it
         runtime.e4m3(s.ffn, s.ffn, pixels * channels)
     else:
@@ -276,10 +278,10 @@ def record_feed_forward(runtime, w, s):
         runtime.e4m3(s.hidden, s.hidden, pixels * s.hidden_width)
         runtime.to_half(s.hidden, s.hidden16, pixels * s.hidden_width)
         runtime.gemm(s.hidden16, w.branch, s.branch, pixels, channels, s.hidden_width)
-        runtime.residual(s.branch, s.value, w.ffn_cos, s.ffn, pixels * channels, channels)
+        runtime.residual(s.branch, source, w.ffn_cos, s.ffn, pixels * channels, channels)
 
 
-def record_split_feed_forward(runtime, w, s):
+def record_split_feed_forward(runtime, w, s, source):
     """The split family's core: e4m3(x @ first), then a per-64-group 64 -> 256 -> 64 MLP.
 
     The gate sits between the two group GEMMs with no publish, so the wide buffer is
@@ -287,7 +289,7 @@ def record_split_feed_forward(runtime, w, s):
     """
     pixels, channels, groups = s.height * s.width, w.channels, w.groups
     wide = groups * 256
-    runtime.to_half(s.value, s.value16, pixels * channels)
+    runtime.to_half(source, s.value16, pixels * channels)
     runtime.gemm(s.value16, w.first, s.heads_out, pixels, channels, channels)
     runtime.e4m3(s.heads_out, s.heads_out, pixels * channels)
     runtime.to_half(s.heads_out, s.heads16, pixels * channels)
@@ -304,7 +306,7 @@ def record_split_feed_forward(runtime, w, s):
     runtime.e4m3(s.merged_core, s.merged_core, pixels * channels)
     runtime.to_half(s.merged_core, s.core16, pixels * channels)
     runtime.gemm(s.core16, w.weight3, s.branch, pixels, channels, channels)
-    runtime.residual(s.branch, s.value, w.ffn_cos, s.ffn, pixels * channels, channels)
+    runtime.residual(s.branch, source, w.ffn_cos, s.ffn, pixels * channels, channels)
 
 
 def record_window_attention(runtime, w, s, source):
@@ -337,15 +339,21 @@ def record_window_attention(runtime, w, s, source):
                     origin=w.origin)
 
 
-def record_block(runtime, w, s):
-    """A whole window block: feed-forward, attention, both residuals."""
+def record_block(runtime, w, s, source=None, target=None):
+    """A whole window block: feed-forward, attention, both residuals.
+
+    `source` and `target` default to the scratch's own buffers; passing them lets one
+    level's blocks chain into the next without a copy.
+    """
+    source = source or s.value
+    target = target or s.out
     pixels = s.height * s.width
     if getattr(w, "split", False):
-        record_split_feed_forward(runtime, w, s)
+        record_split_feed_forward(runtime, w, s, source)
     else:
-        record_feed_forward(runtime, w, s)
+        record_feed_forward(runtime, w, s, source)
     record_window_attention(runtime, w, s, s.ffn)
-    runtime.residual(s.attention, s.ffn, w.attn_cos, s.out, pixels * w.channels,
+    runtime.residual(s.attention, s.ffn, w.attn_cos, target, pixels * w.channels,
                      w.channels)
 
 
@@ -356,3 +364,85 @@ def run_block(runtime, w, s, value):
     record_block(runtime, w, s)
     passes = runtime.submit()
     return s.out.view(shape=value.shape).copy(), passes
+
+
+# --------------------------------------------------------------------------
+# transitions between levels
+# --------------------------------------------------------------------------
+
+
+class Transition:
+    """The weights a level change needs, uploaded once."""
+
+    def __init__(self, runtime, weights, index, *, kind):
+        self.kind = kind
+        prefix = f"block{index}.layer0"
+        if kind in ("down", "up"):
+            self.weight0 = runtime.buffer_from(weights[f"{prefix}.weight0"], np.float16)
+            self.out_channels = weights[f"{prefix}.weight0"].shape[1]
+        if kind == "up":
+            self.sine = runtime.buffer_from(weights[f"{prefix}.sin"])
+
+
+def record_downsample(runtime, transition, scratch, source, target, height, width,
+                      channels, *, pad_to=0):
+    """Pool the block's unpublished output, publish it, then project.
+
+    The fused `ds` kernels pool the half-precision output before its E4M3 publish and
+    publish the pooled tensor again before the QMMA projection, so both are here.
+    """
+    if pad_to:
+        padded_height = -(-height // pad_to) * pad_to
+        padded_width = -(-width // pad_to) * pad_to
+        runtime.pad_end(source, scratch.padded, height, width, padded_height,
+                        padded_width, channels)
+        source, height, width = scratch.padded, padded_height, padded_width
+    half_height, half_width = height // 2, width // 2
+    pixels = half_height * half_width
+    runtime.pool2(source, scratch.pooled, height, width, channels)
+    runtime.e4m3(scratch.pooled, scratch.pooled, pixels * channels)
+    runtime.to_half(scratch.pooled, scratch.pooled16, pixels * channels)
+    runtime.gemm(scratch.pooled16, transition.weight0, target, pixels,
+                 transition.out_channels, channels)
+    runtime.e4m3(target, target, pixels * transition.out_channels)
+    return half_height, half_width
+
+
+def record_upsample_merge(runtime, transition, scratch, source, skip, target,
+                          source_height, source_width, height, width, channels,
+                          out_channels):
+    """Project, nearest-upsample onto the skip, add the scaled skip, publish.
+
+    The fused `upsample` kernels read the merged tensor as E4M3, so the publish is
+    part of the transition rather than of the block that follows.
+    """
+    source_pixels = source_height * source_width
+    runtime.to_half(source, scratch.projected16, source_pixels * channels)
+    runtime.gemm(scratch.projected16, transition.weight0, scratch.projected,
+                 source_pixels, out_channels, channels)
+    runtime.upsample2(scratch.projected, scratch.upsampled, source_width, height, width,
+                      out_channels)
+    runtime.scale_channel(skip, transition.sine, scratch.scaled, height * width * out_channels,
+                          out_channels)
+    runtime.add(scratch.upsampled, scratch.scaled, target, height * width * out_channels)
+    runtime.e4m3(target, target, height * width * out_channels)
+
+
+class TransitionScratch:
+    """Buffers a transition needs, sized for the largest level that uses it."""
+
+    def __init__(self, runtime, elements, half_elements):
+        make = runtime.buffer
+        self.padded = make(elements)
+        self.pooled = make(elements)
+        self.pooled16 = make(elements, np.float16)
+        self.projected = make(elements)
+        self.projected16 = make(elements, np.float16)
+        self.upsampled = make(elements)
+        self.scaled = make(elements)
+
+    def free(self):
+        for name in dir(self):
+            value = getattr(self, name)
+            if isinstance(value, xmxres.Buffer):
+                value.free()

@@ -31,7 +31,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 TM, TN, TK = 8, 16, 16
 
 (E4M3, GATE, HALF, TO_HALF, SCALE, RESIDUAL, FROM_HALF, PARTITION, REVERSE, ADD_BIAS,
- SPLIT_HEADS, MERGE_HEADS) = range(12)
+ SPLIT_HEADS, MERGE_HEADS, POOL2, UPSAMPLE2, SCALE_CHANNEL, ADD, PAD_END) = range(17)
 COSINE_PUBLISH, SOFTMAX = 0, 1
 
 _lib = None
@@ -237,6 +237,30 @@ class Runtime:
         """(windows, heads, tokens, 32) -> (windows, tokens, C)."""
         return self.unary(MERGE_HEADS, source, target, windows * tokens * channels,
                           channels=channels, _dims=(heads, tokens, 0, 0))
+
+    def pool2(self, source, target, height, width, channels):
+        """2x2 average pool, NHWC."""
+        return self.unary(POOL2, source, target, (height // 2) * (width // 2) * channels,
+                          channels=channels, _dims=(0, height, width, 0))
+
+    def upsample2(self, source, target, source_width, height, width, channels):
+        """Nearest 2x upsample, cropped to (height, width)."""
+        return self.unary(UPSAMPLE2, source, target, height * width * channels,
+                          channels=channels, _dims=(0, width, source_width, 0))
+
+    def pad_end(self, source, target, height, width, padded_height, padded_width, channels):
+        """Extend to a larger extent with zeros, as `pad_spatial_end` does."""
+        return self.unary(PAD_END, source, target,
+                          padded_height * padded_width * channels, channels=channels,
+                          _dims=(0, height, width, padded_width))
+
+    def scale_channel(self, source, factors, target, count, channels):
+        """target = source * factors, one factor per channel."""
+        return self.unary(SCALE_CHANNEL, source, target, count, channels=channels,
+                          third=factors)
+
+    def add(self, left, right, target, count):
+        return self.unary(ADD, left, target, count, second=right)
 
     def add_bias(self, source, bias, target, count, tokens, heads):
         """scores + the per-head attention bias."""

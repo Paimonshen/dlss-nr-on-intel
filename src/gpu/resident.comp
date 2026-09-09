@@ -32,7 +32,8 @@ layout(push_constant, scalar) uniform Push {
 // kinds
 const uint E4M3 = 0u, GATE = 1u, HALF = 2u, TO_HALF = 3u, SCALE = 4u,
            RESIDUAL = 5u, FROM_HALF = 6u, PARTITION = 7u, REVERSE = 8u, ADD_BIAS = 9u,
-           SPLIT_HEADS = 10u, MERGE_HEADS = 11u;
+           SPLIT_HEADS = 10u, MERGE_HEADS = 11u, POOL2 = 12u, UPSAMPLE2 = 13u,
+           SCALE_CHANNEL = 14u, ADD = 15u, PAD_END = 16u;
 
 /* Rounding to half precision, done on the float32 exponent and mantissa.
  *
@@ -113,6 +114,42 @@ void main() {
         }
         return;
     }
+    if (kind == POOL2) {
+        // 2x2 average, NHWC. n=channels, sb=source width.
+        uint channels = pc.n, width = pc.sb;
+        uint c = index % channels, rest = index / channels;
+        uint x = rest % (width / 2u), y = rest / (width / 2u);
+        uint base = ((2u * y) * width + 2u * x) * channels + c;
+        /* The reference adds the four taps column-first — (top-left + bottom-left) +
+         * top-right + bottom-right — and float32 addition is not associative, so the
+         * order is part of the answer. `precise` keeps the compiler from regrouping. */
+        precise float total = pc.a.v[base] + pc.a.v[base + width * channels];
+        total += pc.a.v[base + channels];
+        total += pc.a.v[base + (width + 1u) * channels];
+        pc.c.v[index] = total * 0.25;
+        return;
+    }
+    if (kind == UPSAMPLE2) {
+        // nearest 2x, cropped to the target extent. n=channels, sa=target width,
+        // sb=source width.
+        uint channels = pc.n, target = pc.sa, source = pc.sb;
+        uint c = index % channels, rest = index / channels;
+        uint x = rest % target, y = rest / target;
+        pc.c.v[index] = pc.a.v[((y / 2u) * source + (x / 2u)) * channels + c];
+        return;
+    }
+    if (kind == PAD_END) {
+        // extend to a larger extent with zeros. n=channels, sa=height, sb=width,
+        // sc=padded width.
+        uint channels = pc.n, height = pc.sa, width = pc.sb, padded = pc.sc;
+        uint c = index % channels, rest = index / channels;
+        uint x = rest % padded, y = rest / padded;
+        pc.c.v[index] = (y < height && x < width)
+            ? pc.a.v[(y * width + x) * channels + c] : 0.0;
+        return;
+    }
+    if (kind == SCALE_CHANNEL) { pc.c.v[index] = pc.a.v[index] * pc.d.v[index % pc.n]; return; }
+    if (kind == ADD)           { pc.c.v[index] = pc.a.v[index] + pc.b.v[index]; return; }
     if (kind == SPLIT_HEADS) {
         // (windows, tokens, 3C) -> one of Q/K/V as (windows, heads, tokens, 32)
         uint channels = pc.n, heads = pc.batch, tokens = pc.sa, part = pc.sb;
