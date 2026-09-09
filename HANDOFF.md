@@ -109,8 +109,19 @@ and the real package needs sudo. Round-trip verified. Both files already exist.
 **Done 2026-09-09.** The graph runs, on CPU and on XMX. What is left, in order of
 value:
 
-1. **The GEMM kernel's operand staging.** A 720p frame is now **~625 ms**, and
-   `work/bench/split_cost.py` splits it almost exactly in half: **327 ms of GEMM,
+1. ~~**The GEMM kernel's operand staging.**~~ **DONE and it does not pay** —
+   `notes/phase22-staging-and-storage.md`. `src/gpu/gemm_staged.comp` exists, is
+   correct, and wins 19-24 % on deep-K shapes; it loses 44 % on the shallow-K, huge-M
+   shapes this graph actually spends its GEMM time on. Gated at K >= 128 the frame is
+   unchanged. Storing every published buffer as float16 is done too, and also changed
+   nothing measurable. **The frame is no longer bandwidth-bound** — 30.9 GB in ~600 ms
+   is 50 GB/s against a ~90 GB/s ceiling — and both halves are latency-bound.
+   What is actually left, in order: a **smaller network extent** (640x384 for 30 fps),
+   a different decomposition of the shallow-K shapes, and **a real game**, which is
+   now the highest-value thing on this list. The stale reasoning follows.
+
+   *A 720p frame is ~600 ms, and*
+   `src/bench/split_cost.py` splits it almost exactly in half: **327 ms of GEMM,
    366 ms of everything else.** The second half is close to its floor — the passes run
    at 50-90 GB/s against a ~90 GB/s ceiling — and the first is not: 459.6 GFLOP in
    327 ms is **1.4 TFLOP/s, 4.4 % of the ~32 TFLOP/s peak**. The kernel now keeps a
@@ -120,8 +131,14 @@ value:
    *slower* in a frame — occupancy) and software pipelining the K loop (619 -> 760 ms —
    register pressure). `notes/phase21-fusion-and-tiling.md`.
    *(No longer blocked: the coopmat epilogue works if the accumulator is stored
-   untouched to shared memory first and transformed there. Still worth reporting the
-   underlying Mesa/ANV bug upstream.)*
+   untouched to shared memory first and transformed there — llama.cpp's `mul_mm.comp`
+   does the same. The underlying **Mesa/ANV bug is still live in 26.2.1 and unreported**;
+   there is a two-line reproducer and a five-variant table in `notes/phase18-fusion.md`,
+   and it is the one piece of this work that clearly belongs upstream. A second one, if
+   wanted: llama.cpp issue #13530 has coopmat disabled for all Intel on the strength of
+   an Alchemist regression, and the only Xe2 rebuttal in it is a discrete B580 with
+   GDDR6. Arc 140V on a UMA LPDDR5X pool is unmeasured in public and we have the
+   numbers.)*
 2. **A real game, not `vkcube`.** The photo-mode loop is proven on a toy; the next
    step is a title under Proton. DX12 goes DX12 -> VKD3D -> Vulkan on ANV, DX11 and
    DX9 through DXVK, so the layer should attach unchanged. `src/layer/nr-photo --steam`
