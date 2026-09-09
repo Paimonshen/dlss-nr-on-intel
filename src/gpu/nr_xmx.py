@@ -42,7 +42,18 @@ EXACT = False
 
 _prepared: dict[tuple, tuple] = {}
 STATS = {"gpu": 0, "gpu_macs": 0, "gpu_seconds": 0.0,
-         "cpu": 0, "cpu_macs": 0, "cpu_seconds": 0.0, "split": 0}
+         "cpu": 0, "cpu_macs": 0, "cpu_seconds": 0.0, "split": 0, "bytes": 0}
+
+
+def _moved(rows, inner, cols):
+    """Bytes crossing the host/device boundary for one dispatch.
+
+    The operands live in shared memory, but the activation is still written as
+    float16 on the way in and the result read as float32 on the way out, once per
+    GEMM, because the graph between them runs in numpy. This is the number a full
+    compute-shader port would delete, not any single kernel's time.
+    """
+    return rows * inner * 2 + rows * cols * 4
 
 
 def _operand(weight):
@@ -80,6 +91,7 @@ def _batched(a, b, transpose_b):
         return None
     STATS["gpu"] += 1
     STATS["gpu_macs"] += batch * rows * inner * cols
+    STATS["bytes"] += batch * (_moved(rows, inner, cols) + cols * inner * 2)
     STATS["gpu_seconds"] += time.perf_counter() - started
     return out.reshape(a.shape[0], a.shape[1], rows, cols)
 
@@ -115,6 +127,7 @@ def matmul(a, b):
                 out = xmx.gemm_mapped(flat, operand, b_key=key)
             STATS["gpu"] += 1
             STATS["gpu_macs"] += rows * inner * cols
+            STATS["bytes"] += _moved(rows, inner, cols)
             STATS["gpu_seconds"] += time.perf_counter() - started
             return out.reshape(*a.shape[:-1], cols)
     routed = _batched(a, b, False)
@@ -171,4 +184,5 @@ def report():
         rate = 2 * macs / seconds / 1e9 if seconds > 0 else 0.0
         lines.append(f"  {where.upper()}  {calls:6d} calls  {2 * macs / 1e9:8.1f} GFLOP  "
                      f"{seconds:7.2f} s  {rate:7.1f} GFLOP/s")
+    lines.append(f"  host<->device {STATS['bytes'] / 1e9:.2f} GB in {STATS['gpu']} round trips")
     return "\n".join(lines)
