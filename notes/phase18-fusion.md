@@ -80,6 +80,14 @@ fused with the other elementwise passes rather than with the GEMM.
 
 ## What 30 fps at 720p would actually take
 
+> **SUPERSEDED 2026-09-09 by `notes/phase25-the-frame-rate-wall.md`.** This section
+> extrapolated from arithmetic and bandwidth. Measured across nine extents, the frame is
+> `20 ms + 632 ms per megapixel`: 640x384 is **191 ms, 5.2 fps**, not the 30 this
+> section's arithmetic suggested, and 60 fps is below the fixed cost outright. The
+> kernel work that was supposed to close the gap has since happened — 1025 -> 649 ms —
+> and both remaining levers measured null.
+
+
 The owner's target is 30 fps at 720p — 33 ms a frame against today's 1231 ms, a factor
 of 37. Being straight about it:
 

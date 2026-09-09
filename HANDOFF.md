@@ -116,9 +116,12 @@ value:
    unchanged. Storing every published buffer as float16 is done too, and also changed
    nothing measurable. **The frame is no longer bandwidth-bound** — 30.9 GB in ~600 ms
    is 50 GB/s against a ~90 GB/s ceiling — and both halves are latency-bound.
-   What is actually left, in order: a **smaller network extent** (640x384 for 30 fps),
-   a different decomposition of the shallow-K shapes, and **a real game**, which is
-   now the highest-value thing on this list. The stale reasoning follows.
+   What is actually left is smaller than it looks. **A smaller extent does not buy a
+   frame rate** — measured, `notes/phase25-the-frame-rate-wall.md`: the frame is
+   `20 ms + 632 ms per megapixel`, so 640x384 is **191 ms (5.2 fps)**, not the 30 fps
+   this file used to claim. 30 fps would need a 194x109 extent and 60 fps is below the
+   fixed cost outright. On this hardware, with this graph, **this is a photo mode** —
+   which is what the Vulkan layer already delivers. The stale reasoning follows.
 
    *A 720p frame is ~600 ms, and*
    `src/bench/split_cost.py` splits it almost exactly in half: **327 ms of GEMM,
