@@ -228,6 +228,15 @@ def main():
                         help="feed zero motion with a moving image, as a control")
     parser.add_argument("--profile", default="standard")
     parser.add_argument("--intensity", type=float, default=1.0)
+    # The vendor's panel exposes these three as guide overrides; the recovered
+    # pipeline has always taken them, they were simply never wired to the CLI.
+    parser.add_argument("--motion-scale", default="1,1",
+                        help="multiplier on the supplied motion, X,Y — the panel's "
+                             "Motion Scale X/Y Multiplier")
+    parser.add_argument("--scene-cut", type=float, default=0.3,
+                        help="mean luma change that clears the history; 0 disables it")
+    parser.add_argument("--blend-scale", type=float, default=None,
+                        help="ceiling on the learned history blend (default 0.73974609375)")
     parser.add_argument("--gpu", action="store_true")
     parser.add_argument("--resident", action="store_true",
                         help="run the whole graph on the GPU (the fastest path)")
@@ -264,8 +273,15 @@ def main():
         install_gpu_history(model.runtime)
     else:
         model = nr_model.NeuralRenderingModel.from_safetensors(args.weights)
-    outputs, _ = run_sequence(model, sequence, motions, profile=args.profile,
-                              intensity=args.intensity)
+    scale = tuple(float(part) for part in args.motion_scale.split(","))
+    if scale != (1.0, 1.0):
+        motions = [motion * np.float32(scale) for motion in motions]
+        print(f"motion scaled by {scale[0]},{scale[1]}")
+    options = {"profile": args.profile, "intensity": args.intensity,
+               "scene_cut_threshold": args.scene_cut}
+    if args.blend_scale is not None:
+        options["blend_scale"] = args.blend_scale
+    outputs, _ = run_sequence(model, sequence, motions, **options)
     for index, output in enumerate(outputs):
         path = f"{args.output_prefix}_{index:02d}.png"
         image_io.save(output, path)
