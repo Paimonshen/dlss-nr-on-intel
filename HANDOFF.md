@@ -13,10 +13,10 @@ eyelashes and eyebrow hairs resolved out of a smeared input, skin pores synthesi
 iris and eyeliner sharpened. `notes/phase7-first-render.md`.
 
 ```
-work/venv/bin/python src/ref/nr_frame.py IN.png OUT.png --accel   # 10 s, the fastest
-python3 src/ref/nr_frame.py IN.png OUT.png --gpu      # 17 s for 384x384 on XMX
-python3 src/ref/nr_frame.py IN.png OUT.png            # 38 s, system numpy is netlib
-python3 src/ref/nr_temporal.py IN.png OUT --gpu --pan 6,0 --frames 4   # a sequence
+python3 src/ref/nr_frame.py IN.png OUT.png --resident        # 0.26 s — the fast path
+python3 src/ref/nr_temporal.py IN.png OUT --resident --pan 6,0 --frames 5
+work/venv/bin/python src/ref/nr_frame.py IN.png OUT.png --accel   # 10 s, best on CPU
+python3 src/ref/nr_frame.py IN.png OUT.png                   # 38 s, netlib reference
 ```
 
 A full **1280x720** frame renders too, network extent 1280x768, 9 GiB peak, no tiling
@@ -106,13 +106,9 @@ and the real package needs sudo. Round-trip verified. Both files already exist.
 **Done 2026-09-09.** The graph runs, on CPU and on XMX. What is left, in order of
 value:
 
-1. **GPU residency, and it is now the precondition rather than an optimisation.**
-   71 % of a frame is elementwise numpy — the E4M3 publishes, the bit-affine softmax,
-   the fragment-tree cosine normalise, the window partition and reverse — and every
-   GEMM round-trips its activation through host memory, which is why the XMX path does
-   not beat OpenBLAS. Compute shaders for those operators *plus* device-resident
-   activations between blocks. The win is not any single kernel; it is deleting
-   16.46 GB of traffic per 720p frame.
+1. ~~**GPU residency**~~ **DONE 2026-09-09** — `notes/phase15-residency.md`. The whole
+   71-block graph records on the device, 2966 passes, and the CLIs take `--resident`.
+   What is left of performance is the elementwise passes' own bandwidth, not traffic.
 2. ~~**The temporal path**~~ **DONE 2026-09-09** — `src/ref/nr_temporal.py`,
    `notes/phase12-temporal.md`. The history gate is the head's fourth channel, and it
    works: alpha goes 0.008 with no history -> **0.705** with correctly reprojected
@@ -265,11 +261,11 @@ What is *not* claimed:
 - **No NVIDIA parity gate.** There is still no NVIDIA GPU here, so there are still no
   reference activations. The graph is MLX-DLSS's recovery from vendor captures, and it
   is validated against their spec and against behaviour, not against the DLL.
-- **Not fast, and the GPU is not yet paying for itself.** Best is **10.2 s** for
-  384x384 and **64.4 s** for 720p — OpenBLAS numpy plus `nr_accel`, which swaps the
-  half and E4M3 rounding for torch's SIMD conversions (bit-identical, verified over
-  every representable value; pin torch to **one** thread, eight is 3x slower).
-  XMX adds nothing on top. Every GEMM is on the GPU; the
+- **The whole graph is resident on the GPU**: **0.26 s** at 384x384 and **1.56 s**
+  at 720p, 48x and 41x against the best CPU configuration, head correlation 0.9918.
+  `src/gpu/nr_frame_resident.py`, `notes/phase15-residency.md`. That is within 4.6x
+  of the arithmetic floor in `notes/phase11-what-is-left.md`, so full-frame real-time
+  is still out of reach and always was — the model's arithmetic against this iGPU. Every GEMM is on the GPU; the
   remaining 71 % is elementwise numpy, and the round trips cost more than the kernel
   saves.
 - **Single frame.** No motion vectors, no history, no temporal path.

@@ -336,6 +336,55 @@ def test_blocks(runtime, weights):
     M.FUSE_BRANCHED = previous
 
 
+def test_frame(runtime, weights, extent=320):
+    """The whole graph on the device against the whole graph on the host.
+
+    Per-element agreement is not available — see notes/phase9-numerics.md — so this
+    checks correlation, that the head's spread matches, and that nothing is lost or
+    infinite.
+    """
+    import time
+
+    import nr_frame_resident
+
+    print(f"the whole graph, {extent}x{extent}")
+    rng = np.random.default_rng(5)
+    features = np.zeros((extent, extent, 16), dtype=np.float32)
+    yy, xx = np.mgrid[0:extent, 0:extent].astype(np.float32)
+    features[..., 0:3] = rng.normal(0, 1, (extent, extent, 3)).astype(np.float32)
+    features[..., 3] = 1
+    colour = np.stack([np.sin(xx / 9), np.cos(yy / 11), np.sin((xx + yy) / 13)], -1)
+    colour = ((np.clip(0.5 + 0.3 * colour, 0, 1) - 0.5) * 0.125).astype(np.float32)
+    features[..., 4:7] = colour
+    features[..., 7:10] = colour
+    features[..., 11] = 1
+    features[..., 12] = 1
+    features[..., 13] = -1
+    features[..., 14] = -1
+
+    previous = M.FUSE_BRANCHED
+    M.FUSE_BRANCHED = True
+    frame = nr_frame_resident.ResidentFrame(runtime, weights, extent, extent)
+    passes = []
+    frame.run(features, submits=passes)
+    started = time.perf_counter()
+    head = frame.run(features)
+    device_seconds = time.perf_counter() - started
+    started = time.perf_counter()
+    expected = M.NeuralRenderingModel(weights).forward(features[None])[0]
+    host_seconds = time.perf_counter() - started
+    M.FUSE_BRANCHED = previous
+
+    check("the head is finite", np.isfinite(head).all())
+    correlation = float(np.corrcoef(head[..., :3].ravel(), expected[..., :3].ravel())[0, 1])
+    check("the resident frame tracks the host reference", correlation > 0.97,
+          f"corr {correlation:.6f}")
+    spread = head[..., :3].std() / expected[..., :3].std()
+    check("the head's spread matches", 0.9 < spread < 1.1, f"ratio {spread:.4f}")
+    print(f"  {passes[0]} passes, {device_seconds:.2f}s against the host's "
+          f"{host_seconds:.1f}s ({host_seconds / device_seconds:.0f}x)")
+
+
 def main():
     runtime = xmxres.Runtime()
     test_operators(runtime)
@@ -345,6 +394,7 @@ def main():
         test_chain(runtime, weights)
         test_attention(runtime, weights)
         test_blocks(runtime, weights)
+        test_frame(runtime, weights)
     else:
         print(f"weights not found at {WEIGHTS}; skipping the chain")
     print()

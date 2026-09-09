@@ -14,9 +14,10 @@ has native FP8 E4M3 matrix hardware. That approach does not transfer here — se
 a CPU reference.** Playable framerates are explicitly *not* a goal. Do not propose
 optimisations that trade correctness for speed until Phase 3 is done.
 
-> **REACHED 2026-09-09.** `python3 src/ref/nr_frame.py IN.png OUT.png --gpu` renders a
-> frame with the real effect — lashes and hair resolved, skin pores synthesised — in
-> about **17 s** for 384x384 and 95 s for 1280x720. The port is **bit-identical** to
+> **REACHED 2026-09-09.** `python3 src/ref/nr_frame.py IN.png OUT.png --resident`
+> renders a frame with the real effect — lashes and hair resolved, skin pores
+> synthesised — in **0.26 s** for 384x384 and **1.56 s** for 1280x720, with the whole
+> 71-block graph resident on the GPU. The port is **bit-identical** to
 > MLX-DLSS's PyTorch original once both are given the same GEMM. Note the CPU baseline:
 > the system numpy is the netlib reference BLAS, and under OpenBLAS the CPU alone is
 > as fast as the XMX path (`notes/phase13-torch-and-blas.md`). Two adversarial controls pass. Phase 4 is done as well:
@@ -272,6 +273,12 @@ Treat all of the above as *reported*, not verified. Verifying it is Phase 1's jo
   correct history, **0.032** when the motion is wrong, which is ghosting rejection.
   Static-scene flicker falls 3.6x by the fourth frame (6.3x at the peak) with no
   high-frequency loss.
+- **Phase 4c — Residency. DONE 2026-09-09** — `src/gpu/nr_frame_resident.py`,
+  `notes/phase15-residency.md`. The whole graph runs on the device: operands travel as
+  64-bit addresses in push constants so there are no descriptor sets, a block records
+  as one command buffer, and activations never return to the host. 0.26 s at 384x384
+  and 1.56 s at 720p, 48x and 41x against the best CPU, head correlation 0.9918 and a
+  visually indistinguishable picture. Within 4.6x of the arithmetic floor.
 - **Phase 5 (later) — Integration.** Wire into a real game. Target: Control (DX12, has
   DLSS, light enough for this iGPU under Proton, and the most published RTX 50
   before/after comparisons to sanity-check against). Cyberpunk 2077 photo mode is the
