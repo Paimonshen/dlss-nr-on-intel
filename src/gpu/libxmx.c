@@ -26,12 +26,24 @@ static struct {
 	struct buf A, B, C;
 	/* resident path */
 	VkPipelineLayout rpl; VkPipeline rgemm, rtiled, rstaged, runary, rrow, rhistory;
+	char *rpaths[5];
+	unsigned specialize;
 	unsigned tiling, tilem, tilen;
 	int syncing;
 	unsigned staging;
 	VkCommandBuffer rcb; VkFence rfence; int recording, recorded, rready;
 	char name[256]; char err[256]; int ready;
 } g;
+
+#define MAX_SPECIALIZED 256
+static struct {
+	unsigned family, flags;
+	VkPipeline pipeline;
+} specialized[MAX_SPECIALIZED];
+static unsigned specialized_count;
+
+#define MAX_GRAPHS 128
+static struct { VkCommandBuffer commands; int passes; } graphs[MAX_GRAPHS];
 
 /* Device-resident buffers. The graph's activations live here between blocks instead
  * of being read back to the host after every GEMM; on a shared-memory APU the mapping
@@ -69,7 +81,8 @@ static uint32_t memtype(uint32_t bits, VkMemoryPropertyFlags want)
 	return UINT32_MAX;
 }
 
-static int build_pipeline(const char *spv_path, VkPipelineLayout layout, VkPipeline *out)
+static int build_pipeline_spec(const char *spv_path, VkPipelineLayout layout, VkPipeline *out,
+			      const VkSpecializationInfo *specialization)
 {
 	FILE *f = fopen(spv_path, "rb");
 	if (!f) FAIL("cannot open spv", 0);
@@ -85,12 +98,55 @@ static int build_pipeline(const char *spv_path, VkPipelineLayout layout, VkPipel
 	if (r) FAIL("shader module", r);
 	VkComputePipelineCreateInfo cpi = { .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
 		.stage = { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-			   .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = sm, .pName = "main" }, .layout = layout };
+			   .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = sm, .pName = "main",
+			   .pSpecializationInfo = specialization }, .layout = layout };
 	r = vkCreateComputePipelines(g.dev, VK_NULL_HANDLE, 1, &cpi, NULL, out);
 	vkDestroyShaderModule(g.dev, sm, NULL);
 	if (r) FAIL("pipeline", r);
 	return 0;
 }
+
+static int build_pipeline(const char *path, VkPipelineLayout layout, VkPipeline *out)
+{
+	return build_pipeline_spec(path, layout, out, NULL);
+}
+
+/* Freeze operation flags before compilation: dead transpose/publish/width branches
+ * otherwise contribute to register pressure even on dispatches that do not use them.
+ * Keep the unspecialized path for same-buffer A/B measurements and shader overrides. */
+static int resident_pipeline(unsigned family, unsigned flags, VkPipeline fallback,
+			     VkPipeline *out)
+{
+	unsigned mask = family < 3 ? 1u : (family == 3 ? 2u : 4u);
+	*out = fallback;
+	if (!(g.specialize & mask)) return 0;
+	for (unsigned i = 0; i < specialized_count; i++) {
+		if (specialized[i].family == family && specialized[i].flags == flags) {
+			*out = specialized[i].pipeline;
+			return 0;
+		}
+	}
+	if (specialized_count == MAX_SPECIALIZED) return 0;
+	VkSpecializationMapEntry entry = { .constantID = 0, .offset = 0, .size = sizeof flags };
+	VkSpecializationInfo info = { .mapEntryCount = 1, .pMapEntries = &entry,
+				      .dataSize = sizeof flags, .pData = &flags };
+	if (build_pipeline_spec(g.rpaths[family], g.rpl, out, &info)) return -1;
+	specialized[specialized_count].family = family;
+	specialized[specialized_count].flags = flags;
+	specialized[specialized_count++].pipeline = *out;
+	return 0;
+}
+
+int xmx_specialize(unsigned mask)
+{
+	if (g.recording) FAIL("cannot switch specialization during recording", 0);
+	if (mask > 7) FAIL("specialization mask must be in 0..7", 0);
+	g.specialize = mask;
+	return 0;
+}
+
+unsigned xmx_specialized_count(void) { return specialized_count; }
+unsigned xmx_specialization(void) { return g.specialize; }
 
 static int ensure(struct buf *b, VkDeviceSize size)
 {
@@ -354,6 +410,14 @@ int xmx_res_init(const char *gemm_spv, const char *unary_spv, const char *row_sp
 					   .pushConstantRangeCount = 1, .pPushConstantRanges = &pcr };
 	VkResult r = vkCreatePipelineLayout(g.dev, &pli, NULL, &g.rpl);
 	if (r) FAIL("resident pipeline layout", r);
+	const char *paths[] = { gemm_spv, tiled_spv, staged_spv, unary_spv, row_spv };
+	for (unsigned i = 0; i < 5; i++) {
+		g.rpaths[i] = strdup(paths[i]);
+		if (!g.rpaths[i]) FAIL("pipeline path allocation", 0);
+	}
+	const char *spec = getenv("XMX_SPECIALIZE");
+	g.specialize = spec ? (unsigned)atoi(spec) : 7;
+	if (g.specialize > 7) FAIL("XMX_SPECIALIZE must be in 0..7", 0);
 	if (build_pipeline(gemm_spv, g.rpl, &g.rgemm) || build_pipeline(unary_spv, g.rpl, &g.runary)
 	    || build_pipeline(row_spv, g.rpl, &g.rrow)
 	    || build_pipeline(history_spv, g.rpl, &g.rhistory)
@@ -386,6 +450,7 @@ int xmx_buf_create(unsigned long long bytes)
 	struct rbuf *rb = &rbufs[id];
 	VkBufferCreateInfo bi = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = bytes ? bytes : 4,
 				  .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+					   | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT
 					   | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT };
 	VkResult r = vkCreateBuffer(g.dev, &bi, NULL, &rb->b);
 	if (r) FAIL("vkCreateBuffer (resident)", r);
@@ -436,14 +501,24 @@ static VkDeviceAddress addr_of(int id)
 int xmx_begin(void)
 {
 	if (!g.rready) FAIL("resident runtime not initialised", 0);
+	if (g.recording) FAIL("already recording", 0);
 	vkResetCommandBuffer(g.rcb, 0);
-	VkCommandBufferBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-					.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT };
+	/* Captured graphs are replayed, so ONE_TIME_SUBMIT is deliberately absent. */
+	VkCommandBufferBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
 	VkResult r = vkBeginCommandBuffer(g.rcb, &bi);
 	if (r) FAIL("begin resident recording", r);
 	g.recording = 1;
 	g.recorded = 0;
 	g.syncing = 1;
+	return 0;
+}
+
+int xmx_abort(void)
+{
+	if (!g.recording) return 0;
+	VkResult r = vkResetCommandBuffer(g.rcb, 0);
+	if (r) FAIL("abort resident recording", r);
+	g.recording = 0;
 	return 0;
 }
 
@@ -460,6 +535,38 @@ static void barrier(void)
 			       .dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT };
 	vkCmdPipelineBarrier(g.rcb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
 			     VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+}
+
+/* Copy a skip without a host fence. Both barriers cover execution dependencies
+ * (including write-after-read), and make writes visible between compute/transfer. */
+int xmx_rec_copy(int source, int target, unsigned long long bytes,
+		 unsigned long long source_offset, unsigned long long target_offset)
+{
+	if (!g.recording) FAIL("not recording", 0);
+	if (!addr_of(source) || !addr_of(target)) FAIL("copy buffer is not live", 0);
+	struct rbuf *a = &rbufs[source], *b = &rbufs[target];
+	if (!bytes || ((bytes | source_offset | target_offset) & 3) ||
+	    source_offset > a->size || bytes > a->size - source_offset ||
+	    target_offset > b->size || bytes > b->size - target_offset)
+		FAIL("copy range must be aligned and within both buffers", 0);
+	if (source == target && source_offset < target_offset + bytes &&
+	    target_offset < source_offset + bytes) FAIL("overlapping copy", 0);
+	VkMemoryBarrier before = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+		.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
+		.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT };
+	vkCmdPipelineBarrier(g.rcb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+		VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &before, 0, NULL, 0, NULL);
+	VkBufferCopy region = { .srcOffset = source_offset, .dstOffset = target_offset, .size = bytes };
+	vkCmdCopyBuffer(g.rcb, a->b, b->b, 1, &region);
+	VkMemoryBarrier after = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+		.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+		.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
+				 VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT };
+	vkCmdPipelineBarrier(g.rcb, VK_PIPELINE_STAGE_TRANSFER_BIT,
+		VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+		0, 1, &after, 0, NULL, 0, NULL);
+	g.recorded++;
+	return 0;
 }
 
 /* Suppress or restore the barrier between dispatches. Restoring emits one, closing the
@@ -504,13 +611,14 @@ int xmx_rec_gemm(int a, int b, int c, unsigned M, unsigned N, unsigned K, unsign
 	 * are indistinguishable — see notes/phase22-staging-and-storage.md. */
 	int staged = M % 64 == 0 && N % 32 == 0 && K % 32 == 0 && K >= g.staging;
 	int tiled = M % g.tilem == 0 && N % g.tilen == 0 && K >= g.tiling;
+	VkPipeline pipeline;
+	if (resident_pipeline(staged ? 2 : (tiled ? 1 : 0), bt,
+			      staged ? g.rstaged : (tiled ? g.rtiled : g.rgemm), &pipeline)) return -1;
+	vkCmdBindPipeline(g.rcb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+	vkCmdPushConstants(g.rcb, g.rpl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
 	if (staged) {
-		vkCmdBindPipeline(g.rcb, VK_PIPELINE_BIND_POINT_COMPUTE, g.rstaged);
-		vkCmdPushConstants(g.rcb, g.rpl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
 		vkCmdDispatch(g.rcb, N / 32, M / 64, batch ? batch : 1);
 	} else {
-		vkCmdBindPipeline(g.rcb, VK_PIPELINE_BIND_POINT_COMPUTE, tiled ? g.rtiled : g.rgemm);
-		vkCmdPushConstants(g.rcb, g.rpl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
 		if (tiled) vkCmdDispatch(g.rcb, N / g.tilen, M / g.tilem, batch ? batch : 1);
 		else       vkCmdDispatch(g.rcb, (N + 15) / 16, (M + 7) / 8, batch ? batch : 1);
 	}
@@ -527,7 +635,9 @@ int xmx_rec_unary(unsigned kind, int a, int b, int c, int d, unsigned n, unsigne
 			  .m = n, .n = channels, .flags = kind, .p0 = p0,
 			  .batch = batch, .sa = sa, .sb = sb, .sc = sc, .k = k };
 	if (!p.a || !p.c) FAIL("unary operand is not a live buffer", 0);
-	vkCmdBindPipeline(g.rcb, VK_PIPELINE_BIND_POINT_COMPUTE, g.runary);
+	VkPipeline pipeline;
+	if (resident_pipeline(3, kind, g.runary, &pipeline)) return -1;
+	vkCmdBindPipeline(g.rcb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
 	vkCmdPushConstants(g.rcb, g.rpl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
 	vkCmdDispatch(g.rcb, (n + 255) / 256, 1, 1);
 	barrier();
@@ -545,7 +655,9 @@ int xmx_rec_row(unsigned kind, int a, int b, int c, int d, unsigned rows, unsign
 			  .m = rows, .n = width, .k = scaled, .batch = heads, .flags = kind,
 			  .sa = stride, .p0 = cap };
 	if (!p.a || !p.c) FAIL("row operand is not a live buffer", 0);
-	vkCmdBindPipeline(g.rcb, VK_PIPELINE_BIND_POINT_COMPUTE, g.rrow);
+	VkPipeline pipeline;
+	if (resident_pipeline(4, kind, g.rrow, &pipeline)) return -1;
+	vkCmdBindPipeline(g.rcb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
 	vkCmdPushConstants(g.rcb, g.rpl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
 	vkCmdDispatch(g.rcb, (rows + 31) / 32, 1, 1);
 	barrier();
@@ -570,17 +682,60 @@ int xmx_rec_history(int history, int motion, int out, unsigned pixels, unsigned 
 	return 0;
 }
 
+static int submit_commands(VkCommandBuffer commands, int passes)
+{
+	VkResult r = vkResetFences(g.dev, 1, &g.rfence);
+	if (r) FAIL("reset resident fence", r);
+	VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1,
+			    .pCommandBuffers = &commands };
+	if ((r = vkQueueSubmit(g.q, 1, &si, g.rfence))) FAIL("resident submit", r);
+	if ((r = vkWaitForFences(g.dev, 1, &g.rfence, VK_TRUE, 60ull * 1000000000ull)))
+		FAIL("resident fence wait", r);
+	return passes;
+}
+
 int xmx_submit(void)
 {
 	if (!g.recording) FAIL("not recording", 0);
 	g.recording = 0;
 	VkResult r = vkEndCommandBuffer(g.rcb);
 	if (r) FAIL("end resident recording", r);
-	vkResetFences(g.dev, 1, &g.rfence);
-	VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1,
-			    .pCommandBuffers = &g.rcb };
-	if ((r = vkQueueSubmit(g.q, 1, &si, g.rfence))) FAIL("resident submit", r);
-	if ((r = vkWaitForFences(g.dev, 1, &g.rfence, VK_TRUE, 60ull * 1000000000ull)))
-		FAIL("resident fence wait", r);
-	return g.recorded;
+	return submit_commands(g.rcb, g.recorded);
+}
+
+/* A graph owns its command buffer; later recording (including temporal history)
+ * uses a different one. Callers keep referenced buffers alive until graph_destroy. */
+int xmx_graph_capture(void)
+{
+	if (!g.recording) FAIL("not recording", 0);
+	int id;
+	for (id = 0; id < MAX_GRAPHS && graphs[id].commands; id++);
+	if (id == MAX_GRAPHS) FAIL("out of graph slots", 0);
+	VkCommandBuffer replacement;
+	VkCommandBufferAllocateInfo ai = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+		.commandPool = g.cpool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1 };
+	VkResult r = vkAllocateCommandBuffers(g.dev, &ai, &replacement);
+	if (r) FAIL("graph command buffer", r);
+	r = vkEndCommandBuffer(g.rcb);
+	if (r) { vkFreeCommandBuffers(g.dev, g.cpool, 1, &replacement); FAIL("end graph recording", r); }
+	graphs[id].commands = g.rcb;
+	graphs[id].passes = g.recorded;
+	g.rcb = replacement;
+	g.recording = 0;
+	return id;
+}
+
+int xmx_graph_run(int id)
+{
+	if (g.recording) FAIL("cannot replay during recording", 0);
+	if (id < 0 || id >= MAX_GRAPHS || !graphs[id].commands) FAIL("graph is not live", 0);
+	return submit_commands(graphs[id].commands, graphs[id].passes);
+}
+
+int xmx_graph_destroy(int id)
+{
+	if (id < 0 || id >= MAX_GRAPHS || !graphs[id].commands) return 0;
+	vkFreeCommandBuffers(g.dev, g.cpool, 1, &graphs[id].commands);
+	graphs[id].commands = VK_NULL_HANDLE;
+	return 0;
 }

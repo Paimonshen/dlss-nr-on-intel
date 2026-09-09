@@ -149,6 +149,32 @@ class GlobalScratch:
                 value.free()
 
 
+def record_qkv(runtime, w, s, windows, tokens, channels, heads):
+    """Split V; optionally normalize Q/K directly from the projection buffer."""
+    if runtime.fuse_qk:
+        with runtime.independent():
+            runtime.cosine_publish(s.proj, s.q16, windows * heads * tokens,
+                                   tokens=tokens, heads=heads, scale=w.scale,
+                                   narrow=True, qkv_part=0)
+            runtime.cosine_publish(s.proj, s.k16, windows * heads * tokens,
+                                   tokens=tokens, heads=heads, narrow=True, qkv_part=1)
+            runtime.split_heads(s.proj, s.v16, windows, tokens, channels, heads, 2,
+                                epilogue=xmxres.EPI_E4M3, narrow=True)
+        return
+    with runtime.independent():
+        for index, part in enumerate((s.q16, s.k16)):
+            runtime.split_heads(s.proj, part, windows, tokens, channels, heads, index,
+                                epilogue=xmxres.EPI_HALF, narrow=True)
+        runtime.split_heads(s.proj, s.v16, windows, tokens, channels, heads, 2,
+                            epilogue=xmxres.EPI_E4M3, narrow=True)
+    with runtime.independent():
+        runtime.cosine_publish(s.q16, s.q16, windows * heads * tokens,
+                               tokens=tokens, heads=heads, scale=w.scale,
+                               narrow=True, from_half=True)
+        runtime.cosine_publish(s.k16, s.k16, windows * heads * tokens,
+                               tokens=tokens, heads=heads, narrow=True, from_half=True)
+
+
 def record_global_block(runtime, w, s, source=None, target=None):
     """A bottleneck block: the wide feed-forward, then attention over every token."""
     source = source or s.value
@@ -162,17 +188,7 @@ def record_global_block(runtime, w, s, source=None, target=None):
 
     runtime.to_half(s.ffn, s.ffn16, padded * channels)
     runtime.gemm(s.ffn16, w.qkv, s.proj, padded, 3 * channels, channels)
-    with runtime.independent():
-        for index, part in enumerate((s.q16, s.k16)):
-            runtime.split_heads(s.proj, part, 1, padded, channels, heads, index,
-                                epilogue=xmxres.EPI_HALF, narrow=True)
-        runtime.split_heads(s.proj, s.v16, 1, padded, channels, heads, 2,
-                            epilogue=xmxres.EPI_E4M3, narrow=True)
-    with runtime.independent():
-        runtime.cosine_publish(s.q16, s.q16, heads * padded, tokens=padded, heads=heads,
-                               scale=w.scale, narrow=True, from_half=True)
-        runtime.cosine_publish(s.k16, s.k16, heads * padded, tokens=padded, heads=heads,
-                               narrow=True, from_half=True)
+    record_qkv(runtime, w, s, 1, padded, channels, heads)
     runtime.gemm(s.q16, s.k16, s.scores, padded, padded, 32, batch=heads,
                  strides=(padded * 32, padded * 32, padded * padded), transpose_b=True)
     # no attention bias here, and the logits are clamped symmetrically
@@ -326,20 +342,7 @@ def record_window_attention(runtime, w, s, source):
     runtime.partition(source, s.win16, s.height, s.width, channels, origin=w.origin,
                       narrow=True)
     runtime.gemm(s.win16, w.qkv, s.proj, windows * tokens, 3 * channels, channels)
-    with runtime.independent():
-        for index, part in enumerate((s.q16, s.k16)):
-            runtime.split_heads(s.proj, part, windows, tokens, channels, heads, index,
-                                epilogue=xmxres.EPI_HALF, narrow=True)
-        # V's publish is the split itself: a permutation and a round commute
-        runtime.split_heads(s.proj, s.v16, windows, tokens, channels, heads, 2,
-                            epilogue=xmxres.EPI_E4M3, narrow=True)
-    # the cosine publish rounds its input to half first, so reading the split's own
-    # half output is the same value it would have computed from float32
-    with runtime.independent():
-        runtime.cosine_publish(s.q16, s.q16, batch * tokens, tokens=tokens, heads=heads,
-                               scale=w.scale, narrow=True, from_half=True)
-        runtime.cosine_publish(s.k16, s.k16, batch * tokens, tokens=tokens, heads=heads,
-                               narrow=True, from_half=True)
+    record_qkv(runtime, w, s, windows, tokens, channels, heads)
     runtime.gemm(s.q16, s.k16, s.scores, tokens, tokens, 32, batch=batch,
                  strides=(tokens * 32, tokens * 32, tokens * tokens), transpose_b=True)
     runtime.softmax(s.scores, s.probs16, batch * tokens, tokens, narrow=True,

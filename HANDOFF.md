@@ -1,8 +1,80 @@
 # HANDOFF — read this first
 
-State of the DLSS-NR on Intel Xe2 project as of **2026-09-09**. CLAUDE.md holds the
+State of the DLSS-NR on Intel Xe2 project as of **2026-09-10**. CLAUDE.md holds the
 original brief; **this file overrides it wherever they disagree**, and after
 2026-09-09 they disagree about something foundational.
+
+---
+
+## Latest: softmax packing and GEMM sweep (2026-09-10)
+
+**A smaller, exact optimization is now enabled:** softmax uses native FP16 pack/unpack
+instead of manual bit conversion. The isolated kernel is 14% faster, but paired full
+frames improve only about 2% at 384x384 and 1% at 720p; **1080p is unchanged within
+noise**. Do not quote the kernel gain as a frame gain. All heads remain bit-identical.
+`notes/phase29-softmax-pack.md` contains measurements and reproduction commands.
+
+Six GEMM tile sizes and transposed static weights were evaluated; neither produced
+a worthwhile replacement for the current path. The ablation benchmark now forces
+fresh recording so cached replay cannot ignore its disabled operations. Attention
+layout/conversion fusion is a better next experiment than another blind tile sweep.
+`make test` passes, including exhaustive affine-pair and finite-FP16 softmax checks.
+
+## Previous: captured frame replay (2026-09-10)
+
+**A frame now uses one GPU submission instead of 73, and subsequent frames reuse
+recorded commands.** Encoder skip copies and bottleneck conversions run on the GPU.
+The output is bit-identical to the previous resident path, including changed inputs.
+`notes/phase28-frame-replay.md` records the implementation, limits and raw evidence.
+
+Incremental warm measurements over phase27, paired on the same buffers:
+
+| Output | Previous block mode | Captured replay | Time reduction |
+|---|---:|---:|---:|
+| 384x384 | 123.5 ms | 91.0 ms | 26% |
+| 1280x720 | 541.3 ms | 510.6 ms | 6% |
+| 1920x1080 | 1139.0 ms | 1102.7 ms | 3% |
+
+These are graph timings, excluding feature assembly/composition and image I/O;
+first-use allocation/compilation/capture is separate. This remains photo mode.
+`NR_FRAME_MODE=replay` is the default; `block` restores the old submission strategy,
+`single` records once per frame. Diagnostic stage capture/timing uses block mode.
+
+The backend now retains one extent by default and frees old GPU resources on a
+resolution change. Temporary image files are cleaned up. `.gitignore` no longer
+hides `src/ref/`; include that source in the next commit. Clean-build dependencies
+and pinned upstream revisions are in `notes/reproduce.md`.
+
+GPU/CPU regressions, cold capture, replay with changed input, resolution eviction,
+recording-error recovery, clean native/shader build, and a three-frame temporal pan
+all passed. `src/bench/frame_replay.py` reproduces the exact-output comparison.
+
+## Previous: pipeline specialization (2026-09-10)
+
+**The resident Vulkan path is faster, with bit-identical output.** Operation flags
+are now specialized before pipeline compilation; 33–34 cached variants cover a
+frame. All specialized variants in the compiler check are spill-free, against the
+generic 16x32 GEMM's 15:15 spills:fills. The claim that OpenCL was the only remaining
+route to improvement is withdrawn. `notes/phase27-pipeline-specialization.md`.
+
+Warm, paired measurements on a real Cyberpunk frame, with the same buffers:
+
+| Output | Generic median | Specialized median | Time reduction |
+|---|---:|---:|---:|
+| 384x384 | 126 ms | 114 ms | 9% |
+| 1280x720, two separate processes | 614–670 ms | 536–550 ms | 13–18% |
+| 1920x1080 | 1457 ms | 1179 ms | 19% |
+
+These measure the graph, not image I/O, feature assembly or composition. First use
+also compiles the variants; startup is not represented by these warm numbers.
+The old 2.9 s 1080p record was not reproduced with this protocol and must not be
+used to inflate the improvement. This remains photo mode, not real-time rendering.
+
+Enabled automatically after `make`; `--resident` and the game daemon both benefit.
+`XMX_SPECIALIZE=0` restores the generic path for comparison; default is `7`.
+`make test` passes, including the new strided/batched GEMM specialization tests.
+`src/bench/specialization.py --size 720 1280 --masks 0,7 --pairs 6` reproduces the
+paired comparison and checks exact outputs before and after changing frame input.
 
 ---
 
@@ -13,16 +85,16 @@ eyelashes and eyebrow hairs resolved out of a smeared input, skin pores synthesi
 iris and eyeliner sharpened. `notes/phase7-first-render.md`.
 
 ```
-make                                                         # libxmx.so and six shaders
-python3 src/ref/nr_frame.py IN.png OUT.png --resident        # 0.13 s — the fast path
+make                                                         # Vulkan runtime, layer, shaders
+python3 src/ref/nr_frame.py IN.png OUT.png --resident        # the fast path
 python3 src/ref/nr_temporal.py IN.png OUT --resident --pan 6,0 --frames 5
 work/venv/bin/python src/ref/nr_frame.py IN.png OUT.png --accel   # 10 s, best on CPU
 python3 src/ref/nr_frame.py IN.png OUT.png                   # 38 s, netlib reference
 ```
 
-A full **1280x720** frame renders in **0.59-0.72 s** (network extent 1280x768) and
-**1920x1080** in **2.9 s**, with no tiling artefacts. Quote the band, not a single
-number. Frames inside one process are steady to 2 %, but the same binary spreads ten
+Before phase27, a full **1280x720** frame rendered in **0.59-0.72 s** (network extent
+1280x768), with a **2.9 s** 1080p record. Current paired results are above. Quote the
+band, not a single number. Frames inside one process were steady to 2 %, but the same binary spread ten
 percent either side of a ~625 ms median *between* processes — buffer placement, not
 clocks; the GPU holds 1950 MHz at 43-45 C throughout. A first frame after an idle costs
 two to four times the rest while the clock ramps.
@@ -120,18 +192,18 @@ value:
    All 64 XMX engines are busy (throughput scales linearly to 256 workgroups, four per
    engine, and flattens exactly there), but each is ~90 % idle because a SIMD32 subgroup
    runs out of registers: one accumulator is 4 of the 128 GRF, so a 16x32 block already
-   spills and a 32x64 block spills 474 times. That single fact explains the failed
-   register tiling, the failed operand staging, and the 4.4 % of peak. **The only lever
-   with a factor left in it is OpenCL** — `cl_intel_subgroup_2d_block_io` and the wider
-   DPAS shapes are on this machine and unreachable from Vulkan. A second backend, not a
-   flag.
+   spills and a 32x64 block spills 474 times **in the old universal shaders**.
+   **Phase27 removes the 16x32 spills by specializing operation flags** and saves
+   13–18% at 720p without changing any result. The old conclusion that only OpenCL
+   could help was too strong. `cl_intel_subgroup_2d_block_io` and wider DPAS shapes
+   remain a possible OpenCL research direction, requiring a second backend.
 
-   What is actually left is smaller than it looks. **A smaller extent does not buy a
-   frame rate** — measured, `notes/phase25-the-frame-rate-wall.md`: the frame is
-   `20 ms + 632 ms per megapixel`, so 640x384 is **191 ms (5.2 fps)**, not the 30 fps
-   this file used to claim. 30 fps would need a 194x109 extent and 60 fps is below the
-   fixed cost outright. On this hardware, with this graph, **this is a photo mode** —
-   which is what the Vulkan layer already delivers. The stale reasoning follows.
+   **Phase28 also removes per-block submissions and repeated Python recording.**
+   The old phase25 fit (`20 ms + 632 ms per megapixel`) predates both changes and
+   cannot describe today's fixed overhead. Current paired timings are at the top.
+   They still do not demonstrate real-time rendering. Profile the specialized,
+   replayed graph before choosing another kernel change. The historical reasoning
+   below is retained as evidence of earlier experiments, not a current cost split.
 
    *A 720p frame is ~600 ms, and*
    `src/bench/split_cost.py` splits it almost exactly in half: **327 ms of GEMM,
@@ -175,12 +247,9 @@ value:
 4. ~~**The DX12/Proton integration**~~ — the door turned out to be a Vulkan layer
    rather than an NGX hook; see item 2.
 
-Smaller, if wanted: **store the published inter-block buffers as float16.** An E4M3
-value is exact in half, so every buffer a block publishes could be half with no loss —
-that removes the remaining 263 M elements of `to_half` and halves the residual's skip
-read. Worth roughly 2.6 GB of a ~26 GB frame; the work is threading a "this operand is
-half" flag through the residual, partition, pool2 and upsample readers.
-`MIN_MACS` in `nr_xmx.py` was tuned against the reference BLAS and should be re-swept.
+**Already done:** published inter-block buffers use float16 (phase22); per-block
+host copies/fences and repeated command recording are removed (phase28). Tuning
+`MIN_MACS` concerns the superseded `nr_xmx.py` hook path, not the resident default.
 
 ---
 
@@ -324,9 +393,11 @@ What is *not* claimed:
 - **No NVIDIA parity gate.** There is still no NVIDIA GPU here, so there are still no
   reference activations. The graph is MLX-DLSS's recovery from vendor captures, and it
   is validated against their spec and against behaviour, not against the DLL.
-- **The whole graph is resident on the GPU**: **0.13 s** at 384x384, **0.6-0.7 s** at
-  720p and **2.9 s** at 1080p, head correlation 0.9918 with the CPU reference and a
-  visually indistinguishable picture. 5.6 GB of device buffers at 720p.
+- **The whole graph is resident on the GPU**: phase27 warm medians are **0.114 s** at
+  384x384, **0.536–0.550 s** at 720p and **1.179 s** at 1080p. The optimization is
+  bit-identical to the generic GPU path. Earlier comparisons reported head correlation
+  0.9918 with the CPU reference and visually indistinguishable pictures.
+  5.6 GB of device buffers at 720p.
   `src/gpu/nr_frame_resident.py`, `notes/phase15-residency.md`,
   `notes/phase18-fusion.md`, `notes/phase21-fusion-and-tiling.md`.
 - **It runs in a game.** A Vulkan layer captures the presented frame, a daemon runs
@@ -340,14 +411,14 @@ What is *not* claimed:
 - **The machine's real limits, measured** (`notes/phase20-machine-limits.md`):
   **70-91 GB/s** of memory bandwidth against 136.5 theoretical, the GPU holding its
   **1950 MHz ceiling** throughout a run at 46-48 C, and our GEMM at **8-12 %** of the
-  ~32 TFLOP/s FP16 peak — **4.4 %** averaged over the frame's real shapes. That ceiling
-  is the register file, not the kernel (`notes/phase26-the-register-ceiling.md`): the
-  GPU has **64** XMX engines, all of them busy, each mostly idle. Earlier notes quoted
-  23 GB/s, which was single-threaded
-  numpy and wrong by 3x. The slack is in our kernel, not the chip. Every GEMM is on the GPU; the
-  remaining 71 % is elementwise numpy, and the round trips cost more than the kernel
-  saves.
-- **Single frame.** No motion vectors, no history, no temporal path.
+  ~32 TFLOP/s FP16 peak — **4.4 %** averaged over the frame's real shapes **before
+  specialization**. The GPU has **64** XMX engines. Phase27 demonstrates that some
+  register pressure was avoidable shader code; these older throughput measurements
+  do not establish the optimized kernel's ceiling. Earlier notes quoted 23 GB/s,
+  which was single-threaded numpy and wrong by 3x. Both GEMM and elementwise graph
+  operations now run on the GPU.
+- **Temporal processing exists** in `nr_temporal.py`; the game's photo daemon uses
+  the single-frame path and does not supply engine motion/history.
 - The graph recovery is **not ours**. Ours is the Xe2 execution path, the numpy
   reference, the independent second extraction that confirms their weight spec, and
   the PTX findings in section 2 that their write-up and ours agree on.

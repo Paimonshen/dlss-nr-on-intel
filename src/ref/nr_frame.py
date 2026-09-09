@@ -91,11 +91,14 @@ def controls(profile="standard", style_index=None, local_tone=None,
 class ResidentBackend:
     """Runs the graph on the GPU, keeping activations in device buffers.
 
-    Holds one `ResidentFrame` per network extent, since the buffers are sized for it;
-    a sequence at a fixed resolution therefore pays the allocation once.
+    Retains the most recently used extents, one by default. Evicted frames are
+    closed, releasing their GPU allocations and captured commands. A caller must
+    not keep using a frame after asking this backend for a different extent.
     """
 
-    def __init__(self, weights_path=None):
+    def __init__(self, weights_path=None, *, max_cached_frames=1):
+        if not isinstance(max_cached_frames, int) or max_cached_frames < 1:
+            raise ValueError("max_cached_frames must be a positive integer")
         sys.path.insert(0, str(ROOT / "src" / "gpu"))
         import xmxres
         import nr_frame_resident
@@ -104,12 +107,23 @@ class ResidentBackend:
         self.weights, _ = nr_model.load_logical(weights_path or WEIGHTS)
         nr_model.FUSE_BRANCHED = True
         self._frames = {}
+        self.max_cached_frames = max_cached_frames
 
     def frame(self, height, width):
-        if (height, width) not in self._frames:
-            self._frames[(height, width)] = self._module.ResidentFrame(
-                self.runtime, self.weights, height, width)
-        return self._frames[(height, width)]
+        key = (height, width)
+        if key in self._frames:
+            frame = self._frames.pop(key)
+        else:
+            while len(self._frames) >= self.max_cached_frames:
+                self._frames.pop(next(iter(self._frames))).close()
+            frame = self._module.ResidentFrame(self.runtime, self.weights, height, width)
+        self._frames[key] = frame
+        return frame
+
+    def close(self):
+        for frame in self._frames.values():
+            frame.close()
+        self._frames.clear()
 
     def run_features(self, features):
         height, width = features.shape[:2]

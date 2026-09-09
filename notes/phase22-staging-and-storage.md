@@ -1,5 +1,13 @@
 # Phase 22 — two suggested optimisations, measured
 
+> **Note 2026-09-10.** The "between processes the same binary spreads 586-718 ms ...
+> so it is buffer placement, not clocks or heat" conclusion in phase 21 and repeated
+> here was wrong. Most of that spread was **host** variance from 73 command-buffer
+> submissions and five CPU-side skip copies per frame. With the frame captured as one
+> command buffer and replayed (`notes/phase28-frame-replay.md`) the same measurement
+> reads 494, 494, 494 ms across three processes. Measure through replay before
+> attributing a spread to placement.
+
 2026-09-09, after phase 21. A second model, consulted separately, proposed three
 things: read llama.cpp's Vulkan `mul_mm.comp` for a production coopmat GEMM, watch two
 llama.cpp issues about coopmat on Intel, and move activations to **bfloat16** to halve

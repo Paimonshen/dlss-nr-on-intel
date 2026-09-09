@@ -1,4 +1,4 @@
-# Everything the resident path needs: one shared library and five compute shaders.
+# Build the resident Vulkan runtime, game layer and compute shaders.
 # The shaders are plain GLSL compiled to SPIR-V; libxmx keeps the Vulkan context alive
 # across calls so a block records as one command buffer.
 
@@ -11,6 +11,12 @@ SHADERS := work/gemm_resident.spv work/gemm_tiled.spv work/gemm_staged.spv \
 
 all: work/libxmx.so work/libnr_layer.so $(SHADERS)
 
+work:
+	mkdir -p $@
+
+$(SHADERS) work/libxmx.so work/libnr_layer.so work/half_probe.spv work/attention_ab.spv: | work
+work/test_exchange: | work
+
 work/libxmx.so: src/gpu/libxmx.c
 	$(CC) $(CFLAGS) -shared -o $@ $< -lvulkan
 
@@ -18,17 +24,22 @@ work/libxmx.so: src/gpu/libxmx.c
 work/libnr_layer.so: src/layer/nr_layer.c
 	$(CC) $(CFLAGS) -shared -o $@ $< -lvulkan
 
-work/gemm_resident.spv: src/gpu/gemm_resident.comp src/gpu/publish.glsl
+work/test_exchange: src/layer/test_exchange.c src/layer/nr_layer.c
+	$(CC) $(CFLAGS) -o $@ $< -lvulkan -lpthread
+
+work/gemm_resident.spv: src/gpu/gemm_resident.comp src/gpu/publish.glsl src/gpu/specialize.glsl
 	$(GLSL) -o $@ $<
 # the same source, with a 16x32 block of the output held in one subgroup's registers
-work/gemm_tiled.spv: src/gpu/gemm_resident.comp src/gpu/publish.glsl Makefile
+work/gemm_tiled.spv: src/gpu/gemm_resident.comp src/gpu/publish.glsl src/gpu/specialize.glsl Makefile
 	$(GLSL) -DRM=2 -DRN=2 -o $@ $<
-work/gemm_staged.spv: src/gpu/gemm_staged.comp src/gpu/publish.glsl
+work/gemm_staged.spv: src/gpu/gemm_staged.comp src/gpu/publish.glsl src/gpu/specialize.glsl
 	$(GLSL) -o $@ $<
-work/resident.spv: src/gpu/resident.comp
+work/resident.spv: src/gpu/resident.comp src/gpu/publish.glsl src/gpu/specialize.glsl
 	$(GLSL) -o $@ $<
-work/attention.spv: src/gpu/attention.comp
+work/attention.spv: src/gpu/attention.comp src/gpu/publish.glsl src/gpu/specialize.glsl
 	$(GLSL) -o $@ $<
+work/attention_ab.spv: src/gpu/attention.comp src/gpu/publish.glsl src/gpu/specialize.glsl
+	$(GLSL) -DSOFTMAX_AB -o $@ $<
 work/history.spv: src/gpu/history.comp
 	$(GLSL) -o $@ $<
 work/gemm_coopmat.spv: src/gpu/gemm_coopmat.comp
@@ -45,9 +56,15 @@ bench: all work/half_probe.spv
 	python3 src/bench/half_probe.py
 	python3 src/bench/split_cost.py
 
-test: all
+test: all work/attention_ab.spv work/test_exchange
+	python3 src/layer/test_daemon.py
 	python3 src/gpu/test_epilogue.py
+	python3 src/gpu/test_specialization.py
+	python3 src/gpu/test_softmax_pack.py
+	python3 src/gpu/test_graph.py
+	python3 src/gpu/test_frame_execution.py
 	python3 src/gpu/test_resident.py
+	python3 src/ref/test_frame_cache.py
 	python3 src/ref/test_nr_model.py
 
 .PHONY: all test bench

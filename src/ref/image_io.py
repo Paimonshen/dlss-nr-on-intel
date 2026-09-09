@@ -16,19 +16,20 @@ import numpy as np
 
 def load(path, size=None):
     """-> (H, W, 3) float32 in [0,1]."""
-    d = Path(tempfile.mkdtemp())
-    args = ["magick", str(path)]
-    if size:
-        args += ["-resize", "%dx%d!" % (size[1], size[0])]
-    args += ["-depth", "8", str(d / "o.rgb")]
-    subprocess.run(args, check=True, capture_output=True)
-    raw = np.frombuffer((d / "o.rgb").read_bytes(), dtype=np.uint8)
-    if size is None:
-        probe = subprocess.run(["magick", "identify", "-format", "%w %h", str(path)],
-                               check=True, capture_output=True, text=True)
-        width, height = (int(value) for value in probe.stdout.split()[:2])
-        size = (height, width)
-    return raw.reshape(size[0], size[1], 3).astype(np.float32) / 255.0
+    with tempfile.TemporaryDirectory() as temporary:
+        d = Path(temporary)
+        args = ["magick", str(path)]
+        if size:
+            args += ["-resize", "%dx%d!" % (size[1], size[0])]
+        args += ["-depth", "8", str(d / "o.rgb")]
+        subprocess.run(args, check=True, capture_output=True)
+        raw = np.frombuffer((d / "o.rgb").read_bytes(), dtype=np.uint8)
+        if size is None:
+            probe = subprocess.run(["magick", "identify", "-format", "%w %h", str(path)],
+                                   check=True, capture_output=True, text=True)
+            width, height = (int(value) for value in probe.stdout.split()[:2])
+            size = (height, width)
+        return raw.reshape(size[0], size[1], 3).astype(np.float32) / 255.0
 
 
 def save(arr, path):
@@ -38,10 +39,11 @@ def save(arr, path):
         a = np.repeat(a[:, :, None], 3, axis=2)
     a = np.clip(a, 0.0, 1.0)
     H, W, _ = a.shape
-    d = Path(tempfile.mkdtemp())
-    (d / "i.rgb").write_bytes((a * 255.0 + 0.5).astype(np.uint8).tobytes())
-    subprocess.run(["magick", "-size", "%dx%d" % (W, H), "-depth", "8",
-                    "rgb:" + str(d / "i.rgb"), str(path)], check=True, capture_output=True)
+    with tempfile.TemporaryDirectory() as temporary:
+        d = Path(temporary)
+        (d / "i.rgb").write_bytes((a * 255.0 + 0.5).astype(np.uint8).tobytes())
+        subprocess.run(["magick", "-size", "%dx%d" % (W, H), "-depth", "8",
+                        "rgb:" + str(d / "i.rgb"), str(path)], check=True, capture_output=True)
     return path
 
 

@@ -50,6 +50,8 @@ layout(push_constant, scalar) uniform Push {
     uint lda, ldb, ldc, spare;
 } pc;
 
+#include "specialize.glsl"
+
 shared float16_t buf_a[BM * SA];
 shared float16_t buf_b[BK * SB];
 shared float stage[BM * BN];
@@ -59,7 +61,7 @@ void main() {
     uint batch = gl_WorkGroupID.z;
     uint ao = batch * pc.sa, bo = batch * pc.sb, co = batch * pc.sc;
     uint lda = pc.lda != 0u ? pc.lda : pc.k;
-    bool transposed = (pc.flags & 1u) != 0u;
+    bool transposed = (operation_flags() & 1u) != 0u;
     uint ldb = pc.ldb != 0u ? pc.ldb : (transposed ? pc.k : pc.n);
     uint ldc = pc.ldc != 0u ? pc.ldc : pc.n;
 
@@ -134,8 +136,8 @@ void main() {
         }
     }
 
-    uint epilogue = (pc.flags >> 8) & 0xFu;
-    bool narrow = (pc.flags & 0x1000u) != 0u;
+    uint epilogue = (operation_flags() >> 8) & 0xFu;
+    bool narrow = (operation_flags() & 0x1000u) != 0u;
     if (epilogue == 0u && !narrow) {
         for (uint i = 0; i < RM; i++)
             for (uint j = 0; j < RN; j++)

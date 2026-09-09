@@ -47,13 +47,15 @@ layout(push_constant, scalar) uniform Push {
     uint lda, ldb, ldc, spare;      // row strides; 0 means the dense default
 } pc;
 
+#include "specialize.glsl"
+
 const uint TM = 8, TN = 16, TK = 16;
 
 /* How many cooperative-matrix tiles one subgroup keeps in registers. The kernel is
  * compiled twice: RM = RN = 1 for shapes whose extents are not a whole tile block, and
- * RM = 4, RN = 2 otherwise. Every K step then loads RM fragments of A and RN of B to
+ * RM = 2, RN = 2 otherwise. Every K step then loads RM fragments of A and RN of B to
  * feed RM*RN multiply-accumulates, so the loads per unit of arithmetic fall by
- * RM*RN/(RM+RN) — from 0.5 to 1.33 — and the workgroup count falls eightfold with it. */
+ * RM*RN/(RM+RN) — from 0.5 to 1 — and the workgroup count falls fourfold with it. */
 #ifndef RM
 #define RM 1
 #endif
@@ -75,7 +77,7 @@ void main() {
      * output head into a 32-column slice of a wider buffer, and the split feed-forward
      * reads a 64-column slice of one. */
     uint lda = pc.lda != 0u ? pc.lda : pc.k;
-    uint ldb = pc.ldb != 0u ? pc.ldb : ((pc.flags & 1u) != 0u ? pc.k : pc.n);
+    uint ldb = pc.ldb != 0u ? pc.ldb : ((operation_flags() & 1u) != 0u ? pc.k : pc.n);
     uint ldc = pc.ldc != 0u ? pc.ldc : pc.n;
 
     coopmat<float, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator> acc[RM][RN];
@@ -87,7 +89,7 @@ void main() {
 
     /* The transposed test stays outside the K loop. Inside it, the loads stop being
      * hoisted and the loop stops pipelining — worth 30 % of a frame when it was there. */
-    if ((pc.flags & 1u) != 0u) {
+    if ((operation_flags() & 1u) != 0u) {
         for (uint k = 0; k < pc.k; k += TK) {
             for (uint i = 0; i < RM; i++)
                 coopMatLoad(a[i], pc.a.v, ao + (row + i * TM) * lda + k, lda,
@@ -113,8 +115,8 @@ void main() {
         }
     }
 
-    uint epilogue = (pc.flags >> 8) & 0xFu;
-    bool narrow = (pc.flags & 0x1000u) != 0u;
+    uint epilogue = (operation_flags() >> 8) & 0xFu;
+    bool narrow = (operation_flags() & 0x1000u) != 0u;
     if (epilogue == 0u && !narrow) {
         for (uint i = 0; i < RM; i++)
             for (uint j = 0; j < RN; j++)

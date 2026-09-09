@@ -25,10 +25,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
+#include <errno.h>
 #include <unistd.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
+#include <sys/time.h>
 #include <vulkan/vulkan.h>
 #include <vulkan/vk_layer.h>
 
@@ -84,6 +86,11 @@ static int exchange(const void *header, size_t header_size, const void *payload,
 {
 	int fd = socket(AF_UNIX, SOCK_STREAM, 0);
 	if (fd < 0) return -1;
+	struct timeval timeout = { .tv_sec = 60 };
+	if (setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof timeout) ||
+	    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof timeout)) {
+		close(fd); return -1;
+	}
 	struct sockaddr_un address = { .sun_family = AF_UNIX };
 	snprintf(address.sun_path, sizeof address.sun_path, "%s", socket_path);
 	if (connect(fd, (struct sockaddr *)&address, sizeof address) < 0) {
@@ -93,19 +100,22 @@ static int exchange(const void *header, size_t header_size, const void *payload,
 	}
 	const unsigned char *out = header;
 	for (size_t sent = 0; sent < header_size; ) {
-		ssize_t n = write(fd, out + sent, header_size - sent);
+		ssize_t n = send(fd, out + sent, header_size - sent, MSG_NOSIGNAL);
+		if (n < 0 && errno == EINTR) continue;
 		if (n <= 0) { close(fd); return -1; }
 		sent += (size_t)n;
 	}
 	out = payload;
 	for (size_t sent = 0; sent < payload_size; ) {
-		ssize_t n = write(fd, out + sent, payload_size - sent);
+		ssize_t n = send(fd, out + sent, payload_size - sent, MSG_NOSIGNAL);
+		if (n < 0 && errno == EINTR) continue;
 		if (n <= 0) { close(fd); return -1; }
 		sent += (size_t)n;
 	}
 	unsigned char *in = reply;
 	for (size_t got = 0; got < payload_size; ) {
 		ssize_t n = read(fd, in + got, payload_size - got);
+		if (n < 0 && errno == EINTR) continue;
 		if (n <= 0) { close(fd); return -1; }
 		got += (size_t)n;
 	}

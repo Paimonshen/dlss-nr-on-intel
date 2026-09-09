@@ -1,5 +1,9 @@
 # Phase 25 — what frame rate is actually reachable, measured rather than extrapolated
 
+**Historical measurements:** phase27 shader specialization and phase28 command replay
+change both kernel costs and fixed overhead. Do not use this fit as the current
+performance model; see `notes/phase28-frame-replay.md`.
+
 2026-09-09. Every note in this project that has talked about frame rate has done it by
 extrapolation: take the arithmetic, take the bandwidth, assume the kernel improves,
 divide. `src/bench/extent_curve.py` measures it instead — the real graph at nine network

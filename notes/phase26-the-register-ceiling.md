@@ -1,5 +1,29 @@
 # Phase 26 — all 64 XMX engines are busy, and each is 90 % idle
 
+**Update 2026-09-10.** Every spill count below was measured on the **universal**
+shaders, which carry code for every flag combination at once. Pipeline specialization
+compiles one variant per flag word and lets the driver drop the rest, and re-measuring
+through it changes two of the three things this note says:
+
+| block | universal (below) | specialized |
+|---|---|---|
+| 16x32 | 15:15 | **0:0** |
+| 32x32 | 97:141 | 31:59 |
+| 32x64 | 474:435 | 153:182 |
+
+- **Withdrawn: "not a better Vulkan kernel ... the one avenue left is OpenCL."** That
+  was wrong. Specialization is a Vulkan-side change worth a *paired, same-buffer*
+  **11 %** at 720p on this machine (556.5 -> 494.9 ms, bit-identical), and this note
+  missed it. `phase27-pipeline-specialization.md`.
+- **Corrected: the spill counts are about 3x too high**, and the block the graph
+  actually uses does not spill at all once specialized.
+- **Still standing: the mechanism, and the ranking.** Specialization cuts spilling by
+  a constant factor; it does not change that an accumulator costs 4 of 128 registers.
+  Re-measured with specialization on, 16x32 still wins by a wide margin — **2247**
+  GFLOP/s against 1281 for 32x32 and 710 for 32x64 — because the larger blocks still
+  spill. The register file is still the ceiling; it is just a slightly higher one than
+  this note measured.
+
 2026-09-10. Asked whether the port is using all the XMX cores, on the understanding
 that there are 128 of them and 67 TOPS to be had. Both halves of that are worth
 correcting, and the answer underneath is the most useful thing measured in this project

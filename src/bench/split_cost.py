@@ -3,6 +3,8 @@
 
 Each half is skipped in turn. The output is meaningless; the timing is not — the
 buffers keep their sizes and the dispatch pattern is otherwise identical.
+Force fresh recording: cached replay would otherwise ignore the monkeypatches.
+These ablations change intermediate values and are only an approximate cost split.
 """
 import pathlib, sys, time
 import numpy as np
@@ -20,10 +22,15 @@ real = {n: getattr(xmxres.Runtime, n) for n in
 def timed(label, skip):
     for name in skip:
         setattr(xmxres.Runtime, name, lambda self, *a, **k: self)
-    best = min(( (lambda t=time.perf_counter(): (frame.run(features), time.perf_counter() - t)[1])()
-                for _ in range(4) ))
-    for name, fn in real.items():
-        setattr(xmxres.Runtime, name, fn)
+    try:
+        best = float("inf")
+        for _ in range(4):
+            started = time.perf_counter()
+            frame.run(features, execution="single")
+            best = min(best, time.perf_counter() - started)
+    finally:
+        for name, fn in real.items():
+            setattr(xmxres.Runtime, name, fn)
     print("  %-28s %7.0f ms" % (label, 1000 * best))
     return best
 

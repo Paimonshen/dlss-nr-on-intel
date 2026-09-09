@@ -33,6 +33,8 @@ layout(push_constant, scalar) uniform Push {
     float p0, p1, p2, p3;
 } pc;
 
+#include "specialize.glsl"
+
 /* Both row passes read a whole row into one invocation, and a row is 32 or 64
  * consecutive floats: neighbouring invocations then touch addresses 128 or 256 bytes
  * apart and every load instruction spans sixty-four cache lines. Staging the
@@ -45,7 +47,29 @@ shared float stage[32 * 64];
 void gather(uint base, uint count) {
     /* Bit 15: the input is float16. The cosine publish rounds its input to half as its
      * first act, so a producer that already wrote half loses nothing by it. */
-    if ((pc.flags & 0x8000u) != 0u) {
+    if ((operation_flags() & 0x20000u) != 0u) {
+        // Q/K directly from (window, token, 3, head, channel). The cosine
+        // operation performs the split's half rounding before its reduction.
+        uint part = (operation_flags() >> 18) & 1u;
+        if (pc.n % 32u == 0u) {
+            // A workgroup's 32 rows stay in one head. Compute its base once,
+            // instead of repeating integer division for every gathered element.
+            uint row = base / 32u;
+            uint head = (row / pc.n) % pc.batch, token = row % pc.n;
+            uint window = row / (pc.n * pc.batch);
+            uint at = ((window * pc.n + token) * 3u * pc.batch + part * pc.batch + head) * 32u;
+            for (uint i = gl_LocalInvocationID.x; i < count; i += 32u)
+                stage[i] = pc.a.v[at + (i / 32u) * pc.batch * 96u + i % 32u];
+        } else {
+            for (uint i = gl_LocalInvocationID.x; i < count; i += 32u) {
+                uint row = (base + i) / 32u, channel = (base + i) % 32u;
+                uint head = (row / pc.n) % pc.batch, token = row % pc.n;
+                uint window = row / (pc.n * pc.batch);
+                uint at = ((window * pc.n + token) * 3u * pc.batch + part * pc.batch + head) * 32u + channel;
+                stage[i] = pc.a.v[at];
+            }
+        }
+    } else if ((operation_flags() & 0x8000u) != 0u) {
         HalfBuf h = HalfBuf(uint64_t(pc.a));
         for (uint i = gl_LocalInvocationID.x; i < count; i += 32u) stage[i] = float(h.v[base + i]);
     } else
@@ -57,7 +81,7 @@ void gather(uint base, uint count) {
 void scatter(uint base, uint count) {
     subgroupMemoryBarrierShared();
     subgroupBarrier();
-    if ((pc.flags & 0x1000u) != 0u) {
+    if ((operation_flags() & 0x1000u) != 0u) {
         HalfBuf h = HalfBuf(uint64_t(pc.c));
         for (uint i = gl_LocalInvocationID.x; i < count; i += 32u)
             h.v[base + i] = float16_t(stage[i]);
@@ -84,10 +108,10 @@ float hfma(float l, float r, float acc) { precise float t = l * r + acc; return 
  * writing float32 for a `to_half` pass to read straight back. Both of these rows end in
  * an E4M3 value, which is exact in half, so narrowing here changes nothing. */
 void store(uint index, float value) {
-    uint epilogue = (pc.flags >> 8) & 0xFu;
+    uint epilogue = (operation_flags() >> 8) & 0xFu;
     if (epilogue == 1u) value = e4m3(value);
     else if (epilogue == 4u) value = half_round(value);
-    if ((pc.flags & 0x1000u) != 0u) HalfBuf(uint64_t(pc.c)).v[index] = float16_t(value);
+    if ((operation_flags() & 0x1000u) != 0u) HalfBuf(uint64_t(pc.c)).v[index] = float16_t(value);
     else                            pc.c.v[index] = value;
 }
 
@@ -129,14 +153,34 @@ void cosine_publish(uint row, uint local) {
  * register, so the pair is coupled — the shift moves bits across the halves and the add
  * can carry between them — and the two elements cannot be computed apart.
  * See notes/phase5-softmax-found.md. */
-void weights_at(bool staged, uint base, uint bias, uint i, out float w0, out float w1) {
+/* The clamped affine values encode as 0x3c20..0x3e47. For every pair,
+ * the coupled transform below yields finite normal half values (0x0400..0x48e0).
+ * Native pack/unpack therefore reproduces the former bit reconstruction exactly,
+ * including the carry from the low half into the high half. */
+void weights_at_fast(bool staged, uint base, uint bias, uint i, out float w0, out float w1) {
+    vec2 affine;
+    for (uint j = 0u; j < 2u; j++) {
+        float logit = staged ? stage[base + i + j] : pc.a.v[base + i + j];
+        if ((operation_flags() & 0x2000u) != 0u) logit += pc.b.v[bias + i + j];
+        if (pc.p0 != 0.0) logit = clamp(logit, -pc.p0, pc.p0);
+        precise float scaled = half_round(logit) * 0.044921875;
+        scaled += 1.30078125;
+        affine[j] = clamp(scaled, 1.03125, 1.5693359375);
+    }
+    uint transformed = (packHalf2x16(affine) << 5) + 0x7FF88000u;
+    vec2 weights = unpackHalf2x16(transformed);
+    w0 = weights.x; w1 = weights.y;
+}
+
+#ifdef SOFTMAX_AB
+void weights_at_reference(bool staged, uint base, uint bias, uint i, out float w0, out float w1) {
     uint bits[2];
     for (uint j = 0u; j < 2u; j++) {
         float logit = staged ? stage[base + i + j] : pc.a.v[base + i + j];
         /* The per-head attention bias, added here rather than by a pass of its own:
          * it is a few tens of kilobytes and stays in cache, so folding it in costs
          * nothing and saves a whole read-modify-write of the scores. */
-        if ((pc.flags & 0x2000u) != 0u) logit += pc.b.v[bias + i + j];
+        if ((operation_flags() & 0x2000u) != 0u) logit += pc.b.v[bias + i + j];
         if (pc.p0 != 0.0) logit = clamp(logit, -pc.p0, pc.p0);
         precise float scaled = half_round(logit) * 0.044921875;
         scaled += 1.30078125;
@@ -157,6 +201,18 @@ void weights_at(bool staged, uint base, uint bias, uint i, out float w0, out flo
         out2[j] = ((half_bits & 0x8000u) != 0u) ? -weight : weight;
     }
     w0 = out2[0]; w1 = out2[1];
+}
+#endif
+
+void weights_at(bool staged, uint base, uint bias, uint i, out float w0, out float w1) {
+#ifdef SOFTMAX_AB
+    // Test-only specialization bit; removed entirely from the shipped shader.
+    if ((operation_flags() & 0x40000000u) != 0u) {
+        weights_at_reference(staged, base, bias, i, w0, w1);
+        return;
+    }
+#endif
+    weights_at_fast(staged, base, bias, i, w0, w1);
 }
 
 void softmax(uint row, uint local) {
@@ -204,12 +260,11 @@ void softmax(uint row, uint local) {
 
 void main() {
     uint row = gl_GlobalInvocationID.x;
-    if (row >= pc.m) return;
-    uint kind = pc.flags & 0xFFu, local = gl_LocalInvocationID.x;
+    uint kind = operation_flags() & 0xFFu, local = gl_LocalInvocationID.x;
     if (kind == COSINE_PUBLISH) {
         uint base = gl_WorkGroupID.x * 32u * 32u;
         gather(base, min(32u * 32u, pc.m * 32u - base));
-        cosine_publish(row, local);
+        if (row < pc.m) cosine_publish(row, local);
         scatter(base, min(32u * 32u, pc.m * 32u - base));
     } else if (kind == SOFTMAX) {
         uint stride = pc.sa != 0u ? pc.sa : pc.n;
@@ -217,10 +272,10 @@ void main() {
             uint base = gl_WorkGroupID.x * 32u * stride;
             uint count = min(32u * stride, pc.m * stride - base);
             gather(base, count);
-            softmax(row, local);
+            if (row < pc.m) softmax(row, local);
             scatter(base, count);
         } else {
-            softmax(row, local);
+            if (row < pc.m) softmax(row, local);
         }
     }
 }

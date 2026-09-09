@@ -23,6 +23,7 @@ import argparse
 import os
 import pathlib
 import socket
+import stat
 import struct
 import sys
 import time
@@ -92,6 +93,47 @@ def receive(connection, count):
     return b"".join(chunks)
 
 
+def process_connection(connection, backend, args):
+    """One request. Reject invalid extents before allocating/receiving the body.
+
+    Closing a rejected exchange makes the Vulkan layer retain its original frame.
+    """
+    magic, width, height, vk_format = struct.unpack("<4I", receive(connection, 16))
+    if magic != MAGIC:
+        raise ValueError(f"bad magic {magic:#x}")
+    if not width or not height or width * height > args.max_pixels:
+        raise ValueError(f"rejected extent {width}x{height}; limit {args.max_pixels} pixels")
+    payload = receive(connection, width * height * 4)
+    if vk_format not in FORMATS:
+        print(f"unsupported VkFormat {vk_format}; passing the frame through",
+              flush=True)
+        connection.sendall(payload)
+        return
+
+    clock = time.perf_counter()
+    colour = decode(payload, width, height, vk_format)
+    geometry = nr_frame.NetworkGeometry.vendor_aligned(width, height)
+    features = nr_frame.make_features(
+        colour, geometry=geometry, **nr_frame.PROFILES[args.profile])
+    head = geometry.crop(backend.run_features(features))
+    output = nr_frame.compose(head, colour, intensity=args.intensity,
+                              detail_strength=args.detail_strength,
+                              colour_strength=args.colour_strength)
+    connection.sendall(encode(output, payload, vk_format))
+    if args.dump:
+        import image_io
+        try:
+            destination = pathlib.Path(args.dump)
+            destination.mkdir(parents=True, exist_ok=True)
+            image_io.save(colour, destination / "in.png")
+            image_io.save(output, destination / "out.png")
+        except (OSError, image_io.subprocess.CalledProcessError) as error:
+            print(f"frame returned, but dump failed: {error}", flush=True)
+    print(f"{width}x{height} {FORMATS[vk_format][1]} in "
+          f"{time.perf_counter() - clock:.2f}s  "
+          f"change {np.abs(output - colour).mean():.5f}", flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -103,14 +145,29 @@ def main():
     parser.add_argument("--max-pixels", type=int, default=1 << 22,
                         help="refuse frames larger than this, rather than thrash")
     parser.add_argument("--dump", help="write each frame in and out as PNG, for a look")
+    parser.add_argument("--timeout", type=float, default=60,
+                        help="socket inactivity timeout in seconds")
     args = parser.parse_args()
+    if args.max_pixels <= 0 or args.timeout <= 0:
+        parser.error("--max-pixels and --timeout must be positive")
 
     started = time.perf_counter()
     backend = nr_frame.ResidentBackend()
     print(f"model ready in {time.perf_counter() - started:.1f}s", flush=True)
 
-    if os.path.exists(args.socket):
-        os.unlink(args.socket)
+    if os.path.lexists(args.socket):
+        if not stat.S_ISSOCK(os.lstat(args.socket).st_mode):
+            backend.close()
+            raise SystemExit(f"socket path is occupied by a non-socket: {args.socket}")
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+            probe.settimeout(0.2)
+            try:
+                probe.connect(args.socket)
+            except ConnectionRefusedError:
+                os.unlink(args.socket)
+            else:
+                backend.close()
+                raise SystemExit(f"a daemon is already listening at {args.socket}")
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     server.bind(args.socket)
     server.listen(4)
@@ -120,47 +177,17 @@ def main():
         while True:
             connection, _ = server.accept()
             try:
-                magic, width, height, vk_format = struct.unpack("<4I", receive(connection, 16))
-                if magic != MAGIC:
-                    print(f"bad magic {magic:#x}", flush=True)
-                    continue
-                payload = receive(connection, width * height * 4)
-                if vk_format not in FORMATS:
-                    print(f"unsupported VkFormat {vk_format}; passing the frame through",
-                          flush=True)
-                    connection.sendall(payload)
-                    continue
-                if width * height > args.max_pixels:
-                    print(f"{width}x{height} is past --max-pixels; passing through",
-                          flush=True)
-                    connection.sendall(payload)
-                    continue
-
-                clock = time.perf_counter()
-                colour = decode(payload, width, height, vk_format)
-                geometry = nr_frame.NetworkGeometry.vendor_aligned(width, height)
-                features = nr_frame.make_features(
-                    colour, geometry=geometry, **nr_frame.PROFILES[args.profile])
-                head = geometry.crop(backend.run_features(features))
-                output = nr_frame.compose(head, colour, intensity=args.intensity,
-                                          detail_strength=args.detail_strength,
-                                          colour_strength=args.colour_strength)
-                connection.sendall(encode(output, payload, vk_format))
-                if args.dump:
-                    import image_io
-                    image_io.save(colour, f"{args.dump}/in.png")
-                    image_io.save(output, f"{args.dump}/out.png")
-                print(f"{width}x{height} {FORMATS[vk_format][1]} in "
-                      f"{time.perf_counter() - clock:.2f}s  "
-                      f"change {np.abs(output - colour).mean():.5f}", flush=True)
-            except (EOFError, ConnectionError) as error:
-                print(f"connection dropped: {error}", flush=True)
+                connection.settimeout(args.timeout)
+                process_connection(connection, backend, args)
+            except (EOFError, OSError, ValueError, RuntimeError) as error:
+                print(f"frame rejected/failed; game keeps original: {error}", flush=True)
             finally:
                 connection.close()
     except KeyboardInterrupt:
         pass
     finally:
         server.close()
+        backend.close()
         if os.path.exists(args.socket):
             os.unlink(args.socket)
 

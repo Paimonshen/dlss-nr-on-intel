@@ -22,6 +22,7 @@ residual, after every read of the source — so a level needs one value buffer, 
 """
 from __future__ import annotations
 
+import os
 import pathlib
 import sys
 
@@ -62,6 +63,8 @@ class ResidentFrame:
         self.height, self.width = height, width
         self.levels = self._plan(height, width)
         self._scratch, self._blocks, self._buffers, self._edges = {}, {}, {}, {}
+        self._graphs = {}
+        self._closed = False
         self._upload_edges()
 
     @staticmethod
@@ -133,11 +136,56 @@ class ResidentFrame:
                 self.weights.get(f"{prefix}.sin") if kind == "up" else None)
         return self._edges[(index, kind)]
 
+    def close(self):
+        """Release recorded commands before any buffers they reference."""
+        for graph in self._graphs.values():
+            graph.free()
+        self._graphs.clear()
+        self._closed = True
+        for cache in (self._scratch, self._blocks, self._buffers, self._edges):
+            cache.clear()
+        for name in ("adapter", "bottleneck", "decoder_input", "merge_sin", "merge_cos", "head"):
+            if hasattr(self, name):
+                delattr(self, name)
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+
     # -- the frame --------------------------------------------------------
 
-    def run(self, features, submits=None, capture=None, timing=None):
+    def run(self, features, submits=None, capture=None, timing=None, execution=None):
+        try:
+            return self._run(features, submits, capture, timing, execution)
+        except Exception:
+            self.rt.abort()
+            raise
+
+    def _run(self, features, submits, capture, timing, execution):
         rt = self.rt
         import time as _time
+
+        if self._closed:
+            raise RuntimeError("ResidentFrame is closed")
+        if features.shape != (self.height, self.width, 16):
+            raise ValueError("features must match the frame's (height, width, 16)")
+        execution = execution or os.environ.get("NR_FRAME_MODE", "replay")
+        if execution not in ("block", "single", "replay"):
+            raise ValueError("NR_FRAME_MODE must be block, single or replay")
+        # Diagnostic reads require a fence after each block.
+        if capture is not None or timing is not None:
+            execution = "block"
+        batched = execution != "block"
+        key = rt.graph_key()
+        recording = False
+
+        def begin():
+            nonlocal recording
+            if not batched or not recording:
+                rt.begin()
+                recording = True
 
         def keep(name, buffer, count, shape=None, dtype=np.float32):
             if capture is not None:
@@ -151,6 +199,8 @@ class ResidentFrame:
         stage = ["stem"]
 
         def submit():
+            if batched:
+                return
             started = _time.perf_counter()
             counter[0] += rt.submit()
             if timing is not None:
@@ -161,7 +211,13 @@ class ResidentFrame:
         stem = self.buffer("stem", pixels * 32)
         source = self.buffer("features", pixels * 16)
         source.view(shape=(pixels, 16))[...] = features.reshape(-1, 16)
-        rt.begin()
+        if execution == "replay" and key in self._graphs:
+            passes = self._graphs[key].run()
+            if submits is not None:
+                submits.append(passes)
+            return self.buffer("head", pixels * 16).view(shape=(pixels, 16))[:, :4].reshape(
+                height, width, 4).copy()
+        begin()
         rt.to_half(source, self.buffer("features16", pixels * 16, np.float16), pixels * 16)
         rt.gemm(self.buffer("features16", pixels * 16, np.float16), self.adapter, stem,
                 pixels, 32, 16)
@@ -178,7 +234,7 @@ class ResidentFrame:
         full_skip = self.buffer("full_skip", pixels * 32, np.float16)
         h, w, channels = self.levels[1]
         value = self.buffer("l1", h * w * 32, np.float16)
-        rt.begin()
+        begin()
         R.record_block(rt, block0, self.scratch(block0, height, width),
                        source=stem, target=raw)
         # the post block's skip is block 0 published; the encoder pools the
@@ -198,15 +254,18 @@ class ResidentFrame:
             for index in regular:
                 stage[0] = f"encoder L{level} blocks (C={channels})"
                 block = self.block(index, heads)
-                rt.begin()
+                begin()
                 R.record_block(rt, block, self.scratch(block, h, w), source=value,
                                target=value, publish=xmxres.EPI_E4M3,
                                source_half=True, target_half=True)
                 submit()
             keep(f"l{level}", value, h * w * channels, (1, h, w, channels), np.float16)
             skips[level] = self.buffer(f"skip{level}", h * w * channels, np.float16)
-            skips[level].view(np.float16)[:h * w * channels] = \
-                value.view(np.float16)[:h * w * channels]
+            if batched:
+                rt.copy(value, skips[level], h * w * channels * 2)
+            else:
+                skips[level].view(np.float16)[:h * w * channels] = \
+                    value.view(np.float16)[:h * w * channels]
 
             block = self.block(transition, heads)
             edge = self.edge(transition, "down")
@@ -215,7 +274,7 @@ class ResidentFrame:
             nxt = self.buffer(f"l{level + 1}", nh * nw * nchannels, np.float16)
             padded = pad8(h) * pad8(w) * channels
             stage[0] = f"downsample L{level}->L{level + 1}"
-            rt.begin()
+            begin()
             R.record_block(rt, block, self.scratch(block, h, w), source=value,
                            target=unpublished, source_half=True)
             R.record_downsample(rt, edge, self.transition_scratch(padded), unpublished,
@@ -231,19 +290,22 @@ class ResidentFrame:
         stage[0] = "split blocks 23-30 (C=512)"
         for index in range(23, 31):
             block = self.block(index, 16, "split")
-            rt.begin()
+            begin()
             R.record_block(rt, block, self.scratch(block, h, w), source=value,
                            target=value, publish=xmxres.EPI_E4M3,
                            source_half=True, target_half=True)
             submit()
         keep("l5", value, h * w * channels, (1, h, w, channels), np.float16)
         split_skip = self.buffer("split_skip", h * w * channels, np.float16)
-        split_skip.view(np.float16)[:h * w * channels] = \
-            value.view(np.float16)[:h * w * channels]
+        if batched:
+            rt.copy(value, split_skip, h * w * channels * 2)
+        else:
+            split_skip.view(np.float16)[:h * w * channels] = \
+                value.view(np.float16)[:h * w * channels]
 
         gh, gw, gchannels = self.levels[6]
         deep = self.buffer("l6", gh * gw * gchannels, np.float16)
-        rt.begin()
+        begin()
         R.record_plain_downsample(rt, self.bottleneck, self.transition_scratch(
             pad8(h) * pad8(w) * channels), value, deep, h, w, channels, pad_to=8,
             source_half=True, target_half=True)
@@ -254,20 +316,25 @@ class ResidentFrame:
         for index in range(31, 39):
             block = self.block(index, 32, "global")
             scratch = self.scratch(block, gh, gw, tokens=tokens)
-            rt.begin()
-            # the bottleneck's own tensors are the graph's smallest, so it keeps
-            # float32 and its two edge copies carry the width — exact in both
-            # directions, since what crosses them is an E4M3 publish
-            scratch.value.view()[:tokens * gchannels] = \
-                deep.view(np.float16)[:tokens * gchannels]
+            begin()
+            # Published values are exact in both widths. Convert on-device when
+            # batching; the block mode retains the original host-copy reference.
+            if batched:
+                rt.from_half(deep, scratch.value, tokens * gchannels)
+            else:
+                scratch.value.view()[:tokens * gchannels] = \
+                    deep.view(np.float16)[:tokens * gchannels]
             R.record_global_block(rt, block, scratch)
             rt.e4m3(scratch.out, scratch.out, scratch.padded * gchannels)
+            if batched:
+                rt.to_half(scratch.out, deep, tokens * gchannels)
             submit()
-            deep.view(np.float16)[:tokens * gchannels] = \
-                scratch.out.view()[:tokens * gchannels]
+            if not batched:
+                deep.view(np.float16)[:tokens * gchannels] = \
+                    scratch.out.view()[:tokens * gchannels]
 
         # the decoder input merge, then the split family again
-        rt.begin()
+        begin()
         R.record_upsample_merge(rt, self.decoder_input, self.transition_scratch(
             h * w * channels), deep, split_skip, value, gh, gw, h, w, gchannels, channels,
             source_half=True, skip_half=True, target_half=True)
@@ -275,7 +342,7 @@ class ResidentFrame:
         stage[0] = "split blocks 40-47 (C=512)"
         for index in range(40, 48):
             block = self.block(index, 16, "split")
-            rt.begin()
+            begin()
             R.record_block(rt, block, self.scratch(block, h, w), source=value,
                            target=value, publish=xmxres.EPI_E4M3,
                            source_half=True, target_half=True)
@@ -286,7 +353,7 @@ class ResidentFrame:
             sh, sw, schannels = self.levels[skip_level]
             edge = self.edge(transition, "up")
             target = self.buffer(f"d{skip_level}", sh * sw * schannels, np.float16)
-            rt.begin()
+            begin()
             R.record_upsample_merge(rt, edge, self.transition_scratch(
                 sh * sw * max(channels, schannels)), value, skips[skip_level], target,
                 h, w, sh, sw, channels, schannels,
@@ -300,7 +367,7 @@ class ResidentFrame:
             for index in regular:
                 stage[0] = f"decoder L{skip_level} blocks (C={channels})"
                 block = self.block(index, heads)
-                rt.begin()
+                begin()
                 R.record_block(rt, block, self.scratch(block, h, w), source=value,
                                target=value, publish=xmxres.EPI_E4M3,
                                source_half=True, target_half=True)
@@ -312,7 +379,7 @@ class ResidentFrame:
         upsampled = self.buffer("upsampled", pixels * 32)
         block70 = self.block(70, 1)
         out = self.buffer("out", pixels * 32)
-        rt.begin()
+        begin()
         rt.upsample2(value, upsampled, w, height, width, 32, a_half=True)
         rt.scale_channel(upsampled, self.merge_sin, merged, pixels * 32, 32)
         rt.residual(merged, full_skip, self.merge_cos, merged, pixels * 32, 32,
@@ -324,6 +391,11 @@ class ResidentFrame:
                 self.buffer("head", pixels * 16), pixels, 16, 32)
         submit()
 
+        if execution == "replay":
+            self._graphs[key] = rt.capture()
+            counter[0] = self._graphs[key].run()
+        elif execution == "single":
+            counter[0] = rt.submit()
         if submits is not None:
             submits.append(counter[0])
         return self.buffer("head", pixels * 16).view(shape=(pixels, 16))[:, :4].reshape(

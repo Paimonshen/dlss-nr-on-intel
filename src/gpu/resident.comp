@@ -32,6 +32,8 @@ layout(push_constant, scalar) uniform Push {
     float p0, p1, p2, p3;
 } pc;
 
+#include "specialize.glsl"
+
 // kinds
 const uint E4M3 = 0u, GATE = 1u, HALF = 2u, TO_HALF = 3u, SCALE = 4u,
            RESIDUAL = 5u, FROM_HALF = 6u, PARTITION = 7u, REVERSE = 8u, ADD_BIAS = 9u,
@@ -51,26 +53,26 @@ const uint E4M3 = 0u, GATE = 1u, HALF = 2u, TO_HALF = 3u, SCALE = 4u,
  * measured, `src/bench/bf16_check.py` — so a buffer the graph publishes can be stored
  * narrow and read back here with nothing lost. Bit 15 marks `a`, bit 16 marks `b`. */
 float load_a(uint index) {
-    return (pc.flags & 0x8000u) != 0u ? float(HalfBuf(uint64_t(pc.a)).v[index]) : pc.a.v[index];
+    return (operation_flags() & 0x8000u) != 0u ? float(HalfBuf(uint64_t(pc.a)).v[index]) : pc.a.v[index];
 }
 
 float load_b(uint index) {
-    return (pc.flags & 0x10000u) != 0u ? float(HalfBuf(uint64_t(pc.b)).v[index]) : pc.b.v[index];
+    return (operation_flags() & 0x10000u) != 0u ? float(HalfBuf(uint64_t(pc.b)).v[index]) : pc.b.v[index];
 }
 
 void store(uint index, float value) {
-    uint epilogue = (pc.flags >> 8) & 0xFu;
+    uint epilogue = (operation_flags() >> 8) & 0xFu;
     if (epilogue == 2u || epilogue == 3u) value = gate_activation(value);
     if (epilogue == 1u || epilogue == 3u) value = e4m3(value);
     if (epilogue == 4u) value = half_round(value);
-    if ((pc.flags & 0x1000u) != 0u) HalfBuf(uint64_t(pc.c)).v[index] = float16_t(value);
+    if ((operation_flags() & 0x1000u) != 0u) HalfBuf(uint64_t(pc.c)).v[index] = float16_t(value);
     else                            pc.c.v[index] = value;
 }
 
 void main() {
     uint index = gl_GlobalInvocationID.x;
     if (index >= pc.m) return;
-    uint kind = pc.flags & 0xFFu;
+    uint kind = operation_flags() & 0xFFu;
 
     if (kind == GATE_E4M3_HALF || kind == E4M3_HALF || kind == GATE_HALF) {
         float value = pc.a.v[index];
@@ -94,7 +96,7 @@ void main() {
          * the branch read through the window reverse, so the attention output goes
          * straight into the residual instead of being copied into image order first. */
         uint at = index;
-        if ((pc.flags & 0x4000u) != 0u) {
+        if ((operation_flags() & 0x4000u) != 0u) {
             uint channels = pc.n, size = pc.batch, width = pc.sb, across = pc.sc;
             uint c = index % channels, rest = index / channels;
             uint py = rest / width + (pc.k >> 16), px = rest % width + (pc.k & 0xFFFFu);

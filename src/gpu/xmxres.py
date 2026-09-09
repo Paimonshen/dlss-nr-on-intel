@@ -67,7 +67,15 @@ def _load():
             ("xmx_buf_create", [ctypes.c_ulonglong]),
             ("xmx_buf_destroy", [ctypes.c_int]),
             ("xmx_begin", []),
+            ("xmx_abort", []),
             ("xmx_sync", [ctypes.c_int]),
+            ("xmx_specialize", [ctypes.c_uint]),
+            ("xmx_specialized_count", []),
+            ("xmx_specialization", []),
+            ("xmx_graph_capture", []),
+            ("xmx_graph_run", [ctypes.c_int]),
+            ("xmx_graph_destroy", [ctypes.c_int]),
+            ("xmx_rec_copy", [ctypes.c_int] * 2 + [ctypes.c_ulonglong] * 3),
             ("xmx_submit", []),
             ("xmx_rec_gemm", [ctypes.c_int] * 3 + [ctypes.c_uint] * 14),
             ("xmx_rec_unary", [ctypes.c_uint] + [ctypes.c_int] * 4
@@ -136,12 +144,43 @@ class Buffer:
             pass
 
 
+class CommandGraph:
+    """Replayable commands. Referenced buffers must outlive this object."""
+
+    def __init__(self, lib):
+        self._lib = lib
+        self.id = lib.xmx_graph_capture()
+        if self.id < 0:
+            raise RuntimeError("xmx_graph_capture: " + lib.xmx_error().decode())
+
+    def run(self):
+        passes = self._lib.xmx_graph_run(self.id)
+        if passes < 0:
+            raise RuntimeError("xmx_graph_run: " + self._lib.xmx_error().decode())
+        return passes
+
+    def free(self):
+        if self.id >= 0:
+            self._lib.xmx_graph_destroy(self.id)
+            self.id = -1
+
+    def __del__(self):
+        try:
+            self.free()
+        except Exception:
+            pass
+
+
 class Runtime:
     """Records a chain of GPU passes and submits it once."""
 
     def __init__(self):
         self.lib = _load()
         self.recorded = 0
+        self.fuse_qk = os.environ.get("NR_FUSE_QK", "0") != "0"
+
+    def graph_key(self):
+        return self.lib.xmx_specialization() | (int(self.fuse_qk) << 3)
 
     # -- allocation ----------------------------------------------------
 
@@ -175,6 +214,34 @@ class Runtime:
         write three — and on small dispatches the overlap is worth having.
         """
         return _Independent(self)
+
+    def capture(self):
+        """Finish recording without executing; return reusable commands."""
+        return CommandGraph(self.lib)
+
+    def abort(self):
+        """Discard unfinished recording after an error; completed graphs survive."""
+        if self.lib.xmx_abort() != 0:
+            raise RuntimeError("xmx_abort: " + self.lib.xmx_error().decode())
+
+    def copy(self, source, target, nbytes, source_offset=0, target_offset=0):
+        if min(nbytes, source_offset, target_offset) < 0:
+            raise ValueError("copy sizes and offsets must be nonnegative")
+        if self.lib.xmx_rec_copy(source.id, target.id, nbytes,
+                                  source_offset, target_offset) != 0:
+            raise RuntimeError("xmx_rec_copy: " + self.lib.xmx_error().decode())
+        self.recorded += 1
+        return self
+
+    def specialize(self, mask=7):
+        """Select cached shader variants: GEMM=1, elementwise=2, rows=4.
+
+        The default enables all three. Zero retains the generic shaders for exact
+        A/B tests on the same buffers. Switch only between command buffers.
+        """
+        if self.lib.xmx_specialize(mask) != 0:
+            raise RuntimeError("xmx_specialize: " + self.lib.xmx_error().decode())
+        return self
 
     def gemm(self, a, b, c, rows, cols, inner, *, batch=1, strides=None, transpose_b=False,
              leading=None, offsets=(0, 0, 0), epilogue=0, narrow=False):
@@ -346,14 +413,19 @@ class Runtime:
                           third=bias, _dims=(heads, 0, 0, 0))
 
     def cosine_publish(self, source, target, rows, *, tokens=0, heads=0, scale=None,
-                       narrow=False, from_half=False):
+                       narrow=False, from_half=False, qkv_part=None):
         """Normalise rows of 32 through the kernel's fragment tree, then publish as E4M3.
 
         With `scale` the query path also multiplies by its head's `attn_scale`; rows are
         ordered (batch, head, token), so the head follows from the row index.
         """
         third = scale if scale is not None else source
-        if self.lib.xmx_rec_row(COSINE_PUBLISH | _publish(0, narrow) | (0x8000 if from_half else 0),
+        flags = COSINE_PUBLISH | _publish(0, narrow) | (0x8000 if from_half else 0)
+        if qkv_part is not None:
+            if qkv_part not in (0, 1) or tokens <= 0 or heads <= 0 or from_half:
+                raise ValueError("QKV gather needs part 0/1, positive tokens/heads and float32 input")
+            flags |= 0x20000 | (qkv_part << 18)
+        if self.lib.xmx_rec_row(flags,
                                 source.id, source.id, target.id, third.id,
                                 int(rows), int(tokens), int(heads),
                                 1 if scale is not None else 0, 0, 0.0) != 0:
