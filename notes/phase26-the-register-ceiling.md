@@ -123,6 +123,26 @@ shape with staged operands — **12 % of peak**. Call the usable range 8-12 %. T
 TFLOP/s figure assumes the units are fed back to back, which needs more registers than
 a SIMD32 subgroup has.
 
+## Not a thermal or a power limit
+
+Worth settling separately, because "the hardware's limit" usually means heat. It is
+not that. Sampled every three seconds through a minute of continuous frames:
+
+```
+1950 1950 1950 1950 1950 1950 1950 1950 1950 1950
+1950 1950 1950 1950 1950 1950 1950 1950 1950 1950  MHz
+package 55 C (limit 100), RAPL 35 W long / 37 W short, max_freq 1950
+```
+
+Twenty samples, no dip. The part's own ceiling is 1950 and its efficient point is 700,
+so the graph runs pinned at the top clock, cool, and inside a 35 W envelope shared with
+the CPU. There is no headroom being lost to throttling and none to be recovered by
+cooling: the fan profile question from phase 20 is now answered — leaving it on silent
+costs nothing.
+
+The limit is architectural. The units are all busy, at full clock, and mostly idle
+inside each cycle.
+
 ## What would actually change it
 
 Not a better Vulkan kernel. The one avenue left is **OpenCL**, which exposes what Vulkan
