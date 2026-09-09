@@ -39,6 +39,15 @@ COSINE_PUBLISH, SOFTMAX = 0, 1
 # GEMM epilogues, applied to the accumulator on its way out of the kernel
 EPI_NONE, EPI_E4M3, EPI_GATE, EPI_GATE_E4M3, EPI_HALF = 0, 1, 2, 3, 4
 
+
+def _publish(epilogue, narrow):
+    """The publish half of a pass's flags: bits 8-11 the epilogue, bit 12 a half output.
+
+    Every shader reads the same layout, so a pass that ends in a publish never needs a
+    second dispatch over the same buffer to apply it.
+    """
+    return (int(epilogue) << 8) | (0x1000 if narrow else 0)
+
 _lib = None
 
 
@@ -167,7 +176,7 @@ class Runtime:
         if strides is None:
             strides = (rows * inner, cols * inner if transpose_b else inner * cols, rows * cols)
         lda, ldb, ldc = leading or (0, 0, 0)
-        flags = (1 if transpose_b else 0) | (int(epilogue) << 4) | (0x100 if narrow else 0)
+        flags = (1 if transpose_b else 0) | _publish(epilogue, narrow)
         if self.lib.xmx_rec_gemm(a.id, b.id, c.id, rows, cols, inner, batch,
                                  strides[0], strides[1], strides[2], flags,
                                  lda, ldb, ldc, *offsets) != 0:
@@ -176,11 +185,12 @@ class Runtime:
         return self
 
     def unary(self, kind, source, target, count, *, scale=1.0, second=None,
-              third=None, channels=0, _dims=None, _pad=0):
+              third=None, channels=0, epilogue=0, narrow=False, _dims=None, _pad=0):
         second = second if second is not None else source
         third = third if third is not None else source
         batch, height, width, across = _dims or (0, 0, 0, 0)
-        if self.lib.xmx_rec_unary(kind, source.id, second.id, target.id, third.id,
+        if self.lib.xmx_rec_unary(kind | _publish(epilogue, narrow),
+                                  source.id, second.id, target.id, third.id,
                                   int(count), int(channels), float(scale),
                                   int(batch), int(height), int(width), int(across),
                                   int(_pad)) != 0:
@@ -234,7 +244,8 @@ class Runtime:
         padded_width = pad_left + width + (-(width + pad_left)) % size
         return padded_height, padded_width, (pad_top, pad_left)
 
-    def partition(self, source, target, height, width, channels, size=8, origin=(0, 0)):
+    def partition(self, source, target, height, width, channels, size=8, origin=(0, 0),
+                  *, epilogue=0, narrow=False):
         """NHWC -> (windows, tokens, channels), the shifted-window origin folded in.
 
         The vendor pads by up to one window before partitioning; rather than write that
@@ -242,7 +253,7 @@ class Runtime:
         """
         ph, pw, (top, left) = self.window_extent(height, width, origin, size)
         return self.unary(PARTITION, source, target, ph * pw * channels,
-                          channels=channels, scale=1.0,
+                          channels=channels, scale=1.0, epilogue=epilogue, narrow=narrow,
                           _dims=(size, height, width, pw // size),
                           _pad=(top << 16) | left)
 
@@ -254,20 +265,25 @@ class Runtime:
                           _dims=(size, height, width, pw // size),
                           _pad=(top << 16) | left)
 
-    def split_heads(self, source, target, windows, tokens, channels, heads, part):
+    def split_heads(self, source, target, windows, tokens, channels, heads, part,
+                    *, epilogue=0, narrow=False):
         """(windows, tokens, 3C) -> Q, K or V as (windows, heads, tokens, 32)."""
         return self.unary(SPLIT_HEADS, source, target, windows * tokens * channels,
-                          channels=channels, _dims=(heads, tokens, part, 0))
+                          channels=channels, epilogue=epilogue, narrow=narrow,
+                          _dims=(heads, tokens, part, 0))
 
-    def merge_heads(self, source, target, windows, tokens, channels, heads):
+    def merge_heads(self, source, target, windows, tokens, channels, heads,
+                    *, epilogue=0, narrow=False):
         """(windows, heads, tokens, 32) -> (windows, tokens, C)."""
         return self.unary(MERGE_HEADS, source, target, windows * tokens * channels,
-                          channels=channels, _dims=(heads, tokens, 0, 0))
+                          channels=channels, epilogue=epilogue, narrow=narrow,
+                          _dims=(heads, tokens, 0, 0))
 
-    def pool2(self, source, target, height, width, channels):
+    def pool2(self, source, target, height, width, channels, *, epilogue=0, narrow=False):
         """2x2 average pool, NHWC."""
         return self.unary(POOL2, source, target, (height // 2) * (width // 2) * channels,
-                          channels=channels, _dims=(0, height, width, 0))
+                          channels=channels, epilogue=epilogue, narrow=narrow,
+                          _dims=(0, height, width, 0))
 
     def upsample2(self, source, target, source_width, height, width, channels):
         """Nearest 2x upsample, cropped to (height, width)."""
@@ -293,21 +309,23 @@ class Runtime:
         return self.unary(ADD_BIAS, source, target, count, channels=tokens,
                           third=bias, _dims=(heads, 0, 0, 0))
 
-    def cosine_publish(self, source, target, rows, *, tokens=0, heads=0, scale=None):
+    def cosine_publish(self, source, target, rows, *, tokens=0, heads=0, scale=None,
+                       narrow=False):
         """Normalise rows of 32 through the kernel's fragment tree, then publish as E4M3.
 
         With `scale` the query path also multiplies by its head's `attn_scale`; rows are
         ordered (batch, head, token), so the head follows from the row index.
         """
         third = scale if scale is not None else source
-        if self.lib.xmx_rec_row(COSINE_PUBLISH, source.id, target.id, third.id,
+        if self.lib.xmx_rec_row(COSINE_PUBLISH | _publish(0, narrow),
+                                source.id, target.id, third.id,
                                 int(rows), int(tokens), int(heads),
                                 1 if scale is not None else 0, 0, 0.0) != 0:
             raise RuntimeError("xmx_rec_row: " + self.lib.xmx_error().decode())
         self.recorded += 1
         return self
 
-    def softmax(self, source, target, rows, width, *, stride=0, cap=0.0):
+    def softmax(self, source, target, rows, width, *, stride=0, cap=0.0, narrow=False):
         """The bit-affine softmax, one row per invocation.
 
         `stride` lets a row be wider than its token count, which the global blocks
@@ -315,7 +333,7 @@ class Runtime:
         multiple of the tile. `cap` is the symmetric logit clamp the vit_1d kernels
         apply.
         """
-        if self.lib.xmx_rec_row(SOFTMAX, source.id, target.id, source.id,
+        if self.lib.xmx_rec_row(SOFTMAX | _publish(0, narrow), source.id, target.id, source.id,
                                 int(rows), int(width), 0, 0, int(stride), float(cap)) != 0:
             raise RuntimeError("xmx_rec_row: " + self.lib.xmx_error().decode())
         self.recorded += 1

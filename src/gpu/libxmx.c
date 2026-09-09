@@ -461,7 +461,7 @@ int xmx_rec_gemm(int a, int b, int c, unsigned M, unsigned N, unsigned K, unsign
 	/* Element offsets are folded into the addresses, so a sub-matrix needs no shader
 	 * support: A and B are half, and C is float unless the epilogue narrows it. */
 	p.a += (uint64_t)oa * 2; p.b += (uint64_t)ob * 2;
-	p.c += (uint64_t)oc * ((bt & 0x100u) ? 2 : 4);
+	p.c += (uint64_t)oc * ((bt & 0x1000u) ? 2 : 4);
 	vkCmdBindPipeline(g.rcb, VK_PIPELINE_BIND_POINT_COMPUTE, g.rgemm);
 	vkCmdPushConstants(g.rcb, g.rpl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
 	vkCmdDispatch(g.rcb, (N + 15) / 16, (M + 7) / 8, batch ? batch : 1);
@@ -498,7 +498,7 @@ int xmx_rec_row(unsigned kind, int a, int c, int d, unsigned rows, unsigned widt
 	if (!p.a || !p.c) FAIL("row operand is not a live buffer", 0);
 	vkCmdBindPipeline(g.rcb, VK_PIPELINE_BIND_POINT_COMPUTE, g.rrow);
 	vkCmdPushConstants(g.rcb, g.rpl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
-	vkCmdDispatch(g.rcb, (rows + 63) / 64, 1, 1);
+	vkCmdDispatch(g.rcb, (rows + 31) / 32, 1, 1);
 	barrier();
 	g.recorded++;
 	return 0;

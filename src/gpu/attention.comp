@@ -15,10 +15,13 @@
 #extension GL_EXT_buffer_reference2 : require
 #extension GL_EXT_scalar_block_layout : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_KHR_shader_subgroup_basic : require
 
-layout(local_size_x = 64) in;
+layout(local_size_x = 32) in;
 
-layout(buffer_reference, scalar, buffer_reference_align = 16) buffer FloatBuf { float v[]; };
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer FloatBuf { float     v[]; };
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer HalfBuf  { float16_t v[]; };
 
 layout(push_constant, scalar) uniform Push {
     FloatBuf a, b, c, d;
@@ -26,6 +29,33 @@ layout(push_constant, scalar) uniform Push {
     uint sa, sb, sc, flags;
     float p0, p1, p2, p3;
 } pc;
+
+/* Both row passes read a whole row into one invocation, and a row is 32 or 64
+ * consecutive floats: neighbouring invocations then touch addresses 128 or 256 bytes
+ * apart and every load instruction spans sixty-four cache lines. Staging the
+ * workgroup's rows through shared memory makes the global traffic contiguous — the
+ * cosine publish went from 23.7 GB/s to the 80-odd the other passes reach — while each
+ * invocation still sees its own row whole, which the vendor's fragment tree requires. */
+shared float stage[32 * 64];
+
+/* `count` consecutive floats from `base`, spread across the workgroup. */
+void gather(uint base, uint count) {
+    for (uint i = gl_LocalInvocationID.x; i < count; i += 32u) stage[i] = pc.a.v[base + i];
+    subgroupMemoryBarrierShared();
+    subgroupBarrier();
+}
+
+void scatter(uint base, uint count) {
+    subgroupMemoryBarrierShared();
+    subgroupBarrier();
+    if ((pc.flags & 0x1000u) != 0u) {
+        HalfBuf h = HalfBuf(uint64_t(pc.c));
+        for (uint i = gl_LocalInvocationID.x; i < count; i += 32u)
+            h.v[base + i] = float16_t(stage[i]);
+    } else {
+        for (uint i = gl_LocalInvocationID.x; i < count; i += 32u) pc.c.v[base + i] = stage[i];
+    }
+}
 
 const uint COSINE_PUBLISH = 0u, SOFTMAX = 1u;
 const float COSINE_NORM_FLOOR = 0.00006198883056640625;
@@ -52,10 +82,22 @@ float hmul(float l, float r) { precise float t = l * r; return half_round(t); }
 float hadd(float l, float r) { precise float t = l + r; return half_round(t); }
 float hfma(float l, float r, float acc) { precise float t = l * r + acc; return half_round(t); }
 
-void cosine_publish(uint row) {
-    uint base = row * 32u;
+/* The publish this pass ends with: bits 8-11 of `flags` pick the transform and bit 12
+ * narrows the output to float16, so the row passes can feed a GEMM directly instead of
+ * writing float32 for a `to_half` pass to read straight back. Both of these rows end in
+ * an E4M3 value, which is exact in half, so narrowing here changes nothing. */
+void store(uint index, float value) {
+    uint epilogue = (pc.flags >> 8) & 0xFu;
+    if (epilogue == 1u) value = e4m3(value);
+    else if (epilogue == 4u) value = half_round(value);
+    if ((pc.flags & 0x1000u) != 0u) HalfBuf(uint64_t(pc.c)).v[index] = float16_t(value);
+    else                            pc.c.v[index] = value;
+}
+
+void cosine_publish(uint row, uint local) {
+    uint base = local * 32u;
     float h[32];
-    for (uint i = 0u; i < 32u; i++) h[i] = half_round(pc.a.v[base + i]);
+    for (uint i = 0u; i < 32u; i++) h[i] = half_round(stage[base + i]);
 
     float partial[4][2];
     for (uint lane = 0u; lane < 4u; lane++)
@@ -82,56 +124,100 @@ void cosine_publish(uint row) {
     for (uint i = 0u; i < 32u; i++) {
         float value = hmul(h[i], reciprocal);
         if (pc.k != 0u) value = hmul(value, scale);
-        pc.c.v[base + i] = e4m3(value);
+        stage[base + i] = e4m3(value);
     }
 }
 
-void softmax(uint row) {
+/* One pair of attention weights. The vendor's exp is a bit-affine map on an `f16x2`
+ * register, so the pair is coupled — the shift moves bits across the halves and the add
+ * can carry between them — and the two elements cannot be computed apart.
+ * See notes/phase5-softmax-found.md. */
+void weights_at(bool staged, uint base, uint i, out float w0, out float w1) {
+    uint bits[2];
+    for (uint j = 0u; j < 2u; j++) {
+        float logit = staged ? stage[base + i + j] : pc.a.v[base + i + j];
+        if (pc.p0 != 0.0) logit = clamp(logit, -pc.p0, pc.p0);
+        precise float scaled = half_round(logit) * 0.044921875;
+        scaled += 1.30078125;
+        float affine = clamp(scaled, 1.03125, 1.5693359375);
+        // the float16 bit pattern of the affine value
+        int f = floatBitsToInt(half_round(affine));
+        bits[j] = uint(((f >> 13) & 0x3FF) | (((((f >> 23) & 0xFF) - 112) & 0x1F) << 10)
+                       | ((f < 0) ? 0x8000 : 0));
+    }
+    uint transformed = ((bits[0] | (bits[1] << 16)) << 5) + 0x7FF88000u;
+    float out2[2];
+    for (uint j = 0u; j < 2u; j++) {
+        uint half_bits = (j == 0u) ? (transformed & 0xFFFFu) : ((transformed >> 16) & 0xFFFFu);
+        uint exponent = (half_bits >> 10) & 0x1Fu, mantissa = half_bits & 0x3FFu;
+        float weight = (exponent == 0u)
+            ? float(mantissa) * 5.9604644775390625e-08
+            : intBitsToFloat(int(((exponent + 112u) << 23) | (mantissa << 13)));
+        out2[j] = ((half_bits & 0x8000u) != 0u) ? -weight : weight;
+    }
+    w0 = out2[0]; w1 = out2[1];
+}
+
+void softmax(uint row, uint local) {
     /* `n` is the real token count and `sa` the row stride, which differ for the
      * global blocks: their token count is the bottleneck's pixel count and need not
      * be a multiple of the cooperative-matrix tile, so the scores are padded. The pad
      * must not enter the sum, and is zeroed so the following P@V contributes nothing.
-     * `p0` is the symmetric logit clamp the vit_1d kernels apply; 0 means none. */
+     * `p0` is the symmetric logit clamp the vit_1d kernels apply; 0 means none.
+     *
+     * The weights are computed twice rather than parked in the output buffer between
+     * the sum and the normalise: that buffer is the one being narrowed, and reading a
+     * half value back would round the total. Recomputing is also the cheaper half of a
+     * bandwidth-bound pass. */
     uint stride = pc.sa != 0u ? pc.sa : pc.n;
-    uint base = row * stride;
-    for (uint i = pc.n; i < stride; i++) pc.c.v[base + i] = 0.0;
-    // the affine map into the exponent's linear region, clamped
-    // (see notes/phase5-softmax-found.md)
+    bool staged = stride == pc.n && stride <= 64u;
+    uint base = staged ? local * stride : row * stride;
+    if (!staged) for (uint i = pc.n; i < stride; i++) store(base + i, 0.0);
     float total = 0.0;
+    float w0, w1;
     for (uint i = 0u; i < pc.n; i += 2u) {
-        uint bits[2];
-        for (uint j = 0u; j < 2u; j++) {
-            float logit = pc.a.v[base + i + j];
-            if (pc.p0 != 0.0) logit = clamp(logit, -pc.p0, pc.p0);
-            precise float scaled = half_round(logit) * 0.044921875;
-            scaled += 1.30078125;
-            float affine = clamp(scaled, 1.03125, 1.5693359375);
-            // the float16 bit pattern of the affine value
-            int f = floatBitsToInt(half_round(affine));
-            bits[j] = uint(((f >> 13) & 0x3FF) | (((((f >> 23) & 0xFF) - 112) & 0x1F) << 10)
-                           | ((f < 0) ? 0x8000 : 0));
-        }
-        uint packed = bits[0] | (bits[1] << 16);
-        uint transformed = (packed << 5) + 0x7FF88000u;
-        for (uint j = 0u; j < 2u; j++) {
-            uint half_bits = (j == 0u) ? (transformed & 0xFFFFu) : ((transformed >> 16) & 0xFFFFu);
-            uint exponent = (half_bits >> 10) & 0x1Fu, mantissa = half_bits & 0x3FFu;
-            float weight = (exponent == 0u)
-                ? float(mantissa) * 5.9604644775390625e-08
-                : intBitsToFloat(int(((exponent + 112u) << 23) | (mantissa << 13)));
-            if ((half_bits & 0x8000u) != 0u) weight = -weight;
-            pc.c.v[base + i + j] = weight;
-            total += weight;                      // float32 accumulation, as numpy does
-        }
+        weights_at(staged, base, i, w0, w1);
+        /* The weights are parked where the logits were, so the normalising pass does
+         * not repeat the bit-affine transform. Only shared memory can hold them: the
+         * output buffer is the one being narrowed to float16, and a rounded weight
+         * would give a different product. The rows too wide to stage — the bottleneck's,
+         * eight calls a frame — pay the transform twice instead. */
+        if (staged) { stage[base + i] = w0; stage[base + i + 1u] = w1; }
+        total += w0;                              // float32 accumulation, as numpy does
+        total += w1;
     }
     float reciprocal = half_round(1.0 / half_round(total));
-    for (uint i = 0u; i < pc.n; i++)
-        pc.c.v[base + i] = e4m3(hmul(pc.c.v[base + i], reciprocal));
+    if (staged) {
+        for (uint i = 0u; i < pc.n; i++)
+            stage[base + i] = e4m3(hmul(stage[base + i], reciprocal));
+    } else {
+        for (uint i = 0u; i < pc.n; i += 2u) {
+            weights_at(false, base, i, w0, w1);
+            store(base + i,      e4m3(hmul(w0, reciprocal)));
+            store(base + i + 1u, e4m3(hmul(w1, reciprocal)));
+        }
+    }
 }
 
 void main() {
     uint row = gl_GlobalInvocationID.x;
     if (row >= pc.m) return;
-    if (pc.flags == COSINE_PUBLISH) cosine_publish(row);
-    else if (pc.flags == SOFTMAX)   softmax(row);
+    uint kind = pc.flags & 0xFFu, local = gl_LocalInvocationID.x;
+    if (kind == COSINE_PUBLISH) {
+        uint base = gl_WorkGroupID.x * 32u * 32u;
+        gather(base, min(32u * 32u, pc.m * 32u - base));
+        cosine_publish(row, local);
+        scatter(base, min(32u * 32u, pc.m * 32u - base));
+    } else if (kind == SOFTMAX) {
+        uint stride = pc.sa != 0u ? pc.sa : pc.n;
+        if (stride == pc.n && stride <= 64u) {
+            uint base = gl_WorkGroupID.x * 32u * stride;
+            uint count = min(32u * stride, pc.m * stride - base);
+            gather(base, count);
+            softmax(row, local);
+            scatter(base, count);
+        } else {
+            softmax(row, local);
+        }
+    }
 }

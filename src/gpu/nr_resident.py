@@ -165,24 +165,23 @@ def record_global_block(runtime, w, s, source=None, target=None):
 
     runtime.to_half(s.ffn, s.ffn16, padded * channels)
     runtime.gemm(s.ffn16, w.qkv, s.proj, padded, 3 * channels, channels)
-    for index, part in enumerate((s.q, s.k, s.v)):
+    for index, part in enumerate((s.q, s.k)):
         runtime.split_heads(s.proj, part, 1, padded, channels, heads, index)
-    runtime.cosine_publish(s.q, s.q, heads * padded, tokens=padded, heads=heads,
-                           scale=w.scale)
-    runtime.cosine_publish(s.k, s.k, heads * padded, tokens=padded, heads=heads)
-    runtime.e4m3_half(s.v, s.v16, padded * channels)
-    for part, half in ((s.q, s.q16), (s.k, s.k16)):
-        runtime.to_half(part, half, padded * channels)
+    runtime.split_heads(s.proj, s.v16, 1, padded, channels, heads, 2,
+                        epilogue=xmxres.EPI_E4M3, narrow=True)
+    runtime.cosine_publish(s.q, s.q16, heads * padded, tokens=padded, heads=heads,
+                           scale=w.scale, narrow=True)
+    runtime.cosine_publish(s.k, s.k16, heads * padded, tokens=padded, heads=heads,
+                           narrow=True)
     runtime.gemm(s.q16, s.k16, s.scores, padded, padded, 32, batch=heads,
                  strides=(padded * 32, padded * 32, padded * padded), transpose_b=True)
     # no attention bias here, and the logits are clamped symmetrically
-    runtime.softmax(s.scores, s.scores, heads * padded, s.tokens,
-                    stride=padded, cap=w.logit_cap)
-    runtime.to_half(s.scores, s.probs16, heads * padded * padded)
+    runtime.softmax(s.scores, s.probs16, heads * padded, s.tokens,
+                    stride=padded, cap=w.logit_cap, narrow=True)
     runtime.gemm(s.probs16, s.v16, s.context, padded, 32, padded, batch=heads,
                  strides=(padded * padded, padded * 32, padded * 32))
-    runtime.merge_heads(s.context, s.merged, 1, padded, channels, heads)
-    runtime.e4m3_half(s.merged, s.merged16, padded * channels)
+    runtime.merge_heads(s.context, s.merged16, 1, padded, channels, heads,
+                        epilogue=xmxres.EPI_E4M3, narrow=True)
     runtime.gemm(s.merged16, w.out, s.attention, padded, channels, channels)
     runtime.residual(s.attention, s.ffn, w.attn_cos, target, padded * channels, channels)
 
@@ -311,26 +310,26 @@ def record_window_attention(runtime, w, s, source):
     windows = (padded_height // 8) * (padded_width // 8)
     batch = windows * heads
     windowed = windows * tokens * channels
-    runtime.partition(source, s.win, s.height, s.width, channels, origin=w.origin)
-    runtime.to_half(s.win, s.win16, windowed)
+    runtime.partition(source, s.win16, s.height, s.width, channels, origin=w.origin,
+                      narrow=True)
     runtime.gemm(s.win16, w.qkv, s.proj, windows * tokens, 3 * channels, channels)
-    for index, part in enumerate((s.q, s.k, s.v)):
+    for index, part in enumerate((s.q, s.k)):
         runtime.split_heads(s.proj, part, windows, tokens, channels, heads, index)
-    runtime.cosine_publish(s.q, s.q, batch * tokens, tokens=tokens, heads=heads,
-                           scale=w.scale)
-    runtime.cosine_publish(s.k, s.k, batch * tokens, tokens=tokens, heads=heads)
-    runtime.e4m3_half(s.v, s.v16, windowed)
-    for part, half in ((s.q, s.q16), (s.k, s.k16)):
-        runtime.to_half(part, half, windowed)
+    # V's publish is the split itself: a permutation and an elementwise round commute
+    runtime.split_heads(s.proj, s.v16, windows, tokens, channels, heads, 2,
+                        epilogue=xmxres.EPI_E4M3, narrow=True)
+    runtime.cosine_publish(s.q, s.q16, batch * tokens, tokens=tokens, heads=heads,
+                           scale=w.scale, narrow=True)
+    runtime.cosine_publish(s.k, s.k16, batch * tokens, tokens=tokens, heads=heads,
+                           narrow=True)
     runtime.gemm(s.q16, s.k16, s.scores, tokens, tokens, 32, batch=batch,
                  strides=(tokens * 32, tokens * 32, tokens * tokens), transpose_b=True)
     runtime.add_bias(s.scores, w.bias, s.scores, batch * tokens * tokens, tokens, heads)
-    runtime.softmax(s.scores, s.scores, batch * tokens, tokens)
-    runtime.to_half(s.scores, s.probs16, batch * tokens * tokens)
+    runtime.softmax(s.scores, s.probs16, batch * tokens, tokens, narrow=True)
     runtime.gemm(s.probs16, s.v16, s.context, tokens, 32, tokens, batch=batch,
                  strides=(tokens * tokens, tokens * 32, tokens * 32))
-    runtime.merge_heads(s.context, s.merged, windows, tokens, channels, heads)
-    runtime.e4m3_half(s.merged, s.merged16, windowed)
+    runtime.merge_heads(s.context, s.merged16, windows, tokens, channels, heads,
+                        epilogue=xmxres.EPI_E4M3, narrow=True)
     runtime.gemm(s.merged16, w.out, s.attended, windows * tokens, channels, channels)
     runtime.reverse(s.attended, s.attention, s.height, s.width, channels,
                     origin=w.origin)
@@ -396,8 +395,8 @@ def record_downsample(runtime, transition, scratch, source, target, height, widt
         source, height, width = scratch.padded, padded_height, padded_width
     half_height, half_width = height // 2, width // 2
     pixels = half_height * half_width
-    runtime.pool2(source, scratch.pooled, height, width, channels)
-    runtime.e4m3_half(scratch.pooled, scratch.pooled16, pixels * channels)
+    runtime.pool2(source, scratch.pooled16, height, width, channels,
+                  epilogue=xmxres.EPI_E4M3, narrow=True)
     runtime.gemm(scratch.pooled16, transition.weight0, target, pixels,
                  transition.out_channels, channels, epilogue=xmxres.EPI_E4M3)
     return half_height, half_width
@@ -457,7 +456,7 @@ def record_plain_downsample(runtime, edge, scratch, source, target, height, widt
                         padded_width, channels)
         source, height, width = scratch.padded, padded_height, padded_width
     pixels = (height // 2) * (width // 2)
-    runtime.pool2(source, scratch.pooled, height, width, channels)
-    runtime.to_half(scratch.pooled, scratch.pooled16, pixels * channels)
+    runtime.pool2(source, scratch.pooled16, height, width, channels,
+                  epilogue=xmxres.EPI_HALF, narrow=True)
     runtime.gemm(scratch.pooled16, edge.weight0, target, pixels, edge.out_channels,
                  channels, epilogue=xmxres.EPI_E4M3)

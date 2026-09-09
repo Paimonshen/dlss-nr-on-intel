@@ -109,8 +109,8 @@ void main() {
             acc = coopMatMulAdd(a, b, acc);
         }
     }
-    uint epilogue = (pc.flags >> 4) & 0xFu;
-    bool narrow = (pc.flags & 0x100u) != 0u;
+    uint epilogue = (pc.flags >> 8) & 0xFu;
+    bool narrow = (pc.flags & 0x1000u) != 0u;
     if (epilogue == 0u && !narrow) {
         coopMatStore(acc, pc.c.v, co + row * ldc + col, ldc,
                      gl_CooperativeMatrixLayoutRowMajor);
