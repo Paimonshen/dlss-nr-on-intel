@@ -20,10 +20,12 @@ work/venv/bin/python src/ref/nr_frame.py IN.png OUT.png --accel   # 10 s, best o
 python3 src/ref/nr_frame.py IN.png OUT.png                   # 38 s, netlib reference
 ```
 
-A full **1280x720** frame renders in **0.61-0.66 s** (network extent 1280x768) and
+A full **1280x720** frame renders in **0.59-0.72 s** (network extent 1280x768) and
 **1920x1080** in **2.9 s**, with no tiling artefacts. Quote the band, not a single
-number: run to run varies about 8 %, and a first frame after the GPU has idled costs
-two to four times more while the clock ramps.
+number. Frames inside one process are steady to 2 %, but the same binary spreads ten
+percent either side of a ~625 ms median *between* processes — buffer placement, not
+clocks; the GPU holds 1950 MHz at 43-45 C throughout. A first frame after an idle costs
+two to four times the rest while the clock ramps.
 
 - `src/ref/nr_model.py` — the recovered 71-block graph in numpy (a port of MLX-DLSS's
   PyTorch `model.py`, Apache-2.0; no torch on this machine). One GEMM entry point,
@@ -107,7 +109,7 @@ and the real package needs sudo. Round-trip verified. Both files already exist.
 **Done 2026-09-09.** The graph runs, on CPU and on XMX. What is left, in order of
 value:
 
-1. **The GEMM kernel's operand staging.** A 720p frame is now **613 ms**, and
+1. **The GEMM kernel's operand staging.** A 720p frame is now **~625 ms**, and
    `work/bench/split_cost.py` splits it almost exactly in half: **327 ms of GEMM,
    366 ms of everything else.** The second half is close to its floor — the passes run
    at 50-90 GB/s against a ~90 GB/s ceiling — and the first is not: 459.6 GFLOP in
@@ -283,7 +285,7 @@ What is *not* claimed:
 - **No NVIDIA parity gate.** There is still no NVIDIA GPU here, so there are still no
   reference activations. The graph is MLX-DLSS's recovery from vendor captures, and it
   is validated against their spec and against behaviour, not against the DLL.
-- **The whole graph is resident on the GPU**: **0.13 s** at 384x384, **0.61 s** at
+- **The whole graph is resident on the GPU**: **0.13 s** at 384x384, **0.6-0.7 s** at
   720p and **2.9 s** at 1080p, head correlation 0.9918 with the CPU reference and a
   visually indistinguishable picture. 5.6 GB of device buffers at 720p.
   `src/gpu/nr_frame_resident.py`, `notes/phase15-residency.md`,

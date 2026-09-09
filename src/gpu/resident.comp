@@ -43,7 +43,7 @@ const uint E4M3 = 0u, GATE = 1u, HALF = 2u, TO_HALF = 3u, SCALE = 4u,
  * every vendor rounding point in this graph silently vanish. `packHalf2x16` changes
  * the bit representation so it cannot be elided, and it is bit-exact against numpy's
  * float16 over ordinary values, half subnormals and overflow to infinity
- * (`work/bench/half_probe.py`): two instructions and no branches, where doing the
+ * (`src/bench/half_probe.py`): two instructions and no branches, where doing the
  * exponent and mantissa by hand took ten and two branches. */
 float half_round(float x) { return unpackHalf2x16(packHalf2x16(vec2(x, 0.0))).x; }
 

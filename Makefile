@@ -31,9 +31,16 @@ work/gemm_batched.spv: src/gpu/gemm_coopmat_batched.comp
 work/gemm_f16acc.spv: src/gpu/gemm_coopmat_f16acc.comp
 	$(GLSL) -o $@ $<
 
+work/half_probe.spv: src/bench/half_probe.comp
+	$(GLSL) -o $@ $<
+
+bench: all work/half_probe.spv
+	python3 src/bench/half_probe.py
+	python3 src/bench/split_cost.py
+
 test: all
 	python3 src/gpu/test_epilogue.py
 	python3 src/gpu/test_resident.py
 	python3 src/ref/test_nr_model.py
 
-.PHONY: all test
+.PHONY: all test bench

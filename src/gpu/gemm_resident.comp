@@ -33,7 +33,7 @@ layout(buffer_reference, scalar, buffer_reference_align = 8)  buffer Half4Buf { 
  * *shared* memory intact, and the transform can then be done on ordinary scalars. That
  * turns four trips over block 0's 503 MB hidden buffer into one 252 MB write. Every
  * epilogue is bit-exact against the same chain run as a separate pass
- * (`work/bench/test_epilogue.py`).
+ * (`src/gpu/test_epilogue.py`).
  */
 
 layout(push_constant, scalar) uniform Push {
@@ -66,7 +66,7 @@ shared float stage[BM * BN];
  * skipping every rounding point the vendor's graph depends on. `packHalf2x16` cannot
  * be elided because it changes the bit representation, and it is bit-exact against
  * numpy's float16 over ordinary values, half subnormals, and overflow to infinity
- * (`work/bench/half_probe.py`). Two instructions and no branches, against ten and two
+ * (`src/bench/half_probe.py`). Two instructions and no branches, against ten and two
  * branches for the version that did the exponent and mantissa by hand. */
 float half_round(float x) { return unpackHalf2x16(packHalf2x16(vec2(x, 0.0))).x; }
 

@@ -17,10 +17,19 @@ for speed; each step is either bit-exact by construction or was checked to be.
 **1.67x**, and 1920x1080 renders for the first time — it used to die in
 `vkAllocateMemory` before the second block. 384x384 goes 180 -> **126 ms**.
 
-Every figure here is the best of five consecutive frames. The run-to-run band is about
-8 %, and the *first* frame after the GPU has idled costs two to four times the rest
-while the clock ramps from 550 MHz to its 1950 ceiling — which is also why the first
-version of `work/bench/replay.py` read a third low until it was made to warm up.
+**On the numbers.** Every figure here is the best of five or more consecutive frames
+inside one process. Within a process the frames are steady to about 2 %; *between*
+processes the same binary spreads **586-718 ms**, ten percent either side of a ~625 ms
+median, and each process is internally consistent at its own level — so it is buffer
+placement, not clocks or heat. The GPU holds 1950 MHz throughout at 43-45 C. The first
+frame after an idle costs two to four times the rest while the clock ramps from 550
+MHz, which is also why the first version of `src/bench/replay.py` read a third low
+until it was made to warm up.
+
+Read the progression as a direction with about 10 % of slack on each step. Where a step
+mattered it was A/B'd inside one process against its immediate predecessor — the
+register-block comparison below is the clearest example, and the two rejected
+optimisations were both measured that way.
 
 ## Where the time actually was
 
@@ -37,12 +46,12 @@ times. Counting the passes as they are recorded:
 
 So the frame moved about 65 GB, and at the 90 GB/s the GPU reaches that is a 720 ms
 floor against a 1025 ms measurement. It was bandwidth-bound, and the elementwise
-half — not the GEMMs — was three quarters of it. `work/bench/census.py` and
-`census_ew.py` produce those tables; `replay.py` re-runs the GEMM census on the
-device, `ew_rate.py` measures each elementwise pass at block 0's size.
+half — not the GEMMs — was three quarters of it. `src/bench/census.py` and
+`src/bench/census_ew.py` produce those tables; `replay.py` re-runs the GEMM census on the
+device, `src/bench/ew_rate.py` measures each elementwise pass at block 0's size.
 
 A second correction to phase 18's arithmetic: the per-dispatch fixed cost is **4.5 us**
-(`work/bench/overhead.py`), so 2000 dispatches is 9 ms. Dispatch overhead was never
+(`src/bench/overhead.py`), so 2000 dispatches is 9 ms. Dispatch overhead was never
 the problem.
 
 ## The coopmat epilogue was not blocked after all
@@ -73,7 +82,7 @@ work, written that way because `float(float16_t(x))` is folded away by the compi
 the bug that once made every vendor rounding point in this graph silently vanish.
 
 `packHalf2x16` changes the bit representation, so it cannot be elided.
-`work/bench/half_probe.py` runs all three side by side over 360 704 values — ordinary
+`src/bench/half_probe.py` runs all three side by side over 360 704 values — ordinary
 magnitudes, half subnormals, values far below the subnormal range, the overflow range,
 and the exact boundaries:
 
@@ -194,7 +203,7 @@ before the second block.
 
 ## Where the 613 ms sits now
 
-`work/bench/split_cost.py` runs the frame with each half of the work skipped in turn:
+`src/bench/split_cost.py` runs the frame with each half of the work skipped in turn:
 
 ```
 whole frame                      663 ms
