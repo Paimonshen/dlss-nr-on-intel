@@ -92,6 +92,36 @@ def main():
     for value in (0.5, 1.5, 2.0):
         report(f"intensity={value}", nr_frame.compose(head, colour, intensity=value))
 
+    if args.sheet:
+        rows = [
+            [colour, base] + [render(local_tone=v) for v in (0.0, 2.0)],
+            [colour, base] + [render(local_structure=v) for v in (0.0, 2.0)],
+            [colour, base] + [render(style_index=v) for v in (1, 2)],
+            [colour, base] + [nr_frame.compose(head, colour, intensity=v) for v in (0.5, 2.0)],
+        ]
+        sheet(args.sheet, rows,
+              ["source | default | local_tone 0 | local_tone 2",
+               "source | default | local_structure 0 | local_structure 2",
+               "source | default | style 1 | style 2",
+               "source | default | intensity 0.5 | intensity 2"], args.size)
+
+
+def sheet(path, rows, labels, size):
+    """A contact sheet: one row per control, one column per value, plus the reference."""
+    gap, pad = 4, 1.0
+    height = width = size
+    columns = max(len(row) for row in rows)
+    canvas = np.full(((height + gap) * len(rows) - gap,
+                      (width + gap) * columns - gap, 3), pad, np.float32)
+    for r, row in enumerate(rows):
+        for c, image in enumerate(row):
+            y, x = r * (height + gap), c * (width + gap)
+            canvas[y:y + height, x:x + width] = image
+    image_io.save(canvas, path)
+    print("\n  wrote %s" % path)
+    for r, label in enumerate(labels):
+        print("    row %d: %s" % (r + 1, label))
+
 
 if __name__ == "__main__":
     main()
