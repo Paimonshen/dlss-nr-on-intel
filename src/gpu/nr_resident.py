@@ -165,14 +165,15 @@ def record_global_block(runtime, w, s, source=None, target=None):
 
     runtime.to_half(s.ffn, s.ffn16, padded * channels)
     runtime.gemm(s.ffn16, w.qkv, s.proj, padded, 3 * channels, channels)
-    for index, part in enumerate((s.q, s.k)):
-        runtime.split_heads(s.proj, part, 1, padded, channels, heads, index)
+    for index, part in enumerate((s.q16, s.k16)):
+        runtime.split_heads(s.proj, part, 1, padded, channels, heads, index,
+                            epilogue=xmxres.EPI_HALF, narrow=True)
     runtime.split_heads(s.proj, s.v16, 1, padded, channels, heads, 2,
                         epilogue=xmxres.EPI_E4M3, narrow=True)
-    runtime.cosine_publish(s.q, s.q16, heads * padded, tokens=padded, heads=heads,
-                           scale=w.scale, narrow=True)
-    runtime.cosine_publish(s.k, s.k16, heads * padded, tokens=padded, heads=heads,
-                           narrow=True)
+    runtime.cosine_publish(s.q16, s.q16, heads * padded, tokens=padded, heads=heads,
+                           scale=w.scale, narrow=True, from_half=True)
+    runtime.cosine_publish(s.k16, s.k16, heads * padded, tokens=padded, heads=heads,
+                           narrow=True, from_half=True)
     runtime.gemm(s.q16, s.k16, s.scores, padded, padded, 32, batch=heads,
                  strides=(padded * 32, padded * 32, padded * padded), transpose_b=True)
     # no attention bias here, and the logits are clamped symmetrically
@@ -236,7 +237,6 @@ class BlockScratch:
         self.merged = make(windowed)
         self.merged16 = make(windowed, np.float16)
         self.attended = make(windowed)
-        self.attention = make(pixels * channels)
         self.out = make(pixels * channels)
         self.merged_core = make(pixels * channels)
         self.core16 = make(pixels * channels, np.float16)
@@ -301,9 +301,11 @@ def record_split_feed_forward(runtime, w, s, source):
 
 
 def record_window_attention(runtime, w, s, source):
-    """Window attention over `source`, into `s.attention`.
+    """Window attention over `source`, into `s.attended` — in window order.
 
-    The window count follows this block's own origin, not the scratch's worst case.
+    The reverse back to image order is the following residual's own gather, so nothing
+    is written in image order here. The window count follows this block's own origin,
+    not the scratch's worst case.
     """
     channels, heads, tokens = w.channels, w.heads, s.tokens
     padded_height, padded_width, _ = runtime.window_extent(s.height, s.width, w.origin)
@@ -313,15 +315,18 @@ def record_window_attention(runtime, w, s, source):
     runtime.partition(source, s.win16, s.height, s.width, channels, origin=w.origin,
                       narrow=True)
     runtime.gemm(s.win16, w.qkv, s.proj, windows * tokens, 3 * channels, channels)
-    for index, part in enumerate((s.q, s.k)):
-        runtime.split_heads(s.proj, part, windows, tokens, channels, heads, index)
+    for index, part in enumerate((s.q16, s.k16)):
+        runtime.split_heads(s.proj, part, windows, tokens, channels, heads, index,
+                            epilogue=xmxres.EPI_HALF, narrow=True)
     # V's publish is the split itself: a permutation and an elementwise round commute
     runtime.split_heads(s.proj, s.v16, windows, tokens, channels, heads, 2,
                         epilogue=xmxres.EPI_E4M3, narrow=True)
-    runtime.cosine_publish(s.q, s.q16, batch * tokens, tokens=tokens, heads=heads,
-                           scale=w.scale, narrow=True)
-    runtime.cosine_publish(s.k, s.k16, batch * tokens, tokens=tokens, heads=heads,
-                           narrow=True)
+    # the cosine publish rounds its input to half first, so reading the split's own
+    # half output is the same value it would have computed from float32
+    runtime.cosine_publish(s.q16, s.q16, batch * tokens, tokens=tokens, heads=heads,
+                           scale=w.scale, narrow=True, from_half=True)
+    runtime.cosine_publish(s.k16, s.k16, batch * tokens, tokens=tokens, heads=heads,
+                           narrow=True, from_half=True)
     runtime.gemm(s.q16, s.k16, s.scores, tokens, tokens, 32, batch=batch,
                  strides=(tokens * 32, tokens * 32, tokens * tokens), transpose_b=True)
     runtime.softmax(s.scores, s.probs16, batch * tokens, tokens, narrow=True,
@@ -331,8 +336,6 @@ def record_window_attention(runtime, w, s, source):
     runtime.merge_heads(s.context, s.merged16, windows, tokens, channels, heads,
                         epilogue=xmxres.EPI_E4M3, narrow=True)
     runtime.gemm(s.merged16, w.out, s.attended, windows * tokens, channels, channels)
-    runtime.reverse(s.attended, s.attention, s.height, s.width, channels,
-                    origin=w.origin)
 
 
 def record_block(runtime, w, s, source=None, target=None):
@@ -349,8 +352,9 @@ def record_block(runtime, w, s, source=None, target=None):
     else:
         record_feed_forward(runtime, w, s, source)
     record_window_attention(runtime, w, s, s.ffn)
-    runtime.residual(s.attention, s.ffn, w.attn_cos, target, pixels * w.channels,
-                     w.channels)
+    # the window reverse is the residual's own gather, not a pass of its own
+    runtime.residual(s.attended, s.ffn, w.attn_cos, target, pixels * w.channels,
+                     w.channels, reverse=(s.height, s.width, 8, w.origin))
 
 
 def run_block(runtime, w, s, value):

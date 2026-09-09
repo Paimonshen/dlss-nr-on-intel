@@ -105,8 +105,18 @@ void main() {
         return;
     }
     if (kind == RESIDUAL) {
-        // out = branch + skip * cosine, the cosine one value per channel
-        store(index, pc.a.v[index] + pc.b.v[index] * pc.d.v[index % pc.n]);
+        /* out = branch + skip * cosine, the cosine one value per channel. Bit 14 makes
+         * the branch read through the window reverse, so the attention output goes
+         * straight into the residual instead of being copied into image order first. */
+        uint at = index;
+        if ((pc.flags & 0x4000u) != 0u) {
+            uint channels = pc.n, size = pc.batch, width = pc.sb, across = pc.sc;
+            uint c = index % channels, rest = index / channels;
+            uint py = rest / width + (pc.k >> 16), px = rest % width + (pc.k & 0xFFFFu);
+            at = (((py / size) * across + px / size) * size * size
+                  + (py % size) * size + px % size) * channels + c;
+        }
+        store(index, pc.a.v[at] + pc.b.v[index] * pc.d.v[index % pc.n]);
         return;
     }
     if (kind == PARTITION || kind == REVERSE) {

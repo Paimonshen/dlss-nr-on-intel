@@ -232,8 +232,15 @@ class Runtime:
     def scale(self, source, target, count, factor):
         return self.unary(SCALE, source, target, count, scale=factor)
 
-    def residual(self, branch, skip, cosine, target, count, channels):
+    def residual(self, branch, skip, cosine, target, count, channels, *, reverse=None):
         """target = branch + skip * cosine, one cosine per channel."""
+        if reverse is not None:
+            height, width, size, origin = reverse
+            _, pw, (top, left) = self.window_extent(height, width, origin, size)
+            return self.unary(RESIDUAL | 0x4000, branch, target, count, second=skip,
+                              third=cosine, channels=channels,
+                              _dims=(size, height, width, pw // size),
+                              _pad=(top << 16) | left)
         return self.unary(RESIDUAL, branch, target, count, second=skip, third=cosine,
                           channels=channels)
 
@@ -311,14 +318,14 @@ class Runtime:
                           third=bias, _dims=(heads, 0, 0, 0))
 
     def cosine_publish(self, source, target, rows, *, tokens=0, heads=0, scale=None,
-                       narrow=False):
+                       narrow=False, from_half=False):
         """Normalise rows of 32 through the kernel's fragment tree, then publish as E4M3.
 
         With `scale` the query path also multiplies by its head's `attn_scale`; rows are
         ordered (batch, head, token), so the head follows from the row index.
         """
         third = scale if scale is not None else source
-        if self.lib.xmx_rec_row(COSINE_PUBLISH | _publish(0, narrow),
+        if self.lib.xmx_rec_row(COSINE_PUBLISH | _publish(0, narrow) | (0x8000 if from_half else 0),
                                 source.id, source.id, target.id, third.id,
                                 int(rows), int(tokens), int(heads),
                                 1 if scale is not None else 0, 0, 0.0) != 0:

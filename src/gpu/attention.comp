@@ -40,6 +40,12 @@ shared float stage[32 * 64];
 
 /* `count` consecutive floats from `base`, spread across the workgroup. */
 void gather(uint base, uint count) {
+    /* Bit 15: the input is float16. The cosine publish rounds its input to half as its
+     * first act, so a producer that already wrote half loses nothing by it. */
+    if ((pc.flags & 0x8000u) != 0u) {
+        HalfBuf h = HalfBuf(uint64_t(pc.a));
+        for (uint i = gl_LocalInvocationID.x; i < count; i += 32u) stage[i] = float(h.v[base + i]);
+    } else
     for (uint i = gl_LocalInvocationID.x; i < count; i += 32u) stage[i] = pc.a.v[base + i];
     subgroupMemoryBarrierShared();
     subgroupBarrier();
