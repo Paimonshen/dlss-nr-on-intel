@@ -103,3 +103,61 @@ the detector cannot separate an interface over a still scene from a still scene,
 declined rather than guessed — exactly the designed behaviour
 (`notes/phase35-what-the-operator-does.md`). **The mask is still unproven on a live HUD**,
 and proving it needs a frame captured mid-round with the characters actually moving.
+
+## The mask, proven on a live HUD
+
+17:37, mid-round: Kasumi throwing Christie in the gym stage, timer at 94, 1920x1080.
+
+```
+[nr_layer] 43% of the frame held still; ui mask sent
+[nr_layer] processed 1920x1080 with a ui mask
+nr_daemon: 1920x1080 B8G8R8A8_UNORM in 3.96s  change 0.01516  interface 44% left alone
+```
+
+**44.1 % of the output is bit-identical to the input**, against the daemon's reported
+44 % — the two halves of the protocol agree exactly, so the mask plane survives the
+socket and is applied per pixel as intended. This is the first time the masked path has
+run outside a test.
+
+The acceptance question is not the percentage, it is whether the interface survives:
+
+| | mean abs diff on the health bar | untouched |
+| --- | --- | --- |
+| frame 001, no mask | 9.69 | 0 % |
+| frame 003, mask | **0.97** | **85 %** |
+
+**Ten times less damage to the HUD.** Visually the bar keeps its dark outline and the
+"KASUMI" lettering stays crisp; without the mask the outline was gone and the edges bled.
+
+The discrimination is real and points the right way:
+
+| region | protected |
+| --- | --- |
+| health bar, left | 84.7 % |
+| name "KASUMI" | 93.0 % |
+| Kasumi herself | 13.9 % |
+| Christie | 25.9 % |
+
+The fighters get processed, the interface does not. That is the whole design working.
+
+### Where it is imperfect, and why
+
+Protection is not total. The timer reads 40 % and the right-hand name 37 %, and the
+static background comes out speckled at 38-62 % rather than uniformly held. The detector
+is `|dR| + |dG| + |dB| > 6` between two consecutive presents, which is a real tolerance
+and not exact equality, so the cause is not quantisation:
+
+- the **timer counts**, so its digits genuinely differ between the two presents;
+- DoA5's health bars carry an **animated shine**, so part of the bar genuinely moves;
+- **bloom from the moving fighters** bleeds onto neighbouring pixels, including HUD edges.
+
+None of these are detector bugs; they are the interface genuinely changing. Raising the
+threshold would catch them and would also start protecting slow scene content, which is
+the failure the current setting avoids. A better answer, if this is ever worth improving,
+is to accumulate over more than two presents rather than to loosen the comparison — but
+at a tenfold reduction in HUD damage the feature already does its job, and this is
+recorded as a limit rather than a defect.
+
+**All three open items from the earlier HANDOFF list are now closed**: a game frame worth
+looking at, the interface mask on a live HUD, and — from `notes/phase41` — the layer under
+a second Vulkan client.
