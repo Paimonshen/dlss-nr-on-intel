@@ -63,6 +63,31 @@ def load_mlx_numpy_modules(names=MLX_NUMPY_MODULES):
 
 features_mod, composition_mod = load_mlx_numpy_modules(("features", "composition"))
 NetworkGeometry = features_mod.NetworkGeometry
+# The three noise channels depend on the extent and the frame index and on nothing else,
+# and both callers copy the result into a slice rather than writing through it. In a live
+# mode the frame index does not move — the daemon never sets one — so the same array was
+# being rebuilt from four transcendentals per pixel on every frame, at 29-42 % of the
+# whole feature assembly (notes/phase48). Memoised here rather than in `work/mlx-dlss`,
+# which is a vendored dependency; the result is marked read-only so a future in-place
+# user fails loudly instead of corrupting every later frame.
+_raw_noise = features_mod.deterministic_noise
+_noise_cache: dict = {}
+
+
+def _cached_noise(height, width, frame_index=0):
+    key = (int(height), int(width), int(frame_index))
+    value = _noise_cache.get(key)
+    if value is None:
+        if len(_noise_cache) >= 8:          # extents change rarely; a swapchain resize
+            _noise_cache.clear()            # or a scale change should not grow this
+        value = _raw_noise(height, width, frame_index)
+        value.flags.writeable = False
+        _noise_cache[key] = value
+    return value
+
+
+features_mod.deterministic_noise = _cached_noise
+deterministic_noise = _cached_noise
 make_features = features_mod.make_features
 PROFILES = features_mod.PROFILES
 compose_head = composition_mod.compose_head

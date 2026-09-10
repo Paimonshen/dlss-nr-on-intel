@@ -133,6 +133,14 @@ def apply(knob, value):
         ms = expected(value)
         extra = "   ~%.0f ms, ~%.1f fps of graph time" % (ms, 1000.0 / ms)
     print("  %s = %s%s" % (knob, value, extra))
+    if knob in ("detail_strength", "colour_strength") and value != 1.0:
+        # `compose_detail` returns early when both are 1 and otherwise blurs the whole
+        # frame at radius 4. Measured: 15 -> 110 ms at 854x480, 87 -> 553 at 1080p.
+        # The vendored blur has a `cv2.sepFilter2D` fast path it only takes when OpenCV
+        # is installed; without it the numpy fallback runs 18 full-frame passes.
+        print("     note: away from 1 this costs a full-frame blur — about 7x the")
+        print("     composition, measured 15 -> 110 ms at 854x480. Set it back to 1")
+        print("     to get the rate back, or install OpenCV for the fast path.")
 
 
 def command(words):
