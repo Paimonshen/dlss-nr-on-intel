@@ -15,7 +15,7 @@ work:
 	mkdir -p $@
 
 $(SHADERS) work/libxmx.so work/libnr_layer.so work/half_probe.spv work/attention_ab.spv: | work
-work/test_exchange work/libnr_layer32.so work/test_layer_loader work/test_layer_loader32: | work
+work/test_exchange work/test_settled work/libnr_layer32.so work/test_layer_loader work/test_layer_loader32: | work
 
 work/libxmx.so: src/gpu/libxmx.c
 	$(CC) $(CFLAGS) -shared -o $@ $< -lvulkan
@@ -32,6 +32,9 @@ work/test_layer_loader: src/layer/test_layer_loader.c
 
 work/test_layer_loader32: src/layer/test_layer_loader.c
 	$(CC) $(CFLAGS) -m32 -o $@ $< -lvulkan
+
+work/test_settled: src/layer/test_settled.c src/layer/nr_layer.c
+	$(CC) $(CFLAGS) -Isrc/layer -o $@ $< -lvulkan
 
 work/test_exchange: src/layer/test_exchange.c src/layer/nr_layer.c
 	$(CC) $(CFLAGS) -o $@ $< -lvulkan -lpthread
@@ -65,8 +68,9 @@ bench: all work/half_probe.spv
 	python3 src/bench/half_probe.py
 	python3 src/bench/split_cost.py
 
-test: all work/attention_ab.spv work/test_exchange
+test: all work/attention_ab.spv work/test_exchange work/test_settled
 	python3 src/layer/test_daemon.py
+	work/test_settled
 	python3 src/layer/test_ui_mask.py
 	python3 src/gpu/test_epilogue.py
 	python3 src/gpu/test_specialization.py

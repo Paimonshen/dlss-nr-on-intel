@@ -447,6 +447,15 @@ static uint32_t settled(const unsigned char *now, const unsigned char *before,
 	return held;
 }
 
+/* Whether a mask is worth sending at all. Over nine tenths held still means nothing
+ * moved, so an interface cannot be told from a still scene and the mask would cover the
+ * whole frame. Under a fiftieth means there is no interface worth a second plane on the
+ * wire. Between them the signal is real. */
+static int mask_worth_sending(uint32_t held, uint32_t pixels)
+{
+	return held < (uint32_t)((uint64_t)pixels * 9 / 10) && held > pixels / 50;
+}
+
 static int process_frame(struct device_data *data, struct swapchain_data *chain,
 			 VkQueue queue, uint32_t index)
 {
@@ -466,10 +475,7 @@ static int process_frame(struct device_data *data, struct swapchain_data *chain,
 		memcpy(data->outgoing, data->mapped, (size_t)needed);
 		uint32_t held = settled(data->mapped, data->earlier, pixels,
 					data->outgoing + needed);
-		/* Over nine tenths still means nothing moved, so nothing can be told
-		 * apart. Under a fiftieth means the interface is not worth a second
-		 * plane on the wire. */
-		masked = held < (uint32_t)(pixels * 0.9) && held > pixels / 50;
+		masked = mask_worth_sending(held, pixels);
 		fprintf(stderr, "[nr_layer] %u%% of the frame held still; ui mask %s\n",
 			100u * held / pixels, masked ? "sent" : "refused");
 	}
