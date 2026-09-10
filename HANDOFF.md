@@ -190,10 +190,12 @@ value:
    (appid 311730, D3D11, installed) is the right target.
    `src/layer/nr-photo --proton <appid> <exe>` is the way in.
 
-2. **Upstream what belongs upstream.** The **Mesa/ANV cooperative-matrix store bug** is
-   live in 26.2.1 and unreported: any arithmetic on an accumulator between
-   `coopMatMulAdd` and `coopMatStore` scrambles the result, with a two-line reproducer
-   and a five-variant table in `notes/phase18-fusion.md`. Second, llama.cpp issue #13530
+2. ~~**The Mesa/ANV cooperative-matrix store bug.**~~ **It does not exist** —
+   `notes/phase38-there-was-no-bug.md`. The reproducer written to file it found that the
+   last surviving variant was our own invalid shader: a float16 matrix stored into a
+   `float[]`, where the component type does not match the destination. Given a matching
+   destination every variant is exact. Three phases of design rested on it. What is left
+   upstream is llama.cpp issue #13530
    has coopmat disabled for all Intel on the strength of an Alchemist regression, and
    its only Xe2 rebuttal is a discrete B580 with GDDR6; Arc 140V on a UMA LPDDR5X pool
    is unmeasured in public and this project has the numbers.

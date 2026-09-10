@@ -22,7 +22,8 @@ layout(buffer_reference, scalar, buffer_reference_align = 16) buffer HalfBuf  { 
 layout(buffer_reference, scalar, buffer_reference_align = 16) buffer FloatBuf { float     v[]; };
 layout(buffer_reference, scalar, buffer_reference_align = 8)  buffer Half4Buf { f16vec4   v4[]; };
 
-/* The epilogue is staged through shared memory, and that is the whole trick.
+/* The epilogue runs on the accumulator itself; see the store below for why the shared
+ * memory this used to need is gone.
  *
  * Folding the publish into the accumulator directly cannot be done on this driver:
  * **any** operation on a cooperative matrix between `coopMatMulAdd` and `coopMatStore`
@@ -76,7 +77,14 @@ const uint TM = 8, TN = 16, TK = 16;
 #endif
 const uint BM = TM * RM, BN = TN * RN;
 
+/* A narrow output is still written through shared memory, and not because anything
+ * forbids the direct store — phase 38 established that a matrix stored into an array of
+ * its own component type is exact. It is a write-pattern choice: `coopMatStore` of a
+ * float16 matrix puts two bytes per lane per element on the wire, while going through
+ * shared memory lets each lane write four consecutive halves as one 64-bit store. That
+ * is worth about 20 ms of a 720p frame. */
 shared ACC stage[BM * BN];
+
 
 
 
@@ -142,51 +150,45 @@ void main() {
         return;
     }
 #endif
-    /* A float32 output takes the publish on the accumulator's own components and
-     * stores it directly. phase 18 recorded this as impossible — "any operation on the
-     * accumulator between coopMatMulAdd and coopMatStore scrambles the result" — and a
-     * minimal reproducer says otherwise: whole-matrix arithmetic, element assignment
-     * and a copy through a fresh matrix are all correct on Mesa 26.2.1. Only a
-     * *converting* store is wrong, which is why a narrow output still goes through
-     * shared memory below. `src/probe/coopmat_store_bug.comp`. */
-    if (!narrow) {
-        for (uint i = 0; i < RM; i++)
-            for (uint j = 0; j < RN; j++) {
-                for (uint e = 0; e < acc[i][j].length(); e++)
-                    acc[i][j][e] = ACC(publish(epilogue, float(acc[i][j][e])));
-                coopMatStore(acc[i][j], pc.c.v, co + (row + i * TM) * ldc + col + j * TN,
-                             ldc, gl_CooperativeMatrixLayoutRowMajor);
-            }
-        return;
-    }
+    /* The publish runs on the accumulator's own components and the matrix stores
+     * straight to global. phase 18 recorded this as impossible and phase 38 found out
+     * why it looked that way: the failing case was storing a float16 matrix into a
+     * `float[]`, where the component type does not match the destination. Given a
+     * destination of the matching type, every variant is exact
+     * (`src/probe/coopmat_store_bug.comp`). So the rule is simply: store into an array
+     * of the accumulator's own type, converting the matrix first if they differ. */
     for (uint i = 0; i < RM; i++)
-        for (uint j = 0; j < RN; j++)
-            coopMatStore(acc[i][j], stage, i * TM * BN + j * TN, BN,
-                         gl_CooperativeMatrixLayoutRowMajor);
-    /* One subgroup per workgroup, so a subgroup barrier is the whole barrier. */
+        for (uint j = 0; j < RN; j++) {
+            for (uint e = 0; e < acc[i][j].length(); e++)
+                acc[i][j][e] = ACC(publish(epilogue, float(acc[i][j][e])));
+            if (narrow) {
+                coopMatStore(acc[i][j], stage, i * TM * BN + j * TN, BN,
+                             gl_CooperativeMatrixLayoutRowMajor);
+                continue;
+            }
+            uint at = co + (row + i * TM) * ldc + col + j * TN;
+#ifdef ACC16
+            coopmat<float, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator> wide =
+                coopmat<float, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator>(acc[i][j]);
+            coopMatStore(wide, pc.c.v, at, ldc, gl_CooperativeMatrixLayoutRowMajor);
+#else
+            coopMatStore(acc[i][j], pc.c.v, at, ldc, gl_CooperativeMatrixLayoutRowMajor);
+#endif
+        }
+    if (!narrow) return;
+
     subgroupMemoryBarrierShared();
     subgroupBarrier();
-
-    /* Four consecutive elements per lane, so the stores coalesce; one element per lane
-     * strided across the tile costs more than the epilogue saves. */
+    /* Four consecutive elements per lane, so the stores coalesce. */
     for (uint e = gl_LocalInvocationID.x * 4u; e < BM * BN; e += 32u * 4u) {
-        vec4 out4;
-        for (uint i = 0; i < 4u; ++i) {
-            float value = float(stage[e + i]);
-            if (epilogue == 2u || epilogue == 3u) value = gate_activation(value);
-            if (epilogue == 1u || epilogue == 3u) value = e4m3(value);
-            if (epilogue == 4u) value = half_round(value);
-            out4[i] = value;
-        }
         uint at = co + (row + e / BN) * ldc + col + e % BN;
-        if (!narrow) {
-            for (uint i = 0; i < 4u; ++i) pc.c.v[at + i] = out4[i];
-        } else if ((at & 3u) == 0u && (uint(uint64_t(pc.c)) & 7u) == 0u) {
-            /* Four 16-bit stores are slower than the float32 store they replace; one
-             * 64-bit store is what makes the narrow output actually cheaper. */
-            Half4Buf(uint64_t(pc.c)).v4[at >> 2] = f16vec4(out4);
+        if ((at & 3u) == 0u && (uint(uint64_t(pc.c)) & 7u) == 0u) {
+            Half4Buf(uint64_t(pc.c)).v4[at >> 2] =
+                f16vec4(float(stage[e]), float(stage[e + 1]),
+                        float(stage[e + 2]), float(stage[e + 3]));
         } else {
-            for (uint i = 0; i < 4u; ++i) HalfBuf(uint64_t(pc.c)).v[at + i] = float16_t(out4[i]);
+            for (uint i = 0; i < 4u; ++i)
+                HalfBuf(uint64_t(pc.c)).v[at + i] = float16_t(stage[e + i]);
         }
     }
 }
