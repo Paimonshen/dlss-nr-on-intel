@@ -65,3 +65,33 @@ measurement taken while anything else holds memory — another session's daemon,
 game, three graph extents alive in one process — is measuring the page fault rate.
 
 `free -h` before trusting a number, and one extent per process.
+
+
+## Re-measured on a clean machine (2026-09-11)
+
+The owner updated and rebooted; swap went to **zero**, 9.5 GiB available, nothing else
+running. One extent per process, as the trap above says. The numbers move a great deal:
+
+| | 512x288, scale 1.0 | 1920x1080, scale 0.27 |
+| --- | --- | --- |
+| **whole round** | **112 ms (8.9 fps)** | **328 ms (3.0 fps)** — was 1004 |
+| network | 89.5 ms (80 %) | 115.6 ms (35 %) |
+| compose | 3.2 | 73.7 |
+| head upscale | 0.0 | 60.3 |
+| features | 17.6 | 23.1 |
+| encode / decode / downscale | 2.2 | 55.8 |
+
+`compose` and the head upscale land at **73.7 and 60.3 ms** — the figures they gave when
+timed alone yesterday, not the 364 and 298 the swapping profile reported. The isolated
+numbers were right and the pipeline profile was wrong, which is the opposite of the usual
+direction and worth remembering.
+
+**And the conclusion changes.** At the extent the live mode actually runs — 512x288 — the
+network is **80 %** of the daemon's work and everything around it is 22 ms. There is
+nothing left to win there; the graph is register- and bandwidth-bound (`phase45`) and it
+*is* the frame again. `phase47`'s "the bottleneck left the network" holds only for a large
+output, where the numpy is 213 ms of 328.
+
+So the live mode at a small extent is finished at roughly 9-10 fps, and the remaining
+question is not speed but what the picture looks like once something stretches 512x288 to
+the panel. That is an upscaler's job, not ours.
