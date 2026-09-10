@@ -76,3 +76,62 @@ The tables are now generated from `resident.comp` and `attention.comp` by regex 
 time, so a kind added to a shader cannot silently mislabel a row again. **A profiler that
 names things is only as good as the names**, and the numbers looked equally plausible
 either way.
+
+## Every pass, against the machine's ceiling — and the answer
+
+Traffic measured per pass and divided by the profiled time, against the 70-91 GB/s this
+machine reaches:
+
+| pass | ms | GB/s | of ~80 | verdict |
+| --- | --- | --- | --- | --- |
+| row: softmax | 74.4 | 36 | 44 % | arithmetic |
+| row: cosine publish | 67.9 | 38 | 48 % | arithmetic |
+| unary: residual | 51.3 | 104 | **130 %** | at the ceiling |
+| unary: split heads | 19.9 | 65 | **81 %** | at the ceiling |
+| unary: partition | 17.7 | 69 | **86 %** | at the ceiling |
+| unary: merge heads | 15.3 | 84 | **105 %** | at the ceiling |
+| unary: to half | 11.3 | 61 | **77 %** | at the ceiling |
+
+**Every pass in the frame that only moves data is already at the memory ceiling.** The
+figures above 100 % mean part of the reads are served from cache, which is the same
+statement. Nothing in that group is waiting on a better kernel.
+
+The only two below the ceiling are softmax and cosine publish, and both do real
+per-element arithmetic — a hand-rolled `f16x2` exponential, an E4M3 quantisation and a
+half rounding per element. For a pass like that, 45 % of *bandwidth* is not a deficiency;
+it is what an arithmetic pass looks like when measured with a bandwidth ruler. And the
+softmax has already had one round of exactly this work: `phase29` replaced the manual
+half encode/decode with `packHalf2x16`, won 13.7 % on the isolated kernel, and that came
+to **1.1 %** of the frame.
+
+Both scale at 3.85-3.89x for a 4x area, so there is no fixed per-dispatch cost hiding in
+them either — it is all per-element work.
+
+### Two hypotheses this note killed
+
+- **`to half` at 14 GB/s.** An artefact of the mislabelled kind table, above. The pass is
+  11.3 ms at 61 GB/s.
+- **Bank conflicts in the row shaders.** `attention.comp` stages 32 rows at stride 64 and
+  gives each of a subgroup's 32 lanes one row, so lane `l` reads `stage[l*64 + i]` — bank
+  `i mod 32` for all 32 lanes at once, a textbook 32-way conflict. `src/bench/bank_probe.*`
+  measures that exact pattern with the stride padded to 65 and without:
+
+  ```
+  64  (conflicting)   25.78 ms
+  65  (padded)        23.13 ms      1.11x
+  ```
+
+  **1.11x, not 32x.** Xe2's shared memory does not punish this the way the textbook
+  describes, and the surgery on `gather`/`scatter` that padding would have required is not
+  worth 11 % of two passes. Kept as a probe so the next person does not have to guess.
+
+## What the frame is, now that it is measured
+
+GEMM is register-bound (`phase26`: 128 GRF, an accumulator costs 4, larger blocks spill
+and get slower). Everything that moves data is bandwidth-bound. What is left is two
+arithmetic passes that have already been through one optimisation round for 1.1 %.
+
+**"Performance is finished" was already the standing conclusion. It is now a measured one,
+pass by pass, rather than an inference from two ablations.** The remaining lever is not
+inside the frame at all: it is to give the network fewer pixels, which is `phase37` and
+needs a neural upscaler downstream.
