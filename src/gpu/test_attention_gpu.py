@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
 """
-test_attention_gpu — a complete split-Swin-16H attention layer with every matmul
-executed on the Xe2 XMX units, checked against the pure-CPU reference.
+test_attention_gpu — the three block families on Intel's matrix hardware.
 
-This is the layer-by-layer validation the roadmap asks for, at the granularity of a
-whole layer rather than a single matrix.
+**Superseded, and not in `make test`.** Two reasons, both worth knowing before running
+it: it loads `work/weights_ht.bin`, the dense-FP16 decode that `notes/phase6` replaced —
+so it cannot run on a clone that has not carved that file out of the DLL — and the
+weights it reads are the wrong decode, kept only for the findings the surrounding files
+encode. `notes/reviewing.md` says which tests are the live ones.
+
+It still passes: worst relative deviation **2.8e-04** across every layer tested,
+which is Phase 4's acceptance result. What it measures is whether the GPU path
+reproduces the CPU path *on the same weights*, so the decode being wrong does not
+invalidate it — it is a kernel test, not a weights test.
 """
 import sys
 from pathlib import Path

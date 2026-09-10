@@ -1,8 +1,20 @@
 #!/usr/bin/env python3
 """
-test_layer — run a real DLSS-NR weight matrix on the Xe2 XMX units and check it
-against the CPU reference. This is the Phase 4 acceptance test in miniature:
-NVIDIA's parameters, Intel's matrix hardware, our numbers.
+test_layer — a real weight matrix on the XMX units, against the CPU.
+
+**Superseded, and not in `make test`.** Two reasons, both worth knowing before running
+it: it loads `work/weights_ht.bin`, the dense-FP16 decode that `notes/phase6` replaced —
+so it cannot run on a clone that has not carved that file out of the DLL — and the
+weights it reads are the wrong decode, kept only for the findings the surrounding files
+encode. `notes/reviewing.md` says which tests are the live ones.
+
+**It does not pass, and cannot.** Worst relative error 0.22. The dense-FP16 decode
+produces values including FP16 subnormals, XMX flushes subnormal operands to zero
+and the float64 reference does not, so the two disagree by the size of that gap.
+The premise it was written under — `notes/phase4-subnormal-flush.md`, '27 % of this
+model's parameters are subnormal' — was itself an artefact of the same wrong decode;
+the real figure is 0.00006 %. Kept as the record of a measurement that was real at
+the time and is not reproducible now.
 """
 import subprocess
 import sys

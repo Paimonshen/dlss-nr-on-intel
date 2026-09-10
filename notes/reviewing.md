@@ -55,12 +55,34 @@ arena's aliasing plan against the barriers in `nr_resident.py`, and whether ever
 `coopMatStore` writes into an array of the matrix's own component type — the one rule
 whose violation cost this project three phases (`notes/phase38-there-was-no-bug.md`).
 
-**`base-ref` — `src/ref`.** The CPU reference and the frame/temporal drivers. Note
-before starting: `hnet_model.py`, `hnet_ops.py`, `hnet_ref.py`, `forward.py` and
-`run_frame.py` are **superseded** — they decode the weight container the wrong way and
-are kept only for the PTX-derived findings they encode. Reviewing them is wasted effort.
-The live files are `nr_model.py`, `nr_frame.py`, `nr_temporal.py`, `nr_display.py`,
-`nr_accel.py`, `image_io.py` and the tests.
+**`review-ref` — `src/ref`.** The CPU reference and the frame/temporal drivers. The live
+files are `nr_model.py`, `nr_frame.py`, `nr_temporal.py`, `nr_display.py`, `nr_accel.py`,
+`image_io.py` and their tests.
+
+`hnet_model.py`, `hnet_ops.py`, `hnet_ref.py`, `forward.py` and `run_frame.py` are
+**superseded** — they decode the weight container the wrong way — and are kept for the
+PTX-derived findings they encode. They are not worth reviewing *as production code*, but
+"do not read them" was too strong, and a review said so: **two tests in `src/gpu` import
+from them** — `test_attention_gpu.py` takes `Model`, `softmax`, `l2_normalize`,
+`HEAD_DIM`, `TOKENS` and `GQA_RATIO`, and `test_layer.py` takes `Model`. Whoever reviews
+`review-gpu` will meet those imports and needs to know what is behind them.
+
+### The two tests outside `make test`, and why
+
+Both load `work/weights_ht.bin`, which is carved out of the DLL and gitignored, so
+neither can run on a fresh clone — that alone keeps them out of the recipe. Beyond that
+they differ, and the difference matters:
+
+- `test_attention_gpu.py` **passes**: worst relative deviation **2.8e-04**, Phase 4's
+  acceptance result. It asks whether the GPU path reproduces the CPU path *on the same
+  weights*, so a wrong decode does not invalidate it. It is a kernel test.
+- `test_layer.py` **fails at 0.22 and cannot pass.** The dense-FP16 decode yields values
+  including FP16 subnormals; XMX flushes subnormal operands to zero and the float64
+  reference does not. The premise it was written under — "27 % of this model's parameters
+  are subnormal" — was an artefact of the same wrong decode, and the real figure is
+  0.00006 %.
+
+Both now say this at the top of the file, so nobody runs them expecting green.
 
 **`base-tools` — `src/bench`, `src/probe`, `src/tools`.** Measurement and
 reverse-engineering tooling. Lowest risk, but the benchmarks are where claims come from,
