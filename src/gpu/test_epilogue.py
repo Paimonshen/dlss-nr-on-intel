@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """The GEMM's fused epilogue, against the same chain run as a separate pass.
 
-The driver will not let a cooperative matrix be touched between `coopMatMulAdd` and
-`coopMatStore` (notes/phase18-fusion.md), so the accumulator is stored untouched to
-shared memory and the publish is done on ordinary scalars afterwards. This checks that
-the detour is exact: the plain store still matches numpy, and every epilogue matches
-the reference chain applied to the GPU's own GEMM output.
+The publish runs on the accumulator's own components and the matrix stores straight to
+global. `notes/phase18-fusion.md` claimed the driver forbade touching a cooperative
+matrix between `coopMatMulAdd` and `coopMatStore`, which is withdrawn — the only real
+rule is that a matrix must be stored into an array of its own component type
+(`notes/phase38-there-was-no-bug.md`). This checks the fused path is exact: the plain
+store still matches numpy, and every epilogue matches the reference chain applied to
+the GPU's own GEMM output.
 """
 import pathlib, sys
 import numpy as np
@@ -51,6 +53,6 @@ good &= report("gate", run(2, False), gate(base))
 good &= report("gate + e4m3", run(3, False), e4m3(gate(base)))
 good &= report("gate + e4m3, half out", run(3, True), e4m3(gate(base)))
 good &= report("half round", run(4, False), half(base))
-print("\n  %s" % ("all epilogues correct — the shared-memory stage dodges the bug"
+print("\n  %s" % ("all epilogues correct — fused into the accumulator, stored straight out"
                   if good else "something is still wrong"))
 sys.exit(0 if good else 1)

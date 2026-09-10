@@ -146,9 +146,13 @@ void main() {
                              gl_CooperativeMatrixLayoutRowMajor);
         return;
     }
-    /* The driver will not let a cooperative matrix be touched between `coopMatMulAdd`
-     * and `coopMatStore`, so the publish happens on scalars after an untouched store
-     * to shared memory. See gemm_resident.comp. */
+    /* The publish happens on scalars, after an untouched store to shared memory. That
+     * used to be forced by a driver bug which does not exist: the real rule is only that
+     * a matrix must be stored into an array of its own component type
+     * (notes/phase38-there-was-no-bug.md). The detour stays here for the write pattern —
+     * the loop below has each lane write four consecutive elements and the whole
+     * workgroup, not one subgroup, covers the tile. `gemm_resident.comp` dropped it for
+     * float32 outputs; this shader has not been re-measured without it. */
     for (uint i = 0; i < RM; i++)
         for (uint j = 0; j < RN; j++)
             coopMatStore(acc[i][j], stage, (warp * WM + i * TM) * BN + j * TN, BN,

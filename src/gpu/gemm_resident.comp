@@ -25,17 +25,21 @@ layout(buffer_reference, scalar, buffer_reference_align = 8)  buffer Half4Buf { 
 /* The epilogue runs on the accumulator itself; see the store below for why the shared
  * memory this used to need is gone.
  *
- * Folding the publish into the accumulator directly cannot be done on this driver:
- * **any** operation on a cooperative matrix between `coopMatMulAdd` and `coopMatStore`
- * scrambles where the elements land. Verified at the crudest level — `acc = acc * 2.0`,
- * whole-matrix, no element access — which comes back with the values in the wrong
- * places, and not even as a clean permutation. Element access, a fresh matrix and the
- * float16 conversion store all fail the same way, while an untouched accumulator
- * stores correctly. Mesa 26.2.1 on ANV, cooperative matrix revision 2.
+ * This comment used to say the opposite: that **any** operation on a cooperative matrix
+ * between `coopMatMulAdd` and `coopMatStore` scrambles where the elements land, on
+ * Mesa 26.2.1 / ANV, cooperative matrix revision 2. That was wrong, and it shaped three
+ * phases of design before the reproducer written to file it upstream found out why —
+ * the last variant still failing was our own invalid shader, a float16 matrix stored
+ * into a `float[]`. `notes/phase38-there-was-no-bug.md`,
+ * `src/probe/coopmat_store_bug.comp`.
  *
- * But the bug is in the arithmetic, not in the store: an untouched accumulator reaches
- * *shared* memory intact, and the transform can then be done on ordinary scalars. That
- * turns four trips over block 0's 503 MB hidden buffer into one 252 MB write. Every
+ * The real rule is narrow, and it is about types rather than timing: **store a matrix
+ * only into an array of its own component type**, converting the matrix first if they
+ * differ. glslang accepts the mismatch and the driver hands back packed halves read as
+ * float32 — 79 of 128 zero, the rest denormal-sized. Given a matching destination every
+ * variant is exact, arithmetic on the accumulator included, which is why the publish
+ * below runs on the accumulator's own components and stores straight to global. That
+ * turned four trips over block 0's 503 MB hidden buffer into one 252 MB write. Every
  * epilogue is bit-exact against the same chain run as a separate pass
  * (`src/gpu/test_epilogue.py`).
  */
@@ -137,10 +141,11 @@ void main() {
 
     uint epilogue = (operation_flags() >> 8) & 0xFu;
     bool narrow = (operation_flags() & 0x1000u) != 0u;
-    /* A float16 accumulator cannot take the direct store: the destination is float32
-     * and converting a cooperative matrix is one of the five things the driver bug
-     * scrambles (notes/phase18-fusion.md). It goes through the shared-memory stage,
-     * where the conversion happens on ordinary scalars. */
+    /* A float16 accumulator cannot take the direct store, and this is the one thing
+     * that genuinely does not work: `pc.c` is a `float[]`, so storing a float16 matrix
+     * into it is the component-type mismatch itself
+     * (notes/phase38-there-was-no-bug.md). The path below converts to a float32 matrix
+     * first and stores that — no shared memory involved. */
 #ifndef ACC16
     if (epilogue == 0u && !narrow) {
         for (uint i = 0; i < RM; i++)
