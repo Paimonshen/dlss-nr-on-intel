@@ -89,3 +89,35 @@ standard slightly *raises* iris saturation, 0.38 to 0.47. What actually happens 
 the eye darkens by 38 %, and in a face that has darkened with it the eye reads as duller.
 The conclusion — cinematic is the safer default for faces — survives; the reason given
 for it did not.
+
+## Correction: `standard` is the better default for this game, not `cinematic`
+
+Frame 010 — Helena on sand, a photo-mode shot, bright and washed out — put through both
+profiles on the same input:
+
+| | sand | face | hair | skin |
+| --- | --- | --- | --- | --- |
+| `cinematic` | **-17.7 %** | **-5.6 %** | **-11.1 %** | -11.5 % |
+| `standard` | +3.8 % | **+34.2 %** | **+27.5 %** | -5.1 % |
+
+Cinematic does not merely add less here — it **removes** detail, smoothing the sand grain
+and softening the face. Standard adds a third again to the face and a quarter to the hair.
+At 6x the difference is not subtle: standard gives a modelled face with a defined eye and
+formed lips, cinematic gives something close to the flat input.
+
+So the recommendation written above — "for a photo mode on faces, cinematic is the
+defensible default" — is **wrong**, and it was wrong because it generalised from a single
+cutscene frame where cinematic happened to land slightly positive. Three frames now say
+otherwise.
+
+The rule that actually holds across all of them: **standard always adds more texture, and
+cinematic can go negative.** Standard's cost is a large tone drop. And in *this* game that
+cost is mostly a benefit — DoA5 renders skin near clipping (Hitomi's face at luma 136 with
+saturation 87, Helena's at 162), so pulling the level back is restoring contrast the
+shader threw away, not darkening a correct picture.
+
+**Use `standard` for DoA5.** Reach for `cinematic` when the goal is to keep the game's own
+look rather than to get the most out of the frame — and know that on a bright scene it
+will smooth rather than sharpen.
+
+The daemon has been running `--profile cinematic` since 18:13; it should go back.
