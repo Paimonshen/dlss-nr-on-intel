@@ -160,6 +160,7 @@ static struct queue_data {
 	VkQueue queue;
 	VkDevice device;
 	uint32_t family;
+	int capture_ok;      /* the family can hold a copy, and the queue is not protected */
 } queues[MAX_QUEUES];
 
 static struct queue_data *find_queue(VkQueue queue)
@@ -169,14 +170,37 @@ static struct queue_data *find_queue(VkQueue queue)
 	return NULL;
 }
 
-static void remember_queue(VkDevice device, uint32_t family, VkQueue queue)
+/* Whether a copy can be recorded for this family at all. A present queue is not
+ * required to support graphics, compute or transfer — some drivers expose a
+ * present-only family — and recording `vkCmdCopyImageToBuffer` on one is invalid.
+ * Ported from the parallel ProjectsCodex tree, which had this guard and we did not. */
+static int family_can_capture(struct device_data *data, uint32_t family)
+{
+	if (!data || !next_instance_proc || !layer_instance) return 0;
+	PFN_vkGetPhysicalDeviceQueueFamilyProperties properties =
+		(PFN_vkGetPhysicalDeviceQueueFamilyProperties)
+		next_instance_proc(layer_instance, "vkGetPhysicalDeviceQueueFamilyProperties");
+	if (!properties) return 0;
+	uint32_t count = 0;
+	properties(data->physical, &count, NULL);
+	if (!count || family >= count) return 0;
+	VkQueueFamilyProperties *families = calloc(count, sizeof *families);
+	if (!families) return 0;
+	properties(data->physical, &count, families);
+	int ok = (families[family].queueFlags & (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT
+						 | VK_QUEUE_TRANSFER_BIT)) != 0;
+	free(families);
+	return ok;
+}
+
+static void remember_queue(VkDevice device, uint32_t family, VkQueue queue, int capture_ok)
 {
 	if (!queue) return;
 	pthread_mutex_lock(&lock);
 	if (!find_queue(queue))
 		for (int i = 0; i < MAX_QUEUES; i++)
 			if (!queues[i].queue) {
-				queues[i] = (struct queue_data){ queue, device, family };
+				queues[i] = (struct queue_data){ queue, device, family, capture_ok };
 				break;
 			}
 	pthread_mutex_unlock(&lock);
@@ -188,7 +212,7 @@ VKAPI_ATTR void VKAPI_CALL nr_GetDeviceQueue(VkDevice device, uint32_t family,
 	struct device_data *data = find_device(device);
 	if (!data || !data->get_device_queue) return;
 	data->get_device_queue(device, family, index, queue);
-	remember_queue(device, family, *queue);
+	remember_queue(device, family, *queue, family_can_capture(data, family));
 }
 
 VKAPI_ATTR void VKAPI_CALL nr_GetDeviceQueue2(VkDevice device,
@@ -197,7 +221,11 @@ VKAPI_ATTR void VKAPI_CALL nr_GetDeviceQueue2(VkDevice device,
 	struct device_data *data = find_device(device);
 	if (!data || !data->get_device_queue2) return;
 	data->get_device_queue2(device, info, queue);
-	remember_queue(device, info->queueFamilyIndex, *queue);
+	/* Protected memory cannot be read back into a host-visible buffer, so a protected
+	 * queue is never a capture source however capable its family is. */
+	remember_queue(device, info->queueFamilyIndex, *queue,
+		       (info->flags & VK_DEVICE_QUEUE_CREATE_PROTECTED_BIT)
+		       ? 0 : family_can_capture(data, info->queueFamilyIndex));
 }
 
 /* Four bytes a pixel is assumed everywhere downstream: the staging buffer is sized
@@ -265,7 +293,8 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateInstance(const VkInstanceCreateInfo *inf
 		capture_path = getenv("NR_LAYER_CAPTURE");
 		socket_path = getenv("NR_LAYER_SOCKET");
 		trigger_path = getenv("NR_LAYER_TRIGGER");
-		ui_mask = getenv("NR_LAYER_UI_MASK") != NULL;
+		const char *mask = getenv("NR_LAYER_UI_MASK");
+		ui_mask = mask && strcmp(mask, "0") != 0;
 		const char *every = getenv("NR_LAYER_EVERY");
 		capture_every = every ? strtol(every, NULL, 10) : 0;
 		const char *live = getenv("NR_LAYER_LIVE");
@@ -341,12 +370,33 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateSwapchainKHR(VkDevice device,
 {
 	struct device_data *data = find_device(device);
 	if (!data) return VK_ERROR_INITIALIZATION_FAILED;
+	const VkImageUsageFlags copies = VK_IMAGE_USAGE_TRANSFER_SRC_BIT
+				       | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
 	VkSwapchainCreateInfoKHR patched = *info;
-	patched.imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+	patched.imageUsage |= copies;
+	int copyable = 1;
 	VkResult r = data->create_swapchain(device, &patched, allocator, swapchain);
-	if (r != VK_SUCCESS)
+	if (r != VK_SUCCESS) {
+		/* The surface may refuse transfer usage. Falling back keeps the game alive,
+		 * but the images then lack TRANSFER_SRC and copying from them is invalid
+		 * usage — so the swapchain is created and deliberately not tracked. Before
+		 * this the fallback silently left us issuing an illegal copy every frame;
+		 * the parallel ProjectsCodex tree checks the flags and we did not. */
+		copyable = (info->imageUsage & copies) == copies;
 		r = data->create_swapchain(device, info, allocator, swapchain);
+	}
 	if (r != VK_SUCCESS) return r;
+	if (!copyable) {
+		fprintf(stderr, "[nr_layer] swapchain refused transfer usage; capture off\n");
+		return r;
+	}
+	/* One layer, and not protected: the copy reads a single 2-D image, and protected
+	 * memory cannot reach a host-visible buffer at all. */
+	if (info->imageArrayLayers != 1
+	    || (info->flags & VK_SWAPCHAIN_CREATE_PROTECTED_BIT_KHR)) {
+		fprintf(stderr, "[nr_layer] swapchain is multi-layer or protected; capture off\n");
+		return r;
+	}
 
 	if (!format_is_four_bytes(info->imageFormat)) {
 		fprintf(stderr, "[nr_layer] swapchain format %d is not four bytes a pixel; "
@@ -367,13 +417,76 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateSwapchainKHR(VkDevice device,
 		entry->format = info->imageFormat;
 		entry->extent = info->imageExtent;
 		entry->image_count = MAX_IMAGES;
-		data->get_swapchain_images(device, *swapchain, &entry->image_count, entry->images);
+		VkResult got = data->get_swapchain_images(device, *swapchain,
+							  &entry->image_count, entry->images);
+		/* VK_INCOMPLETE means there are more images than the array holds, and
+		 * `pImageIndices` may then name one past the end. Refusing is the only safe
+		 * answer; the alternative is an out-of-bounds read every present. */
+		if (got != VK_SUCCESS || !entry->image_count) {
+			memset(entry, 0, sizeof *entry);
+			pthread_mutex_unlock(&lock);
+			fprintf(stderr, "[nr_layer] swapchain has more than %d images or none; "
+				"capture off\n", MAX_IMAGES);
+			return r;
+		}
 		fprintf(stderr, "[nr_layer] swapchain %ux%u format %d, %u images\n",
 			entry->extent.width, entry->extent.height, entry->format,
 			entry->image_count);
 	}
 	pthread_mutex_unlock(&lock);
 	return r;
+}
+
+/* Everything this layer allocated per device, given back. The pointer to
+ * `vkDestroyDevice` was being stored and never used: a staging buffer, its device memory
+ * and its host mapping leaked on every device teardown, which a game that recreates its
+ * device — a resolution change under some wrappers — does more than once. Ported from the
+ * parallel ProjectsCodex tree. */
+static void release_device(struct device_data *data)
+{
+	if (data->mapped) {
+		PFN_vkUnmapMemory unmap =
+			(PFN_vkUnmapMemory)data->get_device_proc(data->device, "vkUnmapMemory");
+		if (unmap) unmap(data->device, data->staging_memory);
+	}
+	if (data->staging) {
+		PFN_vkDestroyBuffer destroy =
+			(PFN_vkDestroyBuffer)data->get_device_proc(data->device, "vkDestroyBuffer");
+		if (destroy) destroy(data->device, data->staging, NULL);
+	}
+	if (data->staging_memory) {
+		PFN_vkFreeMemory release =
+			(PFN_vkFreeMemory)data->get_device_proc(data->device, "vkFreeMemory");
+		if (release) release(data->device, data->staging_memory, NULL);
+	}
+	if (data->pool) {
+		PFN_vkDestroyCommandPool destroy = (PFN_vkDestroyCommandPool)
+			data->get_device_proc(data->device, "vkDestroyCommandPool");
+		if (destroy) destroy(data->device, data->pool, NULL);
+	}
+	free(data->result);
+	free(data->earlier);
+	free(data->outgoing);
+}
+
+VKAPI_ATTR void VKAPI_CALL nr_DestroyDevice(VkDevice device,
+					    const VkAllocationCallbacks *allocator)
+{
+	struct device_data *data = find_device(device);
+	PFN_vkDestroyDevice next = data ? data->destroy_device : NULL;
+	if (data) {
+		pthread_mutex_lock(&lock);
+		for (int i = 0; i < MAX_SWAPCHAINS; i++)
+			if (swapchains[i].device == device)
+				memset(&swapchains[i], 0, sizeof swapchains[i]);
+		for (int i = 0; i < MAX_QUEUES; i++)
+			if (queues[i].device == device)
+				memset(&queues[i], 0, sizeof queues[i]);
+		pthread_mutex_unlock(&lock);
+		release_device(data);
+		memset(data, 0, sizeof *data);
+	}
+	if (next) next(device, allocator);
 }
 
 /* Without this the eight slots are consumed one per window resize, exclusive-fullscreen
@@ -643,6 +756,12 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
 	/* Resolve the queue rather than taking the first live device: with two devices the
 	 * first is not necessarily this one, and the family decides which pool is legal. */
 	struct queue_data *owner = find_queue(queue);
+	if (owner && !owner->capture_ok) {
+		/* A present-only or protected queue: nothing can be recorded on it. Find the
+		 * device only to reach its `present` pointer. */
+		struct device_data *host = find_device(owner->device);
+		if (host) return host->present(queue, info);
+	}
 	if (owner) {
 		data = find_device(owner->device);
 		if (data && data->queue_family != owner->family) {
@@ -679,7 +798,7 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
 		if (!on) data->holding = 0;
 		for (uint32_t i = 0; on && i < info->swapchainCount; i++) {
 			struct swapchain_data *chain = find_swapchain(info->pSwapchains[i]);
-			if (!chain) continue;
+			if (!chain || info->pImageIndices[i] >= chain->image_count) continue;
 			uint32_t index = info->pImageIndices[i];
 			VkDeviceSize want = (VkDeviceSize)chain->extent.width
 					  * chain->extent.height * 4;
@@ -705,7 +824,7 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
 
 	for (uint32_t i = 0; i < info->swapchainCount; i++) {
 		struct swapchain_data *chain = find_swapchain(info->pSwapchains[i]);
-		if (!chain) continue;
+		if (!chain || info->pImageIndices[i] >= chain->image_count) continue;
 		uint32_t index = info->pImageIndices[i];
 		if (wanted && ui_mask && !data->holding && !data->have_earlier) {
 			/* Spend the first present after the trigger keeping the frame, and
@@ -750,6 +869,7 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL nr_GetDeviceProcAddr(VkDevice device,
 {
 	INTERCEPT(QueuePresentKHR);
 	INTERCEPT(CreateSwapchainKHR);
+	INTERCEPT(DestroyDevice);
 	INTERCEPT(DestroySwapchainKHR);
 	INTERCEPT(GetDeviceQueue);
 	INTERCEPT(GetDeviceQueue2);
@@ -766,6 +886,7 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL nr_GetInstanceProcAddr(VkInstance insta
 	INTERCEPT(GetDeviceProcAddr);
 	INTERCEPT(QueuePresentKHR);
 	INTERCEPT(CreateSwapchainKHR);
+	INTERCEPT(DestroyDevice);
 	INTERCEPT(DestroySwapchainKHR);
 	INTERCEPT(GetDeviceQueue);
 	INTERCEPT(GetDeviceQueue2);

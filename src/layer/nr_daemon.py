@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import pathlib
 import socket
@@ -133,6 +134,9 @@ class Settings:
         except (OSError, ValueError) as error:
             print(f"settings: {error}; keeping the current ones", flush=True)
             return
+        if not isinstance(given, dict):
+            print("settings: expected a JSON object; keeping the current ones", flush=True)
+            return
         changed = []
         for knob in self.KNOBS:
             if knob not in given:
@@ -148,8 +152,16 @@ class Settings:
                 except (TypeError, ValueError):
                     print(f"settings: {knob} is not a number", flush=True)
                     continue
-                if knob == "render_scale" and not 0.05 <= value <= 1.0:
-                    print("settings: render_scale must be between 0.05 and 1", flush=True)
+                if not math.isfinite(value):
+                    print(f"settings: {knob} must be finite", flush=True)
+                    continue
+                if knob == "render_scale":
+                    if not 0.05 <= value <= 1.0:
+                        print("settings: render_scale must be between 0.05 and 1", flush=True)
+                        continue
+                elif not 0.0 <= value <= 2.0:
+                    # the vendor's own panel stops at 2 (notes/phase30-control-atlas.md)
+                    print(f"settings: {knob} must be between 0 and 2", flush=True)
                     continue
             if getattr(self, knob) != value:
                 setattr(self, knob, value)
@@ -290,7 +302,20 @@ def process_connection(connection, backend, args):
                               detail_strength=live.detail_strength,
                               colour_strength=live.colour_strength,
                               control_mask=control)
-    connection.sendall(encode(output, payload, vk_format))
+    encoded = encode(output, payload, vk_format)
+    if held is not None:
+        # The control mask reaches `compose_head`, but `compose_detail` runs *after* it
+        # and re-weights the whole frame: with either strength away from 1 it moved 89.6%
+        # of the masked pixels, so the interface protection silently stopped working the
+        # moment a knob was touched. Restoring the original wire bytes here is exact by
+        # construction — it survives every later stage and does not depend on the codec
+        # round-tripping. Taken from the parallel ProjectsCodex tree, which had it.
+        protected = np.frombuffer(encoded, np.uint8).copy().reshape(height, width, 4)
+        original = np.frombuffer(payload, np.uint8).reshape(height, width, 4)
+        protected[held] = original[held]
+        encoded = protected.tobytes()
+        output[held] = colour[held]          # so a --dump shows what was actually sent
+    connection.sendall(encoded)
     if args.dump:
         import image_io
         try:

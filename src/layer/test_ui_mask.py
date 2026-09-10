@@ -24,13 +24,13 @@ def check(name, ok, detail=""):
         FAILURES.append(name)
 
 
-def request(payload, header):
+def request(payload, header, socket_path=None):
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
         client.settimeout(180)
-        client.connect(SOCKET)
+        client.connect(socket_path or SOCKET)
         client.sendall(header + payload)
-        want, chunks = len(payload) - (len(payload) - 4 * WIDTH * HEIGHT), b""
-        want = 4 * WIDTH * HEIGHT
+        # the reply is colour only: a masked request is larger than its answer
+        want, chunks = 4 * WIDTH * HEIGHT, b""
         while len(chunks) < want:
             piece = client.recv(want - len(chunks))
             if not piece:
@@ -40,6 +40,42 @@ def request(payload, header):
 
 
 WIDTH, HEIGHT = 384, 256
+
+
+def strength_test(payload, colour, mask, interior):
+    """The mask must survive a strength knob, which it did not until notes/phase49.
+
+    `compose_detail` runs *after* the control mask and re-weights the whole frame, so
+    with either strength away from 1 it moved **89.6 %** of the masked pixels. The daemon
+    now restores the original wire bytes after encoding, which no later stage can undo.
+    This needs its own daemon because the strengths are process-wide defaults.
+    """
+    socket_path = SOCKET + ".strength"
+    pathlib.Path(socket_path).unlink(missing_ok=True)
+    daemon = subprocess.Popen([sys.executable, str(ROOT / "src" / "layer" / "nr_daemon.py"),
+                               "--socket", socket_path,
+                               "--detail-strength", "1.2", "--colour-strength", "0.8"],
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    try:
+        for _ in range(300):
+            if pathlib.Path(socket_path).exists():
+                break
+            if daemon.poll() is not None:
+                raise RuntimeError("daemon exited: " + (daemon.stdout.read() or ""))
+            time.sleep(0.5)
+        header = struct.pack("<4I", MAGIC_MASKED, WIDTH, HEIGHT, FORMAT_B8G8R8A8)
+        tuned = np.frombuffer(request(payload + mask.tobytes(), header, socket_path),
+                              np.uint8).reshape(HEIGHT, WIDTH, 4)
+        check("the mask holds when a strength knob is moved",
+              np.array_equal(tuned[interior], colour[interior]),
+              "detail 1.2, colour 0.8, %d interior pixels" % interior.sum())
+        check("the strengths still change the rest",
+              not np.array_equal(tuned[~interior], colour[~interior]),
+              f"mean |d| {np.abs(tuned[~interior].astype(int) - colour[~interior]).mean():.2f}")
+    finally:
+        daemon.terminate()
+        daemon.wait(timeout=30)
+        pathlib.Path(socket_path).unlink(missing_ok=True)
 
 
 def main():
@@ -99,6 +135,7 @@ def main():
         check("the unmasked path still works",
               not np.array_equal(plain, colour),
               f"mean |d| {np.abs(plain.astype(int) - colour).mean():.2f}")
+        strength_test(payload, colour, mask, interior)
     finally:
         daemon.terminate()
         daemon.wait(timeout=30)
