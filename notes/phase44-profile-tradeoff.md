@@ -59,3 +59,33 @@ times the texture. The daemon takes `--profile`, so this is a launch-time choice
 and could be a per-frame one if it ever matters.
 
 Frames: `work/doa5ab/`.
+
+## The same comparison on the best face of the session
+
+Frame 002's input — Hitomi in close-up, the largest face this project has run — through
+`standard` and `cinematic`, same input, `--resident`:
+
+| | face luma | face saturation | relative fine texture | iris luma | iris hue |
+| --- | --- | --- | --- | --- | --- |
+| input | 136.1 | 87.3 | — | 93.3 | 18° |
+| `standard` | 87.4 | 60.0 | **+30.6 %** | 57.5 (-38 %) | 21° |
+| `cinematic` | 121.3 | 72.2 | **-8.8 %** | 77.4 (-17 %) | 13° |
+
+Note the sign: on *this* face cinematic **removes** relative texture, where on the frame
+008 cutscene it added 3.7 %. The trade-off curve is real but its zero point moves with the
+scene, so "cinematic adds less texture" is the safe statement and "cinematic adds a
+little" is not.
+
+Visually the two are different pictures rather than two strengths of one. Standard turns
+the game's waxy, near-clipping skin into something photographic — pores, freckles across
+the cheeks and nose, subsurface reddening — at the cost of a much darker face. Cinematic
+keeps the game's own look and adds a modest amount.
+
+**A correction.** Looking at the crop I claimed standard had turned the irises from
+blue-grey to brown, i.e. changed the character rather than the detail. That is wrong, and
+the measurement is what caught it: sampling the actual iris pixels, they are brown in the
+input too (R119 G87 B73), and the hue barely moves — 18° to 21° under standard, and
+standard slightly *raises* iris saturation, 0.38 to 0.47. What actually happens is that
+the eye darkens by 38 %, and in a face that has darkened with it the eye reads as duller.
+The conclusion — cinematic is the safer default for faces — survives; the reason given
+for it did not.
