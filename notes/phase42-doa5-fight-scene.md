@@ -47,3 +47,59 @@ for the detector, `notes/phase39-layer-review.md` for the bug that stopped it wo
 all until today.
 
 Frames and crops: `work/doa5live/`.
+
+
+## A close-up, and a correction to what "more detail" means
+
+17:31, same session, a story-mode still of Hitomi at **1920x1080**, 5.05 s in the daemon.
+The largest face this project has put through the pass. First impression from the two
+full frames was "pores and freckles appeared". The measurement says that is half right,
+and the half it gets wrong matters.
+
+```
+face, mean colour   in  R 184.9  G 125.3  B 98.0   luma 136.1   saturation 87.3
+                    out R 120.8  G  80.4  B 61.0   luma  87.4   saturation 60.0
+```
+
+Mean absolute difference over the face is **48.8/255**, and compensating nothing but the
+mean brightness shift drops it to **17.6**. So most of that number is tone, not texture.
+Raw fine-texture energy (deviation from a local 3x3 mean) *falls* on the face, by 16 %.
+
+Normalised for level, it rises everywhere:
+
+| region | luma | relative fine texture |
+| --- | --- | --- |
+| face | 136.1 -> 87.4 | **+30.6 %** |
+| hair | 55.0 -> 37.0 | +8.5 % |
+| jacket | 60.1 -> 52.8 | +8.6 % |
+| background | 41.6 -> 46.4 | +8.9 % |
+
+**The whole frame's brightness is unchanged (-1 %).** The pass is not darkening the
+picture; it is specifically pulling back a blown-out skin highlight — the game's shader
+puts the face at R=185, near clipping and waxy — and putting structure into the range it
+frees. That is a defensible thing for a detail re-render trained on real skin to do, and
+whether it is *wanted* is an artistic call rather than a correctness one. The knobs exist
+already: `--profile`, `--intensity`, `--detail-strength`, `--colour-strength`, all at
+their defaults for this frame.
+
+The lesson for measuring this model: **raw high-frequency energy is the wrong statistic
+when the pass also moves the level.** Normalise, or the tone change masquerades as lost
+detail. The earlier fight-scene figures in this note are unaffected — the change there
+was 5.4/255 with no comparable level shift — but they are the exception, not the rule.
+
+## The mask refused, correctly
+
+Relaunched with `NR_LAYER_UI_MASK=1`, verified present in the game's own `/proc` environ.
+The layer said:
+
+```
+[nr_layer] ui mask on: the first present after the trigger is kept to find what held still
+[nr_layer] 90% of the frame held still; ui mask refused
+[nr_layer] processed 1920x1080
+```
+
+The frame was a story-mode still. 90 % of it had not moved between the two presents, and
+the detector cannot separate an interface over a still scene from a still scene, so it
+declined rather than guessed — exactly the designed behaviour
+(`notes/phase35-what-the-operator-does.md`). **The mask is still unproven on a live HUD**,
+and proving it needs a frame captured mid-round with the characters actually moving.
