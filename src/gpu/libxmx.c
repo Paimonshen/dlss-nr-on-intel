@@ -456,21 +456,38 @@ int xmx_buf_create(unsigned long long bytes)
 	if (r) FAIL("vkCreateBuffer (resident)", r);
 	VkMemoryRequirements mr;
 	vkGetBufferMemoryRequirements(g.dev, rb->b, &mr);
+	const char *failure = "no host-visible memory type";
 	uint32_t mt = memtype(mr.memoryTypeBits,
 			      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-	if (mt == UINT32_MAX) FAIL("no host-visible memory type", 0);
+	if (mt == UINT32_MAX) goto failed;
 	VkMemoryAllocateFlagsInfo fl = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO,
 					 .flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT };
 	VkMemoryAllocateInfo ai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = &fl,
 				    .allocationSize = mr.size, .memoryTypeIndex = mt };
-	if ((r = vkAllocateMemory(g.dev, &ai, NULL, &rb->m))) FAIL("vkAllocateMemory (resident)", r);
-	vkBindBufferMemory(g.dev, rb->b, rb->m, 0);
-	if ((r = vkMapMemory(g.dev, rb->m, 0, VK_WHOLE_SIZE, 0, &rb->p))) FAIL("vkMapMemory (resident)", r);
+	failure = "vkAllocateMemory (resident)";
+	if ((r = vkAllocateMemory(g.dev, &ai, NULL, &rb->m))) goto failed;
+	failure = "vkBindBufferMemory (resident)";
+	if ((r = vkBindBufferMemory(g.dev, rb->b, rb->m, 0))) goto failed;
+	failure = "vkMapMemory (resident)";
+	if ((r = vkMapMemory(g.dev, rb->m, 0, VK_WHOLE_SIZE, 0, &rb->p))) goto failed;
 	VkBufferDeviceAddressInfo ai2 = { .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = rb->b };
 	rb->addr = vkGetBufferDeviceAddress(g.dev, &ai2);
 	rb->size = bi.size;
 	rb->live = 1;
 	return id;
+failed:
+	if (rb->p) vkUnmapMemory(g.dev, rb->m);
+	if (rb->b) vkDestroyBuffer(g.dev, rb->b, NULL);
+	if (rb->m) vkFreeMemory(g.dev, rb->m, NULL);
+	*rb = (struct rbuf){ 0 };
+	FAIL(failure, r);
+}
+
+unsigned long long xmx_buf_total_bytes(void)
+{
+	unsigned long long total = 0;
+	for (unsigned i = 0; i < MAX_RBUF; i++) if (rbufs[i].live) total += rbufs[i].size;
+	return total;
 }
 
 void *xmx_buf_ptr(int id)

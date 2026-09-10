@@ -2,6 +2,7 @@
 # nr-photo — run a game with the DLSS-NR layer attached.
 #
 #   src/layer/nr-photo <game> [args]              a native Vulkan game
+#   src/layer/nr-photo --check-proton <appid> <exe>  verify paths without launching
 #   src/layer/nr-photo --proton <appid> <exe> ...  a Steam game, through Proton directly
 #   src/layer/nr-photo --steam 1091500            print the Steam launch option to paste
 #
@@ -25,14 +26,8 @@ layer_dir="${NR_LAYER_DIR:-$root/work/layer}"
 socket="${NR_LAYER_SOCKET:-/tmp/nr_layer.sock}"
 trigger="${NR_LAYER_TRIGGER:-/tmp/nr_trigger}"
 
-if [ ! -f "$root/work/libnr_layer.so" ]; then
-    echo "building the layer" >&2
-    cc -O2 -shared -fPIC -I "$root/work/vulkan-headers/include" \
-       -o "$root/work/libnr_layer.so" "$root/src/layer/nr_layer.c" -lvulkan
-fi
-mkdir -p "$layer_dir"
-sed "s|LIBRARY_PATH_PLACEHOLDER|$root/work/libnr_layer.so|" \
-    "$root/src/layer/VkLayer_dlss_nr.json" > "$layer_dir/VkLayer_dlss_nr.json"
+make -s -C "$root" work/libnr_layer.so
+python3 "$root/src/layer/prepare_layer.py" "$layer_dir"
 
 # The socket path has to fit in sun_path, 108 bytes — a long scratch directory will
 # silently truncate and the layer will report no daemon.
@@ -47,35 +42,65 @@ export VK_LAYER_PATH="$layer_dir" \
        NR_LAYER_SOCKET="$socket" \
        NR_LAYER_TRIGGER="$trigger"
 
-if [ "${1:-}" = "--proton" ]; then
+if [ "${1:-}" = "--proton" ] || [ "${1:-}" = "--check-proton" ]; then
+    check_only=0
+    [ "$1" = "--check-proton" ] && check_only=1
     shift
     appid="${1:?usage: nr-photo --proton <appid> <exe> [args]}"; shift
     steam="${STEAM_ROOT:-$HOME/.local/share/Steam}"
     # the game may live in any library the client knows about
+    libraries=("$steam")
+    while IFS= read -r library; do
+        libraries+=("$library")
+    done < <(sed -n 's/.*"path"[^"]*"\([^"]*\)".*/\1/p' \
+             "$steam/steamapps/libraryfolders.vdf" 2>/dev/null)
     prefix=""
-    for library in "$steam" $(sed -n 's/.*"path"[^"]*"\([^"]*\)".*/\1/p' \
-                              "$steam/steamapps/libraryfolders.vdf" 2>/dev/null); do
-        [ -d "$library/steamapps/compatdata/$appid" ] && prefix="$library/steamapps/compatdata/$appid"
+    for library in "${libraries[@]}"; do
+        if [ -d "$library/steamapps/compatdata/$appid" ]; then
+            prefix="$library/steamapps/compatdata/$appid"
+        fi
     done
     if [ -z "$prefix" ]; then
         echo "no Proton prefix for appid $appid — start it from Steam once first" >&2
         exit 1
     fi
-    proton="$(ls -d "$steam"/steamapps/common/Proton* \
-              $(dirname "$prefix")/common/Proton* 2>/dev/null | tail -1)/proton"
+    proton="${NR_PROTON:-}"
+    if [ -z "$proton" ]; then
+        shopt -s nullglob
+        for library in "${libraries[@]}"; do
+            for candidate in "$library"/steamapps/common/Proton*/proton; do
+                [ -x "$candidate" ] && proton="$candidate"
+            done
+        done
+        shopt -u nullglob
+    fi
     if [ ! -x "$proton" ]; then
-        echo "no Proton runtime found next to the prefix" >&2
+        echo "no Proton runtime found in Steam libraries; set NR_PROTON to its proton executable" >&2
         exit 1
     fi
     export STEAM_COMPAT_CLIENT_INSTALL_PATH="$steam" STEAM_COMPAT_DATA_PATH="$prefix"
     exe="${1:?usage: nr-photo --proton <appid> <exe> [args]}"; shift
+    if [ ! -f "$exe" ]; then
+        echo "game executable not found: $exe" >&2
+        exit 1
+    fi
+    # Proton may run a 32-bit game or helpers. Ship a matching layer for both
+    # Unix architectures; the manifest's library_arch lets the loader select it.
+    make -s -C "$root" work/libnr_layer32.so
+    python3 "$root/src/layer/prepare_layer.py" "$layer_dir"
+    if [ "$check_only" = 1 ]; then
+        printf 'Prefix: %s\nProton: %s\nGame: %s\nSocket: %s\n' "$prefix" "$proton" "$exe" "$socket"
+        exit 0
+    fi
     cd "$(dirname "$exe")"
     exec "$proton" run "./$(basename "$exe")" "$@"
 fi
 
 if [ "${1:-}" = "--steam" ]; then
+    make -s -C "$root" work/libnr_layer32.so
+    python3 "$root/src/layer/prepare_layer.py" "$layer_dir"
     printf 'Paste this into the game'"'"'s Steam launch options:\n\n'
-    printf '  VK_LAYER_PATH=%s VK_INSTANCE_LAYERS=VK_LAYER_dlssnr_intel ENABLE_NR_LAYER=1 NR_LAYER_SOCKET=%s NR_LAYER_TRIGGER=%s %%command%%\n\n' \
+    printf '  VK_LAYER_PATH=%q VK_INSTANCE_LAYERS=VK_LAYER_dlssnr_intel ENABLE_NR_LAYER=1 NR_LAYER_SOCKET=%q NR_LAYER_TRIGGER=%q %%command%%\n\n' \
            "$layer_dir" "$socket" "$trigger"
     printf 'Then: touch %s to enhance, rm %s to release.\n' "$trigger" "$trigger"
     exit 0

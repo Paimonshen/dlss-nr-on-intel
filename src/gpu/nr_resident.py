@@ -121,26 +121,27 @@ class GlobalBlockWeights:
 class GlobalScratch:
     """Working buffers for one bottleneck block over `tokens` tokens."""
 
-    def __init__(self, runtime, weights, tokens):
+    def __init__(self, runtime, weights, tokens, arena=None):
         channels, heads = weights.channels, weights.heads
         # the token count is the bottleneck's pixel count and need not be tile-aligned
         self.tokens, self.padded = tokens, xmxres.align(tokens, 16)
         padded, hidden = self.padded, weights.hidden_width
-        make = runtime.buffer
-        self.value = make(padded * channels).zero()
-        self.value16 = make(padded * channels, np.float16)
-        self.hidden16 = make(padded * hidden, np.float16)
-        self.branch = make(padded * channels)
-        self.ffn = make(padded * channels)
-        self.ffn16 = make(padded * channels, np.float16)
-        self.proj = make(padded * channels * 3)
-        self.q16, self.k16, self.v16 = (make(padded * channels, np.float16) for _ in range(3))
-        self.scores = make(heads * padded * padded)
-        self.probs16 = make(heads * padded * padded, np.float16)
-        self.context = make(heads * padded * 32)
-        self.merged16 = make(padded * channels, np.float16)
-        self.attention = make(padded * channels)
-        self.out = make(padded * channels)
+        make = (arena.buffer if arena is not None else
+                lambda name, count, dtype=np.float32: runtime.buffer(count, dtype))
+        self.value = make("global.value", padded * channels).zero()
+        self.value16 = make("value16", padded * channels, np.float16)
+        self.hidden16 = make("hidden16", padded * hidden, np.float16)
+        self.branch = make("branch", padded * channels)
+        self.ffn = make("ffn", padded * channels)
+        self.ffn16 = make("ffn16", padded * channels, np.float16)
+        self.proj = make("proj", padded * channels * 3)
+        self.q16, self.k16, self.v16 = (make(name, padded * channels, np.float16) for name in ("q16", "k16", "v16"))
+        self.scores = make("scores", heads * padded * padded)
+        self.probs16 = make("probs16", heads * padded * padded, np.float16)
+        self.context = make("context", heads * padded * 32)
+        self.merged16 = make("merged16", padded * channels, np.float16)
+        self.attention = make("attention", padded * channels)
+        self.out = make("global.out", padded * channels)
 
     def free(self):
         for name in dir(self):
@@ -215,7 +216,7 @@ def run_global_block(runtime, w, s, value):
 class BlockScratch:
     """Working buffers for one block at one extent, allocated once and reused."""
 
-    def __init__(self, runtime, weights, height, width):
+    def __init__(self, runtime, weights, height, width, arena=None):
         channels, heads = weights.channels, weights.heads
         # Sized for the largest window count any origin can produce, so blocks at the
         # same level share one scratch even though their shifts differ. Getting this
@@ -234,23 +235,26 @@ class BlockScratch:
             hidden = weights.groups * 256
         # Every buffer a block wrote in float32 only to read it straight back went
         # away when the publishes moved into the pass that produces the value.
-        make = runtime.buffer
-        self.value = make(pixels * channels)
-        self.value16 = make(pixels * channels, np.float16)
-        self.hidden16 = make(pixels * hidden, np.float16)
-        self.heads16 = make(pixels * channels, np.float16)
-        self.branch = make(pixels * channels)
-        self.ffn = make(pixels * channels)
-        self.win16 = make(windowed, np.float16)
-        self.proj = make(windowed * 3)
-        self.q16, self.k16, self.v16 = (make(windowed, np.float16) for _ in range(3))
-        self.scores = make(self.batch * self.tokens * self.tokens)
-        self.probs16 = make(self.batch * self.tokens * self.tokens, np.float16)
-        self.context = make(self.batch * self.tokens * 32)
-        self.merged16 = make(windowed, np.float16)
-        self.attended = make(windowed)
-        self.out = make(pixels * channels)
-        self.core16 = make(pixels * channels, np.float16)
+        make = (arena.buffer if arena is not None else
+                lambda name, count, dtype=np.float32: runtime.buffer(count, dtype))
+        self.value = make("value", pixels * channels)
+        self.value16 = make("value16", pixels * channels, np.float16)
+        self.hidden16 = make("hidden16", pixels * hidden, np.float16)
+        self.heads16 = (make("heads16", pixels * channels, np.float16)
+                        if weights.branched or getattr(weights, "split", False) else None)
+        self.branch = make("branch", pixels * channels)
+        self.ffn = make("ffn", pixels * channels)
+        self.win16 = make("win16", windowed, np.float16)
+        self.proj = make("proj", windowed * 3)
+        self.q16, self.k16, self.v16 = (make(name, windowed, np.float16) for name in ("q16", "k16", "v16"))
+        self.scores = make("scores", self.batch * self.tokens * self.tokens)
+        self.probs16 = make("probs16", self.batch * self.tokens * self.tokens, np.float16)
+        self.context = make("context", self.batch * self.tokens * 32)
+        self.merged16 = make("merged16", windowed, np.float16)
+        self.attended = make("attended", windowed)
+        self.out = make("out", pixels * channels)
+        self.core16 = (make("core16", pixels * channels, np.float16)
+                       if getattr(weights, "split", False) else None)
         self.hidden_width = hidden
 
     def free(self):
@@ -455,15 +459,16 @@ def record_upsample_merge(runtime, transition, scratch, source, skip, target,
 class TransitionScratch:
     """Buffers a transition needs, sized for the largest level that uses it."""
 
-    def __init__(self, runtime, elements, half_elements):
-        make = runtime.buffer
+    def __init__(self, runtime, elements, half_elements, arena=None):
+        make = (arena.buffer if arena is not None else
+                lambda name, count, dtype=np.float32: runtime.buffer(count, dtype))
         # `padded` holds whichever width its source has, so it is sized for float32
-        self.padded = make(elements)
-        self.pooled16 = make(elements, np.float16)
-        self.projected = make(elements)
-        self.projected16 = make(elements, np.float16)
-        self.upsampled = make(elements)
-        self.scaled = make(elements)
+        self.padded = make("transition.padded", elements)
+        self.pooled16 = make("transition.pooled16", elements, np.float16)
+        self.projected = make("transition.projected", elements)
+        self.projected16 = make("transition.projected16", elements, np.float16)
+        self.upsampled = make("transition.upsampled", elements)
+        self.scaled = make("transition.scaled", elements)
 
     def free(self):
         for name in dir(self):

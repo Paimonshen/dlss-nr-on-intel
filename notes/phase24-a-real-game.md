@@ -45,7 +45,7 @@ anyone who would rather go through the client.
 
 | game | appid | API | content for this model |
 |---|---|---|---|
-| Dead or Alive 5 Last Round | 311730 | D3D11 | **realistic faces** — the right target |
+| Dead or Alive 5 Last Round | 311730 | **32-bit D3D9** | **realistic faces** — the right target |
 | Dead or Alive 6 Last Round | 4144680 | D3D11 | realistic faces, 83 GB |
 | GUILTY GEAR Xrd -SIGN- | 376300 | D3D9/11 | cel-shaded; good for the D3D9 path, poor for the effect |
 | Counter-Strike 2 | 730 | **native Vulkan** | no Proton in the way — but VAC, so not for unattended experiments |
@@ -53,6 +53,15 @@ anyone who would rather go through the client.
 
 GG Xrd was tried first and did not reach a swapchain when its executable is launched
 directly — it likely wants its own `BootGGXrd.exe` launcher, which needs input.
+
+## Correction 2026-09-10: Dead or Alive 5 is 32-bit D3D9
+
+This note called it D3D11. It is not: `game.exe` is `PE32 ... Intel i386` and imports
+`d3d9.dll`. That matters more than the API name — a 32-bit game needs a **32-bit layer
+library**, and the one built here was x86_64 only, so it would never have loaded. The
+Vulkan loader picks the ABI from `library_arch` in a 1.2.1 manifest;
+`src/layer/prepare_layer.py` now writes both, `make test-proton` builds and loads both,
+and both report this GPU. `notes/phase32-scratch-and-qk.md`.
 
 ## Two things worth knowing before the next attempt
 

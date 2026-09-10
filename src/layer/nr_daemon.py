@@ -25,6 +25,7 @@ import pathlib
 import socket
 import stat
 import struct
+import subprocess
 import sys
 import time
 
@@ -127,7 +128,7 @@ def process_connection(connection, backend, args):
             destination.mkdir(parents=True, exist_ok=True)
             image_io.save(colour, destination / "in.png")
             image_io.save(output, destination / "out.png")
-        except (OSError, image_io.subprocess.CalledProcessError) as error:
+        except (OSError, subprocess.CalledProcessError) as error:
             print(f"frame returned, but dump failed: {error}", flush=True)
     print(f"{width}x{height} {FORMATS[vk_format][1]} in "
           f"{time.perf_counter() - clock:.2f}s  "

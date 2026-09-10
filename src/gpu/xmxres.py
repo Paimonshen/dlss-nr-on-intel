@@ -89,6 +89,8 @@ def _load():
     lib.xmx_buf_ptr.restype = ctypes.c_void_p
     lib.xmx_buf_bytes.argtypes = [ctypes.c_int]
     lib.xmx_buf_bytes.restype = ctypes.c_ulonglong
+    lib.xmx_buf_total_bytes.argtypes = []
+    lib.xmx_buf_total_bytes.restype = ctypes.c_ulonglong
     # The shader paths take an environment override so a variant can be measured
     # against the shipped one without editing the tree.
     spv = [os.environ.get(name) or str(ROOT / "work" / default)
@@ -171,16 +173,114 @@ class CommandGraph:
             pass
 
 
+class ScratchArena:
+    """Plan shared scratch by role, then freeze sizes before commands are recorded.
+
+    Blocks run sequentially and may share each role's storage. Input, output and
+    encoder skips belong to the frame separately. Unused roles allocate no memory.
+    """
+
+    # Within a block these roles have disjoint live intervals. Barriers already
+    # separate their producers/last consumers in nr_resident. Transition scratch
+    # runs between blocks and reuses those same allocations. Keep FFN residuals
+    # separate: they stay live until the closing attention residual.
+    ALIASES = {
+        **dict.fromkeys(("hidden16", "proj", "attended", "attention",
+                         "transition.padded", "transition.projected"), "projection"),
+        **dict.fromkeys(("branch", "v16"), "branch_value"),
+        **dict.fromkeys(("value16", "win16", "ffn16", "k16",
+                         "transition.pooled16", "transition.projected16"), "input_key"),
+        **dict.fromkeys(("heads16", "core16", "q16", "probs16", "merged16"), "query_probability"),
+        **dict.fromkeys(("scores", "context", "transition.upsampled"), "scores_context"),
+        **dict.fromkeys(("ffn", "transition.scaled"), "residual"),
+    }
+
+    def __init__(self, runtime):
+        self.runtime = runtime
+        self.buffers = {}
+        self.sealed = False
+        self._plan_state = [False]
+
+    def buffer(self, name, count, dtype=np.float32):
+        dtype = np.dtype(dtype)
+        key = (self.ALIASES[name], "bytes") if name in self.ALIASES else (name, dtype.str)
+        size = int(count) * dtype.itemsize
+        if key not in self.buffers:
+            if self.sealed:
+                raise RuntimeError(f"scratch role was not planned: {name}")
+            self.buffers[key] = _ScratchBuffer(self, size)
+        buffer = self.buffers[key]
+        if size > buffer.nbytes:
+            if self.sealed:
+                raise RuntimeError(f"scratch role exceeds its plan: {name}")
+            buffer.nbytes = size
+        return buffer
+
+    def seal(self):
+        self.sealed = True
+        self._plan_state[0] = True
+
+    def free(self):
+        for buffer in self.buffers.values():
+            buffer.free()
+        self.buffers.clear()
+
+
+class _ScratchBuffer:
+    def __init__(self, arena, nbytes):
+        # Keep no reference back to the arena, so dropping a frame releases it.
+        self.runtime = arena.runtime
+        self._plan_state = arena._plan_state
+        self.nbytes = nbytes
+        self._buffer = None
+        self._zero = False
+        self._closed = False
+
+    def _get(self):
+        if self._closed:
+            raise RuntimeError("scratch buffer is closed")
+        if not self._plan_state[0]:
+            raise RuntimeError("scratch plan must be sealed before allocation")
+        if self._buffer is None:
+            self._buffer = self.runtime.buffer(self.nbytes, np.uint8)
+            if self._zero:
+                self._buffer.zero()
+        return self._buffer
+
+    @property
+    def id(self):
+        return self._get().id
+
+    def view(self, dtype=np.float32, shape=None):
+        return self._get().view(dtype, shape)
+
+    def zero(self):
+        self._zero = True
+        if self._buffer is not None:
+            self._buffer.zero()
+        return self
+
+    def free(self):
+        if self._buffer is not None:
+            self._buffer.free()
+        self._closed = True
+
+
 class Runtime:
     """Records a chain of GPU passes and submits it once."""
 
     def __init__(self):
         self.lib = _load()
         self.recorded = 0
-        self.fuse_qk = os.environ.get("NR_FUSE_QK", "0") != "0"
+        self.fuse_qk = os.environ.get("NR_FUSE_QK", "1") != "0"
 
     def graph_key(self):
         return self.lib.xmx_specialization() | (int(self.fuse_qk) << 3)
+
+    @property
+    def buffer_bytes(self):
+        """Live resident buffer sizes, excluding driver allocations and host weights."""
+        return self.lib.xmx_buf_total_bytes()
 
     # -- allocation ----------------------------------------------------
 

@@ -15,7 +15,7 @@ work:
 	mkdir -p $@
 
 $(SHADERS) work/libxmx.so work/libnr_layer.so work/half_probe.spv work/attention_ab.spv: | work
-work/test_exchange: | work
+work/test_exchange work/libnr_layer32.so work/test_layer_loader work/test_layer_loader32: | work
 
 work/libxmx.so: src/gpu/libxmx.c
 	$(CC) $(CFLAGS) -shared -o $@ $< -lvulkan
@@ -23,6 +23,15 @@ work/libxmx.so: src/gpu/libxmx.c
 # The Vulkan layer that puts the pass inside a running game.
 work/libnr_layer.so: src/layer/nr_layer.c
 	$(CC) $(CFLAGS) -shared -o $@ $< -lvulkan
+
+work/libnr_layer32.so: src/layer/nr_layer.c
+	$(CC) $(CFLAGS) -m32 -shared -o $@ $< -lvulkan
+
+work/test_layer_loader: src/layer/test_layer_loader.c
+	$(CC) $(CFLAGS) -o $@ $< -lvulkan
+
+work/test_layer_loader32: src/layer/test_layer_loader.c
+	$(CC) $(CFLAGS) -m32 -o $@ $< -lvulkan
 
 work/test_exchange: src/layer/test_exchange.c src/layer/nr_layer.c
 	$(CC) $(CFLAGS) -o $@ $< -lvulkan -lpthread
@@ -61,6 +70,8 @@ test: all work/attention_ab.spv work/test_exchange
 	python3 src/gpu/test_epilogue.py
 	python3 src/gpu/test_specialization.py
 	python3 src/gpu/test_softmax_pack.py
+	python3 src/gpu/test_qkv_fusion.py
+	python3 src/gpu/test_scratch_arena.py
 	python3 src/gpu/test_graph.py
 	python3 src/gpu/test_frame_execution.py
 	python3 src/gpu/test_resident.py
@@ -68,4 +79,10 @@ test: all work/attention_ab.spv work/test_exchange
 	python3 src/ref/test_nr_model.py
 	python3 src/ref/test_temporal_controls.py
 
-.PHONY: all test bench
+test-proton: all work/libnr_layer32.so work/test_layer_loader work/test_layer_loader32
+	python3 src/layer/test_launcher.py
+	python3 src/layer/prepare_layer.py work/layer-check
+	VK_LAYER_PATH=$(CURDIR)/work/layer-check ENABLE_NR_LAYER=1 work/test_layer_loader
+	VK_LAYER_PATH=$(CURDIR)/work/layer-check ENABLE_NR_LAYER=1 work/test_layer_loader32
+
+.PHONY: all test test-proton bench

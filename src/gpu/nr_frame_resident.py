@@ -64,6 +64,7 @@ class ResidentFrame:
         self.levels = self._plan(height, width)
         self._scratch, self._blocks, self._buffers, self._edges = {}, {}, {}, {}
         self._graphs = {}
+        self._arena = xmxres.ScratchArena(runtime) if os.environ.get("NR_SCRATCH_ARENA", "1") != "0" else None
         self._closed = False
         self._upload_edges()
 
@@ -109,14 +110,14 @@ class ResidentFrame:
         key = (height, width, tokens, block.channels, block.heads,
                getattr(block, "split", False), getattr(block, "branched", False))
         if key not in self._scratch:
-            self._scratch[key] = (R.GlobalScratch(self.rt, block, tokens) if tokens
-                                  else R.BlockScratch(self.rt, block, height, width))
+            self._scratch[key] = (R.GlobalScratch(self.rt, block, tokens, arena=self._arena) if tokens
+                                  else R.BlockScratch(self.rt, block, height, width, arena=self._arena))
         return self._scratch[key]
 
     def transition_scratch(self, elements):
         rounded = 1 << max(1, int(elements - 1)).bit_length()
         if rounded not in self._edges:
-            self._edges[rounded] = R.TransitionScratch(self.rt, rounded, 0)
+            self._edges[rounded] = R.TransitionScratch(self.rt, rounded, 0, arena=self._arena)
         return self._edges[rounded]
 
     def buffer(self, name, elements, dtype=np.float32):
@@ -136,6 +137,33 @@ class ResidentFrame:
                 self.weights.get(f"{prefix}.sin") if kind == "up" else None)
         return self._edges[(index, kind)]
 
+    def _prepare_scratch(self):
+        """Plan every role's maximum size before a buffer address can be recorded."""
+        if self._arena is None or self._arena.sealed:
+            return
+        for index in (0, 70):
+            self.scratch(self.block(index, 1), self.height, self.width)
+        for level, (regular, transition, heads) in enumerate(ENCODER, 1):
+            h, w, channels = self.levels[level]
+            for index in (*regular, transition):
+                self.scratch(self.block(index, heads), h, w)
+            self.transition_scratch(pad8(h) * pad8(w) * channels)
+        h, w, channels = self.levels[5]
+        for index in (*range(23, 31), *range(40, 48)):
+            self.scratch(self.block(index, 16, "split"), h, w)
+        self.transition_scratch(pad8(h) * pad8(w) * channels)
+        self.transition_scratch(h * w * channels)
+        gh, gw, _ = self.levels[6]
+        for index in range(31, 39):
+            self.scratch(self.block(index, 32, "global"), gh, gw, tokens=gh * gw)
+        for transition, regular, level, heads in DECODER:
+            sh, sw, schannels = self.levels[level]
+            self.transition_scratch(sh * sw * max(channels, schannels))
+            for index in (transition, *regular):
+                self.scratch(self.block(index, heads), sh, sw)
+            channels = schannels
+        self._arena.seal()
+
     def close(self):
         """Release recorded commands before any buffers they reference."""
         for graph in self._graphs.values():
@@ -144,6 +172,8 @@ class ResidentFrame:
         self._closed = True
         for cache in (self._scratch, self._blocks, self._buffers, self._edges):
             cache.clear()
+        if self._arena is not None:
+            self._arena.free()
         for name in ("adapter", "bottleneck", "decoder_input", "merge_sin", "merge_cos", "head"):
             if hasattr(self, name):
                 delattr(self, name)
@@ -171,6 +201,7 @@ class ResidentFrame:
             raise RuntimeError("ResidentFrame is closed")
         if features.shape != (self.height, self.width, 16):
             raise ValueError("features must match the frame's (height, width, 16)")
+        self._prepare_scratch()
         execution = execution or os.environ.get("NR_FRAME_MODE", "replay")
         if execution not in ("block", "single", "replay"):
             raise ValueError("NR_FRAME_MODE must be block, single or replay")
