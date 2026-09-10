@@ -343,24 +343,41 @@ the answers are the useful part and several of them are counter-intuitive.
 
 ### What is actually left
 
-1. **A game frame worth looking at, beyond the one we have.** The pipeline is proven;
-   reaching a good scene needs someone driving the game.
-2. **The interface mask on a live HUD.** Built and exact (`src/layer/test_ui_mask.py`),
-   but motion cannot separate an interface over a still scene from a still scene, so it
-   refuses on a paused frame and wants a moving one to prove itself.
-   `notes/phase35-what-the-operator-does.md`.
-3. **Intercepting a game's own upscaler**, which is the only route to the things the
-   vendor gets for free: a pre-interface insertion point, depth and motion guides, and a
-   smaller extent. Dead or Alive 6 carries FSR2 and XeSS and both run on this hardware.
-   `notes/phase37-neural-upstream.md`.
+The three items this section carried on 2026-09-10 morning are all closed. A game frame
+worth looking at exists and is measured (`notes/phase42`); the interface mask is proven on
+a live HUD, with a failure mode found and fixed the same evening (`phase43`); and the
+layer is proven under a second Vulkan client, VKD3D-Proton on a 64-bit D3D12 title
+(`phase41`). What replaced them:
 
-**Performance is finished.** Every lever has been measured and the notes say so:
-register tiling, operand staging, integer weights, storage width, the accumulator
-format, and OpenCL. The frame is latency-bound in both halves at ~488 ms for 720p, and
-`17 ms + 488 ms per megapixel` is the cost model. 30 fps is not reachable at any usable
-extent — this is a photo mode, and the layer delivers exactly that.
+1. **The full-frame passes *around* the network.** Once the extent is small enough the
+   graph stops being the frame, and what dominates is a stack of independent full-frame
+   passes over the *output* resolution — feature assembly, composition, the head upscale,
+   the detail blur. None shrinks with the render scale. Two were pure waste and are fixed;
+   the rest have never been examined the way the graph now has. **This is the live lever.**
+   `notes/phase47`, `phase48`.
+2. **A neural upscaler.** Half the extent is three times faster and keeps only **62 %** of
+   the high-frequency band, because the detail is drawn at the wrong scale and no
+   interpolator can reconstruct it — that is why the vendor's own arrangement puts DLSS
+   after the pass. XeSS is the substitute and is unverified on Linux/Vulkan here.
+   `notes/phase37`.
+3. **A DX12 game that starts.** The layer is ready; DOA6LR dies for a reason inside its own
+   build, not in our stack. `notes/phase41`.
 
----
+**Performance inside the graph is finished, and now measured rather than inferred.**
+`xmx_profile()` timestamps every pass (`src/bench/frame_profile.py`): GEMM is 216 ms of
+488 at 720p and is register-bound; of the other 272 ms, every pass that only moves data
+runs at 61-104 GB/s against a machine ceiling of 70-91, and the only two below it are
+arithmetic. The extent curve is `17 ms + 488 ms per megapixel`. Levers measured and closed:
+register tiling, operand staging, integer weights, storage width, the accumulator format,
+OpenCL, and — new — shared-memory bank padding (**1.11x**, not the textbook 32x) and
+handing work to the four E-cores (**-7 %** for a theoretical +2 %). `notes/phase45`,
+`phase46`.
+
+**Both modes run in a real game.** Photo mode holds a frame while a trigger file exists;
+live mode (`NR_LAYER_LIVE=N`) runs continuously and reaches **10.6 fps at 512x288**, with
+the game set to that extent and the compositor doing the stretch. `src/layer/nr-ctl`
+changes profile, intensity, both strengths and the render scale between frames without
+reloading the model.
 
 ## Repo layout
 
@@ -386,5 +403,5 @@ src/     our code
 
 ---
 
-*Last updated 2026-09-10 (all six phases closed; the pass runs inside a real game). Owner runs Arch Linux, is comfortable at kernel/driver level,
+*Last updated 2026-09-10, evening (phases 39-48: the frame measured pass by pass, the interface mask proven and then fixed, a live mode at 10.6 fps, and a control tool). **Read `HANDOFF.md` first** — it carries the current state and the traps. Owner runs Arch Linux, is comfortable at kernel/driver level,
 prefers C for low-level work, and does not need concepts explained from scratch.*
