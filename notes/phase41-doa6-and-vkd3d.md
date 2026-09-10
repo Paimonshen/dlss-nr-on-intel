@@ -111,3 +111,69 @@ that game, not this one. DOA6LR is worth returning to only if a build appears wh
 startup path works under Proton; the Streamline prize described in `phase37` — the
 `kBufferTypeHUDLessColor` / depth / motion-vector tags, verified present in this game's
 `sl.common.dll` — is unreachable while the game will not start.
+
+## The cause, found (2026-09-10 evening)
+
+`phase41` above stopped at "the third-party shim bolted onto this build". That was wrong,
+and the thing that settled it was Streamline's own log — it honours `SL_LOG_LEVEL`,
+`SL_LOG_PATH` and `SL_LOG_NAME` as environment variables, which nothing in the earlier
+pass had tried.
+
+```
+[warn]  sl.dlss not supported on current hardware
+[warn]  Disabling DLSS-G since it is not supported on current hardware
+[warn]  Ignoring plugin 'sl.dlss' since it is not supported on this platform
+[warn]  Ignoring plugin 'sl.dlss_g' since it is not supported on this platform
+[error] slValidateFeatureContext: 'kFeatureDLSS_G' context is missing.
+[error] initializePlugins: D3D or VK API hook is activated without device being created
+        ... repeated 34 times, from 3.5 s to 8 s, until shutdown
+```
+
+**The game requires DLSS-G — frame generation — and will not start without it.** Streamline
+correctly refuses to load `sl.dlss` and `sl.dlss_g` on non-NVIDIA hardware; the game asks
+for the DLSS-G feature context regardless; it is missing; and the interposer then spins on
+"hook is activated without device being created" while the game waits for a call that will
+never return.
+
+Two measurements from the same evening support this and rule out what was suspected before:
+
+- **The process is blocked, not computing.** Sampling `/proc/<pid>/stat` across the stall:
+  heavy CPU and a climb to **91 threads** for six seconds, then **0-1 ticks per 500 ms**
+  for three and a half seconds, then teardown. Every one of the 79 surviving threads sits
+  in `futex_wait_multiple` or `futex_do_wait`, all in state S. That is a userspace deadlock,
+  not an anti-tamper VM burning cycles — which is what the `.bind` section and the
+  entropy-8.0 `.text` had suggested.
+- **The crack is not involved.** With SmokeAPI's logging on, its hooks for
+  `UserHasLicenseForApp`, `BIsSubscribedApp`, `BIsDlcInstalled` and `GetDLCCount` are
+  installed and **never called once**. The game never asks about ownership. The last Steam
+  calls before the stall are `SteamController008` and `SteamInput006`.
+
+### Everything tried, and it is a long list
+
+Proton Experimental and Hotfix, a fresh prefix, esync and fsync off, XWayland and native
+Wayland, the saved graphics settings removed, aspect ratios and desktop sizes from 800x450
+to 1920x1200, a Wine virtual desktop, `PROTON_DISABLE_HIDRAW`, `PROTON_LIMIT_RESOLUTIONS`,
+`PROTON_NO_XIM`, `PROTON_DISABLE_NVAPI`, `PROTON_FORCE_NVAPI`,
+`DXVK_NVAPI_ALLOW_OTHER_DRIVERS`, the Steam overlay disabled two ways,
+`VKD3D_DISABLE_EXTENSIONS=VK_KHR_present_wait`, `VKD3D_SWAPCHAIN_LATENCY_FRAMES=1`,
+`VKD3D_SWAPCHAIN_IMAGES=2`, `VKD3D_SWAPCHAIN_PRESENT_MODE`, and a `dxvk.conf` reporting an
+NVIDIA vendor and device ID. **Every one is identical**: the same stall at the same point.
+
+`sl.interposer.dll` is statically imported — disabling it gives a different, earlier
+failure (exit 53 at seven seconds, no swapchain at all), which is how we know it is
+load-bearing rather than optional.
+
+The vendor spoof failing is itself informative: Streamline's hardware check does not go
+through the DXGI adapter, it goes through NGX, which probes the real driver.
+
+### What would actually fix it
+
+Not a setting. The game needs something that **implements** the DLSS feature so Streamline
+loads a working plugin instead of refusing — which is exactly what **OptiScaler** does by
+replacing `nvngx`/`sl.dlss` with an FSR- or XeSS-backed implementation. That is a project
+of its own and has nothing to do with this one; it is also the only route short of an
+NVIDIA GPU.
+
+**For this project the conclusion is unchanged and now properly grounded**: the layer is
+proven under VKD3D-Proton, and DOA6LR is not the game to prove it on. The game directory
+was restored — the `dxvk.conf`, the SmokeAPI log and its logging flag are all gone.
