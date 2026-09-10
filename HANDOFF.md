@@ -41,6 +41,13 @@ model. Measured end to end: **512x288 at scale 0.35 is 94 ms, 10.6 fps**; 640x36
 The network runs on the reduced frame but the **head** is scaled back and composed against
 the full-resolution original, so the game's own pixels are never resampled.
 
+**4. Read the parallel tree before assuming this one is ahead.** `~/ProjectsCodex` is
+driven by a different model on the same problem. Twice now it has held something this
+tree lacked: `.gitignore` hiding the entire CPU reference from thirteen commits, and —
+this session — seven Vulkan-layer guards plus a real bug, the interface mask silently
+failing whenever a strength knob moved (`phase49`). Its git history being behind ours
+says nothing about its working tree.
+
 Also this session: the interface mask proven in a live fight (**ten times less HUD
 damage**) and then caught making a *worse* artefact on a near-static frame, diagnosed and
 fixed (`phase42`, `phase43`); the profiles measured as a real trade-off — everything added

@@ -95,6 +95,7 @@ disproved.
 | --- | --- |
 | `phase39-layer-review.md` | eight findings in `src/layer`; one was a feature that never worked |
 | `phase40-gpu-review.md` | four nits in `src/gpu`, and why that area was already right |
+| `phase49-from-the-other-tree.md` | seven layer guards and one real bug taken from `ProjectsCodex` |
 
 ## Withdrawn or superseded, kept deliberately
 
