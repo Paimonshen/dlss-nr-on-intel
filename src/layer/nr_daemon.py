@@ -39,6 +39,7 @@ sys.path.insert(0, str(ROOT / "src" / "gpu"))
 import nr_frame  # noqa: E402
 
 MAGIC = 0x304E524E
+MAGIC_MASKED = 0x314E524E     # the same, with a one-byte-per-pixel interface mask after the colour
 
 # The swapchain formats a compositor or VKD3D actually hands out. A game writes
 # sRGB-encoded values into a UNORM swapchain just as it does into an SRGB one, so both
@@ -100,11 +101,12 @@ def process_connection(connection, backend, args):
     Closing a rejected exchange makes the Vulkan layer retain its original frame.
     """
     magic, width, height, vk_format = struct.unpack("<4I", receive(connection, 16))
-    if magic != MAGIC:
+    if magic not in (MAGIC, MAGIC_MASKED):
         raise ValueError(f"bad magic {magic:#x}")
     if not width or not height or width * height > args.max_pixels:
         raise ValueError(f"rejected extent {width}x{height}; limit {args.max_pixels} pixels")
     payload = receive(connection, width * height * 4)
+    interface = receive(connection, width * height) if magic == MAGIC_MASKED else None
     if vk_format not in FORMATS:
         print(f"unsupported VkFormat {vk_format}; passing the frame through",
               flush=True)
@@ -117,9 +119,18 @@ def process_connection(connection, backend, args):
     features = nr_frame.make_features(
         colour, geometry=geometry, **nr_frame.PROFILES[args.profile])
     head = geometry.crop(backend.run_features(features))
+    control = None
+    if interface is not None:
+        # Red scales the blend per pixel, so an interface pixel comes back exactly as
+        # the game drew it. The network still runs over the whole frame — masking the
+        # composition rather than the input keeps the numerical path untouched.
+        held = np.frombuffer(interface, np.uint8).reshape(height, width) > 127
+        control = np.ones((height, width, 3), np.float32)
+        control[held, 0] = 0.0
     output = nr_frame.compose(head, colour, intensity=args.intensity,
                               detail_strength=args.detail_strength,
-                              colour_strength=args.colour_strength)
+                              colour_strength=args.colour_strength,
+                              control_mask=control)
     connection.sendall(encode(output, payload, vk_format))
     if args.dump:
         import image_io
@@ -135,9 +146,13 @@ def process_connection(connection, backend, args):
             print(f"  -> {destination}/{index:03d}_{{in,out}}.png", flush=True)
         except (OSError, subprocess.CalledProcessError, ValueError) as error:
             print(f"frame returned, but dump failed: {error}", flush=True)
+    note = ""
+    if interface is not None:
+        held = np.frombuffer(interface, np.uint8).reshape(height, width) > 127
+        note = f"  interface {100 * held.mean():.0f}% left alone"
     print(f"{width}x{height} {FORMATS[vk_format][1]} in "
           f"{time.perf_counter() - clock:.2f}s  "
-          f"change {np.abs(output - colour).mean():.5f}", flush=True)
+          f"change {np.abs(output - colour).mean():.5f}{note}", flush=True)
 
 
 def main():

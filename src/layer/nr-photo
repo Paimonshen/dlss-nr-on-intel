@@ -15,6 +15,8 @@
 # The pass fires while the trigger file exists and holds its result on screen until it
 # is removed, so it is a photo mode rather than a per-frame filter:
 #
+#   NR_UI_MASK=1 src/layer/nr-photo ...       leave the game's interface untouched
+#
 #   touch /tmp/nr_trigger     # freeze and enhance
 #   rm    /tmp/nr_trigger     # back to the game
 #
@@ -41,6 +43,11 @@ export VK_LAYER_PATH="$layer_dir" \
        ENABLE_NR_LAYER=1 \
        NR_LAYER_SOCKET="$socket" \
        NR_LAYER_TRIGGER="$trigger"
+# NR_LAYER_UI_MASK marks the pixels that held still between two presents so the daemon
+# can leave the interface exactly as the game drew it. Off unless asked for: it cannot
+# tell an interface over a still scene from a still scene, and refuses rather than
+# guesses when almost nothing moved.
+[ -n "${NR_UI_MASK:-}" ] && export NR_LAYER_UI_MASK=1
 
 if [ "${1:-}" = "--proton" ] || [ "${1:-}" = "--check-proton" ]; then
     check_only=0

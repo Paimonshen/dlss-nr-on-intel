@@ -67,6 +67,7 @@ bench: all work/half_probe.spv
 
 test: all work/attention_ab.spv work/test_exchange
 	python3 src/layer/test_daemon.py
+	python3 src/layer/test_ui_mask.py
 	python3 src/gpu/test_epilogue.py
 	python3 src/gpu/test_specialization.py
 	python3 src/gpu/test_softmax_pack.py

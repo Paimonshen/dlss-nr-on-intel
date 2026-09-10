@@ -50,6 +50,15 @@ struct device_data {
 	unsigned char *result;          /* the processed frame, held while the trigger is up */
 	VkDeviceSize result_size;
 	int holding;
+	/* One frame captured before the one being processed, so the daemon can be told
+	 * which pixels did not move. Filled on the present after the trigger goes up and
+	 * released when it goes down; nothing is copied while the trigger is down, so a
+	 * game that never triggers pays nothing for this. */
+	unsigned char *earlier;
+	VkDeviceSize earlier_size;
+	int have_earlier;
+	unsigned char *outgoing;        /* colour followed by the mask, for one send */
+	VkDeviceSize outgoing_size;
 	PFN_vkGetDeviceProcAddr get_device_proc;
 	PFN_vkQueuePresentKHR present;
 	PFN_vkCreateSwapchainKHR create_swapchain;
@@ -76,6 +85,7 @@ static const char *capture_path;
 static long capture_every;
 static const char *socket_path;
 static const char *trigger_path;
+static int ui_mask;
 
 /* The frame goes to a daemon over a Unix socket rather than being processed in
  * process: the implementation is Python and this is a shared object living inside the
@@ -175,12 +185,16 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateInstance(const VkInstanceCreateInfo *inf
 		capture_path = getenv("NR_LAYER_CAPTURE");
 		socket_path = getenv("NR_LAYER_SOCKET");
 		trigger_path = getenv("NR_LAYER_TRIGGER");
+		ui_mask = getenv("NR_LAYER_UI_MASK") != NULL;
 		const char *every = getenv("NR_LAYER_EVERY");
 		capture_every = every ? strtol(every, NULL, 10) : 0;
 		fprintf(stderr, "[nr_layer] active; socket=%s trigger=%s capture=%s every=%ld\n",
 			socket_path ? socket_path : "(none)",
 			trigger_path ? trigger_path : "(none)",
 			capture_path ? capture_path : "(off)", capture_every);
+		if (ui_mask)
+			fprintf(stderr, "[nr_layer] ui mask on: the first present after the "
+				"trigger is kept to find what held still\n");
 	}
 	return r;
 }
@@ -409,6 +423,30 @@ static int transfer(struct device_data *data, struct swapchain_data *chain, VkQu
 	return 0;
 }
 
+/* Which pixels are the interface.
+ *
+ * The shipped feature never has to ask: it inserts the pass before the interface is
+ * drawn ("UI remains downstream"). A layer at `vkQueuePresentKHR` sees the composed
+ * frame and has to work it out, and the one signal available is motion — an interface
+ * holds still while the scene under it does not.
+ *
+ * That signal cannot separate an interface over a still scene from a still scene, so
+ * when almost nothing moved the mask is refused rather than guessed: `settled` returns
+ * 0 and the frame is sent unmasked, which is what a photo mode of a paused scene wants.
+ */
+static uint32_t settled(const unsigned char *now, const unsigned char *before,
+			uint32_t pixels, unsigned char *mask)
+{
+	uint32_t held = 0;
+	for (uint32_t i = 0; i < pixels; i++) {
+		const unsigned char *a = now + 4 * i, *b = before + 4 * i;
+		int moved = abs(a[0] - b[0]) + abs(a[1] - b[1]) + abs(a[2] - b[2]) > 6;
+		mask[i] = moved ? 0u : 0xFFu;
+		held += !moved;
+	}
+	return held;
+}
+
 static int process_frame(struct device_data *data, struct swapchain_data *chain,
 			 VkQueue queue, uint32_t index)
 {
@@ -416,8 +454,28 @@ static int process_frame(struct device_data *data, struct swapchain_data *chain,
 	if (ensure_resources(data, needed)) return -1;
 	if (transfer(data, chain, queue, index, 0)) return -1;
 
-	uint32_t header[4] = { 0x304E524Eu, chain->extent.width, chain->extent.height,
-			       (uint32_t)chain->format };
+	uint32_t pixels = chain->extent.width * chain->extent.height;
+	int masked = 0;
+	if (ui_mask && data->have_earlier && data->earlier_size >= needed) {
+		if (data->outgoing_size < needed + pixels) {
+			unsigned char *grown = realloc(data->outgoing, (size_t)needed + pixels);
+			if (!grown) return -1;
+			data->outgoing = grown;
+			data->outgoing_size = needed + pixels;
+		}
+		memcpy(data->outgoing, data->mapped, (size_t)needed);
+		uint32_t held = settled(data->mapped, data->earlier, pixels,
+					data->outgoing + needed);
+		/* Over nine tenths still means nothing moved, so nothing can be told
+		 * apart. Under a fiftieth means the interface is not worth a second
+		 * plane on the wire. */
+		masked = held < (uint32_t)(pixels * 0.9) && held > pixels / 50;
+		fprintf(stderr, "[nr_layer] %u%% of the frame held still; ui mask %s\n",
+			100u * held / pixels, masked ? "sent" : "refused");
+	}
+
+	uint32_t header[4] = { masked ? 0x314E524Eu : 0x304E524Eu, chain->extent.width,
+			       chain->extent.height, (uint32_t)chain->format };
 	if (capture_path) {
 		FILE *file = fopen(capture_path, "wb");
 		if (file) {
@@ -427,6 +485,18 @@ static int process_frame(struct device_data *data, struct swapchain_data *chain,
 		}
 	}
 	if (!socket_path) return -1;
+	/* The mask travels immediately after the colour, one byte a pixel. */
+	if (masked) {
+		if (exchange(header, sizeof header, data->outgoing,
+			     (size_t)needed + pixels, data->result)) {
+			fprintf(stderr, "[nr_layer] the daemon did not answer; frame unchanged\n");
+			return -1;
+		}
+		memcpy(data->mapped, data->result, (size_t)needed);
+		fprintf(stderr, "[nr_layer] processed %ux%u with a ui mask\n",
+			chain->extent.width, chain->extent.height);
+		return 0;
+	}
 	if (exchange(header, sizeof header, data->mapped, (size_t)needed, data->result)) {
 		fprintf(stderr, "[nr_layer] the daemon did not answer; frame unchanged\n");
 		return -1;
@@ -456,7 +526,25 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
 		struct swapchain_data *chain = find_swapchain(info->pSwapchains[i]);
 		if (!chain) continue;
 		uint32_t index = info->pImageIndices[i];
-		if (wanted && !data->holding) {
+		if (wanted && ui_mask && !data->holding && !data->have_earlier) {
+			/* Spend the first present after the trigger keeping the frame, and
+			 * process the next one against it. One frame of extra latency on a
+			 * pass that already takes a second, and nothing at all while the
+			 * trigger is down. */
+			VkDeviceSize needed = (VkDeviceSize)chain->extent.width
+					      * chain->extent.height * 4;
+			if (ensure_resources(data, needed) == 0
+			    && transfer(data, chain, queue, index, 0) == 0) {
+				if (data->earlier_size < needed) {
+					unsigned char *grown = realloc(data->earlier, (size_t)needed);
+					if (grown) { data->earlier = grown; data->earlier_size = needed; }
+				}
+				if (data->earlier_size >= needed) {
+					memcpy(data->earlier, data->mapped, (size_t)needed);
+					data->have_earlier = 1;
+				}
+			}
+		} else if (wanted && !data->holding) {
 			if (process_frame(data, chain, queue, index) == 0) {
 				data->holding = 1;
 				transfer(data, chain, queue, index, 1);
@@ -466,6 +554,7 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
 			transfer(data, chain, queue, index, 1);
 		} else if (!wanted) {
 			data->holding = 0;
+			data->have_earlier = 0;
 		}
 	}
 	return data->present(queue, info);
