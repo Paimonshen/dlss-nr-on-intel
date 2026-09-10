@@ -15,15 +15,34 @@ against this table** — that is how both earlier mistakes announced themselves:
 
 | checkout | base to pass | files | lines |
 |---|---|---|---|
-| `review-layer` | `pre-layer` | 11 | 1 362 — start here |
+| `review-layer` | `pre-layer` | 11 | 1 523 — reviewed 2026-09-10, `notes/phase39-layer-review.md` |
 | `review-gpu` | `pre-gpu` | 29 | 5 423 |
 | `review-ref` | `pre-ref` | 15 | 4 005 |
-| `review-tools` | `pre-tools` | 43 | 3 068 |
+| `review-tools` | `pre-tools` | 43 | 3 068 — `src/tools`, `src/bench` and `src/probe` together |
 
 Each `review-*` branch has **master's exact tree**, so checking one out changes no file
-on disk, and the reviewer can read the whole codebase. Its parent `pre-*` is the same
-tree with that one area removed, so the single commit between them carries exactly the
-area and nothing else.
+on disk, and the reviewer can read the whole codebase. Its parent `pre-*` is an orphan
+holding the same tree with that one area removed, so the single commit between them
+carries exactly the area and nothing else.
+
+That equality is the whole trick, and it stops holding the moment master moves. Rebuild
+all four pairs after any commit — `src/tools`, `src/bench` and `src/probe` go together in
+`tools`:
+
+```sh
+export GIT_INDEX_FILE=$(mktemp -u)
+full=$(git rev-parse master^{tree})
+for area in layer gpu ref tools; do
+    case $area in tools) dirs="src/tools src/bench src/probe";; *) dirs="src/$area";; esac
+    rm -f "$GIT_INDEX_FILE"; git read-tree master; git rm -r -q --cached $dirs
+    base=$(git commit-tree $(git write-tree) -m "Everything except $dirs.")
+    git branch -f "pre-$area"    "$base"
+    git branch -f "review-$area" "$(git commit-tree "$full" -p "$base" -m "$area, for review")"
+done
+rm -f "$GIT_INDEX_FILE"; unset GIT_INDEX_FILE
+```
+
+Plumbing, so the working tree is never touched and `master` is never left.
 
 ### Two wrong ways to build this, both tried
 
@@ -47,7 +66,7 @@ creating one would silently make some arbitrary scope the default.
 
 ## What is worth a reviewer's time, in order
 
-**`base-layer` — `src/layer`, and the reason to start here.** It is C that loads
+**`review-layer` — `src/layer`, and the reason to start here.** It is C that loads
 *inside another process*, in this case a game running under Wine. It intercepts
 `vkQueuePresentKHR`, copies swapchain images, talks to a daemon over a Unix socket, and
 hands the result back. A bug here does not produce a wrong picture; it takes the host
@@ -56,7 +75,7 @@ game down. It has already had one such bug fixed — `write()` instead of
 SIGPIPE. Look at lifetimes, partial reads and writes, the two ABIs, and what happens
 when the daemon is absent, slow, or lying about sizes.
 
-**`base-gpu` — `src/gpu`.** The resident runtime: `libxmx.c` owns the Vulkan device,
+**`review-gpu` — `src/gpu`.** The resident runtime: `libxmx.c` owns the Vulkan device,
 buffers and pipelines and records whole frames; the `.comp` shaders are the graph. The
 sharpest things to check are the ones this project got wrong before: buffer sizing and
 offsets around `xmx_rec_gemm` (cooperative-matrix loads are **not** bounds-checked here,
