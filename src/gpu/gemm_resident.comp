@@ -142,6 +142,23 @@ void main() {
         return;
     }
 #endif
+    /* A float32 output takes the publish on the accumulator's own components and
+     * stores it directly. phase 18 recorded this as impossible — "any operation on the
+     * accumulator between coopMatMulAdd and coopMatStore scrambles the result" — and a
+     * minimal reproducer says otherwise: whole-matrix arithmetic, element assignment
+     * and a copy through a fresh matrix are all correct on Mesa 26.2.1. Only a
+     * *converting* store is wrong, which is why a narrow output still goes through
+     * shared memory below. `src/probe/coopmat_store_bug.comp`. */
+    if (!narrow) {
+        for (uint i = 0; i < RM; i++)
+            for (uint j = 0; j < RN; j++) {
+                for (uint e = 0; e < acc[i][j].length(); e++)
+                    acc[i][j][e] = ACC(publish(epilogue, float(acc[i][j][e])));
+                coopMatStore(acc[i][j], pc.c.v, co + (row + i * TM) * ldc + col + j * TN,
+                             ldc, gl_CooperativeMatrixLayoutRowMajor);
+            }
+        return;
+    }
     for (uint i = 0; i < RM; i++)
         for (uint j = 0; j < RN; j++)
             coopMatStore(acc[i][j], stage, i * TM * BN + j * TN, BN,

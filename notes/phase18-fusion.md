@@ -45,9 +45,16 @@ global blocks, whose hidden layer is 4096 wide, went from 136 ms to 36 ms.
 
 ## The better version is blocked by a driver bug
 
-> **SUPERSEDED 2026-09-09 by `notes/phase21-fusion-and-tiling.md`.** The bug is real
-> and the table below still reproduces, but the conclusion drawn from it was one step
-> too far. The corruption is in the *arithmetic*, not in the store: an untouched
+> **SUPERSEDED TWICE.** By `notes/phase21-fusion-and-tiling.md` (2026-09-09) for the
+> conclusion, and by `notes/phase36-the-bug-is-narrower.md` (2026-09-10) for the table
+> itself: a minimal reproducer says **four of the five rows below are wrong**.
+> Whole-matrix arithmetic, element assignment and a copy through a fresh matrix are all
+> correct on Mesa 26.2.1. Only a *converting* store is broken. The measurements below
+> were taken inside the resident kernel, with buffer-reference addressing, batch strides
+> and slice offsets; none of that is in the reproducer, and the claim did not survive
+> being isolated.
+>
+> The original conclusion, for the record: the bug is real The corruption is in the *arithmetic*, not in the store: an untouched
 > accumulator reaches **shared memory** intact, and the epilogue can then be applied to
 > ordinary scalars on the way out. Every epilogue is bit-exact that way
 > (`src/gpu/test_epilogue.py`), and the GEMM now carries one.
