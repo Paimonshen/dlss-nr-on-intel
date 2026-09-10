@@ -4,6 +4,9 @@ State of the DLSS-NR on Intel Xe2 project as of **2026-09-10**. CLAUDE.md holds 
 original brief; **this file overrides it wherever they disagree**, and after
 2026-09-09 they disagree about something foundational.
 
+`notes/INDEX.md` says what each of the forty-eight phase notes settles — go there when
+you need the evidence behind a line in this file, rather than reading them in order.
+
 ---
 
 ## Latest: it runs in a game, live, at 10 fps (2026-09-10 evening)

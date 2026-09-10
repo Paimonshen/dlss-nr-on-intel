@@ -26,6 +26,7 @@ optimisations that trade correctness for speed until Phase 3 is done.
 >
 > **Read `HANDOFF.md` first**; it overrides this file, and large parts of what follows
 > are the record of how the answers were reached rather than the answers.
+> `notes/INDEX.md` maps every phase note to the question it settles.
 
 ---
 
