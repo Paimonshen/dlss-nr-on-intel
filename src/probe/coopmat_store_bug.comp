@@ -7,7 +7,10 @@
  *   1  acc = acc * 2.0        (whole matrix)      wrong
  *   2  acc[0] = acc[0] * 2.0  (one element)       wrong
  *   3  copy to a fresh matrix, store that         wrong
- *   4  store as float16 via a converting matrix   wrong
+ *   4  store a float16 matrix into a float[]         wrong — but is the *shader*
+ *                                                  valid? the component type does
+ *                                                  not match the destination's
+ *   5  store a float16 matrix into a float16_t[]   the type-correct version
  */
 #extension GL_KHR_cooperative_matrix : require
 #extension GL_KHR_memory_scope_semantics : require
@@ -22,6 +25,7 @@ layout(local_size_x = 32) in;
 layout(set = 0, binding = 0) readonly buffer A { float16_t a[]; };
 layout(set = 0, binding = 1) readonly buffer B { float16_t b[]; };
 layout(set = 0, binding = 2) writeonly buffer C { float c[]; };
+layout(set = 0, binding = 2) writeonly buffer Ch { float16_t ch[]; };
 layout(push_constant) uniform Push { uint M, N, K; } pc;
 
 const uint M = 8, N = 16;
@@ -44,6 +48,11 @@ void main() {
 #elif TOUCH == 3
     coopmat<float, gl_ScopeSubgroup, M, N, gl_MatrixUseAccumulator> copy = acc;
     acc = copy;
+#elif TOUCH == 5
+    coopmat<float16_t, gl_ScopeSubgroup, M, N, gl_MatrixUseAccumulator> narrow =
+        coopmat<float16_t, gl_ScopeSubgroup, M, N, gl_MatrixUseAccumulator>(acc);
+    coopMatStore(narrow, ch, 0, N, gl_CooperativeMatrixLayoutRowMajor);
+    return;
 #elif TOUCH == 4
     coopmat<float16_t, gl_ScopeSubgroup, M, N, gl_MatrixUseAccumulator> narrow =
         coopmat<float16_t, gl_ScopeSubgroup, M, N, gl_MatrixUseAccumulator>(acc);
