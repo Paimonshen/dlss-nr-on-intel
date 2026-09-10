@@ -84,3 +84,21 @@ and what is left is a stack of independent full-frame passes over the *output* �
 assembly, composition, the head upscale — each of which reads and writes the whole
 picture. `phase47` found one of those costing 55 % of a frame. Merging them is the same
 observation from the other side.
+
+## OpenCV installed, measured
+
+The owner installed `python-opencv` (cv2 5.0.0) after reading the above, so the vendored
+blur now takes its `cv2.sepFilter2D` path:
+
+| extent, strengths moved | numpy fallback | OpenCV |
+| --- | --- | --- |
+| 854x480 | 110.0 ms | **31.8 ms** |
+| 1920x1080 | 552.9 ms | **187.9 ms** |
+
+The penalty for touching either strength drops from about **7x the composition to about
+2x**. Agreement with the numpy path is **1.19e-07** maximum over a frame — float32
+rounding, not a different filter, which is expected: the numpy fallback is already the
+same separable Gaussian, just run as 18 array accumulations.
+
+`nr-ctl` detects OpenCV and reports whichever number is true, and `nr-ctl status` says
+which path the blur will take.
