@@ -79,6 +79,30 @@ third-party shim bolted onto this build, and that is outside anything this proje
 controls. The deterministic, orderly, always-at-the-same-point exit fits that and fits
 nothing else that was tested.
 
+## The discriminating test, and what it settled
+
+If the resize itself were fatal, making it a no-op would save the game. A Wine virtual
+desktop of exactly the starting size — `explorer /desktop=doa6,800x450` — was the way to
+try it. It could not be done, and the reason is the finding:
+
+| virtual desktop | swapchain the game then asks for |
+| --- | --- |
+| 1280x720 | 1280x720 |
+| 800x450 | **1920x1200** |
+
+The game does not simply take the desktop size. Nor does the target matter: a request
+for a swapchain *larger than the desktop it is running in* dies at the same instant, in
+the same way, as one that matches the panel exactly.
+
+Across twelve runs the failure is invariant to every graphics-side variable available —
+Proton build, prefix, window driver, sync primitives, Streamline plugins, saved settings,
+aspect ratio, desktop size, and target resolution. **An invariant like that is the
+evidence: the graphics stack is not the cause.**
+
+The exit code says the same thing. `ExitProcess(1)` every time, after an orderly unload
+of the Streamline plugins and with no exception anywhere in the `+seh` trace. The game
+is not being killed — it is deciding to fail and saying so.
+
 ## Standing conclusion
 
 For this project's purposes **Dead or Alive 5 remains the live target** — it runs, the
