@@ -59,6 +59,39 @@ def request_tests():
         raise AssertionError('truncated body accepted')
 
 
+def resample_tests():
+    """`resample` runs per frame and was 55% of it in its first form (notes/phase47)."""
+    rng = np.random.default_rng(0)
+    image = rng.random((17, 23, 4)).astype(np.float32)
+
+    def reference(source, size):
+        """The obvious two-dimensional form the separable one replaced."""
+        height, width = source.shape[:2]
+        new_height, new_width = size
+        ys = (np.arange(new_height, dtype=np.float32) + 0.5) * (height / new_height) - 0.5
+        xs = (np.arange(new_width, dtype=np.float32) + 0.5) * (width / new_width) - 0.5
+        y0 = np.clip(np.floor(ys), 0, height - 1).astype(np.int32)
+        x0 = np.clip(np.floor(xs), 0, width - 1).astype(np.int32)
+        y1, x1 = np.clip(y0 + 1, 0, height - 1), np.clip(x0 + 1, 0, width - 1)
+        wy = np.clip(ys - y0, 0, 1)[:, None, None].astype(np.float32)
+        wx = np.clip(xs - x0, 0, 1)[None, :, None].astype(np.float32)
+        top = source[y0][:, x0] * (1 - wx) + source[y0][:, x1] * wx
+        bottom = source[y1][:, x0] * (1 - wx) + source[y1][:, x1] * wx
+        return (top * (1 - wy) + bottom * wy).astype(np.float32)
+
+    for size in ((41, 37), (9, 11), (17, 40)):
+        assert np.allclose(daemon.resample(image, size), reference(image, size), atol=1e-6), size
+    assert daemon.resample(image, image.shape[:2]) is image, "the identity must not copy"
+    # a whole factor takes the area mean, which point sampling would not
+    block = np.arange(4 * 6 * 1, dtype=np.float32).reshape(4, 6, 1)
+    assert np.allclose(daemon.resample(block, (2, 3)),
+                       block.reshape(2, 2, 3, 2, 1).mean((1, 3))), "area mean"
+    flat = np.full((8, 8, 3), 0.25, np.float32)
+    assert np.allclose(daemon.resample(flat, (19, 5)), 0.25), "a constant must stay constant"
+    print("resample: separable form matches the two-dimensional one, area-averages on a\n"
+          "  whole factor, and leaves a constant alone")
+
+
 def native_exchange_tests():
     with tempfile.TemporaryDirectory(prefix='nr-exchange-') as temporary:
         for mode in ('echo', 'reject', 'partial', 'masked'):
@@ -103,4 +136,5 @@ def native_exchange_tests():
 
 if __name__ == '__main__':
     request_tests()
+    resample_tests()
     native_exchange_tests()

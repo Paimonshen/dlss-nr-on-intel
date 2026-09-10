@@ -87,6 +87,7 @@ static VkInstance layer_instance;
 static unsigned long frame_counter;
 static const char *capture_path;
 static long capture_every;
+static long live_every;
 static const char *socket_path;
 static const char *trigger_path;
 static int ui_mask;
@@ -267,6 +268,16 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateInstance(const VkInstanceCreateInfo *inf
 		ui_mask = getenv("NR_LAYER_UI_MASK") != NULL;
 		const char *every = getenv("NR_LAYER_EVERY");
 		capture_every = every ? strtol(every, NULL, 10) : 0;
+		const char *live = getenv("NR_LAYER_LIVE");
+		live_every = live ? strtol(live, NULL, 10) : 0;
+		if (live_every < 0) live_every = 0;
+		if (live_every > 0)
+			fprintf(stderr, "[nr_layer] live: every %ld%s present goes through the "
+				"network, the frames between hold the last result\n",
+				live_every, live_every == 1 ? "st" : "th");
+		if (live_every > 0 && getenv("NR_LAYER_TRIGGER"))
+			fprintf(stderr, "[nr_layer] live runs while the trigger exists; "
+				"remove it to hand the game back\n");
 		fprintf(stderr, "[nr_layer] active; socket=%s trigger=%s capture=%s every=%ld\n",
 			socket_path ? socket_path : "(none)",
 			trigger_path ? trigger_path : "(none)",
@@ -651,6 +662,40 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
 		for (int i = 0; i < 8; i++) if (devices[i].device) { data = &devices[i]; break; }
 	if (!data) return VK_ERROR_INITIALIZATION_FAILED;
 
+	/* Live mode is a slideshow rather than a photo: every Nth present goes through the
+	 * network and the frames between re-blit the last result, so the picture is steady
+	 * instead of alternating with the game's own. The trigger file is not consulted —
+	 * an `access()` per present is a syscall the hot path does not need — and neither
+	 * is the interface mask, whose detector is built around a frame that was asked for.
+	 *
+	 * The rate this can hold is set by the daemon's `--render-scale`, not by N: the
+	 * network's cost follows the extent it is given (notes/phase37). N only decides how
+	 * many game frames each rendered one covers. */
+	if (live_every > 0) {
+		/* The trigger keeps its meaning — "do the thing" — so the effect can be
+		 * turned on and off mid-game without restarting it. With no trigger
+		 * configured, live mode simply always runs. */
+		int on = !trigger_path || access(trigger_path, F_OK) == 0;
+		if (!on) data->holding = 0;
+		for (uint32_t i = 0; on && i < info->swapchainCount; i++) {
+			struct swapchain_data *chain = find_swapchain(info->pSwapchains[i]);
+			if (!chain) continue;
+			uint32_t index = info->pImageIndices[i];
+			VkDeviceSize want = (VkDeviceSize)chain->extent.width
+					  * chain->extent.height * 4;
+			if (frame_counter % (unsigned long)live_every == 0) {
+				if (process_frame(data, chain, queue, index) == 0) {
+					data->holding = 1;
+					transfer(data, chain, queue, index, 1);
+				}
+			} else if (data->holding && data->result_size == want) {
+				memcpy(data->mapped, data->result, (size_t)data->result_size);
+				transfer(data, chain, queue, index, 1);
+			}
+		}
+		return data->present(queue, info);
+	}
+
 	/* A file is the trigger, not a key: it works the same on X11 and Wayland, needs
 	 * no input hooking inside another process's window, and can be set from a script
 	 * or a hotkey daemon. While it exists the processed frame is held on screen. */
@@ -685,7 +730,9 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
 				data->holding = 1;
 				transfer(data, chain, queue, index, 1);
 			}
-		} else if (wanted && data->holding) {
+		} else if (wanted && data->holding
+			   && data->result_size == (VkDeviceSize)chain->extent.width
+						 * chain->extent.height * 4) {
 			memcpy(data->mapped, data->result, (size_t)data->result_size);
 			transfer(data, chain, queue, index, 1);
 		} else if (!wanted) {

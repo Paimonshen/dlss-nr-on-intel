@@ -1,0 +1,195 @@
+#!/usr/bin/env python3
+"""nr-ctl — drive the running daemon and layer without restarting either.
+
+The daemon holds the model, so restarting it to try another profile costs a second and
+drops the layer's connection mid-game. Everything here is either a post-network knob or
+the extent, so none of it invalidates the weights and all of it can move between frames.
+
+    src/layer/nr-ctl                    an interactive session
+    src/layer/nr-ctl on                 start enhancing (touches the trigger)
+    src/layer/nr-ctl off                hand the game back
+    src/layer/nr-ctl set scale 0.5      run the network at half of each side
+    src/layer/nr-ctl status
+
+Start the daemon so it watches the same file:
+
+    python3 src/layer/nr_daemon.py --settings /tmp/nr_settings.json --render-scale 0.5
+
+The trigger is what the layer polls; the settings file is what the daemon re-reads.
+Neither needs the other, so `on`/`off` work even with no settings file, and a knob can
+be changed while the effect is off.
+"""
+import json
+import os
+import pathlib
+import socket
+import sys
+
+SETTINGS = pathlib.Path(os.environ.get("NR_SETTINGS", "/tmp/nr_settings.json"))
+TRIGGER = pathlib.Path(os.environ.get("NR_LAYER_TRIGGER", "/tmp/nr_trigger"))
+SOCKET = pathlib.Path(os.environ.get("NR_LAYER_SOCKET", "/tmp/nr_layer.sock"))
+
+PROFILES = ("standard", "natural", "cinematic", "neutral")
+KNOBS = {"profile": str, "intensity": float, "detail_strength": float,
+         "colour_strength": float, "render_scale": float}
+ALIAS = {"p": "profile", "i": "intensity", "d": "detail_strength",
+         "c": "colour_strength", "s": "render_scale", "scale": "render_scale",
+         "detail": "detail_strength", "colour": "colour_strength",
+         "color": "colour_strength"}
+
+# Measured end to end on this machine, 2026-09-10 — the whole round trip through the
+# socket, not the graph alone. `(swapchain width, height, render_scale) -> ms`.
+# The network's cost follows the extent it is given and nothing else, but at these sizes
+# the numpy either side of it — feature assembly and composition, both at the output
+# resolution — is the larger half, so the swapchain size matters as much as the scale.
+RATES = (
+    (854, 480, 0.50, 180.1), (854, 480, 0.35, 176.6),
+    (720, 405, 0.50, 200.1), (720, 405, 0.35, 207.9),
+    (640, 360, 0.50, 199.8), (640, 360, 0.35, 116.8),
+    (512, 288, 0.50, 108.3), (512, 288, 0.35, 98.6),
+)
+# Graph time alone against render scale, for the estimate shown when a scale is set.
+COST = ((1.00, 490), (0.70, 233), (0.60, 188), (0.50, 146), (0.35, 78))
+
+
+def expected(scale):
+    """Rough ms and fps for a render scale, interpolated from measurements."""
+    points = sorted(COST)
+    if scale <= points[0][0]:
+        return points[0][1]
+    for (a, ta), (b, tb) in zip(points, points[1:]):
+        if a <= scale <= b:
+            return ta + (tb - ta) * (scale - a) / (b - a)
+    return points[-1][1]
+
+
+def read():
+    try:
+        with SETTINGS.open() as handle:
+            return json.load(handle)
+    except (OSError, ValueError):
+        return {}
+
+
+def write(values):
+    SETTINGS.parent.mkdir(parents=True, exist_ok=True)
+    temporary = SETTINGS.with_suffix(SETTINGS.suffix + ".new")
+    # written whole and renamed, so the daemon never reads a half-written file
+    with temporary.open("w") as handle:
+        json.dump(values, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+    temporary.replace(SETTINGS)
+
+
+def alive():
+    if not SOCKET.exists():
+        return False
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+            probe.settimeout(0.5)
+            probe.connect(str(SOCKET))
+        return True
+    except OSError:
+        return False
+
+
+def status():
+    values = read()
+    print("  daemon    %s  (%s)" % ("listening" if alive() else "not answering", SOCKET))
+    print("  effect    %s  (%s)" % ("ON" if TRIGGER.exists() else "off", TRIGGER))
+    print("  settings  %s" % (SETTINGS if SETTINGS.exists() else "%s — not written yet" % SETTINGS))
+    for knob in KNOBS:
+        shown = values.get(knob, "(daemon default)")
+        note = ""
+        if knob == "render_scale" and isinstance(shown, (int, float)):
+            ms = expected(float(shown))
+            note = "   ~%.0f ms, ~%.1f fps of graph time" % (ms, 1000.0 / ms)
+        print("    %-16s %s%s" % (knob, shown, note))
+
+
+def apply(knob, value):
+    knob = ALIAS.get(knob, knob)
+    if knob not in KNOBS:
+        print("  no knob %r; try: %s" % (knob, ", ".join(KNOBS)))
+        return
+    if knob == "profile":
+        if value not in PROFILES:
+            print("  profiles are: %s" % ", ".join(PROFILES))
+            return
+    else:
+        try:
+            value = float(value)
+        except ValueError:
+            print("  %s takes a number" % knob)
+            return
+        if knob == "render_scale" and not 0.05 <= value <= 1.0:
+            print("  render_scale is between 0.05 and 1")
+            return
+    values = read()
+    values[knob] = value
+    write(values)
+    extra = ""
+    if knob == "render_scale":
+        ms = expected(value)
+        extra = "   ~%.0f ms, ~%.1f fps of graph time" % (ms, 1000.0 / ms)
+    print("  %s = %s%s" % (knob, value, extra))
+
+
+def command(words):
+    if not words:
+        return True
+    head, rest = words[0].lower(), words[1:]
+    if head in ("q", "quit", "exit"):
+        return False
+    if head == "on":
+        TRIGGER.parent.mkdir(parents=True, exist_ok=True)
+        TRIGGER.touch()
+        print("  effect ON")
+    elif head == "off":
+        TRIGGER.unlink(missing_ok=True)
+        print("  effect off")
+    elif head in ("status", "st", ""):
+        status()
+    elif head == "set" and len(rest) == 2:
+        apply(rest[0], rest[1])
+    elif head in ALIAS or head in KNOBS:
+        if len(rest) != 1:
+            print("  %s <value>" % head)
+        else:
+            apply(head, rest[0])
+    elif head in ("rates", "fps"):
+        print("  measured end to end, whole round trip (2026-09-10):\n")
+        print("    %-14s %8s %9s %8s" % ("swapchain", "scale", "ms", "fps"))
+        for width, height, scale, ms in RATES:
+            print("    %-14s %8.2f %9.1f %8.2f"
+                  % ("%dx%d" % (width, height), scale, ms, 1000.0 / ms))
+        print("\n  Set the *game* to the swapchain size; the compositor stretches the")
+        print("  result to the panel for nothing. The odd non-monotonic rows are the")
+        print("  network's alignment padding, which some extents land badly on.")
+    elif head in ("help", "?"):
+        print("  on | off | status | rates | set <knob> <value> | q")
+        print("  shorthand: p <profile>, i <n>, d <n>, c <n>, s <scale>")
+        print("  knobs: %s" % ", ".join(KNOBS))
+    else:
+        print("  ? %s   (try `help`)" % " ".join(words))
+    return True
+
+
+def main():
+    if len(sys.argv) > 1:
+        command(sys.argv[1:])
+        return 0
+    print("nr-ctl — `help` for commands, `q` to leave. The daemon and the game keep running.\n")
+    status()
+    while True:
+        try:
+            line = input("\nnr> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return 0
+        if not command(line.split()):
+            return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

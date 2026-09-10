@@ -20,6 +20,7 @@ width*height*4 bytes of pixels; the same number of bytes come back.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import pathlib
 import socket
@@ -99,6 +100,104 @@ def receive(connection, count):
 SOLID_RADIUS = 3
 
 
+class Settings:
+    """The knobs, re-read from a JSON file whenever it changes.
+
+    The daemon holds the model, so restarting it to try another profile costs a second
+    and loses the layer's connection. These are all post-network or extent choices —
+    nothing here invalidates the weights — so they can move between frames. `nr-ctl`
+    writes the file; anything may, it is one flat object.
+    """
+
+    KNOBS = ("profile", "intensity", "detail_strength", "colour_strength", "render_scale")
+
+    def __init__(self, args):
+        self.path = args.settings
+        self.stamp = None
+        for knob in self.KNOBS:
+            setattr(self, knob, getattr(args, knob))
+
+    def refresh(self):
+        if not self.path:
+            return
+        try:
+            stamp = os.stat(self.path).st_mtime_ns
+        except OSError:
+            return
+        if stamp == self.stamp:
+            return
+        self.stamp = stamp
+        try:
+            with open(self.path) as handle:
+                given = json.load(handle)
+        except (OSError, ValueError) as error:
+            print(f"settings: {error}; keeping the current ones", flush=True)
+            return
+        changed = []
+        for knob in self.KNOBS:
+            if knob not in given:
+                continue
+            value = given[knob]
+            if knob == "profile":
+                if value not in nr_frame.PROFILES:
+                    print(f"settings: no profile {value!r}", flush=True)
+                    continue
+            else:
+                try:
+                    value = float(value)
+                except (TypeError, ValueError):
+                    print(f"settings: {knob} is not a number", flush=True)
+                    continue
+                if knob == "render_scale" and not 0.05 <= value <= 1.0:
+                    print("settings: render_scale must be between 0.05 and 1", flush=True)
+                    continue
+            if getattr(self, knob) != value:
+                setattr(self, knob, value)
+                changed.append(f"{knob}={value}")
+        if changed:
+            print("settings: " + ", ".join(changed), flush=True)
+
+
+def resample(image, size):
+    """Bilinear resize of (H, W, C) to `size`, area-averaging when it divides evenly.
+
+    Pure numpy because this runs per frame: ImageMagick through a subprocess, which is
+    what `image_io.load` uses, costs more than the network does at these extents.
+
+    Separable — one pass down the rows, then one across the columns. The obvious
+    two-dimensional form, `image[y0][:, x0] * ... + image[y1][:, x1] * ...`, materialises
+    four full-size gathers and measured **193 ms** on an 854x480 head against 20 ms for
+    this, which made it 55 % of the whole frame. Splitting the axes leaves two gathers
+    of the intermediate size instead.
+
+    Downscaling by a whole factor takes the area mean instead of point-sampling, since
+    the alternative feeds the network aliasing it would then try to enhance.
+    """
+    height, width = image.shape[:2]
+    new_height, new_width = int(size[0]), int(size[1])
+    if (new_height, new_width) == (height, width):
+        return image
+    if (new_height and new_width and height % new_height == 0 and width % new_width == 0
+            and height > new_height and width > new_width):
+        fy, fx = height // new_height, width // new_width
+        return image.reshape(new_height, fy, new_width, fx, -1).mean((1, 3)).astype(np.float32)
+
+    def axis(source, count, along):
+        """One bilinear pass along `along` (0 rows, 1 columns)."""
+        extent = source.shape[along]
+        if extent == count:
+            return source
+        centres = (np.arange(count, dtype=np.float32) + 0.5) * (extent / count) - 0.5
+        low = np.clip(np.floor(centres), 0, extent - 1).astype(np.int32)
+        high = np.clip(low + 1, 0, extent - 1)
+        weight = np.clip(centres - low, 0.0, 1.0).astype(np.float32)
+        weight = weight.reshape((-1, 1, 1) if along == 0 else (1, -1, 1))
+        return (np.take(source, low, along) * (1.0 - weight)
+                + np.take(source, high, along) * weight)
+
+    return axis(axis(np.asarray(image, np.float32), new_height, 0), new_width, 1)
+
+
 def solid_regions(held, radius=SOLID_RADIUS, majority=0.75):
     """Keep only the parts of the interface mask that sit inside a solid held-still block.
 
@@ -146,12 +245,25 @@ def process_connection(connection, backend, args):
         connection.sendall(payload)
         return
 
+    live = args.live
+    live.refresh()
     clock = time.perf_counter()
     colour = decode(payload, width, height, vk_format)
-    geometry = nr_frame.NetworkGeometry.vendor_aligned(width, height)
+    # The network's cost follows the extent it is given and nothing else, so a smaller
+    # internal frame is the only lever that changes the frame rate (notes/phase37,
+    # phase45). What comes back up is the *head* — the detail the network drew — which
+    # is then composed against the full-resolution original, so the game's own pixels
+    # are never resampled and only the synthesised part is interpolated.
+    inner = colour
+    if live.render_scale < 1.0:
+        inner = resample(colour, (max(64, round(height * live.render_scale)),
+                                  max(64, round(width * live.render_scale))))
+    geometry = nr_frame.NetworkGeometry.vendor_aligned(inner.shape[1], inner.shape[0])
     features = nr_frame.make_features(
-        colour, geometry=geometry, **nr_frame.PROFILES[args.profile])
+        inner, geometry=geometry, **nr_frame.PROFILES[live.profile])
     head = geometry.crop(backend.run_features(features))
+    if head.shape[:2] != colour.shape[:2]:
+        head = resample(head, colour.shape[:2])
     control = None
     held = None
     if interface is not None:
@@ -174,9 +286,9 @@ def process_connection(connection, backend, args):
     if held is not None:
         control = np.ones((height, width, 3), np.float32)
         control[held, 0] = 0.0
-    output = nr_frame.compose(head, colour, intensity=args.intensity,
-                              detail_strength=args.detail_strength,
-                              colour_strength=args.colour_strength,
+    output = nr_frame.compose(head, colour, intensity=live.intensity,
+                              detail_strength=live.detail_strength,
+                              colour_strength=live.colour_strength,
                               control_mask=control)
     connection.sendall(encode(output, payload, vk_format))
     if args.dump:
@@ -207,6 +319,12 @@ def main():
     parser.add_argument("--intensity", type=float, default=1.0)
     parser.add_argument("--detail-strength", type=float, default=1.0)
     parser.add_argument("--colour-strength", type=float, default=1.0)
+    parser.add_argument("--settings", default=None,
+                        help="a JSON file of knobs, re-read whenever it changes; "
+                             "`nr-ctl` writes it")
+    parser.add_argument("--render-scale", type=float, default=1.0,
+                        help="run the network on this fraction of each side; the head is "
+                             "scaled back and composed against the full-size frame")
     parser.add_argument("--max-pixels", type=int, default=1 << 22,
                         help="refuse frames larger than this, rather than thrash")
     parser.add_argument("--dump", help="write each frame in and out as PNG, for a look")
@@ -215,6 +333,9 @@ def main():
     args = parser.parse_args()
     if args.max_pixels <= 0 or args.timeout <= 0:
         parser.error("--max-pixels and --timeout must be positive")
+    if not 0.05 <= args.render_scale <= 1.0:
+        parser.error("--render-scale must be between 0.05 and 1")
+    args.live = Settings(args)
 
     started = time.perf_counter()
     backend = nr_frame.ResidentBackend()

@@ -16,6 +16,11 @@
 # is removed, so it is a photo mode rather than a per-frame filter:
 #
 #   NR_UI_MASK=1 src/layer/nr-photo ...       leave the game's interface untouched
+#   NR_LIVE=1    src/layer/nr-photo ...       a slideshow instead of a photo: every Nth
+#                                             present goes through the network and the
+#                                             frames between hold the last result. Set
+#                                             the game small — 512x288 reaches 10 fps,
+#                                             the compositor stretches it (notes/phase47).
 #
 #   touch /tmp/nr_trigger     # freeze and enhance
 #   rm    /tmp/nr_trigger     # back to the game
@@ -50,6 +55,10 @@ export VK_LAYER_PATH="$layer_dir" \
 # an `&&` one-liner here is a trap under `set -e`: write the branch out
 if [ -n "${NR_UI_MASK:-}" ]; then
     export NR_LAYER_UI_MASK=1
+fi
+# Live mode is a rate, not a flag: N presents per rendered frame.
+if [ -n "${NR_LIVE:-}" ]; then
+    export NR_LAYER_LIVE="$NR_LIVE"
 fi
 
 if [ "${1:-}" = "--proton" ] || [ "${1:-}" = "--check-proton" ]; then
@@ -115,6 +124,9 @@ if [ "${1:-}" = "--steam" ]; then
     mask=""
     if [ -n "${NR_LAYER_UI_MASK:-}" ]; then
         mask="NR_LAYER_UI_MASK=1 "
+    fi
+    if [ -n "${NR_LAYER_LIVE:-}" ]; then
+        mask="${mask}NR_LAYER_LIVE=${NR_LAYER_LIVE} "
     fi
     printf '  VK_LAYER_PATH=%q VK_INSTANCE_LAYERS=VK_LAYER_dlssnr_intel ENABLE_NR_LAYER=1 NR_LAYER_SOCKET=%q NR_LAYER_TRIGGER=%q %s%%command%%\n\n' \
            "$layer_dir" "$socket" "$trigger" "$mask"
