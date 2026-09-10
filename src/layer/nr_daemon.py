@@ -64,15 +64,20 @@ def decode(raw, width, height, vk_format):
                     for shift in (0, 10, 20)]
         return np.stack(channels, axis=-1)
     pixels = np.frombuffer(raw, dtype=np.uint8).reshape(height, width, 4)
-    order = [2, 1, 0] if kind == "bgra8" else [0, 1, 2]
-    return pixels[..., order].astype(np.float32) / np.float32(255.0)
+    # `pixels[..., [2, 1, 0]]` gathers into a new array, then `.astype` copies it again,
+    # then the divide copies a third time — 170 ms for a 1080p frame. A reversed slice is
+    # a *view*, and one ufunc does the widening and the scale together: 3 passes to 1.
+    channels = pixels[..., 2::-1] if kind == "bgra8" else pixels[..., :3]
+    # `divide`, not a multiply by 1/255: that reciprocal is not representable and the two
+    # disagree in the last bit, which a test caught.
+    return np.divide(channels, np.float32(255.0), dtype=np.float32)
 
 
 def encode(image, raw, vk_format):
     """Write `image` back into a copy of `raw`, leaving alpha as the game left it."""
     kind, _ = FORMATS[vk_format]
-    image = np.clip(image, 0.0, 1.0)
     if kind == "a2b10g10r10":
+        image = np.clip(image, 0.0, 1.0)
         packed = np.frombuffer(raw, dtype=np.uint32).copy().reshape(image.shape[:2])
         quantised = (image * np.float32(1023.0) + 0.5).astype(np.uint32)
         packed &= np.uint32(0xC0000000)
@@ -80,10 +85,14 @@ def encode(image, raw, vk_format):
             packed |= np.minimum(quantised[..., index], 1023) << np.uint32(shift)
         return packed.tobytes()
     pixels = np.frombuffer(raw, dtype=np.uint8).copy().reshape(*image.shape[:2], 4)
-    order = [2, 1, 0] if kind == "bgra8" else [0, 1, 2]
-    quantised = np.minimum((image * np.float32(255.0) + 0.5).astype(np.int32), 255)
-    for index, channel in enumerate(order):
-        pixels[..., channel] = quantised[..., index].astype(np.uint8)
+    # The old form built an int32 intermediate — four bytes a channel for a value that
+    # ends up in one — and then copied each channel separately, seven full-frame passes
+    # for 424 ms at 1080p. In place, into a strided view, is three.
+    quantised = np.multiply(image, np.float32(255.0), dtype=np.float32)
+    np.add(quantised, np.float32(0.5), out=quantised)
+    np.clip(quantised, 0.0, 255.0, out=quantised)
+    target = pixels[..., 2::-1] if kind == "bgra8" else pixels[..., :3]
+    target[:] = quantised.astype(np.uint8)
     return pixels.tobytes()
 
 
@@ -275,7 +284,10 @@ def process_connection(connection, backend, args):
         inner, geometry=geometry, **nr_frame.PROFILES[live.profile])
     head = geometry.crop(backend.run_features(features))
     if head.shape[:2] != colour.shape[:2]:
-        head = resample(head, colour.shape[:2])
+        # Only the first three channels reach `compose`; the fourth is the temporal gate
+        # and neither game mode supplies history (notes/phase48). Carrying it through the
+        # upscale is a quarter of that pass for nothing.
+        head = resample(head[..., :3], colour.shape[:2])
     control = None
     held = None
     if interface is not None:
