@@ -6,77 +6,51 @@ original brief; **this file overrides it wherever they disagree**, and after
 
 ---
 
-## Latest: softmax packing and GEMM sweep (2026-09-10)
+## Latest: it runs in a game, live, at 10 fps (2026-09-10 evening)
 
-**A smaller, exact optimization is now enabled:** softmax uses native FP16 pack/unpack
-instead of manual bit conversion. The isolated kernel is 14% faster, but paired full
-frames improve only about 2% at 384x384 and 1% at 720p; **1080p is unchanged within
-noise**. Do not quote the kernel gain as a frame gain. All heads remain bit-identical.
-`notes/phase29-softmax-pack.md` contains measurements and reproduction commands.
+Ten phases in one session, `notes/phase39` through `phase48`. The three things a next
+reader most needs:
 
-Six GEMM tile sizes and transposed static weights were evaluated; neither produced
-a worthwhile replacement for the current path. The ablation benchmark now forces
-fresh recording so cached replay cannot ignore its disabled operations. Attention
-layout/conversion fusion is a better next experiment than another blind tile sweep.
-`make test` passes, including exhaustive affine-pair and finite-FP16 softmax checks.
+**1. The frame is fully accounted for, and performance really is finished — inside the
+graph.** `xmx_profile()` puts a GPU timestamp after every recorded pass, so there is now
+a per-pass breakdown instead of two ablations (`src/bench/frame_profile.py`,
+`notes/phase45`). GEMM is 216 ms of 488 at 720p; of the other 272, **every pass that only
+moves data is at the memory ceiling** (residual 104 GB/s, merge heads 84, partition 69,
+split heads 65, to-half 61, against the machine's 70-91). Only softmax and cosine publish
+sit below it, at ~45 %, and they are arithmetic — that is what an arithmetic pass looks
+like measured with a bandwidth ruler. GEMM is register-bound (`phase26`). There is nothing
+left to win inside the graph.
 
-## Previous: captured frame replay (2026-09-10)
+**2. The bottleneck moved out of the graph.** Shrink the extent and the network stops
+being the frame. What is left is a stack of independent full-frame passes over the
+*output* resolution — feature assembly, composition, the head upscale, the detail blur —
+each reading and writing the whole picture, and none of which shrinks with the render
+scale. Two of them were pure waste and are fixed (`phase47`, `phase48`): a resample
+written in the obvious 2-D form cost **193 ms of a 350 ms frame** until the axes were
+separated, and the diffusion noise was rebuilt from four transcendentals a pixel every
+frame despite depending only on the extent and a frame index nobody sets.
+**This is where the next work is.**
 
-**A frame now uses one GPU submission instead of 73, and subsequent frames reuse
-recorded commands.** Encoder skip copies and bottleneck conversions run on the GPU.
-The output is bit-identical to the previous resident path, including changed inputs.
-`notes/phase28-frame-replay.md` records the implementation, limits and raw evidence.
+**3. There is a live mode and a control tool.** `NR_LAYER_LIVE=N` in the layer,
+`--render-scale` in the daemon, `src/layer/nr-ctl` to drive both without reloading the
+model. Measured end to end: **512x288 at scale 0.35 is 94 ms, 10.6 fps**; 640x360 is 9.5,
+854x480 is 5.4. Set the *game* to that size and the compositor does the stretch for free.
+The network runs on the reduced frame but the **head** is scaled back and composed against
+the full-resolution original, so the game's own pixels are never resampled.
 
-Incremental warm measurements over phase27, paired on the same buffers:
+Also this session: the interface mask proven in a live fight (**ten times less HUD
+damage**) and then caught making a *worse* artefact on a near-static frame, diagnosed and
+fixed (`phase42`, `phase43`); the profiles measured as a real trade-off — everything added
+to skin texture comes out of speculars and colour, and `--colour-strength` runs *opposite*
+to its name (`phase44`); the layer proven under **VKD3D-Proton** on a 64-bit D3D12 game
+(`phase41`); and four busy E-cores measured to cost the GPU **7 %** for a theoretical
+gain of under 2 % (`phase46`).
 
-| Output | Previous block mode | Captured replay | Time reduction |
-|---|---:|---:|---:|
-| 384x384 | 123.5 ms | 91.0 ms | 26% |
-| 1280x720 | 541.3 ms | 510.6 ms | 6% |
-| 1920x1080 | 1139.0 ms | 1102.7 ms | 3% |
+## Earlier entries, now folded into the notes
 
-These are graph timings, excluding feature assembly/composition and image I/O;
-first-use allocation/compilation/capture is separate. This remains photo mode.
-`NR_FRAME_MODE=replay` is the default; `block` restores the old submission strategy,
-`single` records once per frame. Diagnostic stage capture/timing uses block mode.
-
-The backend now retains one extent by default and frees old GPU resources on a
-resolution change. Temporary image files are cleaned up. `.gitignore` no longer
-hides `src/ref/`; include that source in the next commit. Clean-build dependencies
-and pinned upstream revisions are in `notes/reproduce.md`.
-
-GPU/CPU regressions, cold capture, replay with changed input, resolution eviction,
-recording-error recovery, clean native/shader build, and a three-frame temporal pan
-all passed. `src/bench/frame_replay.py` reproduces the exact-output comparison.
-
-## Previous: pipeline specialization (2026-09-10)
-
-**The resident Vulkan path is faster, with bit-identical output.** Operation flags
-are now specialized before pipeline compilation; 33–34 cached variants cover a
-frame. All specialized variants in the compiler check are spill-free, against the
-generic 16x32 GEMM's 15:15 spills:fills. The claim that OpenCL was the only remaining
-route to improvement is withdrawn. `notes/phase27-pipeline-specialization.md`.
-
-Warm, paired measurements on a real Cyberpunk frame, with the same buffers:
-
-| Output | Generic median | Specialized median | Time reduction |
-|---|---:|---:|---:|
-| 384x384 | 126 ms | 114 ms | 9% |
-| 1280x720, two separate processes | 614–670 ms | 536–550 ms | 13–18% |
-| 1920x1080 | 1457 ms | 1179 ms | 19% |
-
-These measure the graph, not image I/O, feature assembly or composition. First use
-also compiles the variants; startup is not represented by these warm numbers.
-The old 2.9 s 1080p record was not reproduced with this protocol and must not be
-used to inflate the improvement. This remains photo mode, not real-time rendering.
-
-Enabled automatically after `make`; `--resident` and the game daemon both benefit.
-`XMX_SPECIALIZE=0` restores the generic path for comparison; default is `7`.
-`make test` passes, including the new strided/batched GEMM specialization tests.
-`src/bench/specialization.py --size 720 1280 --masks 0,7 --pairs 6` reproduces the
-paired comparison and checks exact outputs before and after changing frame input.
-
----
+softmax native packing (`phase29`), captured frame replay (`phase28`), pipeline
+specialization (`phase27`). All three are in effect and none is contested; the numbers
+live in their notes.
 
 ## IT RENDERS (2026-09-09, later)
 
@@ -320,6 +294,37 @@ followed from the wrong gate form), the leading-region projection, and "1.01x pa
 - **Statistical segmentation cannot find tensor boundaries.** Three methods failed
   calibration at C=512 where the answer was known. The notes said so; I re-ran one of
   them anyway. Read section 3 before trying a fourth.
+- **A lookup table written from memory mislabels everything downstream.**
+  `frame_profile.py` shipped a hand-written map of unary kind numbers to names. It was
+  wrong, and under the wrong names one pass appeared to run at a fifth of memory speed,
+  which produced a confident and entirely false diagnosis — with a proposed fix — before
+  anyone noticed the table. The 50 ms belonged to the one pass that needed nothing.
+  **Generate name tables from the source they name.** The file now regexes them out of
+  `resident.comp` and `attention.comp` at import. `notes/phase45`.
+- **A textbook mechanism is a hypothesis, not a finding.** `attention.comp` gives each of
+  a subgroup's 32 lanes one row of a stride-64 shared tile: bank `i mod 32` for all 32
+  lanes, a perfect 32-way conflict, arithmetic beyond dispute. Measured on Xe2 with a
+  30-line probe it costs **1.11x**, not 32x, and the `gather`/`scatter` surgery it would
+  have justified was not worth doing. `src/bench/bank_probe.*`, `notes/phase45`.
+- **On this model, looking at the picture disagrees with measuring it.** The pass moves
+  the *level* — it pulls back blown-out skin by 30-40 % — and that shift dominates every
+  raw statistic and every impression. Twice in one session a confident visual reading was
+  wrong: "more pores" where fine texture had *fallen* 16 % (it rose 31 % once normalised
+  for level), and "the irises turned brown" where the hue moved 18° to 21° and had been
+  brown all along. **Normalise for level, and sample the exact pixels you are claiming
+  about.** `notes/phase42`, `phase44`.
+- **One frame is not a recommendation.** `cinematic` was declared the defensible default
+  for faces on the strength of a single cutscene where it landed slightly positive. Three
+  frames later it was removing detail — on a bright scene it *smooths*. Any statement of
+  the form "profile X is right for Y" needs several scenes. `notes/phase44`.
+- **`pgrep -f` and `pkill -f` match the shell that runs them.** Four times now. The
+  `[n]ame` bracket trick fixes the pattern but not the case where the string also appears
+  elsewhere in your own command line — a heredoc, a comment, an echo. `pkill -f
+  nr_daemon.py` killed the very shell launching the daemon. **List with
+  `ps -eo pid,args | awk '/pattern/ && !/awk/'` and kill by explicit PID.**
+- **The test suite and a loaded daemon do not fit together.** 15 GiB shared with the iGPU;
+  a resident daemon holds the model, `make test` allocates its own device buffers, and the
+  run gets OOM-killed. Stop the daemon before the suite, not after.
 - **External write-ups are summaries, not sources.** A WebFetch of `weight_spec.json`
   returned plausible-looking shapes with a confabulated label (`block31` as "final
   output stage"). Clone the repo and read the file.
@@ -398,17 +403,26 @@ What is *not* claimed:
   384x384, **0.536–0.550 s** at 720p and **1.179 s** at 1080p. The optimization is
   bit-identical to the generic GPU path. Earlier comparisons reported head correlation
   0.9918 with the CPU reference and visually indistinguishable pictures.
-  5.6 GB of device buffers at 720p.
+  **2.3 GiB** of device buffers at 720p since the scratch arena (`phase32`); the 5.6 GB
+  this used to say predates it, and 1080p did not fit at all before.
   `src/gpu/nr_frame_resident.py`, `notes/phase15-residency.md`,
   `notes/phase18-fusion.md`, `notes/phase21-fusion-and-tiling.md`.
-- **It runs in a game.** A Vulkan layer captures the presented frame, a daemon runs
-  the model, and the result goes back into the swapchain — a photo mode, triggered by
-  a file. Verified end to end on `vkcube`.
-  `src/layer/`, `notes/phase17-integration-landscape.md`, `notes/phase19-photo-mode.md`.
+- **It runs in a real game, in two modes.** A Vulkan layer captures the presented frame,
+  a daemon runs the model, and the result goes back into the swapchain. Proven in **Dead
+  or Alive 5** (32-bit D3D9 through DXVK) with faces enhanced and measured, and the layer
+  proven to attach under **VKD3D-Proton** on a 64-bit D3D12 title. Photo mode is triggered
+  by a file; live mode (`NR_LAYER_LIVE=N`) runs continuously and reaches 10.6 fps at
+  512x288. `src/layer/`, `notes/phase34-doa5.md`, `phase41`, `phase47`.
 - **HDR is handled**: `src/ref/nr_display.py`, the recovered display codec — encode a
   linear-HDR frame to an sRGB proxy with a soft knee, run the model, fold it back by
   luminance ratio onto the untouched original. Clamping instead destroys 97 % of the
   highlight structure. `notes/phase16-hdr.md`.
+- **The interface mask works and has a failure mode.** In a live fight it cut HUD damage
+  **tenfold** (mean |d| 9.69 -> 0.97 on the health bar). On a near-static frame it covered
+  the *subject* in a speckle instead, and since the pass moves skin by 20-30 levels the
+  interleaving read as a mottled crust — worse than the softened HUD it prevents. Two
+  guards now: a majority filter narrowing the mask to solid blocks, and a coverage limit
+  that drops it entirely above 55 %. `notes/phase42`, `phase43`.
 - **The machine's real limits, measured** (`notes/phase20-machine-limits.md`):
   **70-91 GB/s** of memory bandwidth against 136.5 theoretical, the GPU holding its
   **1950 MHz ceiling** throughout a run at 46-48 C, and our GEMM at **8-12 %** of the
@@ -418,8 +432,12 @@ What is *not* claimed:
   do not establish the optimized kernel's ceiling. Earlier notes quoted 23 GB/s,
   which was single-threaded numpy and wrong by 3x. Both GEMM and elementwise graph
   operations now run on the GPU.
-- **Temporal processing exists** in `nr_temporal.py`; the game's photo daemon uses
-  the single-frame path and does not supply engine motion/history.
+- **Temporal processing exists** in `nr_temporal.py`; both game modes use the
+  single-frame path and supply no engine motion or history. Feature channels 7:10 *are*
+  the history slot and the still path fills them with the current colour. Live mode has a
+  previous output but no motion vectors, and `phase12` measured the gate at **0.032 with
+  wrong motion** — un-reprojected history would be rejected, so it is not worth wiring
+  blind. `notes/phase48`.
 - The graph recovery is **not ours**. Ours is the Xe2 execution path, the numpy
   reference, the independent second extraction that confirms their weight spec, and
   the PTX findings in section 2 that their write-up and ours agree on.
