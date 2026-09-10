@@ -182,13 +182,16 @@ The graph runs, on CPU and on XMX, and the kernel work is finished. **720p is 49
 and dead stable — 494/494/494 across three processes.** What is left, in order of
 value:
 
-1. **A frame worth looking at, from a real game.** The pipeline is proven end to end
-   under Proton and DXVK (`notes/phase24-a-real-game.md`): the layer loads inside a Wine
-   prefix, intercepts the swapchain, and the frame comes back into the game's own image.
-   The one captured so far is a warning screen. Reaching a face needs someone to drive a
-   game's menus — the only part of this that cannot be done unattended. **Dead or Alive 5**
-   (appid 311730, D3D11, installed) is the right target.
+1. ~~**A frame worth looking at, from a real game.**~~ **Done** —
+   `notes/phase34-doa5.md`. Dead or Alive 5 (appid 311730, 32-bit D3D9 through DXVK,
+   not D3D11 as written here before) was driven live and the pass ran on real faces:
+   lashes and skin resolved in the game's own swapchain image.
    `src/layer/nr-photo --proton <appid> <exe>` is the way in.
+   What is *not* done is the interface mask on a live HUD. It was written and it was
+   broken in the one place tests did not reach — `exchange()` used one size for the
+   request and the answer, so every masked frame came back unchanged
+   (`notes/phase39-layer-review.md`). Fixed and covered by a test that fails on the old
+   code, but **never yet run in a game**: that needs a restart with `NR_UI_MASK=1`.
 
 2. ~~**The Mesa/ANV cooperative-matrix store bug.**~~ **It does not exist** —
    `notes/phase38-there-was-no-bug.md`. The reproducer written to file it found that the
