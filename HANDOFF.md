@@ -205,9 +205,16 @@ value:
    repeated: shared-memory operand staging (phase 22), integer weights (phase 23),
    register blocks past 16x32 and software pipelining the K loop (phases 21 and 26),
    and storing published buffers as float16 (phase 22 — correct, and no faster).
-   The open ones: **attention layout/conversion fusion**, and OpenCL's
-   `cl_intel_subgroup_2d_block_io` and wider DPAS shapes, which are on this machine and
-   unreachable from Vulkan — a second backend, not a flag.
+   ~~The open ones: attention layout/conversion fusion, and OpenCL.~~ Both are now
+   closed. Attention Q/K fusion is **done** (phase 32: 1804 -> 1664 dispatches, 4 %).
+   **OpenCL is measured and is not the lever** — phase 33: its DPAS path reaches
+   3533 GFLOP/s against Vulkan's 3828 on the same shape, peaks at the same 16x32 block
+   and collapses beyond it the same way. Two APIs, two subgroup widths, one curve.
+   `cl_intel_subgroup_2d_block_io` is present and untried, and would have to buy more
+   than 8 % just to reach parity.
+
+**Memory is no longer the constraint it was**: the shared scratch arena took 720p from
+5041 to 2303 MiB and 1080p now fits without swapping (phase 32).
 
 **Real time is still not on the table.** At `17 ms + 488 ms/Mpixel`, 30 fps needs about
 a 243x137 extent and 15 fps about 425x239. On this hardware with this graph, DLSS-NR is
