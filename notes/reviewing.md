@@ -16,7 +16,7 @@ against this table** — that is how both earlier mistakes announced themselves:
 | checkout | base to pass | files | lines |
 |---|---|---|---|
 | `review-layer` | `pre-layer` | 11 | 1 523 — reviewed 2026-09-10, `notes/phase39-layer-review.md` |
-| `review-gpu` | `pre-gpu` | 29 | 5 423 |
+| `review-gpu` | `pre-gpu` | 29 | 5 423 — reviewed 2026-09-10, `notes/phase40-gpu-review.md` |
 | `review-ref` | `pre-ref` | 15 | 4 005 |
 | `review-tools` | `pre-tools` | 43 | 3 068 — `src/tools`, `src/bench` and `src/probe` together |
 
@@ -63,6 +63,10 @@ That is not obvious and it invalidated two attempts:
 
 Always pass a base: bare `/ultrareview` looks for `main`, which does not exist, and
 creating one would silently make some arbitrary scope the default.
+
+**All three free reviews are spent** (2026-09-10): `layer` twice — the first on a
+wrongly-built branch — and `gpu`. `review-ref` and `review-tools` are built and correct
+but have not been reviewed; they need a paid run or another allocation.
 
 ## What is worth a reviewer's time, in order
 
