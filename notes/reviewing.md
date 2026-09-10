@@ -7,30 +7,40 @@ is `master` with one area removed, so `master` against it shows exactly that are
 additions.
 
 ```sh
-git checkout review-layer && /ultrareview review-base && git checkout master
+git checkout review-layer && /ultrareview pre-layer && git checkout master
 ```
 
-and the same for `review-gpu`, `review-ref`, `review-tools`.
+and the same for `gpu`, `ref`, `tools`. **Check the scope line the command prints
+against this table** — that is how both earlier mistakes announced themselves:
 
-| branch | files | lines |
-|---|---|---|
-| `review-layer` | 11 | 1 362 — start here |
-| `review-gpu` | 29 | 5 404 |
-| `review-ref` | 15 | 4 005 |
-| `review-tools` | 43 | 3 068 |
+| checkout | base to pass | files | lines |
+|---|---|---|---|
+| `review-layer` | `pre-layer` | 11 | 1 362 — start here |
+| `review-gpu` | `pre-gpu` | 29 | 5 423 |
+| `review-ref` | `pre-ref` | 15 | 4 005 |
+| `review-tools` | `pre-tools` | 43 | 3 068 |
 
-Each is an **orphan** branch with exactly one commit on top of `review-base`, and that
-commit's patch is the area. `review-base` carries `CLAUDE.md`, `HANDOFF.md`, this file
-and the `Makefile`, so a reviewer can see what the project is without any of it counting
-as changes.
+Each `review-*` branch has **master's exact tree**, so checking one out changes no file
+on disk, and the reviewer can read the whole codebase. Its parent `pre-*` is the same
+tree with that one area removed, so the single commit between them carries exactly the
+area and nothing else.
 
-**Why orphans, which is not obvious.** The first attempt built the bases as *descendants*
-of master — take master, delete the area, commit — reasoning that `master` against such a
-branch is a tree diff showing the area as additions. `git diff` agrees. The review tool
-does not: it reviews the **patches of the commits unique to the branch**, and the only
-commit master had that the base lacked was the one adding this file. The reported scope
-came out as "1 file changed, 65 insertions" and a review was spent on it. If the scope
-line does not match the table above, the branches are wrong again.
+### Two wrong ways to build this, both tried
+
+The tool reviews **the patches of the commits unique to the branch**, not a tree diff.
+That is not obvious and it invalidated two attempts:
+
+1. **Bases as descendants of master** — take master, delete the area, commit. `git diff`
+   shows the area as additions and looks right. But the only commit master had that such
+   a base lacked was the one adding this file, so the scope came out as *1 file, 65
+   insertions* and a review was spent on the reviewing instructions.
+2. **Orphan branches holding only their own area.** The scope was then correct, but the
+   tree was not: a reviewer on such a branch sees `src/layer` and nothing else. That
+   matters — the one substantive finding from the wasted review was that two tests in
+   `src/gpu` import from files in `src/ref`, which is invisible from a branch holding
+   only one of them. Running `/ultrareview review-layer` *from master* also failed here,
+   with 181 files, because an orphan shares no history and every commit in master is
+   then unique to it.
 
 Always pass a base: bare `/ultrareview` looks for `main`, which does not exist, and
 creating one would silently make some arbitrary scope the default.
