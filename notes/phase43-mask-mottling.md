@@ -77,3 +77,31 @@ work because an interface is small and solid while a static scene is large and r
 Tests: `src/layer/test_ui_mask.py` now checks the interior of a block is still exact,
 that the narrowing only eats the boundary, that an 85 % block survives while 60 % speckle
 does not, and that the coverage limit sits between the measured clean and blotched cases.
+
+## Stress case: contre-jour, and a caveat about the metric
+
+Frame 007, 17:57 — Phase 4 vs Christie on the bright cyan stage, dark silhouettes
+against a blown-out background. 32 % held still, narrowed to 13 % by the majority
+filter, mask applied.
+
+| region | luma | mean abs diff | relative fine texture |
+| --- | --- | --- | --- |
+| skin, back | 126.5 -> 107.3 | 25.00 | **+12.6 %** |
+| dark silhouette, left | 113.2 -> 104.2 | 13.56 | +5.4 % |
+| dark silhouette, right | 121.6 -> 115.6 | 9.73 | +8.7 % |
+| blown-out background | 139.8 -> 143.9 | 4.49 | +0.1 % |
+| HUD, health bar | 77.8 -> 77.3 | 1.19 | -0.9 % |
+
+Clean: speckle amplification **x1.02**, frame brightness unmoved (127.9 -> 127.7), the
+interface protected. The model recovered form from a blown-out shoulder — the input back
+is a flat pink field, the output has shading, a spine line and a shoulder blade — and
+left the blown-out background alone, which is the right call since there is nothing there
+to recover.
+
+**The caveat.** Boundary raggedness on this frame is **20.5 %**, *higher* than the 16.5 %
+of the mottled frame 004, and yet there is no artefact. So raggedness alone does not
+predict the damage: the artefact needs a fragmented boundary **and** a level gap across
+it. Here the mask covers the HUD, which sits at luma 78 against surroundings at a similar
+level, so the fragmentation costs nothing. On frame 004 the mask covered armour at luma
+214 next to re-rendered pixels at 114. Any future guard should look at the product, not
+at either factor alone.
