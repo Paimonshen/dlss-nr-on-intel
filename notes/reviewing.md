@@ -13,12 +13,16 @@ git checkout review-layer && /ultrareview pre-layer && git checkout master
 and the same for `gpu`, `ref`, `tools`. **Check the scope line the command prints
 against this table** — that is how both earlier mistakes announced themselves:
 
-| checkout | base to pass | files | lines |
+**File count is the check**, not the line count: lines drift with every commit, files do
+not, and the file count alone catches both mistakes below — they showed as *1 file* and
+as *181 files*.
+
+| checkout | base to pass | files | reviewed |
 |---|---|---|---|
-| `review-layer` | `pre-layer` | 11 | 1 523 — reviewed 2026-09-10, `notes/phase39-layer-review.md` |
-| `review-gpu` | `pre-gpu` | 29 | 5 423 — reviewed 2026-09-10, `notes/phase40-gpu-review.md` |
-| `review-ref` | `pre-ref` | 15 | 4 005 |
-| `review-tools` | `pre-tools` | 43 | 3 068 — `src/tools`, `src/bench` and `src/probe` together |
+| `review-layer` | `pre-layer` | 11 | 2026-09-10, `notes/phase39-layer-review.md` |
+| `review-gpu` | `pre-gpu` | 29 | 2026-09-10, `notes/phase40-gpu-review.md` |
+| `review-ref` | `pre-ref` | 15 | not yet |
+| `review-tools` | `pre-tools` | 43 | not yet — `src/tools`, `src/bench`, `src/probe` |
 
 Each `review-*` branch has **master's exact tree**, so checking one out changes no file
 on disk, and the reviewer can read the whole codebase. Its parent `pre-*` is an orphan
