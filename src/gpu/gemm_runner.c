@@ -21,6 +21,7 @@ static void *slurp(const char *path, size_t *len)
 	if (!f) { perror(path); exit(1); }
 	fseek(f, 0, SEEK_END); *len = ftell(f); fseek(f, 0, SEEK_SET);
 	void *p = malloc(*len);
+	if (!p) { perror("malloc"); exit(1); }
 	if (fread(p, 1, *len, f) != *len) { fprintf(stderr, "short read %s\n", path); exit(1); }
 	fclose(f);
 	return p;

@@ -114,6 +114,8 @@ def _batched(a, b, transpose_b):
     """Route a rank-4 batched matmul, or return None to leave it on the CPU."""
     if a.ndim != 4 or b.ndim != 4 or a.shape[:2] != b.shape[:2]:
         return None
+    if MIN_INTENSITY is None:
+        calibrate()          # matmul_nt reaches here without going through matmul()
     batch = a.shape[0] * a.shape[1]
     rows, inner = a.shape[2], a.shape[3]
     cols = b.shape[2] if transpose_b else b.shape[3]

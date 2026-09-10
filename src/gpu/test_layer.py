@@ -34,14 +34,16 @@ def gpu_gemm(A, B):
     M, K = A.shape
     K2, N = B.shape
     assert K == K2 and M % 8 == 0 and N % 16 == 0 and K % 16 == 0
-    d = Path(tempfile.mkdtemp())
-    (d / "a").write_bytes(np.ascontiguousarray(A, dtype="<f2").tobytes())
-    (d / "b").write_bytes(np.ascontiguousarray(B, dtype="<f2").tobytes())
-    r = subprocess.run([str(RUNNER), str(SPV), str(M), str(N), str(K),
-                        str(d / "a"), str(d / "b"), str(d / "c")], capture_output=True, text=True)
-    if r.returncode:
-        print(r.stderr); raise SystemExit("runner failed")
-    return np.frombuffer((d / "c").read_bytes(), dtype="<f4").reshape(M, N)
+    with tempfile.TemporaryDirectory(prefix="nr-layer-") as temporary:
+        d = Path(temporary)
+        (d / "a").write_bytes(np.ascontiguousarray(A, dtype="<f2").tobytes())
+        (d / "b").write_bytes(np.ascontiguousarray(B, dtype="<f2").tobytes())
+        r = subprocess.run([str(RUNNER), str(SPV), str(M), str(N), str(K),
+                            str(d / "a"), str(d / "b"), str(d / "c")],
+                           capture_output=True, text=True)
+        if r.returncode:
+            print(r.stderr); raise SystemExit("runner failed")
+        return np.frombuffer((d / "c").read_bytes(), dtype="<f4").reshape(M, N)
 
 
 def main():

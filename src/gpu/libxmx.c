@@ -114,6 +114,26 @@ static int build_pipeline(const char *path, VkPipelineLayout layout, VkPipeline 
 /* Freeze operation flags before compilation: dead transpose/publish/width branches
  * otherwise contribute to register pressure even on dispatches that do not use them.
  * Keep the unspecialized path for same-buffer A/B measurements and shader overrides. */
+/* The block size of the tiled pipeline, from the environment.
+ *
+ * These are not free parameters. They have to match the `-DRM`/`-DRN` that
+ * `work/gemm_tiled.spv` was built with — 2 and 2, so 16x32 — because the dispatch
+ * divides the extent by them while each workgroup writes the block the *shader* has.
+ * Too small and the tiles overlap and run off the bottom edge, which
+ * `cooperativeMatrixRobustBufferAccess = false` will not catch; zero divides by zero
+ * outright, and `unsigned` turns a negative into something no extent is a multiple of,
+ * so the knob silently does nothing. Anything but a positive number is refused. */
+static unsigned block_size(const char *name, unsigned fallback)
+{
+	const char *value = getenv(name);
+	if (!value) return fallback;
+	int n = atoi(value);
+	if (n > 0) return (unsigned)n;
+	fprintf(stderr, "libxmx: %s=%s is not a positive block size; using %u\n",
+		name, value, fallback);
+	return fallback;
+}
+
 static int resident_pipeline(unsigned family, unsigned flags, VkPipeline fallback,
 			     VkPipeline *out)
 {
@@ -426,8 +446,8 @@ int xmx_res_init(const char *gemm_spv, const char *unary_spv, const char *row_sp
 		return -1;
 	const char *tile = getenv("XMX_TILE_K");
 	g.tiling = tile ? atoi(tile) : 1;
-	const char *bm = getenv("XMX_TILE_M"), *bn = getenv("XMX_TILE_N");
-	g.tilem = bm ? atoi(bm) : 16; g.tilen = bn ? atoi(bn) : 32;
+	g.tilem = block_size("XMX_TILE_M", 16);
+	g.tilen = block_size("XMX_TILE_N", 32);
 	const char *sk = getenv("XMX_STAGE_K");
 	g.staging = sk ? (unsigned)atoi(sk) : 128;
 	VkCommandBufferAllocateInfo cba = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,

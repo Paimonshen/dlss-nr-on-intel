@@ -18,16 +18,20 @@ SPV = ROOT / "work" / "gemm_coopmat.spv"
 
 
 def run(M, N, K, A, B):
-    d = Path(tempfile.mkdtemp())
-    (d / "a").write_bytes(A.astype("<f2").tobytes())
-    (d / "b").write_bytes(B.astype("<f2").tobytes())
-    r = subprocess.run([str(RUNNER), str(SPV), str(M), str(N), str(K),
-                        str(d / "a"), str(d / "b"), str(d / "c")],
-                       capture_output=True, text=True)
-    if r.returncode != 0:
-        print(r.stdout, r.stderr)
-        raise SystemExit("gemm_runner failed (%d)" % r.returncode)
-    return np.frombuffer((d / "c").read_bytes(), dtype="<f4").reshape(M, N), r.stderr.strip()
+    # a context manager, not mkdtemp: this is called once per shape and the operand
+    # dumps are megabytes, on a machine whose /tmp is RAM it cannot spare
+    with tempfile.TemporaryDirectory(prefix="nr-gemm-") as temporary:
+        d = Path(temporary)
+        (d / "a").write_bytes(A.astype("<f2").tobytes())
+        (d / "b").write_bytes(B.astype("<f2").tobytes())
+        r = subprocess.run([str(RUNNER), str(SPV), str(M), str(N), str(K),
+                            str(d / "a"), str(d / "b"), str(d / "c")],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            print(r.stdout, r.stderr)
+            raise SystemExit("gemm_runner failed (%d)" % r.returncode)
+        return (np.frombuffer((d / "c").read_bytes(), dtype="<f4").reshape(M, N),
+                r.stderr.strip())
 
 
 def check(M, N, K, seed=0, scale=1.0):
