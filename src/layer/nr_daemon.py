@@ -126,9 +126,14 @@ def process_connection(connection, backend, args):
         try:
             destination = pathlib.Path(args.dump)
             destination.mkdir(parents=True, exist_ok=True)
-            image_io.save(colour, destination / "in.png")
-            image_io.save(output, destination / "out.png")
-        except (OSError, subprocess.CalledProcessError) as error:
+            # Numbered, so walking through a game and pressing the trigger repeatedly
+            # keeps every shot instead of overwriting the last one.
+            index = 1 + max((int(path.stem.split("_")[0]) for path in destination.glob("*_in.png")
+                             if path.stem.split("_")[0].isdigit()), default=0)
+            image_io.save(colour, destination / f"{index:03d}_in.png")
+            image_io.save(output, destination / f"{index:03d}_out.png")
+            print(f"  -> {destination}/{index:03d}_{{in,out}}.png", flush=True)
+        except (OSError, subprocess.CalledProcessError, ValueError) as error:
             print(f"frame returned, but dump failed: {error}", flush=True)
     print(f"{width}x{height} {FORMATS[vk_format][1]} in "
           f"{time.perf_counter() - clock:.2f}s  "
