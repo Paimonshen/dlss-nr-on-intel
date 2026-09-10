@@ -62,6 +62,9 @@ struct device_data {
 	PFN_vkGetDeviceProcAddr get_device_proc;
 	PFN_vkQueuePresentKHR present;
 	PFN_vkCreateSwapchainKHR create_swapchain;
+	PFN_vkDestroySwapchainKHR destroy_swapchain;
+	PFN_vkGetDeviceQueue get_device_queue;
+	PFN_vkGetDeviceQueue2 get_device_queue2;
 	PFN_vkGetSwapchainImagesKHR get_swapchain_images;
 	PFN_vkDestroyDevice destroy_device;
 };
@@ -77,6 +80,7 @@ struct swapchain_data {
 
 static struct device_data devices[8];
 static struct swapchain_data swapchains[MAX_SWAPCHAINS];
+
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static PFN_vkGetInstanceProcAddr next_instance_proc;
 static VkInstance layer_instance;
@@ -91,8 +95,11 @@ static int ui_mask;
  * process: the implementation is Python and this is a shared object living inside the
  * game. For a photo mode the game is meant to stall anyway, so the round trip is free;
  * a per-frame pass would need the graph ported to C. */
+/* `reply_size` is deliberately separate from `payload_size`: the interface mask makes
+ * the request larger than the answer, and reusing one size meant asking for bytes the
+ * daemon never sends — the read hit EOF and every masked frame came back unchanged. */
 static int exchange(const void *header, size_t header_size, const void *payload,
-		    size_t payload_size, void *reply)
+		    size_t payload_size, void *reply, size_t reply_size)
 {
 	int fd = socket(AF_UNIX, SOCK_STREAM, 0);
 	if (fd < 0) return -1;
@@ -123,8 +130,8 @@ static int exchange(const void *header, size_t header_size, const void *payload,
 		sent += (size_t)n;
 	}
 	unsigned char *in = reply;
-	for (size_t got = 0; got < payload_size; ) {
-		ssize_t n = read(fd, in + got, payload_size - got);
+	for (size_t got = 0; got < reply_size; ) {
+		ssize_t n = read(fd, in + got, reply_size - got);
 		if (n < 0 && errno == EINTR) continue;
 		if (n <= 0) { close(fd); return -1; }
 		got += (size_t)n;
@@ -138,6 +145,78 @@ static struct device_data *find_device(VkDevice device)
 	for (int i = 0; i < 8; i++)
 		if (devices[i].device == device) return &devices[i];
 	return NULL;
+}
+
+/* Which device and queue family a VkQueue belongs to.
+ *
+ * `vkQueuePresentKHR` hands over a queue and nothing else. Taking the first live device
+ * and the family of `pQueueCreateInfos[0]` is right for the single-queue case and wrong
+ * the moment a game asks for a dedicated present or transfer family, which VKD3D-Proton
+ * does: the command buffer would then be allocated from a pool of the wrong family and
+ * submitted anyway, which is invalid. So the queues are recorded as they are handed out. */
+#define MAX_QUEUES 16
+static struct queue_data {
+	VkQueue queue;
+	VkDevice device;
+	uint32_t family;
+} queues[MAX_QUEUES];
+
+static struct queue_data *find_queue(VkQueue queue)
+{
+	for (int i = 0; i < MAX_QUEUES; i++)
+		if (queues[i].queue == queue) return &queues[i];
+	return NULL;
+}
+
+static void remember_queue(VkDevice device, uint32_t family, VkQueue queue)
+{
+	if (!queue) return;
+	pthread_mutex_lock(&lock);
+	if (!find_queue(queue))
+		for (int i = 0; i < MAX_QUEUES; i++)
+			if (!queues[i].queue) {
+				queues[i] = (struct queue_data){ queue, device, family };
+				break;
+			}
+	pthread_mutex_unlock(&lock);
+}
+
+VKAPI_ATTR void VKAPI_CALL nr_GetDeviceQueue(VkDevice device, uint32_t family,
+					     uint32_t index, VkQueue *queue)
+{
+	struct device_data *data = find_device(device);
+	if (!data || !data->get_device_queue) return;
+	data->get_device_queue(device, family, index, queue);
+	remember_queue(device, family, *queue);
+}
+
+VKAPI_ATTR void VKAPI_CALL nr_GetDeviceQueue2(VkDevice device,
+					      const VkDeviceQueueInfo2 *info, VkQueue *queue)
+{
+	struct device_data *data = find_device(device);
+	if (!data || !data->get_device_queue2) return;
+	data->get_device_queue2(device, info, queue);
+	remember_queue(device, info->queueFamilyIndex, *queue);
+}
+
+/* Four bytes a pixel is assumed everywhere downstream: the staging buffer is sized
+ * `width * height * 4`, `vkCmdCopyImageToBuffer` derives its extent from the image, and
+ * the daemon decodes exactly these five formats. An HDR swapchain — R16G16B16A16_SFLOAT
+ * is eight — would have the driver copy twice what the buffer holds. So a format that
+ * is not on this list is not tracked at all, and the layer stays out of the way. */
+static int format_is_four_bytes(VkFormat format)
+{
+	switch (format) {
+	case VK_FORMAT_R8G8B8A8_UNORM:
+	case VK_FORMAT_R8G8B8A8_SRGB:
+	case VK_FORMAT_B8G8R8A8_UNORM:
+	case VK_FORMAT_B8G8R8A8_SRGB:
+	case VK_FORMAT_A2B10G10R10_UNORM_PACK32:
+	case VK_FORMAT_A2R10G10B10_UNORM_PACK32:
+		return 1;
+	default:
+		return 0;
+	}
 }
 
 static struct swapchain_data *find_swapchain(VkSwapchainKHR swapchain)
@@ -223,6 +302,12 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateDevice(VkPhysicalDevice physical,
 		data->physical = physical;
 		data->get_device_proc = next_device;
 		data->present = (PFN_vkQueuePresentKHR)next_device(*device, "vkQueuePresentKHR");
+		data->get_device_queue =
+			(PFN_vkGetDeviceQueue)next_device(*device, "vkGetDeviceQueue");
+		data->get_device_queue2 =
+			(PFN_vkGetDeviceQueue2)next_device(*device, "vkGetDeviceQueue2");
+		data->destroy_swapchain =
+			(PFN_vkDestroySwapchainKHR)next_device(*device, "vkDestroySwapchainKHR");
 		data->create_swapchain =
 			(PFN_vkCreateSwapchainKHR)next_device(*device, "vkCreateSwapchainKHR");
 		data->get_swapchain_images =
@@ -252,10 +337,18 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateSwapchainKHR(VkDevice device,
 		r = data->create_swapchain(device, info, allocator, swapchain);
 	if (r != VK_SUCCESS) return r;
 
+	if (!format_is_four_bytes(info->imageFormat)) {
+		fprintf(stderr, "[nr_layer] swapchain format %d is not four bytes a pixel; "
+			"leaving it alone\n", info->imageFormat);
+		return r;
+	}
 	pthread_mutex_lock(&lock);
 	struct swapchain_data *entry = NULL;
 	for (int i = 0; i < MAX_SWAPCHAINS; i++)
 		if (!swapchains[i].swapchain) { entry = &swapchains[i]; break; }
+	if (!entry)
+		fprintf(stderr, "[nr_layer] all %d swapchain slots are in use; this one is "
+			"not tracked\n", MAX_SWAPCHAINS);
 	if (entry) {
 		memset(entry, 0, sizeof *entry);
 		entry->swapchain = *swapchain;
@@ -270,6 +363,23 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateSwapchainKHR(VkDevice device,
 	}
 	pthread_mutex_unlock(&lock);
 	return r;
+}
+
+/* Without this the eight slots are consumed one per window resize, exclusive-fullscreen
+ * toggle or HDR renegotiation, after which nothing is tracked and the photo mode goes
+ * quiet. Worse, a driver may reuse a handle, and then `find_swapchain` would match a
+ * stale entry whose VkImages are long destroyed. */
+VKAPI_ATTR void VKAPI_CALL nr_DestroySwapchainKHR(VkDevice device, VkSwapchainKHR swapchain,
+						  const VkAllocationCallbacks *allocator)
+{
+	struct device_data *data = find_device(device);
+	pthread_mutex_lock(&lock);
+	for (int i = 0; i < MAX_SWAPCHAINS; i++)
+		if (swapchains[i].swapchain == swapchain)
+			memset(&swapchains[i], 0, sizeof swapchains[i]);
+	pthread_mutex_unlock(&lock);
+	if (data && data->destroy_swapchain)
+		data->destroy_swapchain(device, swapchain, allocator);
 }
 
 static uint32_t memory_type(struct device_data *data, uint32_t bits,
@@ -494,7 +604,7 @@ static int process_frame(struct device_data *data, struct swapchain_data *chain,
 	/* The mask travels immediately after the colour, one byte a pixel. */
 	if (masked) {
 		if (exchange(header, sizeof header, data->outgoing,
-			     (size_t)needed + pixels, data->result)) {
+			     (size_t)needed + pixels, data->result, (size_t)needed)) {
 			fprintf(stderr, "[nr_layer] the daemon did not answer; frame unchanged\n");
 			return -1;
 		}
@@ -503,7 +613,8 @@ static int process_frame(struct device_data *data, struct swapchain_data *chain,
 			chain->extent.width, chain->extent.height);
 		return 0;
 	}
-	if (exchange(header, sizeof header, data->mapped, (size_t)needed, data->result)) {
+	if (exchange(header, sizeof header, data->mapped, (size_t)needed, data->result,
+		     (size_t)needed)) {
 		fprintf(stderr, "[nr_layer] the daemon did not answer; frame unchanged\n");
 		return -1;
 	}
@@ -518,7 +629,26 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
 {
 	frame_counter++;
 	struct device_data *data = NULL;
-	for (int i = 0; i < 8; i++) if (devices[i].device) { data = &devices[i]; break; }
+	/* Resolve the queue rather than taking the first live device: with two devices the
+	 * first is not necessarily this one, and the family decides which pool is legal. */
+	struct queue_data *owner = find_queue(queue);
+	if (owner) {
+		data = find_device(owner->device);
+		if (data && data->queue_family != owner->family) {
+			data->queue_family = owner->family;
+			/* Destroy rather than drop: command buffers are allocated and freed
+			 * per transfer, so nothing outlives the pool, and a dropped handle
+			 * would leak once per family change. */
+			if (data->pool) {
+				PFN_vkDestroyCommandPool destroy = (PFN_vkDestroyCommandPool)
+					data->get_device_proc(data->device, "vkDestroyCommandPool");
+				if (destroy) destroy(data->device, data->pool, NULL);
+				data->pool = VK_NULL_HANDLE;   /* rebuilt for the right family */
+			}
+		}
+	}
+	if (!data)
+		for (int i = 0; i < 8; i++) if (devices[i].device) { data = &devices[i]; break; }
 	if (!data) return VK_ERROR_INITIALIZATION_FAILED;
 
 	/* A file is the trigger, not a key: it works the same on X11 and Wayland, needs
@@ -573,6 +703,9 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL nr_GetDeviceProcAddr(VkDevice device,
 {
 	INTERCEPT(QueuePresentKHR);
 	INTERCEPT(CreateSwapchainKHR);
+	INTERCEPT(DestroySwapchainKHR);
+	INTERCEPT(GetDeviceQueue);
+	INTERCEPT(GetDeviceQueue2);
 	struct device_data *data = find_device(device);
 	return data ? data->get_device_proc(device, pName) : NULL;
 }
@@ -586,6 +719,9 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL nr_GetInstanceProcAddr(VkInstance insta
 	INTERCEPT(GetDeviceProcAddr);
 	INTERCEPT(QueuePresentKHR);
 	INTERCEPT(CreateSwapchainKHR);
+	INTERCEPT(DestroySwapchainKHR);
+	INTERCEPT(GetDeviceQueue);
+	INTERCEPT(GetDeviceQueue2);
 	return next_instance_proc ? next_instance_proc(instance, pName) : NULL;
 }
 

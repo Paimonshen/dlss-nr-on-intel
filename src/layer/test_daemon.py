@@ -61,7 +61,7 @@ def request_tests():
 
 def native_exchange_tests():
     with tempfile.TemporaryDirectory(prefix='nr-exchange-') as temporary:
-        for mode in ('echo', 'reject', 'partial'):
+        for mode in ('echo', 'reject', 'partial', 'masked'):
             path = str(pathlib.Path(temporary) / mode)
             errors = []
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
@@ -75,10 +75,17 @@ def native_exchange_tests():
                         with connection:
                             connection.settimeout(5)
                             header = daemon.receive(connection, 16)
-                            _, width, height, _ = struct.unpack('<4I', header)
+                            magic, width, height, _ = struct.unpack('<4I', header)
                             if mode == 'reject':
                                 return  # client may still be writing a large payload
                             body = daemon.receive(connection, width * height * 4)
+                            if mode == 'masked':
+                                # the request carries a mask plane the answer does not,
+                                # which is exactly what the daemon does
+                                assert magic == daemon.MAGIC_MASKED, hex(magic)
+                                daemon.receive(connection, width * height)
+                                connection.sendall(body)
+                                return
                             connection.sendall(body if mode == 'echo' else body[:17])
                     except Exception as error:
                         errors.append(error)
@@ -86,12 +93,12 @@ def native_exchange_tests():
                 thread = threading.Thread(target=serve)
                 thread.start()
                 result = subprocess.run([str(ROOT / 'work' / 'test_exchange'), path,
-                                         'echo' if mode == 'echo' else 'reject'],
+                                         mode if mode in ('echo', 'masked') else 'reject'],
                                         capture_output=True, timeout=10)
                 thread.join(timeout=6)
                 assert not thread.is_alive() and not errors, errors
                 assert result.returncode == 0, (mode, result.returncode, result.stderr)
-    print('daemon/layer: early bounds, HDR/alpha round trips, truncation and SIGPIPE-safe exchange OK')
+    print('daemon/layer: early bounds, HDR/alpha round trips, truncation, a masked\n  request whose answer is smaller, and a SIGPIPE-safe exchange OK')
 
 
 if __name__ == '__main__':

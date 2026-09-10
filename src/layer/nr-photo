@@ -47,7 +47,10 @@ export VK_LAYER_PATH="$layer_dir" \
 # can leave the interface exactly as the game drew it. Off unless asked for: it cannot
 # tell an interface over a still scene from a still scene, and refuses rather than
 # guesses when almost nothing moved.
-[ -n "${NR_UI_MASK:-}" ] && export NR_LAYER_UI_MASK=1
+# an `&&` one-liner here is a trap under `set -e`: write the branch out
+if [ -n "${NR_UI_MASK:-}" ]; then
+    export NR_LAYER_UI_MASK=1
+fi
 
 if [ "${1:-}" = "--proton" ] || [ "${1:-}" = "--check-proton" ]; then
     check_only=0
@@ -107,8 +110,14 @@ if [ "${1:-}" = "--steam" ]; then
     make -s -C "$root" work/libnr_layer32.so
     python3 "$root/src/layer/prepare_layer.py" "$layer_dir"
     printf 'Paste this into the game'"'"'s Steam launch options:\n\n'
-    printf '  VK_LAYER_PATH=%q VK_INSTANCE_LAYERS=VK_LAYER_dlssnr_intel ENABLE_NR_LAYER=1 NR_LAYER_SOCKET=%q NR_LAYER_TRIGGER=%q %%command%%\n\n' \
-           "$layer_dir" "$socket" "$trigger"
+    # the printed line has to carry the mask too: a Steam-launched game does not inherit
+    # this shell's environment, so an exported NR_LAYER_UI_MASK would silently vanish
+    mask=""
+    if [ -n "${NR_LAYER_UI_MASK:-}" ]; then
+        mask="NR_LAYER_UI_MASK=1 "
+    fi
+    printf '  VK_LAYER_PATH=%q VK_INSTANCE_LAYERS=VK_LAYER_dlssnr_intel ENABLE_NR_LAYER=1 NR_LAYER_SOCKET=%q NR_LAYER_TRIGGER=%q %s%%command%%\n\n' \
+           "$layer_dir" "$socket" "$trigger" "$mask"
     printf 'Then: touch %s to enhance, rm %s to release.\n' "$trigger" "$trigger"
     exit 0
 fi

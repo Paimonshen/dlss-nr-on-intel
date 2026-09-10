@@ -146,10 +146,7 @@ def process_connection(connection, backend, args):
             print(f"  -> {destination}/{index:03d}_{{in,out}}.png", flush=True)
         except (OSError, subprocess.CalledProcessError, ValueError) as error:
             print(f"frame returned, but dump failed: {error}", flush=True)
-    note = ""
-    if interface is not None:
-        held = np.frombuffer(interface, np.uint8).reshape(height, width) > 127
-        note = f"  interface {100 * held.mean():.0f}% left alone"
+    note = "" if interface is None else f"  interface {100 * held.mean():.0f}% left alone"
     print(f"{width}x{height} {FORMATS[vk_format][1]} in "
           f"{time.perf_counter() - clock:.2f}s  "
           f"change {np.abs(output - colour).mean():.5f}{note}", flush=True)
