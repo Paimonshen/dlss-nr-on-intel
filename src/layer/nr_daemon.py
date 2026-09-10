@@ -39,6 +39,7 @@ sys.path.insert(0, str(ROOT / "src" / "gpu"))
 import nr_frame  # noqa: E402
 
 MAGIC = 0x304E524E
+MASK_COVERAGE_LIMIT = 0.55   # above this the mask is the scene, not the interface
 MAGIC_MASKED = 0x314E524E     # the same, with a one-byte-per-pixel interface mask after the colour
 
 # The swapchain formats a compositor or VKD3D actually hands out. A game writes
@@ -95,6 +96,38 @@ def receive(connection, count):
     return b"".join(chunks)
 
 
+SOLID_RADIUS = 3
+
+
+def solid_regions(held, radius=SOLID_RADIUS, majority=0.75):
+    """Keep only the parts of the interface mask that sit inside a solid held-still block.
+
+    The layer marks single pixels, and that is right for an interface: a health bar is a
+    slab of pixels that do not move. But a nearly static scene — a round transition, a
+    slow replay — makes the *subject* half-hold too, and the mask comes back as a fine
+    speckle over the character. Composing that interleaves original and re-rendered
+    pixels, and since the pass moves skin by 20-30 levels the two populations differ by
+    up to 100, which reads as mottled crust. Measured in `notes/phase43`.
+
+    A majority filter separates them: an interface keeps ~85% of its pixels across a
+    whole window and survives, speckle at ~60% or less does not. It is a majority rather
+    than an erosion because a real interface does lose scattered pixels — an animated
+    shine, bloom from the fighters — and an all-or-nothing test would erase the bar along
+    with the noise.
+    """
+    r = int(radius)
+    if r < 1:
+        return held
+    height, width = held.shape
+    padded = np.zeros((height + 2 * r, width + 2 * r), np.int32)
+    padded[r:r + height, r:r + width] = held
+    integral = np.pad(padded.cumsum(0).cumsum(1), ((1, 0), (1, 0)))
+    k = 2 * r + 1
+    counted = (integral[k:k + height, k:k + width] - integral[0:height, k:k + width]
+               - integral[k:k + height, 0:width] + integral[0:height, 0:width])
+    return counted >= majority * k * k
+
+
 def process_connection(connection, backend, args):
     """One request. Reject invalid extents before allocating/receiving the body.
 
@@ -120,11 +153,25 @@ def process_connection(connection, backend, args):
         colour, geometry=geometry, **nr_frame.PROFILES[args.profile])
     head = geometry.crop(backend.run_features(features))
     control = None
+    held = None
     if interface is not None:
         # Red scales the blend per pixel, so an interface pixel comes back exactly as
         # the game drew it. The network still runs over the whole frame — masking the
         # composition rather than the input keeps the numerical path untouched.
-        held = np.frombuffer(interface, np.uint8).reshape(height, width) > 127
+        held = solid_regions(
+            np.frombuffer(interface, np.uint8).reshape(height, width) > 127)
+        # An interface is a small part of the frame. When the held region is most of it,
+        # the scene itself is standing still — a round transition, a replay pause — and
+        # what is being protected is the subject, not the HUD. Composing that leaves the
+        # character in patches of two different exposures, which is far worse than a
+        # softened health bar. Measured in `notes/phase43`: 43% held gave a clean frame,
+        # 69% and 75% both blotched. So the mask is dropped rather than trusted.
+        if held.mean() > MASK_COVERAGE_LIMIT:
+            print(f"  interface mask covers {100 * held.mean():.0f}% of the frame; "
+                  f"that is the scene holding still, not a HUD — mask dropped",
+                  flush=True)
+            held = None
+    if held is not None:
         control = np.ones((height, width, 3), np.float32)
         control[held, 0] = 0.0
     output = nr_frame.compose(head, colour, intensity=args.intensity,
@@ -146,7 +193,7 @@ def process_connection(connection, backend, args):
             print(f"  -> {destination}/{index:03d}_{{in,out}}.png", flush=True)
         except (OSError, subprocess.CalledProcessError, ValueError) as error:
             print(f"frame returned, but dump failed: {error}", flush=True)
-    note = "" if interface is None else f"  interface {100 * held.mean():.0f}% left alone"
+    note = "" if held is None else f"  interface {100 * held.mean():.0f}% left alone"
     print(f"{width}x{height} {FORMATS[vk_format][1]} in "
           f"{time.perf_counter() - clock:.2f}s  "
           f"change {np.abs(output - colour).mean():.5f}{note}", flush=True)
