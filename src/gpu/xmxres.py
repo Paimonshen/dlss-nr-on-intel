@@ -82,6 +82,7 @@ def _load():
              + [ctypes.c_uint, ctypes.c_uint, ctypes.c_float] + [ctypes.c_uint] * 5),
             ("xmx_rec_row", [ctypes.c_uint] + [ctypes.c_int] * 4 + [ctypes.c_uint] * 5
              + [ctypes.c_float]),
+            ("xmx_profile", [ctypes.c_int]),
             ("xmx_rec_history", [ctypes.c_int] * 3 + [ctypes.c_uint] * 5)):
         getattr(lib, name).argtypes = args
         getattr(lib, name).restype = ctypes.c_int
@@ -91,6 +92,12 @@ def _load():
     lib.xmx_buf_bytes.restype = ctypes.c_ulonglong
     lib.xmx_buf_total_bytes.argtypes = []
     lib.xmx_buf_total_bytes.restype = ctypes.c_ulonglong
+    lib.xmx_profile_reset.argtypes = []
+    lib.xmx_profile_reset.restype = None
+    lib.xmx_profile_ms.argtypes = [ctypes.c_uint]
+    lib.xmx_profile_ms.restype = ctypes.c_double
+    lib.xmx_profile_count.argtypes = [ctypes.c_uint]
+    lib.xmx_profile_count.restype = ctypes.c_uint
     # The shader paths take an environment override so a variant can be measured
     # against the shipped one without editing the tree.
     spv = [os.environ.get(name) or str(ROOT / "work" / default)
@@ -264,6 +271,41 @@ class _ScratchBuffer:
         if self._buffer is not None:
             self._buffer.free()
         self._closed = True
+
+
+# The families a profiled pass can belong to; a kind is `family * 32 + subkind`, so a
+# unary or row pass is attributed to the specific operation rather than to its family.
+PROFILE_FAMILIES = ("gemm", "gemm tiled", "gemm staged", "unary", "row", "history", "copy",
+                    "start")
+
+
+def profile(on=True):
+    """Turn GPU timestamping on. Off by default and free when off."""
+    lib = _load()
+    if lib.xmx_profile(1 if on else 0):
+        raise RuntimeError("xmx_profile: " + lib.xmx_error().decode())
+
+
+def profile_reset():
+    _load().xmx_profile_reset()
+
+
+def profile_totals():
+    """Milliseconds and pass count per kind, as {(family, subkind): (ms, passes)}.
+
+    Only kinds that actually ran appear. `start` is the zero point of the first frame
+    recorded and is not a pass, so it is dropped."""
+    lib = _load()
+    out = {}
+    for kind in range(256):
+        passes = lib.xmx_profile_count(kind)
+        if not passes:
+            continue
+        family, sub = PROFILE_FAMILIES[kind // 32], kind % 32
+        if family == "start":
+            continue
+        out[(family, sub)] = (lib.xmx_profile_ms(kind), passes)
+    return out
 
 
 class Runtime:

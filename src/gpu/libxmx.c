@@ -32,6 +32,9 @@ static struct {
 	int syncing;
 	unsigned staging;
 	VkCommandBuffer rcb; VkFence rfence; int recording, recorded, rready;
+	/* GPU-side profiling. One timestamp after each recorded pass, so pass i costs
+	 * ts[i+1]-ts[i]; the barrier between passes makes that attribution exact. */
+	VkQueryPool qpool; unsigned prof, prof_n; float ts_period;
 	char name[256]; char err[256]; int ready;
 } g;
 
@@ -43,7 +46,17 @@ static struct {
 static unsigned specialized_count;
 
 #define MAX_GRAPHS 128
-static struct { VkCommandBuffer commands; int passes; } graphs[MAX_GRAPHS];
+static struct { VkCommandBuffer commands; int passes; unsigned stamps; unsigned char *kinds; }
+	graphs[MAX_GRAPHS];
+
+/* A pass's kind is `family * 32 + subkind`, so a unary or row pass is attributed to the
+ * specific operation it runs rather than lumped in with its family. Families below. */
+#define MAX_STAMPS 8192
+#define PROF_KINDS 256
+enum { PK_GEMM = 0, PK_TILED, PK_STAGED, PK_UNARY, PK_ROW, PK_HISTORY, PK_COPY, PK_START = 7 };
+static unsigned char stamp_kind[MAX_STAMPS];
+static double prof_ms[PROF_KINDS];
+static unsigned prof_hits[PROF_KINDS];
 
 /* Device-resident buffers. The graph's activations live here between blocks instead
  * of being read back to the host after every GEMM; on a shared-memory APU the mapping
@@ -535,6 +548,17 @@ static VkDeviceAddress addr_of(int id)
 	return (id >= 0 && id < MAX_RBUF && rbufs[id].live) ? rbufs[id].addr : 0;
 }
 
+/* Close a pass with a timestamp. Bottom-of-pipe, so it lands after the dispatch has
+ * finished rather than after it was issued. Costs one query per pass and nothing at all
+ * when profiling is off, which is why it can live on the hot path. */
+static void stamp(unsigned family, unsigned subkind)
+{
+	if (!g.prof || !g.qpool || g.prof_n >= MAX_STAMPS) return;
+	stamp_kind[g.prof_n] = (unsigned char)(family * 32u + (subkind & 31u));
+	vkCmdWriteTimestamp(g.rcb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g.qpool, g.prof_n);
+	g.prof_n++;
+}
+
 int xmx_begin(void)
 {
 	if (!g.rready) FAIL("resident runtime not initialised", 0);
@@ -547,6 +571,11 @@ int xmx_begin(void)
 	g.recording = 1;
 	g.recorded = 0;
 	g.syncing = 1;
+	g.prof_n = 0;
+	if (g.prof && g.qpool) {
+		vkCmdResetQueryPool(g.rcb, g.qpool, 0, MAX_STAMPS);
+		stamp(PK_START, 0);       /* the zero point every later stamp is measured from */
+	}
 	return 0;
 }
 
@@ -602,6 +631,7 @@ int xmx_rec_copy(int source, int target, unsigned long long bytes,
 	vkCmdPipelineBarrier(g.rcb, VK_PIPELINE_STAGE_TRANSFER_BIT,
 		VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
 		0, 1, &after, 0, NULL, 0, NULL);
+	stamp(PK_COPY, 0);
 	g.recorded++;
 	return 0;
 }
@@ -660,6 +690,7 @@ int xmx_rec_gemm(int a, int b, int c, unsigned M, unsigned N, unsigned K, unsign
 		else       vkCmdDispatch(g.rcb, (N + 15) / 16, (M + 7) / 8, batch ? batch : 1);
 	}
 	barrier();
+	stamp(staged ? PK_STAGED : (tiled ? PK_TILED : PK_GEMM), bt);
 	g.recorded++;
 	return 0;
 }
@@ -678,6 +709,7 @@ int xmx_rec_unary(unsigned kind, int a, int b, int c, int d, unsigned n, unsigne
 	vkCmdPushConstants(g.rcb, g.rpl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
 	vkCmdDispatch(g.rcb, (n + 255) / 256, 1, 1);
 	barrier();
+	stamp(PK_UNARY, kind);
 	g.recorded++;
 	return 0;
 }
@@ -698,6 +730,7 @@ int xmx_rec_row(unsigned kind, int a, int b, int c, int d, unsigned rows, unsign
 	vkCmdPushConstants(g.rcb, g.rpl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
 	vkCmdDispatch(g.rcb, (rows + 31) / 32, 1, 1);
 	barrier();
+	stamp(PK_ROW, kind);
 	g.recorded++;
 	return 0;
 }
@@ -715,8 +748,27 @@ int xmx_rec_history(int history, int motion, int out, unsigned pixels, unsigned 
 	vkCmdPushConstants(g.rcb, g.rpl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
 	vkCmdDispatch(g.rcb, (pixels + 63) / 64, 1, 1);
 	barrier();
+	stamp(PK_HISTORY, absolute & 1u);
 	g.recorded++;
 	return 0;
+}
+
+/* Read the timestamps back and add each pass to its kind's running total. Called only
+ * once the fence has signalled, so every query is available; WAIT is passed anyway
+ * because a driver may still report a query as not-ready immediately after. */
+static void collect(unsigned stamps, const unsigned char *kinds)
+{
+	if (!g.prof || !g.qpool || stamps < 2) return;
+	static uint64_t ticks[MAX_STAMPS];
+	if (vkGetQueryPoolResults(g.dev, g.qpool, 0, stamps, sizeof ticks[0] * stamps, ticks,
+				  sizeof ticks[0],
+				  VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT) != VK_SUCCESS)
+		return;
+	for (unsigned i = 1; i < stamps; i++) {
+		if (ticks[i] < ticks[i - 1]) continue;      /* a wrapped counter is not a duration */
+		prof_ms[kinds[i]] += (double)(ticks[i] - ticks[i - 1]) * g.ts_period * 1e-6;
+		prof_hits[kinds[i]]++;
+	}
 }
 
 static int submit_commands(VkCommandBuffer commands, int passes)
@@ -737,7 +789,9 @@ int xmx_submit(void)
 	g.recording = 0;
 	VkResult r = vkEndCommandBuffer(g.rcb);
 	if (r) FAIL("end resident recording", r);
-	return submit_commands(g.rcb, g.recorded);
+	int passes = submit_commands(g.rcb, g.recorded);
+	if (passes >= 0) collect(g.prof_n, stamp_kind);
+	return passes;
 }
 
 /* A graph owns its command buffer; later recording (including temporal history)
@@ -757,6 +811,14 @@ int xmx_graph_capture(void)
 	if (r) { vkFreeCommandBuffers(g.dev, g.cpool, 1, &replacement); FAIL("end graph recording", r); }
 	graphs[id].commands = g.rcb;
 	graphs[id].passes = g.recorded;
+	graphs[id].stamps = g.prof_n;
+	free(graphs[id].kinds);
+	graphs[id].kinds = NULL;
+	if (g.prof_n) {
+		graphs[id].kinds = malloc(g.prof_n);
+		if (graphs[id].kinds) memcpy(graphs[id].kinds, stamp_kind, g.prof_n);
+		else graphs[id].stamps = 0;
+	}
 	g.rcb = replacement;
 	g.recording = 0;
 	return id;
@@ -766,7 +828,64 @@ int xmx_graph_run(int id)
 {
 	if (g.recording) FAIL("cannot replay during recording", 0);
 	if (id < 0 || id >= MAX_GRAPHS || !graphs[id].commands) FAIL("graph is not live", 0);
-	return submit_commands(graphs[id].commands, graphs[id].passes);
+	int passes = submit_commands(graphs[id].commands, graphs[id].passes);
+	if (passes >= 0 && graphs[id].kinds) collect(graphs[id].stamps, graphs[id].kinds);
+	return passes;
+}
+
+/* Turn GPU-side profiling on or off.
+ *
+ * Off by default and free when off: `stamp()` returns on the first test. On, every
+ * recorded pass gains one timestamp query, which is a command-buffer write and not a
+ * synchronisation point, so the frame it measures is the frame that would have run.
+ *
+ * Returns 0, or -1 if the queue family cannot timestamp at all — some do not, and a
+ * silent zero would be worse than a refusal.
+ */
+int xmx_profile(int on)
+{
+	if (!on) { g.prof = 0; return 0; }
+	if (!g.dev) FAIL("profiling needs an initialised device", 0);
+	if (!g.qpool) {
+		VkPhysicalDeviceProperties props;
+		vkGetPhysicalDeviceProperties(g.pd, &props);
+		if (props.limits.timestampPeriod == 0.0f)
+			FAIL("this device does not support timestamps", 0);
+		uint32_t families = 0;
+		vkGetPhysicalDeviceQueueFamilyProperties(g.pd, &families, NULL);
+		VkQueueFamilyProperties *qf = malloc(families * sizeof *qf);
+		if (!qf) FAIL("queue family properties", 0);
+		vkGetPhysicalDeviceQueueFamilyProperties(g.pd, &families, qf);
+		uint32_t bits = g.qi < families ? qf[g.qi].timestampValidBits : 0;
+		free(qf);
+		if (!bits) FAIL("this queue family cannot write timestamps", 0);
+		g.ts_period = props.limits.timestampPeriod;
+		VkQueryPoolCreateInfo qi = { .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
+					     .queryType = VK_QUERY_TYPE_TIMESTAMP,
+					     .queryCount = MAX_STAMPS };
+		VkResult r = vkCreateQueryPool(g.dev, &qi, NULL, &g.qpool);
+		if (r) FAIL("timestamp query pool", r);
+	}
+	g.prof = 1;
+	return 0;
+}
+
+void xmx_profile_reset(void)
+{
+	memset(prof_ms, 0, sizeof prof_ms);
+	memset(prof_hits, 0, sizeof prof_hits);
+}
+
+/* Milliseconds and pass count for one kind, where a kind is `family * 32 + subkind`.
+ * Reading a kind that never ran gives 0, which is the honest answer. */
+double xmx_profile_ms(unsigned kind)
+{
+	return kind < PROF_KINDS ? prof_ms[kind] : 0.0;
+}
+
+unsigned xmx_profile_count(unsigned kind)
+{
+	return kind < PROF_KINDS ? prof_hits[kind] : 0u;
 }
 
 int xmx_graph_destroy(int id)
@@ -774,5 +893,8 @@ int xmx_graph_destroy(int id)
 	if (id < 0 || id >= MAX_GRAPHS || !graphs[id].commands) return 0;
 	vkFreeCommandBuffers(g.dev, g.cpool, 1, &graphs[id].commands);
 	graphs[id].commands = VK_NULL_HANDLE;
+	free(graphs[id].kinds);
+	graphs[id].kinds = NULL;
+	graphs[id].stamps = 0;
 	return 0;
 }
