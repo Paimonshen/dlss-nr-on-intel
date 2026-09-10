@@ -14,17 +14,18 @@ has native FP8 E4M3 matrix hardware. That approach does not transfer here — se
 a CPU reference.** Playable framerates are explicitly *not* a goal. Do not propose
 optimisations that trade correctness for speed until Phase 3 is done.
 
-> **REACHED 2026-09-09.** `python3 src/ref/nr_frame.py IN.png OUT.png --resident`
-> renders a frame with the real effect — lashes and hair resolved, skin pores
-> synthesised — in **0.26 s** for 384x384 and **1.56 s** for 1280x720, with the whole
-> 71-block graph resident on the GPU. The port is **bit-identical** to
-> MLX-DLSS's PyTorch original once both are given the same GEMM. Note the CPU baseline:
-> the system numpy is the netlib reference BLAS, and under OpenBLAS the CPU alone is
-> as fast as the XMX path (`notes/phase13-torch-and-blas.md`). Two adversarial controls pass. Phase 4 is done as well:
-> every GEMM, the batched attention included, runs through
-> `VK_KHR_cooperative_matrix`. **Read `HANDOFF.md` first**; it overrides this file, and
-> large parts of what follows are superseded.
-> `notes/phase7-first-render.md`, `notes/phase8-xmx-graph.md`.
+> **DONE 2026-09-10, further than the line above set out.** A frame of **Dead or Alive
+> 5** goes out of a running game, through the recovered 71-block graph on this iGPU, and
+> back into the game's own swapchain — hair separating into strands, eyelashes
+> resolving, skin picking up texture that is not in the input. 1280x720 in **~0.49 s**
+> of graph time, correlation with the CPU reference **0.981311**, and every optimisation
+> since has kept the output bit-identical.
+>
+> `notes/phase34-doa5.md` for the game, `phase7-first-render.md` for the first frame,
+> `phase8-xmx-graph.md` for the XMX path.
+>
+> **Read `HANDOFF.md` first**; it overrides this file, and large parts of what follows
+> are the record of how the answers were reached rather than the answers.
 
 ---
 
@@ -62,43 +63,39 @@ The **primary path is config 1, `fp16 × fp16 → fp32`** — the shipped weight
 
 ---
 
-## SUPERSEDED 2026-09-09 — see HANDOFF.md section 0
+## The weight format — what is live, and what was wrong twice
 
-**The section below is wrong.** The container holds *packed backend payloads* —
-permuted into `mma` fragment order and partly E4M3 — not plain dense FP16. Decoding
-them as FP16 gives values that correlate **−0.02** with the true logical tensors.
-`data_len == 2*n_elem` fixes the byte count, not the encoding. Use
-`work/mlxw/dlssnr-logical.safetensors` (649 named tensors). Kept below for the record.
+This section has been wrong twice, so it is worth stating carefully what survived.
 
-## The weights are FP16 — there is no FP8 anywhere
+**Live, and load-bearing:**
 
-**Corrected 2026-09-07. This section previously said the model ships FP8 E4M3
-weights, and everything about dequantisation followed from that. It was wrong.**
-Full evidence in `notes/phase3-weight-format.md`; reader in
-`src/tools/hnet_weights.py`.
+- **There is no FP8 anywhere in our path, and no dequantisation step.** The XMX units
+  have no FP8, and the weights are used as they arrive. The early "~148 M FP8
+  parameters" figure was the byte count read as one byte per parameter.
+- **The primary path is FP16, not BF16.** Config 1 of the cooperative-matrix table is
+  `fp16 × fp16 → fp32`, and the logical weights are FP16, so they reach the matrix units
+  with **zero conversion**. **Do not convert to BF16** — it would throw away 3 of 10
+  mantissa bits to reach a format the hardware likes no better, and phase 22 measured
+  exactly that.
+- **73 841 889 parameters**, and the on-disk 147 MB is also the in-memory footprint.
 
-The weight container states its own element count. `data_len == 2 * n_elem` holds in
-**153 of 153** tensors, so one byte per element is arithmetically impossible.
-Decoding confirms it: FP16 gives sane weights (sd ≈ 2e-03), BF16 gives 1e-18
-nonsense under either byte order. Little-endian, settled by an exact NaN/Inf census
-over all 73.8 M elements (11 non-finite vs 61 092 byte-swapped).
+**Superseded, and the trap to avoid:** the container does *not* hold plain dense FP16.
+It holds **packed backend payloads** — permuted into `mma` fragment order, partly E4M3 —
+and `data_len == 2 * n_elem` fixes the byte count, not the encoding. Reading those bytes
+as dense FP16 gives values correlating **−0.02** with the true tensors, which is how
+this project spent its first days measuring scaffolding. Use
+`work/mlxw/dlssnr-logical.safetensors`: **649 named, shaped, logical tensors**, matching
+MLX-DLSS's `weight_spec.json` exactly — 0 missing, 0 extra, 0 shape mismatches, so two
+independent extractions of the same DLL agree. `notes/phase6-mlx-dlss-unpack.md`,
+HANDOFF section 0.
 
-**73 841 889 parameters, stored little-endian FP16.** The reported "~148 M
-parameters" was the byte count divided by one, on the assumption of FP8.
-
-What follows:
-
-- **No dequantisation step exists.** No E4M3 decoder, no calibration, no error budget.
-- **Do not convert to BF16.** That was only a workaround for FP8 hardware we lack.
-  FP16 → BF16 would throw away 3 of 10 mantissa bits for nothing.
-- **The primary path is FP16, not BF16.** Config 1 of the cooperative matrix table is
-  `fp16 × fp16 → fp32`, the same shape and the same FP32 accumulation as the bf16
-  config. Stored weights reach the XMX units with **zero conversion**.
-- The debugging invariant is stronger than before: the weights are used exactly as
-  stored, so **any divergence from the CPU reference is an implementation bug.**
-
-Accumulate in FP32 — config 1 provides it. The Turing FP8-unpacking penalty was never
-relevant here and is now doubly moot.
+**One nuance on the old debugging invariant.** It used to say "the weights are used
+exactly as stored, so any divergence from the CPU reference is an implementation bug".
+That is no longer safe: the graph is chaotic, ~100 E4M3 publishes with a 6.25 % quantum
+stand between input and output, and numpy's own float32 GEMM carries more error than the
+threshold below which perturbations vanish. Per-element agreement is not a property a
+port can have. Judge on the composed image and the controls.
+`notes/phase9-numerics.md`.
 
 ---
 
@@ -142,9 +139,12 @@ Treat all of the above as *reported*, not verified. Verifying it is Phase 1's jo
 ## Hard constraints
 
 1. **Memory.** 15 GiB shared, total, for the whole system. The NVIDIA-side OptiScaler
-   mod reserves a fixed 13 GiB. We cannot. Design for a low internal model resolution
-   and **tile the frame** from the start; do not write a whole-frame path and plan to
-   retrofit tiling.
+   mod reserves a fixed 13 GiB. We cannot.
+   *Resolved differently than this expected:* **tiling was never needed.** The whole
+   frame runs at once, and a shared scratch arena — blocks execute in sequence, so roles
+   with disjoint lifetimes alias — brought 720p to **2.3 GiB** of device buffers and
+   made 1920x1080 fit without swapping. `notes/phase32-scratch-and-qk.md`. Do not
+   retrofit tiling; there is nothing to retrofit it to.
 2. **No NVIDIA GPU exists on this machine or anywhere accessible.** There is no way to
    produce reference activations from the original binary. Ground truth must come from
    our own CPU reference implementation (see Phase 3). *Partially mitigated
@@ -279,11 +279,14 @@ Treat all of the above as *reported*, not verified. Verifying it is Phase 1's jo
   as one command buffer, and activations never return to the host. 0.26 s at 384x384
   and 1.56 s at 720p, 48x and 41x against the best CPU, head correlation 0.9918 and a
   visually indistinguishable picture. Within 4.6x of the arithmetic floor.
-- **Phase 5 (later) — Integration.** Wire into a real game. Target: Control (DX12, has
-  DLSS, light enough for this iGPU under Proton, and the most published RTX 50
-  before/after comparisons to sanity-check against). Cyberpunk 2077 photo mode is the
-  better A/B still-frame source — the model is trained on skin, hair and subsurface
-  scattering, so faces show the effect most clearly.
+- **Phase 5 — Integration. DONE 2026-09-10** — `notes/phase34-doa5.md`. Not through NGX,
+  which needs an NVIDIA GPU, but through a **Vulkan layer** at `vkQueuePresentKHR`: it
+  attaches to any Vulkan application including a Windows game under Proton, copies the
+  presented frame to a daemon holding the model, and writes the result back into the
+  swapchain. A file is the trigger, so it is a photo mode rather than a per-frame pass.
+  Proven on **Dead or Alive 5 Last Round** — 32-bit D3D9 through DXVK, which needs a
+  32-bit layer library; `src/layer/prepare_layer.py` writes both manifests.
+  `src/layer/`, `notes/phase17`, `phase19`, `phase24`, `phase34`.
 
 ---
 
@@ -294,103 +297,70 @@ Treat all of the above as *reported*, not verified. Verifying it is Phase 1's jo
 2. **OpenCL DPAS shapes.** `cl_intel_subgroup_matrix_multiply_accumulate` *and*
    `..._tf32` are both present, confirming DPAS hardware beyond what Vulkan exposes.
    Using it would mean a second, OpenCL backend — not a flag.
-3. **FP32 accumulation for BF16 — yes.** `bf16 × bf16 → fp32` (C and Result both
-   fp32) is config 3. This is the path: BF16 in, FP32 accumulate.
+3. **FP32 accumulation — yes**, and the path turned out to be **FP16 in**, not BF16:
+   the DLL ships FP16 weights, so config 1 (`fp16 × fp16 → fp32`) takes them with zero
+   conversion. Config 0 (`fp16 × fp16 → fp16`) is what NVIDIA's own kernels use and is
+   implemented behind `-DACC16`; it is exact, halves the register pressure, is worth
+   1.36x on an isolated GEMM and **nothing at all in a frame**
+   (`notes/phase31`, `phase38`).
 
-## SUPERSEDED 2026-09-09 — the section below measured the scaffolding
+## Archive — two superseded sections, removed 2026-09-10
 
-`run_frame.py` and `denoise_score` were built on the wrong weight decode, and
-DLSS-NR is a detail re-render, not a denoiser, so a denoise score was never the right
-objective either. The live acceptance test is `src/ref/nr_frame.py` plus the two
-controls in `notes/phase7-first-render.md`. Kept below for the record.
+Both were long, both were wrong, and both are preserved in git history rather than here.
 
-## Goal, as redirected by the owner 2026-09-08
+- **The denoise-score acceptance test.** `run_frame.py` and `denoise_score` were built
+  on the wrong weight decode, and DLSS-NR is a detail re-render rather than a denoiser,
+  so the objective was never right either. The live acceptance test is
+  `src/ref/nr_frame.py` plus the two controls in `notes/phase7-first-render.md`.
+- **"Goal, as redirected by the owner 2026-09-08."** It recorded a project with no
+  result yet, a score 1.43x worse than doing nothing, and a network that moved the frame
+  by 0.35 %. All of that was the wrong weight decode. `notes/phase6-mlx-dlss-unpack.md`
+  is where it turned around.
 
-A **working** version that can be tested and eventually run in a game, ahead of the
-"reimplement, do not execute NVIDIA's kernels" constraint written below. The AMD route
-(capture exact RTX state, replay translated PTX) is closed to us on both halves, and
-their own evidence log says the *semantics* were never recovered by anyone. So the
-acceptance test is `src/ref/run_frame.py`: a frame in, a frame out, scored by
-`denoise_score` against a clean reference — an objective that attenuation cannot game.
+---
 
-Current standing: **no result yet.** The score reads 1.43x worse than doing nothing,
-but `--no-attend` — the network switched off entirely — scores the same to four
-decimals. Every figure this project has recorded (5.13x, 1.45x, 1.43x) is the cost of
-the stand-in bilinear resampling and skip blend; the recovered network moves the frame
-by 0.35 % and the score by 3e-5. Amplifying the branch only makes it worse
-(1.43 -> 1.61 -> 29.6x at gains 1/16/64), so its *direction* is wrong, not its scale.
-`run_frame.py` now prints `NETWORK-INERT` and a scaffolding-only baseline; run
-`--no-attend` first whenever a score moves. Target: meaningfully below 1.0x, which
-needs the stand-ins replaced (stem, output head, learned resampling, skip blend
-weights, the unapplied leading region). See `notes/phase5-visual-loop.md`.
+## Open questions — all closed, and where the answers are
 
-## Open questions to resolve next
+Every question this section once listed has been answered. Kept as an index, because
+the answers are the useful part and several of them are counter-intuitive.
 
-0. **The `128C` region is not the attention bias.** It is neither a shifted-window
-   mask nor a 2-D relative-position bias, and only ~8 bits of each 16-bit element
-   carry information (sign and exponent are constant, 321 distinct values in 65,536).
-   Its role is open; it stays wired into the softmax as a dimensionally-correct
-   placeholder. See `notes/phase3-bias-region.md`. **Narrowed 2026-09-08:** that note
-   argues the near-constant -56.2 "has no effect, softmax is shift-invariant". The
-   softmax has **no max subtraction** (`notes/phase5-softmax-found.md`), so a constant
-   of -56 pushes every logit past the -6 clamp and makes the attention exactly uniform
-   — measured. It cannot be a pre-softmax additive term.
+- **The graph, the operators, the layout.** All recovered. The port is bit-identical to
+  MLX-DLSS's PyTorch original given the same GEMM, and per-element agreement with a
+  float32 reference is impossible by construction — the graph is chaotic, and numpy's own
+  float32 GEMM carries more error than the threshold below which perturbations vanish.
+  Judge on the composed image and the controls. `notes/phase9-numerics.md`.
+- **The `128C` region is the attention bias**, in a 12-bit fragment permutation.
+  `notes/phase3-bias-region.md` and the block-family notes.
+- **The attention non-linearity is a softmax**, hand-rolled in `f16x2` with hard logit
+  clamps and no max subtraction. `notes/phase5-softmax-found.md`.
+- **`attn_scale` is FP32 per head.** `notes/phase5-attn-scale-fp32.md`.
+- **`VK_NV_cooperative_matrix2`** advertises zero flexible-dimension configs here.
+  **OpenCL** *is* reachable and *is* slower — its DPAS path peaks at 3533 GFLOP/s
+  against Vulkan's 3828 on the same shape, and collapses at the same block size.
+  `notes/phase33-opencl-measured.md`.
+- **Edge padding** for unaligned tiles: the buffers carry the padding, since
+  `cooperativeMatrixRobustBufferAccess` is false. Settled in the resident path.
 
-0b. *(Withdrawn 2026-09-08.)* The "missing ~2^8.5 scale factor" is no longer an open
-   problem. It was inferred from a norm-preserving `cos*skip + sin*branch` gate form
-   that the PTX rules out — no kernel computes a sqrt or touches the immediate 1.0f.
-   With the gate as a plain multiply the trunk does not decay and a small branch is
-   ordinary residual behaviour. See `notes/phase3-first-operator.md`.
+### What is actually left
 
-0c. **The attention non-linearity is solved.** It *is* a softmax; `ex2` never appears
-   because `exp` is hand-rolled in `f16x2` from fma/max/min plus a shift-and-add on
-   the f16 bit pattern. Logits are hard-clamped — **Swin +-6, ViT +-3** — instead of
-   max-subtracted. Constants recovered and verified bit-exact;
-   `ptx_exp()` / `ptx_softmax()` in `src/ref/hnet_ops.py`. This also withdraws
-   `notes/phase5-no-softmax.md`. See `notes/phase5-softmax-found.md`.
+1. **A game frame worth looking at, beyond the one we have.** The pipeline is proven;
+   reaching a good scene needs someone driving the game.
+2. **The interface mask on a live HUD.** Built and exact (`src/layer/test_ui_mask.py`),
+   but motion cannot separate an interface over a still scene from a still scene, so it
+   refuses on a paused frame and wants a moving one to prove itself.
+   `notes/phase35-what-the-operator-does.md`.
+3. **Intercepting a game's own upscaler**, which is the only route to the things the
+   vendor gets for free: a pre-interface insertion point, depth and motion guides, and a
+   smaller extent. Dead or Alive 6 carries FSR2 and XeSS and both run on this hardware.
+   `notes/phase37-neural-upstream.md`.
 
-0d. **`attn_scale` is FP32 — SOLVED.** The `2H` run is H **FP32** scalars, not 2H FP16
-   ones, and `unknown_even` is the low half rather than an unidentified parameter: in
-   the ViT blocks those slots take exactly 8 distinct values, all multiples of 0x2000
-   (an FP16 widened to FP32); in the Swin blocks they hold NaNs and 1e4 magnitudes. The
-   kernel confirms it — `ld.global.b32` + `cvt.rn.f16.f32`, stride 4, indexed per head.
-   Scales become 0.015-28 instead of 1.1-2.8, and this is the **only** reading under
-   which a logit ever reaches the hardware's +-6 clamp. The parameter block is also
-   decoded: `+0` input, `+8` output, `+16` weight/scalar arena, `+24`/`+32` dims — so
-   the "launch parameter block" is recoverable after all. This supersedes the
-   stored-as-a-log hypothesis. See `notes/phase5-attn-scale-fp32.md`.
+**Performance is finished.** Every lever has been measured and the notes say so:
+register tiling, operand staging, integer weights, storage width, the accumulator
+format, and OpenCL. The frame is latency-bound in both halves at ~488 ms for 720p, and
+`17 ms + 488 ms per megapixel` is the cost model. 30 fps is not reachable at any usable
+extent — this is a photo mode, and the layer delivers exactly that.
 
-1. **Write the operators.** *Started* — `src/ref/hnet_ops.py`,
-   `notes/phase3-first-operator.md`: the split-Swin-16H **attention path runs on real
-   weights**. GQA splits the qkv slice exactly (C² + C²/4 + C²/4), the bias reshapes
-   to (16, 64, 64), attention rows sum to 1 to 4e-16 and per-head entropy is 3.4–3.9
-   of a possible 4.159 nats — a trained distribution, not a degenerate one.
-   Cosine gates (values in [-1,1], max exactly 1.0) are **universal** — every block
-   type has them, and those matrices carry no bias. QK-normalisation is confirmed
-   (32 `rsqrt` for 16 heads; the branch is input-scale-invariant to 1.2%), and
-   `attn_scale` is located: the odd slots of the `2H` run, one per head.
-   **All block types now have an ordered internal layout** —
-   `notes/phase3-block-internals.md`. Remaining: the ~450x branch/skip factor, which
-   lives in the launch parameter block and is *not* recoverable from PTX alone.
-2. **Which named parameter is which inside the first `4C^2 + 64C`.** The block's
-   *ordered* layout is now solved — `notes/phase3-block-layout.md`, exact for 45 of
-   46 fused blocks — and the gates and attention bias are identified by their value
-   signatures. What remains is naming the individual matrices inside the leading
-   weight region (`qkv_weight` is 1.5C^2 and `projection_weight` is C^2 by size).
-3. **The 57 kernels with no `tin3_1` template** — post-block, blend, control-mask,
-   RGB output head, `cc_cb_clear`. These carry the output path; shapes still to be
-   read from the PTX body.
-4. `VkPhysicalDeviceCooperativeMatrix2FeaturesNV` — flexible dimensions are empty,
-   but the extension also carries reduction/conversion ops. Check before locking
-   down the Phase 4 design.
-5. **`cooperativeMatrixRobustBufferAccess = false`** means out-of-bounds coopmat
-   loads are UB, not zero-fill. Since tiling is mandatory, decide the edge-tile
-   padding scheme *before* the first shader, not after.
-
-*(Answered and closed: cooperative matrix table and FP32 accumulation
-(`notes/hw-coopmat.md`); FP8 vs FP16 (`notes/phase3-weight-format.md`); `.rsrc`
-entropy; block-to-stage map, Swin window 8x8, head dim 32, and the full parameter
-accounting (`notes/MODEL-SPEC.txt`).)*
+---
 
 ## Repo layout
 
@@ -416,6 +386,5 @@ src/     our code
 
 ---
 
-*Last updated 2026-09-09 (the network renders a frame, on the CPU and on XMX;
-Phases 3 and 4 closed). Owner runs Arch Linux, is comfortable at kernel/driver level,
+*Last updated 2026-09-10 (all six phases closed; the pass runs inside a real game). Owner runs Arch Linux, is comfortable at kernel/driver level,
 prefers C for low-level work, and does not need concepts explained from scratch.*
