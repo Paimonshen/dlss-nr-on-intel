@@ -203,7 +203,15 @@ value:
    its only Xe2 rebuttal is a discrete B580 with GDDR6; Arc 140V on a UMA LPDDR5X pool
    is unmeasured in public and this project has the numbers.
 
-3. ~~**If more speed is wanted, measure before choosing.**~~ **Measured, and there is
+3. **A live mode exists and reaches 10 fps.** `notes/phase47-live-mode.md`:
+   `NR_LAYER_LIVE=N` in the layer, `--render-scale` in the daemon, `src/layer/nr-ctl` to
+   drive both without restarting the model. Measured end to end, **512x288 at scale 0.35
+   is 98.6 ms, 10.15 fps**; 640x360 is 8.6 and 854x480 is 5.7. Set the *game* to that
+   size and the compositor does the stretch for nothing. Note what this changed: below
+   about 640x360 the network is no longer the frame — the numpy at output resolution
+   (composition, feature assembly) is, and it does not shrink with the render scale.
+
+4. ~~**If more speed is wanted, measure before choosing.**~~ **Measured, and there is
    nothing left inside the frame.** `notes/phase45-frame-profile.md`: every pass now has
    a GPU timestamp (`xmx_profile`, `src/bench/frame_profile.py`), not an ablation. The
    split is **216 ms of GEMM against 272 ms of everything else** — the old ablation said
