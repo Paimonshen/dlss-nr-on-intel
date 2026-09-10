@@ -203,9 +203,28 @@ value:
    its only Xe2 rebuttal is a discrete B580 with GDDR6; Arc 140V on a UMA LPDDR5X pool
    is unmeasured in public and this project has the numbers.
 
-3. **If more speed is wanted, measure before choosing.** The frame now splits
-   **221 ms of GEMM against 290 ms of everything else** (`src/bench/split_cost.py`), and
-   the extent curve is **17 ms + 488 ms per megapixel** — down from 20 + 632 before
+3. ~~**If more speed is wanted, measure before choosing.**~~ **Measured, and there is
+   nothing left inside the frame.** `notes/phase45-frame-profile.md`: every pass now has
+   a GPU timestamp (`xmx_profile`, `src/bench/frame_profile.py`), not an ablation. The
+   split is **216 ms of GEMM against 272 ms of everything else** — the old ablation said
+   221/290, so it was right. What is new is the inside of that 272:
+
+   | pass | ms | GB/s | of the machine's ~80 |
+   | --- | --- | --- | --- |
+   | softmax | 74.4 | 36 | 44 % — arithmetic |
+   | cosine publish | 67.9 | 38 | 48 % — arithmetic |
+   | residual | 51.3 | 104 | **130 %** |
+   | split heads / partition / merge heads | 52.9 | 65-84 | **81-105 %** |
+   | to half | 11.3 | 61 | **77 %** |
+
+   **Every pass that only moves data is already at the memory ceiling.** The two below it
+   do per-element arithmetic, so 45 % of bandwidth is what that looks like, not a
+   deficiency — and softmax has already had one round of exactly this work for 1.1 % of
+   the frame (phase 29). GEMM is register-bound (phase 26). The frame is fully accounted
+   for. Also killed, with a probe kept at `src/bench/bank_probe.*`: the 32-way shared
+   memory bank conflict in `attention.comp` is real and costs **1.11x**, not 32x.
+
+   The extent curve is **17 ms + 488 ms per megapixel** — down from 20 + 632 before
    specialization and replay. Things already tried, with numbers, that should not be
    repeated: shared-memory operand staging (phase 22), integer weights (phase 23),
    register blocks past 16x32 and software pipelining the K loop (phases 21 and 26),
