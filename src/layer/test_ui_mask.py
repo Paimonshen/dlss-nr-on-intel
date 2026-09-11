@@ -53,7 +53,7 @@ def strength_test(payload, colour, mask, interior):
     socket_path = SOCKET + ".strength"
     pathlib.Path(socket_path).unlink(missing_ok=True)
     daemon = subprocess.Popen([sys.executable, str(ROOT / "src" / "layer" / "nr_daemon.py"),
-                               "--socket", socket_path,
+                               "--socket", socket_path, "--temporal", "0",
                                "--detail-strength", "1.2", "--colour-strength", "0.8"],
                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     try:
@@ -81,7 +81,13 @@ def strength_test(payload, colour, mask, interior):
 def main():
     pathlib.Path(SOCKET).unlink(missing_ok=True)
     daemon = subprocess.Popen([sys.executable, str(ROOT / "src" / "layer" / "nr_daemon.py"),
-                               "--socket", SOCKET], stdout=subprocess.PIPE,
+                               # The mask contract is about one frame. With the temporal
+                               # path on, the daemon carries the previous output forward,
+                               # so the masked and unmasked requests below would not be
+                               # two views of the same frame. `test_temporal.py` covers
+                               # the mask *with* history, which is the other half.
+                               "--socket", SOCKET, "--temporal", "0"],
+                              stdout=subprocess.PIPE,
                               stderr=subprocess.STDOUT, text=True)
     try:
         for _ in range(300):

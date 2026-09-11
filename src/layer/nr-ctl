@@ -31,11 +31,13 @@ SOCKET = pathlib.Path(os.environ.get("NR_LAYER_SOCKET", "/tmp/nr_layer.sock"))
 
 PROFILES = ("standard", "natural", "cinematic", "neutral")
 KNOBS = {"profile": str, "intensity": float, "detail_strength": float,
-         "colour_strength": float, "render_scale": float}
+         "colour_strength": float, "render_scale": float, "temporal": float,
+         "cut_limit": float}
 ALIAS = {"p": "profile", "i": "intensity", "d": "detail_strength",
          "c": "colour_strength", "s": "render_scale", "scale": "render_scale",
          "detail": "detail_strength", "colour": "colour_strength",
-         "color": "colour_strength"}
+         "color": "colour_strength", "t": "temporal", "history": "temporal",
+         "cut": "cut_limit"}
 
 # Measured end to end on this machine, 2026-09-10 — the whole round trip through the
 # socket, not the graph alone. `(swapchain width, height, render_scale) -> ms`.
@@ -115,6 +117,9 @@ def status():
         if knob == "render_scale" and isinstance(shown, (int, float)):
             ms = expected(float(shown))
             note = "   ~%.0f ms, ~%.1f fps of graph time" % (ms, 1000.0 / ms)
+        if knob == "temporal" and isinstance(shown, (int, float)):
+            note = "   off — every frame is drawn alone" if not float(shown) else \
+                   "   the previous frame is carried forward, gated per pixel"
         print("    %-16s %s%s" % (knob, shown, note))
 
 
@@ -135,6 +140,9 @@ def apply(knob, value):
             return
         if knob == "render_scale" and not 0.05 <= value <= 1.0:
             print("  render_scale is between 0.05 and 1")
+            return
+        if knob in ("temporal", "cut_limit") and not 0.0 <= value <= 1.0:
+            print("  %s is between 0 and 1" % knob)
             return
     values = read()
     values[knob] = value
@@ -193,7 +201,7 @@ def command(words):
         print("  network's alignment padding, which some extents land badly on.")
     elif head in ("help", "?"):
         print("  on | off | status | rates | set <knob> <value> | q")
-        print("  shorthand: p <profile>, i <n>, d <n>, c <n>, s <scale>")
+        print("  shorthand: p <profile>, i <n>, d <n>, c <n>, s <scale>, t <0-1>")
         print("  knobs: %s" % ", ".join(KNOBS))
     else:
         print("  ? %s   (try `help`)" % " ".join(words))

@@ -119,7 +119,8 @@ class Settings:
     writes the file; anything may, it is one flat object.
     """
 
-    KNOBS = ("profile", "intensity", "detail_strength", "colour_strength", "render_scale")
+    KNOBS = ("profile", "intensity", "detail_strength", "colour_strength", "render_scale",
+             "temporal", "cut_limit", "hold")
 
     def __init__(self, args):
         self.path = args.settings
@@ -167,6 +168,13 @@ class Settings:
                 if knob == "render_scale":
                     if not 0.05 <= value <= 1.0:
                         print("settings: render_scale must be between 0.05 and 1", flush=True)
+                        continue
+                elif knob in ("temporal", "cut_limit", "hold"):
+                    # `temporal` is the vendor's history confidence, which multiplies a
+                    # gate that is already in [0, 1]; above 1 it would extrapolate past
+                    # the previous frame, which is ringing, not stability.
+                    if not 0.0 <= value <= 1.0:
+                        print(f"settings: {knob} must be between 0 and 1", flush=True)
                         continue
                 elif not 0.0 <= value <= 2.0:
                     # the vendor's own panel stops at 2 (notes/phase30-control-atlas.md)
@@ -285,6 +293,89 @@ def solid_regions(held, radius=SOLID_RADIUS, majority=0.75):
     return counted >= majority * k * k
 
 
+class History:
+    """The previous frame the game was handed, kept for the network's temporal path.
+
+    The flicker this fixes is not noise in the input: 2.3 % of a live frame is
+    byte-identical between presents, and the network still moves those pixels by 3.3
+    levels of 255, while pixels that actually moved come back amplified 1.01x. The
+    graph is global — five downsamples into a ViT-1D bottleneck whose attention sees
+    the whole frame — so a fighter moving in the middle moves the decoder's answer over
+    a crowd that did not move at all. Vendor stability comes from the temporal path,
+    not from the network (`notes/phase53-why-it-flickers.md`).
+
+    Held at the output extent and resampled down at use, so a render-scale change needs
+    no invalidation. Dropped when the geometry moves or the shot cuts, because identity
+    reprojection is a claim about a *continuing* shot.
+    """
+
+    def __init__(self):
+        self.key = None
+        self.output = None      # (active_h, active_w, 3), what the game last received
+        self.source = None      # (inner_h, inner_w, 3), the game's own last frame
+        self.pixels = None      # (active_h, active_w, 3), the game's own last frame, whole
+        self.frames = 0
+        self.cut = 0.0
+
+    def take(self, key, source, limit):
+        """History for this frame: at the network's extent, at the output's, and the
+        game's own frame behind it. `(None, None, None)` when there is nothing to trust."""
+        previous, self.cut = self.output, 0.0
+        if key != self.key or previous is None or self.source.shape != source.shape:
+            self.key, self.output, self.source, self.pixels, self.frames = key, None, None, None, 0
+            return None, None, None
+        self.cut = float(np.abs(source - self.source).mean())
+        if self.cut > limit:
+            # A round transition, a replay cut or a menu. The gate rejects wrong history
+            # per pixel, but it was characterised at full scale on a pan (phase12); a
+            # whole-frame replacement is the one case worth refusing outright.
+            self.output = self.source = self.pixels = None
+            self.frames = 0
+            return None, None, None
+        inner = previous if previous.shape[:2] == source.shape[:2] else resample(previous, source.shape[:2])
+        return inner, previous, self.pixels
+
+    def keep(self, key, output, source, pixels):
+        self.key, self.output, self.source, self.pixels = key, output, source, pixels
+        self.frames += 1
+
+
+# Over how many levels of 255 the hold lets go. A pixel the game handed back unchanged
+# has provably correct history; one level of change is still almost certainly the same
+# surface, and by four it is something else and the model's own gate decides alone.
+HOLD_RAMP = np.float32(4.0)
+
+
+def hold_floor(current, previous, strength):
+    """Per-pixel lower bound on the history weight, from what the *game* did.
+
+    The gate is not local — on a frame where most things move it reads 0.12 even over
+    pixels that did not move at all, against 0.705 when the history was correct
+    everywhere (`notes/phase12-temporal.md`). Motion vectors would fix that, and a
+    `vkQueuePresentKHR` layer has none; optical flow was measured and does not help,
+    because it corrects the history where things *moved*, which is the ghosting case,
+    not the flicker one (`notes/phase54-flicker-fix.md`).
+
+    What the layer does have is the game's own frame. Where it did not change, the
+    previous output is the right answer for that pixel by construction, and holding it
+    cannot ghost: the moment the game moves the pixel the floor is gone. `decode` is a
+    bijection, so comparing the decoded frames is the same test as comparing the bytes,
+    and it stays exact across the packed 10-bit format too.
+    """
+    # Channel by channel and in place. The obvious `max(abs(a - b), axis=2)` builds two
+    # (h, w, 3) temporaries and runs seven full-frame passes at the *output* resolution,
+    # which is where this frame's time already goes (notes/phase47).
+    floor = np.abs(np.subtract(current[..., 0], previous[..., 0], dtype=np.float32))
+    scratch = np.empty_like(floor)
+    for channel in (1, 2):
+        np.subtract(current[..., channel], previous[..., channel], out=scratch)
+        np.maximum(floor, np.abs(scratch, out=scratch), out=floor)
+    # clip(1 - moved * 255 / ramp, 0, 1) * strength, folded into one multiply-add-clip
+    np.multiply(floor, np.float32(-255.0 * strength / HOLD_RAMP), out=floor)
+    np.add(floor, np.float32(strength), out=floor)
+    return np.clip(floor, 0, strength, out=floor)[..., None]
+
+
 def process_connection(connection, backend, args):
     """One request. Reject invalid extents before allocating/receiving the body.
 
@@ -326,14 +417,22 @@ def process_connection(connection, backend, args):
         inner = resample(colour, (max(64, round(active_height * live.render_scale)),
                                   max(64, round(active_width * live.render_scale))))
     geometry = nr_frame.NetworkGeometry.vendor_aligned(inner.shape[1], inner.shape[0])
+    # `inner` is a view of the decoded frame at scale 1; the history keeps it for the next
+    # frame's cut test, and aliasing the decode buffer through it has caused two bugs in
+    # this function already.
+    shot = (width, height, vk_format, top, bottom, left, right, live.profile)
+    history_inner, history_full, history_pixels = args.history.take(
+        shot, inner, live.cut_limit if live.temporal > 0 else -1.0)
     features = nr_frame.make_features(
         inner, geometry=geometry, **nr_frame.PROFILES[live.profile])
+    if history_inner is not None:
+        nr_frame.apply_history(features, history_inner, geometry)
     head = geometry.crop(backend.run_features(features))
     if head.shape[:2] != colour.shape[:2]:
-        # Only the first three channels reach `compose`; the fourth is the temporal gate
-        # and neither game mode supplies history (notes/phase48). Carrying it through the
-        # upscale is a quarter of that pass for nothing.
-        head = resample(head[..., :3], colour.shape[:2])
+        # The fourth channel is the temporal gate. Without history it reaches nothing —
+        # carrying it through the upscale would be a quarter of that pass for nothing
+        # (notes/phase48) — and with history it is what decides the blend, per pixel.
+        head = resample(head[..., :4 if history_full is not None else 3], colour.shape[:2])
     control = None
     held = None
     if interface is not None:
@@ -358,10 +457,16 @@ def process_connection(connection, backend, args):
     if held is not None:
         control = np.ones((active_height, active_width, 3), np.float32)
         control[held, 0] = 0.0
+    # What the game itself did to each pixel — the only motion signal a present-time
+    # layer has, and an exact one.
+    floor = (hold_floor(colour, history_pixels, live.hold)
+             if history_pixels is not None and live.hold > 0 else None)
     output = nr_frame.compose(head, colour, intensity=live.intensity,
                               detail_strength=live.detail_strength,
                               colour_strength=live.colour_strength,
-                              control_mask=control)
+                              control_mask=control, history=history_full,
+                              history_confidence=live.temporal,
+                              history_floor=floor)
     # Measure before the write-back: putting the result into `whole` and then differencing
     # against `whole` compares an array with itself, which reported change 0.00000.
     changed = float(np.abs(output - colour).mean())
@@ -393,6 +498,13 @@ def process_connection(connection, backend, args):
         else:
             output[held] = colour[held]          # so a --dump shows what was actually sent
     connection.sendall(encoded)
+    # After the interface restore, so what is carried forward is what the game was
+    # actually handed. A copy: `output[top:bottom, left:right]` is a view of the frame
+    # buffer that the next decode overwrites.
+    if live.temporal > 0:
+        args.history.keep(shot,
+                          np.array(output[top:bottom, left:right] if boxed else output),
+                          np.array(inner), np.array(colour))
     if args.dump:
         import image_io
         try:
@@ -408,6 +520,13 @@ def process_connection(connection, backend, args):
         except (OSError, subprocess.CalledProcessError, ValueError) as error:
             print(f"frame returned, but dump failed: {error}", flush=True)
     note = "" if held is None else f"  interface {100 * held.mean():.0f}% left alone"
+    if live.temporal > 0:
+        if history_full is None:
+            note += f"  no history, cut {args.history.cut:.4f}"
+        else:
+            gate = float(nr_frame.history_weight(head[::8, ::8]).mean())
+            hold = "" if floor is None else f", held {100 * float((floor[::8, ::8] > 0).mean()):.0f}%"
+            note += f"  gate {gate:.3f}{hold}, cut {args.history.cut:.4f}"
     box = "" if not boxed else (f"  letterbox {height - (bottom - top)}px of rows and "
                                f"{width - (right - left)}px of columns skipped")
     print(f"{width}x{height} {FORMATS[vk_format][1]} in "
@@ -429,6 +548,15 @@ def main():
     parser.add_argument("--render-scale", type=float, default=1.0,
                         help="run the network on this fraction of each side; the head is "
                              "scaled back and composed against the full-size frame")
+    parser.add_argument("--temporal", type=float, default=1.0,
+                        help="how much of the model's own history gate to trust, 0-1; "
+                             "0 turns the temporal path off entirely")
+    parser.add_argument("--hold", type=float, default=1.0,
+                        help="how hard to hold pixels the game handed back unchanged, "
+                             "0-1; this is the floor under the model's own gate")
+    parser.add_argument("--cut-limit", type=float, default=0.15,
+                        help="mean absolute frame-to-frame change above which the shot is "
+                             "taken to have cut and the history is dropped")
     parser.add_argument("--max-pixels", type=int, default=1 << 22,
                         help="refuse frames larger than this, rather than thrash")
     parser.add_argument("--dump", help="write each frame in and out as PNG, for a look")
@@ -439,7 +567,11 @@ def main():
         parser.error("--max-pixels and --timeout must be positive")
     if not 0.05 <= args.render_scale <= 1.0:
         parser.error("--render-scale must be between 0.05 and 1")
+    for knob in ("temporal", "cut_limit", "hold"):
+        if not 0.0 <= getattr(args, knob) <= 1.0:
+            parser.error(f"--{knob.replace('_', '-')} must be between 0 and 1")
     args.live = Settings(args)
+    args.history = History()
 
     started = time.perf_counter()
     backend = nr_frame.ResidentBackend()

@@ -377,8 +377,19 @@ handing work to the four E-cores (**-7 %** for a theoretical +2 %). `notes/phase
 **Both modes run in a real game.** Photo mode holds a frame while a trigger file exists;
 live mode (`NR_LAYER_LIVE=N`) runs continuously and reaches **10.6 fps at 512x288**, with
 the game set to that extent and the compositor doing the stretch. `src/layer/nr-ctl`
-changes profile, intensity, both strengths and the render scale between frames without
-reloading the model.
+changes profile, intensity, both strengths, the render scale and the temporal knobs
+between frames without reloading the model.
+
+**Live mode carries a frame of history, and the daemon is stateful because of it.** The
+previous output goes into feature channels 7-9 with identity reprojection — a present-time
+layer has no motion vectors, and identity is bit-exact, so it costs nothing — and the
+model's learned gate decides per pixel how much survives. The gate turns out **not to be
+local**: it reads 0.12 over pixels that did not move on a frame where most things did,
+against `phase12`'s 0.705 on a scene where the history was correct everywhere. So there is
+a floor under it, driven by the one exact motion signal a layer has — whether the game
+handed back the same pixel. Result: **3.7x less flicker for 3.7 % of the frame time**, and
+moving pixels untouched. Optical flow was measured and does *not* help here.
+`notes/phase53`, `phase54`.
 
 ## Repo layout
 
@@ -404,5 +415,5 @@ src/     our code
 
 ---
 
-*Last updated 2026-09-10, evening (phases 39-48: the frame measured pass by pass, the interface mask proven and then fixed, a live mode at 10.6 fps, and a control tool). **Read `HANDOFF.md` first** — it carries the current state and the traps. Owner runs Arch Linux, is comfortable at kernel/driver level,
+*Last updated 2026-09-11 (phases 49-54: the parallel tree mined, DOA6LR diagnosed, what the model computes in, the output extent's own costs, live rendering in a game, and the flicker found and fixed). **Read `HANDOFF.md` first** — it carries the current state and the traps. Owner runs Arch Linux, is comfortable at kernel/driver level,
 prefers C for low-level work, and does not need concepts explained from scratch.*

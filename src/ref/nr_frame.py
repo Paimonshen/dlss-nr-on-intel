@@ -93,6 +93,44 @@ PROFILES = features_mod.PROFILES
 compose_head = composition_mod.compose_head
 compose_detail = composition_mod.compose_detail
 AutomaticMask = features_mod.AutomaticMask
+half = features_mod.half
+scaled_color = features_mod.scaled_color
+
+# half(blend_scale) of the recovered package, `notes/phase12-temporal.md`.
+BLEND_SCALE = 0.73974609375
+
+
+def apply_history(features, history, geometry=None):
+    """Put a previous output into feature channels 7-9, reprojected by the identity.
+
+    MLX-DLSS's `make_temporal_features` samples the history along engine motion
+    vectors. A Vulkan layer at `vkQueuePresentKHR` has no motion vectors — it sees a
+    finished frame and nothing that produced it — so the reprojection is the identity,
+    which `sample_history` computes bit-exactly at pixel centres (checked: max |delta|
+    is 0 over a random image, so the five-tap collapses to its middle tap).
+
+    That is the correct history wherever the scene stood still, and the *wrong* history
+    wherever it moved. Rejecting the wrong one is the learned gate's job, and it does
+    discriminate: 0.705 with correct history against 0.032 with wrong motion
+    (`notes/phase12-temporal.md`). The first-frame layout already writes the current
+    colour into these channels, so this is a drop-in replacement at the same scaling.
+    """
+    history = np.asarray(history, dtype=np.float32)
+    if history.ndim != 3 or history.shape[2] != 3:
+        raise ValueError("history must be (height, width, 3)")
+    if geometry is not None and not geometry.is_identity:
+        history = history[geometry.source_rows()[:, None],
+                          geometry.source_columns()[None, :], :]
+    if history.shape[:2] != features.shape[:2]:
+        raise ValueError("history must match the feature extent")
+    features[..., 7:10] = scaled_color(history)
+    return features
+
+
+def history_weight(head, *, blend_scale=BLEND_SCALE):
+    """The per-pixel history weight the model asked for, from head channel 4."""
+    logit = half(np.asarray(head, dtype=np.float32)[..., 3:4])
+    return np.clip(1.0 / (1.0 + np.exp(-logit)) * half(blend_scale), 0, 1)
 
 
 # What the vendor's own panel starts at, which is not what MLX-DLSS's profiles use:
@@ -200,8 +238,27 @@ def run_head(model, color, *, profile="standard", frame_index=0, style_index=Non
 
 
 def compose(head, color, *, intensity=1.0, detail_strength=1.0, colour_strength=1.0,
-            detail_radius=4.0, control_mask=None):
+            detail_radius=4.0, control_mask=None, history=None,
+            history_confidence=1.0, history_floor=None, blend_scale=BLEND_SCALE):
     """The head over the frame. Post-network and cheap: sweep it without re-running.
+
+    With a `history` image this is MLX-DLSS's `compose_temporal` instead of its
+    `compose_head`: the model's own gate decides, per pixel, how much of the previous
+    output survives into this one. `history_confidence` scales that gate globally —
+    0 is the still-frame path exactly, 1 is the model's own answer.
+
+    The vendor reads the history back out of feature channels 7-9, which pins it to the
+    network's extent; a live frame composes at the *output* extent, so it arrives here
+    as an image instead. That skips one `scaled_color` round trip through fp16, worth
+    at most 0.06 of a 0-255 level, and keeps the game's own pixels off the resampler.
+
+    `history_floor` raises the gate per pixel rather than lowering it, which the vendor
+    has no need of and we do. The gate is not local: on a frame where most things move it
+    reads 0.12 even over pixels that did not move, against 0.705 on a scene where the
+    history was correct everywhere (`notes/phase54-flicker-fix.md`, `phase12`). A caller
+    that can prove the history is correct for a pixel — because the game handed back the
+    same bytes — can say so here. The floor is still bounded by `blend_scale`, so no
+    pixel is held harder than the model itself ever holds one.
 
     `intensity` blends the model's picture against the source, per pixel when a
     ControlMask supplies its red channel. `detail_strength` and `colour_strength`
@@ -214,11 +271,24 @@ def compose(head, color, *, intensity=1.0, detail_strength=1.0, colour_strength=
     clamped path — the extrapolation only replaces the final blend, and the residual,
     its half rounding and the [0,1] clamp on the result are unchanged.
     """
-    if intensity > 1.0:
+    if history is not None or intensity > 1.0:
         head = np.asarray(head, dtype=np.float32)
         color = np.asarray(color, dtype=np.float32)
         residual = features_mod.half(head[..., :3]) * np.float32(0.25)
         predicted = np.clip(color + residual, 0, 1)
+        if history is not None:
+            if head.shape[2] < 4:
+                raise ValueError("the temporal gate is head channel 4; pass all four")
+            alpha = history_weight(head, blend_scale=blend_scale)
+            if history_confidence != 1.0:
+                alpha = alpha * np.clip(np.float32(history_confidence), 0, 1)
+            if history_floor is not None:
+                floor = np.clip(np.asarray(history_floor, dtype=np.float32), 0, 1)
+                np.maximum(alpha, floor * np.float32(blend_scale), out=alpha)
+            history = np.asarray(history, dtype=np.float32)
+            if history.shape != color.shape:
+                raise ValueError("history must match the colour image shape")
+            predicted += alpha * (history - predicted)
         blend = np.float32(intensity)
         if control_mask is not None:
             blend = np.asarray(control_mask, dtype=np.float32)[..., :1] * blend

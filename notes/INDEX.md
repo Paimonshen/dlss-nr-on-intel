@@ -1,6 +1,6 @@
 # Index of the notes
 
-Eighty files, forty-eight phases. This is what each one settles, so a reader arriving
+Eighty-five files, fifty-four phases. This is what each one settles, so a reader arriving
 cold can go straight to the answer instead of the archaeology.
 
 **Read `HANDOFF.md` first** — it carries the current state, the standing conclusions and
@@ -66,6 +66,8 @@ disproved.
 | `phase45-frame-profile.md` | per-pass timings; everything that moves data is at the memory ceiling |
 | `phase21`, `phase22`, `phase23`, `phase31`, `phase33` | tiling, staging, integer weights, the accumulator, OpenCL — all measured, all closed |
 | `phase25-the-frame-rate-wall.md` | `17 ms + 488 ms per megapixel`, and what that forbids |
+| `phase51-output-resolution-costs.md` | what costs the output extent rather than the network's, and a profile that was measuring swap |
+| `phase50-what-the-model-computes-in.md` | 36 % of the shipped model's mma is already FP8; what FP4 would and would not change |
 | `phase37-neural-upstream.md` | half the extent is 3x faster and keeps 62 % of the high band |
 | `phase46-cpu-share.md` | four busy E-cores cost the GPU 7 % for a theoretical +2 % |
 | `phase14-npu-and-rounding.md` | the NPU is not worth using; the rounding point was |
@@ -86,6 +88,9 @@ disproved.
 | `phase41-doa6-and-vkd3d.md` | the layer under VKD3D-Proton; why DOA6LR will not start |
 | `phase47-live-mode.md` | live mode, the control tool, 10.6 fps |
 | `phase48-feature-inputs.md` | all sixteen feature channels, and two costs that were pure waste |
+| `phase52-live-in-a-game.md` | live neural rendering inside a running game, measured |
+| `phase53-why-it-flickers.md` | why a static pixel moves 3.3 levels: the network is global |
+| `phase54-flicker-fix.md` | the temporal path in live mode; 3.7x less flicker for 3.7 % of the frame |
 | `phase30-control-atlas.md` | what each vendor slider does, and one that does nothing |
 | `morning-doa5.md` | a session log, in Russian, kept for its screenshots |
 

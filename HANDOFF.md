@@ -1,15 +1,54 @@
 # HANDOFF — read this first
 
-State of the DLSS-NR on Intel Xe2 project as of **2026-09-10**. CLAUDE.md holds the
+State of the DLSS-NR on Intel Xe2 project as of **2026-09-11**. CLAUDE.md holds the
 original brief; **this file overrides it wherever they disagree**, and after
 2026-09-09 they disagree about something foundational.
 
-`notes/INDEX.md` says what each of the forty-eight phase notes settles — go there when
+`notes/INDEX.md` says what each of the fifty-four phase notes settles — go there when
 you need the evidence behind a line in this file, rather than reading them in order.
 
 ---
 
-## Latest: it runs in a game, live, at 10 fps (2026-09-10 evening)
+## Latest: it stops flickering (2026-09-11)
+
+The picture in live mode shimmered, and the cause was not noise in the input. Measured on
+22 consecutive presents of a real game: **2.3 % of a frame is byte-identical between two
+presents, and the network moved those pixels 3.25 levels of 255 anyway**, while pixels
+that actually moved came back amplified 1.01x. The graph is global — five downsamples into
+a ViT-1D bottleneck whose attention sees the whole frame — so a fighter moving in the
+middle moves the decoder's answer over a crowd that did not move at all. Vendor stability
+comes from the temporal path, not from the network (`notes/phase53`).
+
+**The temporal path now runs in live mode, and the flicker is 3.7x smaller for 3.7 % of
+the frame time** (215 -> 224 ms; static-pixel invention 3.25 -> 0.87 levels; moving pixels
+untouched at 0.98x). `notes/phase54`. Three things a next reader needs:
+
+**1. Identity reprojection is free and exact.** A `vkQueuePresentKHR` layer has no motion
+vectors, so the previous output goes into feature channels 7-9 where it sits.
+`sample_history` at pixel centres is **bit-identical** to the history — the five-tap
+Catmull-Rom collapses to its middle tap — so there is no gather and no blur, and
+`nr_frame.apply_history` matches MLX-DLSS's `make_temporal_features` bit for bit.
+
+**2. The learned gate is not local, and this is the surprise.** `phase12` measured it at
+**0.705** with correct history. In a fight it reads **0.12** over pixels that did not move
+and 0.014 over pixels that did. It discriminates 10x, but the whole scale is down 5x,
+because most of the frame moved and a global network distrusts the history everywhere.
+**Optical flow does not fix it** — measured, not assumed: DIS costs 7 ms, raises the
+whole-frame gate 0.076 -> 0.111, and nearly all of that lands on *moving* pixels, which is
+the ghosting case rather than the flicker one.
+
+**3. So there is a floor under the gate, and it is ours, not the vendor's.**
+`history_confidence` can only scale down. What a present-time layer has instead is the
+game's own frame: where the game handed back the same pixel, the previous output is right
+for that pixel by construction. `nr_daemon.hold_floor` turns that into a per-pixel lower
+bound, full at zero change and gone by four levels of 255, never above `blend_scale`. It
+cannot ghost — the frame that changes a pixel is the frame that releases it — and it costs
+**2.2 ms**. Knobs: `temporal`, `hold`, `cut_limit`, all live through `nr-ctl`.
+
+**The daemon is now stateful across frames.** Any test that sends a sequence and expects
+each frame to stand alone has to pass `--temporal 0`; `test_ui_mask.py` does.
+
+## It runs in a game, live, at 10 fps (2026-09-10 evening)
 
 Ten phases in one session, `notes/phase39` through `phase48`. The three things a next
 reader most needs:
