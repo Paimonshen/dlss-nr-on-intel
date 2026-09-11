@@ -54,6 +54,13 @@ device buffers on a scratch socket nobody would ever connect to. Four runs took 
 15. The test now binds a socket that accepts and closes, which is all `alive()` looks for,
 and checks at the end that it left nothing behind.
 
+**5. A short window lost two knobs rather than the explanation.** The layout was a fixed
+picture — header, eight rows, a separator, the detail block, a footer at the bottom — so at
+twelve rows the knob list ran into the footer and the last two were simply not there. It is
+now laid out from the height available: the list and the two footer lines come first, the
+explanation gets what is left, and a window too short for even the list says so instead of
+ending early.
+
 ## And one more test that proved nothing
 
 Sending `ESC [ D` to the pty did not work, and the first diagnosis — that curses was not

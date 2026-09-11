@@ -197,6 +197,25 @@ def main():
         alive = screen.output and b"Traceback" not in screen.output
         check("it drew without raising", bool(alive),
               "no traceback on the terminal" if alive else "it crashed")
+        # A short window must lose the explanation, not the knobs, and must never write
+        # over its own footer. Laid out from the height available rather than a picture.
+        for rows, want_all in ((13, True), (10, False)):
+            small = Screen(environment, rows=rows, columns=70)
+            try:
+                small.pump(1.5)
+                flat = squashed(small.text())
+                labels = [knob.label for knob in nr_knobs.KNOBS
+                          if squashed(knob.label) not in flat]
+                if want_all:
+                    check(f"all the knobs still fit in {rows} rows", not labels,
+                          "the explanation goes first, the list stays")
+                else:
+                    check(f"{rows} rows says so rather than ending early",
+                          squashed("window too short") in flat,
+                          "and the list is clipped above the footer")
+            finally:
+                small.close()
+
         leaked = set(daemons_running()) - before
         check("it left no daemon behind", not leaked,
               "the stand-in answered, so the panel had no reason to start one"
