@@ -379,8 +379,11 @@ live mode (`NR_LAYER_LIVE=N`) runs continuously and reaches **10.6 fps at 512x28
 the game set to that extent and the compositor doing the stretch. `src/layer/nr-ctl`
 changes profile, intensity, both strengths, the render scale and the temporal knobs
 between frames without reloading the model, and `src/layer/nr-toggle` is the same three
-files on a key — `Meta+N` on/off, `Meta+Shift+N` for the temporal path — because on
-Wayland only the compositor sees a key while a fullscreen game has focus. `notes/phase55`.
+files on a key, because on Wayland only the compositor sees a key while a fullscreen game
+has focus. The binding is made in System Settings and **must not** be made by us: doing it
+over kglobalaccel's D-Bus interface crashed KWin on the first keypress, because in Plasma
+6.7 that registry lives inside KWin and `plasma-kglobalaccel.service` is not even running.
+`notes/phase55`.
 
 **Live mode carries a frame of history, and the daemon is stateful because of it.** The
 previous output goes into feature channels 7-9 with identity reprojection — a present-time

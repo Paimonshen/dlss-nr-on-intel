@@ -91,7 +91,7 @@ disproved.
 | `phase52-live-in-a-game.md` | live neural rendering inside a running game, measured |
 | `phase53-why-it-flickers.md` | why a static pixel moves 3.3 levels: the network is global |
 | `phase54-flicker-fix.md` | the temporal path in live mode; 3.7x less flicker for 3.7 % of the frame |
-| `phase55-a-switch-on-a-key.md` | one key over a fullscreen game, and three Plasma facts that look like success while doing nothing |
+| `phase55-a-switch-on-a-key.md` | one key over a fullscreen game, and the compositor crash from binding it the wrong way |
 | `phase30-control-atlas.md` | what each vendor slider does, and one that does nothing |
 | `morning-doa5.md` | a session log, in Russian, kept for its screenshots |
 
@@ -107,7 +107,8 @@ disproved.
 
 `phase5-no-softmax.md`, `phase18-fusion.md` and `phase36-the-bug-is-narrower.md` (both
 superseded by `phase38`), the FP8 reading in the early part of `phase3-weight-format.md`,
-and the dense-FP16 decode behind `phase4-subnormal-flush.md`. Each says so at the top.
+the dense-FP16 decode behind `phase4-subnormal-flush.md`, and the shortcut-installing
+recipe at the top of `phase55-a-switch-on-a-key.md`. Each says so at the top.
 **A withdrawn finding lives on wherever it was written down** — `phase40` found five
 places in the *code* still asserting the phase-18 bug as fact, months after the note
 retired it.

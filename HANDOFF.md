@@ -48,16 +48,20 @@ cannot ghost — the frame that changes a pixel is the frame that releases it �
 **The daemon is now stateful across frames.** Any test that sends a sequence and expects
 each frame to stand alone has to pass `--temporal 0`; `test_ui_mask.py` does.
 
-**And there is a switch on a key.** `src/layer/nr-toggle` — `Meta+N` for the rendering,
-`Meta+Shift+N` for the temporal path, a notification for the answer, and turning it on
-brings the daemon up so one press really is one press. On Wayland nothing but the
-compositor can see a key while a fullscreen game holds focus, so the binding is a Plasma
-global shortcut; `nr-toggle install` registers it and `uninstall` takes it back.
-**Three Plasma facts each look like success while doing nothing, and each cost a wrong
-turn** — writing `kglobalshortcutsrc` binds nothing, registering needs `kbuildsycoca6`
-first or `setShortcut` returns an empty list that reads like "key taken", and unbinding
-has to happen while `plasma-kglobalaccel.service` is stopped because it writes the config
-back as it exits. `notes/phase55`.
+**And there is a switch on a key** — `src/layer/nr-toggle`, a flip plus a notification,
+and turning it on brings the daemon up so one press really is one press. Bind it in System
+Settings; `nr-toggle install` prints the two commands and opens that page.
+
+**Do not make this tool install its own shortcut. It did, and it crashed KWin on the first
+keypress.** In Plasma 6.7 the shortcut registry lives *inside* KWin —
+`org.kde.kglobalaccel` is owned by `kwin_wayland` and `plasma-kglobalaccel.service` is
+**inactive** — so editing `kglobalshortcutsrc`, deleting the launcher and restarting that
+unit all work behind the back of the live registry. It kept the component, the file under
+it was gone, and the next key went `Component::uniqueName()` ->
+`GlobalShortcutsRegistry::processKey` -> SIGSEGV. Firing it with `invokeShortcut` had
+passed, because that dispatches by name and never walks the key map: **a test that
+exercises the mechanism around the thing under test proves nothing about it.**
+`notes/phase55`.
 
 ## It runs in a game, live, at 10 fps (2026-09-10 evening)
 

@@ -29,35 +29,33 @@ def load(path, name):
     return module
 
 
-def key_checks(toggle):
-    # Qt 6: Shift 0x02000000, Ctrl 0x04000000, Alt 0x08000000, Meta 0x10000000.
-    for spelling, want in (("Meta+N", 0x1000004E),
-                           ("meta+shift+n", 0x1200004E),
-                           ("Ctrl+Alt+F9", 0x0D000038),
-                           ("Meta+Space", 0x10000020),
-                           ("Meta+Print", 0x11000009),
-                           ("F12", 0x0100003B)):
-        got = toggle.qt_key(spelling)
-        check(f"{spelling} is {want:#x}", got == want, f"got {got:#x}")
-    for bad in ("Foo+N", "Meta+Nope", "", "Meta+F99"):
-        raised = False
-        try:
-            toggle.qt_key(bad)
-        except ValueError:
-            raised = True
-        check(f"{bad!r} is refused", raised,
-              "a shortcut that silently becomes another key is worse than none")
-    spellings = ("Meta+N", "Meta+Shift+N", "Ctrl+Alt+F9", "Meta+Space", "Meta+Print", "F12")
-    wrong = [text for text in spellings
-             if toggle.qt_key(toggle.key_name(toggle.qt_key(text))) != toggle.qt_key(text)]
-    check("a key survives the round trip to an integer and back", not wrong,
-          ", ".join(f"{t} -> {toggle.key_name(toggle.qt_key(t))}" for t in spellings)
-          if not wrong else f"broken: {wrong}")
-    check("the component path is D-Bus-legal",
-          toggle.component_path("nr-toggle") == "/component/nr_toggle_desktop",
-          "every character a path will not take becomes an underscore")
+def launcher_checks(toggle, scratch):
+    """What `install` prints and what `status` reads back.
 
+    There is no key parsing to check any more: this tool used to register the shortcut
+    itself, over kglobalaccel's D-Bus interface, and that crashed the compositor —
+    `notes/phase55`. Binding is System Settings' job now, and the only link back to a
+    shortcut it made is the `Exec` line of the launcher it wrote.
+    """
+    check("the launcher command is the script itself",
+          toggle.launcher_command("") == str(toggle.HERE),
+          toggle.launcher_command(""))
+    check("an argument goes on the end, with no stray space",
+          toggle.launcher_command("temporal") == f"{toggle.HERE} temporal",
+          toggle.launcher_command("temporal"))
 
+    toggle.DESKTOPS = pathlib.Path(scratch) / "applications"
+    toggle.DESKTOPS.mkdir(parents=True, exist_ok=True)
+    check("nothing bound reads as nothing bound",
+          toggle.bound_key("") is None and toggle.bound_key("temporal") is None,
+          "no launcher in the directory")
+    # A launcher for the *other* command must not be mistaken for this one: the plain
+    # form is a prefix of the `temporal` form, and a prefix match would answer both.
+    (toggle.DESKTOPS / "someone-elses.desktop").write_text(
+        f"[Desktop Entry]\nType=Application\nExec={toggle.HERE} temporal\n")
+    check("a launcher is matched on the whole command, not a prefix",
+          toggle.bound_key("") is None,
+          "the plain command is a prefix of the temporal one")
 def flip_checks(toggle, paths):
     # Neither spawning a model nor firing a desktop notification belongs in a test, so
     # both are stood in for. What is checked is that turning it *on* asks for the daemon
@@ -134,7 +132,7 @@ def main():
         paths = load(ROOT / "src" / "layer" / "nr_paths.py", "nr_paths")
         toggle = load(ROOT / "src" / "layer" / "nr-toggle", "nr_toggle_under_test")
         daemon = load(ROOT / "src" / "layer" / "nr_daemon.py", "nr_daemon_probe")
-        key_checks(toggle)
+        launcher_checks(toggle, scratch)
         flip_checks(toggle, paths)
         agreement_checks(toggle, paths)
         probe_checks(daemon)

@@ -9,13 +9,13 @@ enough and fast enough to bind to a key that works while the game is fullscreen.
     src/layer/nr-toggle on | off        set it, for a script
     src/layer/nr-toggle temporal        flip the temporal path, to see the flicker
     src/layer/nr-toggle status
-    src/layer/nr-toggle install         bind both to keys (KDE Plasma)
-    src/layer/nr-toggle uninstall
+    src/layer/nr-toggle install         show the two commands and open the key settings
 
 On Wayland an application cannot grab a key for itself, and reading `/dev/input`
 directly needs the `input` group. The compositor is the only thing that sees a key while
-a fullscreen game has focus, so `install` registers a Plasma global shortcut against this
-script. On anything else, bind it yourself — the script is the whole interface.
+a fullscreen game has focus, so the binding has to be a desktop global shortcut — and it
+has to be made by the desktop's own settings, not by this script. See `install`: doing it
+from here crashed KWin, and the crash is worth reading about before anyone tries again.
 """
 import os
 import pathlib
@@ -29,9 +29,9 @@ import nr_paths                                                        # noqa: E
 HERE = pathlib.Path(__file__).resolve()
 DESKTOPS = pathlib.Path(os.environ.get("XDG_DATA_HOME", pathlib.Path.home() / ".local/share")) / "applications"
 SHORTCUTS = (
-    # desktop file stem, argument, default key, what to call it
-    ("nr-toggle", "", "Meta+N", "Neural rendering on/off"),
-    ("nr-toggle-temporal", "temporal", "Meta+Shift+N", "Neural rendering: temporal path"),
+    # argument to this script, a key worth suggesting, what to call it
+    ("", "Meta+N", "Neural rendering on/off"),
+    ("temporal", "Meta+Shift+N", "Neural rendering: temporal path"),
 )
 
 
@@ -141,8 +141,8 @@ def status():
     print(f"  temporal   {values.get('temporal', '(daemon default: 1)')}")
     print(f"  hold       {values.get('hold', '(daemon default: 1)')}")
     print(f"  scale      {values.get('render_scale', '(daemon default)')}")
-    for stem, argument, _key, name in SHORTCUTS:
-        bound = shortcut_of(stem)
+    for argument, _key, name in SHORTCUTS:
+        bound = bound_key(argument)
         print(f"  key        {bound or 'not bound'}  ->  {name}")
     return 0
 
@@ -150,218 +150,66 @@ def status():
 # --------------------------------------------------------------------------
 # binding it to a key, which on Wayland only the compositor can do
 # --------------------------------------------------------------------------
-# Qt keeps a shortcut as one integer: the key code with the modifier bits set. These are
-# Qt 6's values, and kglobalaccel speaks nothing else over D-Bus.
-MODIFIERS = {"shift": 0x02000000, "ctrl": 0x04000000, "control": 0x04000000,
-             "alt": 0x08000000, "meta": 0x10000000, "super": 0x10000000,
-             "win": 0x10000000}
-NAMED_KEYS = {"space": 0x20, "tab": 0x01000001, "backspace": 0x01000003,
-              "return": 0x01000004, "enter": 0x01000005, "insert": 0x01000006,
-              "delete": 0x01000007, "pause": 0x01000008, "print": 0x01000009,
-              "home": 0x01000010, "end": 0x01000011, "pageup": 0x01000016,
-              "pagedown": 0x01000017, "menu": 0x01000055,
-              "scrolllock": 0x01000026, "capslock": 0x01000024}
+def launcher_command(argument):
+    return f"{HERE} {argument}".rstrip()
 
 
-def qt_key(spec):
-    """'Meta+Shift+N' -> the integer kglobalaccel wants. Raises on anything it cannot
-    name, because a shortcut that silently becomes some other key is worse than none."""
-    parts = [piece.strip() for piece in spec.split("+") if piece.strip()]
-    if not parts:
-        raise ValueError("empty shortcut")
-    value = 0
-    for piece in parts[:-1]:
-        if piece.lower() not in MODIFIERS:
-            raise ValueError(f"{piece!r} is not a modifier")
-        value |= MODIFIERS[piece.lower()]
-    key = parts[-1]
-    lowered = key.lower()
-    if len(key) == 1 and (key.isalnum()):
-        return value | ord(key.upper())
-    if lowered in NAMED_KEYS:
-        return value | NAMED_KEYS[lowered]
-    if lowered.startswith("f") and lowered[1:].isdigit() and 1 <= int(lowered[1:]) <= 35:
-        return value | (0x01000030 + int(lowered[1:]) - 1)
-    raise ValueError(f"{key!r} is not a key this understands")
+def bound_key(argument):
+    """Whichever key the user gave this command, found the way it was actually stored.
+
+    System Settings writes its own launcher into `~/.local/share/applications` and names
+    the shortcut after that file, so the only reliable link back is the `Exec` line.
+    """
+    want = launcher_command(argument)
+    for entry in sorted(DESKTOPS.glob("*.desktop")):
+        try:
+            text = entry.read_text()
+        except OSError:
+            continue
+        if f"Exec={want}\n" not in text and not text.rstrip().endswith(f"Exec={want}"):
+            continue
+        for tool in ("kreadconfig6", "kreadconfig5"):
+            try:
+                got = subprocess.run([tool, "--file", "kglobalshortcutsrc", "--group", "services",
+                                      "--group", entry.name, "--key", "_launch"],
+                                     capture_output=True, text=True, timeout=5)
+            except (OSError, subprocess.SubprocessError):
+                continue
+            if got.returncode == 0 and got.stdout.strip():
+                return got.stdout.strip().split(",")[0]
+    return None
 
 
-def accel(method, signature, *arguments):
-    """One call into kglobalaccel. `busctl` rather than a Python D-Bus binding, because
-    this script has no dependencies and systemd is already a given here."""
-    command = ["busctl", "--user", "call", "org.kde.kglobalaccel", "/kglobalaccel",
-               "org.kde.KGlobalAccel", method, signature, *[str(a) for a in arguments]]
-    return subprocess.run(command, capture_output=True, text=True, timeout=15)
+def install(_keys=None):
+    """Hand the user the two commands and open the page that binds them.
 
+    This used to register the shortcut itself, over kglobalaccel's D-Bus interface, and
+    **it crashed the compositor**. In Plasma 6.7 the shortcut registry lives *inside*
+    KWin — `org.kde.kglobalaccel` is owned by `kwin_wayland` and
+    `plasma-kglobalaccel.service` is not even running — so a tool that edits
+    `kglobalshortcutsrc`, deletes the launcher and restarts that unit is working behind
+    the back of the live registry. It kept the component, the file under it was gone, and
+    the next keypress went
 
-def registered():
-    """Which components kglobalaccel is actually holding, not what a config file says."""
-    got = subprocess.run(["busctl", "--user", "call", "org.kde.kglobalaccel", "/kglobalaccel",
-                          "org.kde.KGlobalAccel", "allComponents"],
-                         capture_output=True, text=True, timeout=15)
-    return got.stdout if got.returncode == 0 else ""
+        Component::uniqueName()  ->  GlobalShortcutsRegistry::processKey  ->  SIGSEGV
 
+    taking the session with it. The registry surviving that is KDE's business; handing it
+    an unsupported lifecycle was ours. `notes/phase55`.
 
-def component_path(stem):
-    """kglobalaccel's object path for a component: every character D-Bus will not take in
-    a path becomes an underscore."""
-    return "/component/" + "".join(
-        c if c.isalnum() or c == "_" else "_" for c in f"{stem}.desktop")
-
-
-def key_name(code):
-    """The integer back into something a person can read."""
-    parts = [name.title() for bit, name in
-             ((0x10000000, "meta"), (0x04000000, "ctrl"), (0x08000000, "alt"),
-              (0x02000000, "shift")) if code & bit]
-    key = code & ~0x1E000000
-    for name, value in NAMED_KEYS.items():
-        if value == key:
-            parts.append(name.title())
+    So: no registration from here. System Settings does it through the path KDE supports,
+    it takes half a minute once, and nothing here can take the desktop down.
+    """
+    print("  Bind these two commands to keys, in System Settings -> Shortcuts -> Add -> Command:\n")
+    for argument, key, name in SHORTCUTS:
+        print(f"    {launcher_command(argument)}")
+        print(f"      {name}   (suggested {key})\n")
+    for settings in ("systemsettings", "systemsettings5"):
+        if subprocess.run(["which", settings], capture_output=True).returncode == 0:
+            subprocess.Popen([settings, "kcm_keys"], stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, start_new_session=True)
+            print("  opening that page now.")
             break
-    else:
-        if 0x01000030 <= key <= 0x01000052:
-            parts.append(f"F{key - 0x01000030 + 1}")
-        elif 0x20 < key < 0x7F:
-            parts.append(chr(key))
-        else:
-            parts.append(f"{key:#x}")
-    return "+".join(parts)
-
-
-def shortcut_of(stem):
-    """What kglobalaccel is holding, asked of kglobalaccel.
-
-    Not of `kglobalshortcutsrc`: the daemon keeps the bindings in memory and writes that
-    file back lazily, so straight after an `install` the config still says nothing and the
-    key works fine. Reading the file made `status` report "not bound" on a binding that
-    had just been proven to fire.
-    """
-    got = subprocess.run(["busctl", "--user", "call", "org.kde.kglobalaccel",
-                          component_path(stem), "org.kde.kglobalaccel.Component",
-                          "allShortcutInfos"], capture_output=True, text=True, timeout=15)
-    if got.returncode != 0:
-        return None
-    # a(ssssssaiai): six strings, then the keys as a counted array, then the defaults
-    tail = got.stdout.rsplit('"', 1)[-1].split()
-    if len(tail) < 2 or not tail[0].isdigit() or int(tail[0]) < 1:
-        return None
-    try:
-        return key_name(int(tail[1]))
-    except ValueError:
-        return None
-
-
-def by_hand(reason):
-    print(f"  {reason}. Bind these two commands to keys yourself:")
-    for _stem, argument, key, name in SHORTCUTS:
-        print(f"    {HERE} {argument}".rstrip() + f"\n      {name}, suggested {key}")
-    return 1
-
-
-def install(keys):
-    """Write the launchers, then *register* them.
-
-    Writing `kglobalshortcutsrc` is not enough and looks as though it is: the section
-    appears in the file, `kreadconfig` reads it back, and no component exists — measured,
-    with `allComponents` listing eighteen and none of them ours. kglobalaccel creates a
-    component when something registers one. After that first registration it does survive
-    a restart, and a reboot, from the file.
-
-    And registering needs the launcher to be in the **service cache**, not merely on
-    disk. A `.desktop` component is resolved through KService, so with a stale cache
-    `doRegister` reports success, creates nothing, and `setShortcut` then returns an empty
-    list rather than an error — which reads exactly like "that key is taken". Two of this
-    session's wrong turns were that empty list. `kbuildsycoca6` between writing and
-    registering is the whole fix.
-    """
-    try:
-        codes = [qt_key(key) for key in keys]
-    except ValueError as error:
-        return by_hand(str(error))
-    if not registered():
-        return by_hand("kglobalaccel is not answering")
-    DESKTOPS.mkdir(parents=True, exist_ok=True)
-    actions = []
-    for (stem, argument, _default, name), key, code in zip(SHORTCUTS, keys, codes):
-        # The shortcut launches this file; without it the key is bound to nothing.
-        (DESKTOPS / f"{stem}.desktop").write_text(
-            "[Desktop Entry]\n"
-            "Type=Application\n"
-            f"Name={name}\n"
-            f"Exec={HERE} {argument}".rstrip() + "\n"
-            "NoDisplay=true\n"
-            "Terminal=false\n"
-            "X-KDE-GlobalAccel-CommandShortcut=true\n")
-        actions.append(([f"{stem}.desktop", "_launch", name, name], key, code, name))
-    rebuild_service_cache()
-    for action, key, code, name in actions:
-        accel("doRegister", "as", 4, *action)
-        # flags 4 is NoAutoloading: use this key, do not quietly take one from the config
-        got = accel("setShortcut", "asaiu", 4, *action, 1, code, 4)
-        if got.returncode != 0:
-            return by_hand(got.stderr.strip() or "kglobalaccel refused the shortcut")
-        taken = got.stdout.split()[-1] if got.stdout.split() else ""
-        if taken != str(code):
-            free = accel("isGlobalShortcutAvailable", "is", code, action[0])
-            print(f"  {key}: kglobalaccel would not take it"
-                  + ("; something else holds it — pick another"
-                     if "true" not in free.stdout else
-                     "; the key is free, so this is the service cache — "
-                     "run `kbuildsycoca6` and try again"))
-            return 1
-        print(f"  {key:<16}{name}")
-    live = registered()
-    if [stem for stem, *_ in SHORTCUTS if component_path(stem) not in live]:
-        return by_hand("registered, but kglobalaccel did not keep it")
-    print("  bound. Press it with the game focused; a notification says which way it went.")
-    return 0
-
-
-def rebuild_service_cache():
-    """Make KService see a launcher written a moment ago. Incremental is enough and takes
-    well under a second; `--noincremental` here would rescan every .desktop on the
-    machine for two files."""
-    for tool in ("kbuildsycoca6", "kbuildsycoca5"):
-        got = subprocess.run(["which", tool], capture_output=True)
-        if got.returncode == 0:
-            subprocess.run([tool], check=False, capture_output=True, timeout=60)
-            return True
-    return False
-
-
-def uninstall():
-    """Take the keys back.
-
-    Order matters and is not the obvious one. kglobalacceld holds the bindings in memory
-    and writes `kglobalshortcutsrc` back **as it exits**, so deleting the keys from the
-    file and then restarting the service deletes nothing — measured, twice. Stop it
-    first, delete while nothing owns the file, then start.
-    """
-    service = ["systemctl", "--user"]
-    stopped = subprocess.run(service + ["stop", "plasma-kglobalaccel.service"],
-                             check=False, capture_output=True, timeout=30).returncode == 0
-    try:
-        tool = next((name for name in ("kwriteconfig6", "kwriteconfig5")
-                     if subprocess.run(["which", name], capture_output=True).returncode == 0),
-                    None)
-        for stem, *_rest in SHORTCUTS:
-            (DESKTOPS / f"{stem}.desktop").unlink(missing_ok=True)
-            if tool:
-                # key by key, because `kwriteconfig` deletes keys and not groups; by it
-                # rather than by editing, because this file holds every shortcut the
-                # desktop has and rewriting it by hand is how a user loses all of them
-                for field in ("_launch", "_k_friendly_name"):
-                    subprocess.run([tool, "--file", "kglobalshortcutsrc", "--group", "services",
-                                    "--group", f"{stem}.desktop", "--key", field,
-                                    "--delete", ""], check=False)
-        rebuild_service_cache()
-    finally:
-        if stopped:
-            # always, even if the middle threw: without this the desktop has no global
-            # shortcuts at all until the next login
-            subprocess.run(service + ["start", "plasma-kglobalaccel.service"],
-                           check=False, capture_output=True, timeout=30)
-    print("  unbound")
+    print("  `nr-toggle status` will show the keys once they are set.")
     return 0
 
 
@@ -376,13 +224,8 @@ def main(argv):
         return temporal()
     if head == "status":
         return status()
-    if head == "install":
-        keys = [key for _s, _a, key, _n in SHORTCUTS]
-        for index, given in enumerate(words[1:3]):
-            keys[index] = given
-        return install(keys)
-    if head == "uninstall":
-        return uninstall()
+    if head in ("install", "keys", "bind"):
+        return install()
     print(__doc__.strip())
     return 0 if head in ("help", "-h", "--help") else 2
 
