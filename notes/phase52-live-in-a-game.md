@@ -174,3 +174,46 @@ reconstructing it, rather than degrading smoothly.
 The floor going negative from 0.65 upward is the one exception and probably the same tone
 pull-back `phase42` measured: the ring floor is a bright near-white surface and the pass
 pulls its level down.
+
+
+## The compromise does not exist, and here is the shape of what does
+
+The 0.55 row above had no negative region — on **that** frame. On a second live frame from
+the same fight, whose crowd sits at luma 28.7 instead of 62.9, the same setting gives
+**-21.4 %** there. Sweeping the scale on that frame:
+
+| scale | ms | fps | whole | **dark crowd** | wing | kimono | floor |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 0.45 | 172 | 5.83 | +1.5 % | **-19.1 %** | +5.6 % | +7.4 % | +6.1 % |
+| 0.55 | 206 | 4.86 | +5.3 % | **-21.4 %** | +14.4 % | +15.0 % | +9.9 % |
+| 0.65 | 288 | 3.47 | +7.6 % | **-13.4 %** | +19.3 % | +16.2 % | +7.0 % |
+| 0.80 | 424 | 2.36 | +8.8 % | **-7.7 %** | +17.2 % | +16.2 % | +1.0 % |
+| 1.00 | 551 | 1.82 | +17.3 % | **+9.8 %** | +42.5 % | +45.5 % | -4.1 % |
+
+Monotone and it only crosses zero at the top. **The scale that a region needs depends on
+how dark and how fine it is**, not on the scale alone:
+
+- bright, large features — fabric, wings, a ring floor — are already positive at 0.55;
+- a distant crowd at luma 29 is negative everywhere below 1.00.
+
+So "0.55 harms nothing" was a one-frame conclusion, and this is the third time this
+session that a recommendation has been generalised from a single sample — after the
+`cinematic` profile (`phase44`) and "the render scale barely matters" above. The pattern
+is worth more than the number: **on this model, one frame never establishes a setting,
+because the effect's sign depends on local content, not on global configuration.**
+
+### What to actually run
+
+| | rate | what it costs |
+| --- | --- | --- |
+| **scale 0.55** | **4.9 fps** | +15 % on fabric and characters, -21 % on a dark crowd |
+| **scale 1.00** | **1.8 fps** | everything positive but a bright floor, +45 % on fabric |
+
+For a fighting game, where the eye is on the characters, 0.55 is the defensible live
+setting and the dark background is the price. For looking at a frame, 1.00.
+
+### An instrumentation note
+
+The live rate at 0.55 is **5.00 fps, 200 ms a frame**. The same run with `--dump` reads
+1.28 fps: two 1024x768 PNGs a frame cost five times the network. **Never measure a rate
+with the dump on** — a mistake this session made once already at 854x480.
