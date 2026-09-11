@@ -106,6 +106,48 @@ strength. `cut_limit` (default 0.15) is the mean frame-to-frame change above whi
 shot is taken to have cut and the history is dropped outright. All three move between
 frames through `nr-ctl` with no reload.
 
+## In the running game, which is better than the replay says
+
+`--meter` reports the same statistic from inside a live game, because the replay cannot
+reproduce the one thing that matters: `--dump` drops the daemon to ~1.28 fps, so
+consecutive frames in a capture are four times further apart in game time than in play.
+Dead or Alive 5, 1024x768, scale 0.55, ~95 frames each:
+
+| | frame held still | invented there | where it moved | ms |
+|---|---|---|---|---|
+| temporal 0 | 17 % | **1.58** | 7.35 | 203 |
+| temporal 1, hold 1 | 15 % | **0.64** | 6.57 | 227 |
+
+**The gate reads 0.38-0.54 in live play, not the 0.12 of the replay**, and 65-70 % of the
+frame gets a floor. Four times less time between presents means four times less of the
+frame has moved, so the history is much more nearly correct and the model knows it. The
+replay's 0.12 is the pessimistic end of the range, not the typical one.
+
+## What it costs, pass by pass
+
+The controlled number is the replay, because both settings see the same frames: **215 ->
+224 ms, +9 ms (4 %)**, repeatable across four runs. Live readings sit between 190 and 230
+ms in *both* settings — scene content moves the frame time more than this path does — so
+the live pair above is not a timing measurement.
+
+Each added pass at 1024x576 output / 563x317 network, measured on synthetic arrays with
+the game running, which makes these an upper bound:
+
+| pass | ms |
+|---|---|
+| resample the previous output to the network extent | 6.7 |
+| `apply_history` including that resample | 14.2 |
+| `hold_floor` | 2.3 |
+| `History.keep`, three copies | 2.8 |
+| `compose` with history and floor, over `compose` without | 7.2 |
+
+Widening the head upscale from three channels to four is **free** — it is the gate channel,
+and the separable resample is not what costs. If this path is ever worth trimming, the two
+places with something in them are `apply_history`'s gather over the *network* extent and
+the sigmoid in `history_weight`, which runs at the output extent over a logit that was
+bilinearly upscaled from the network's — computing it before the upscale would be a third
+of the work and no less faithful.
+
 ## Traps found on the way
 
 - **The daemon is now stateful across frames.** `test_ui_mask.py` sends a masked and an

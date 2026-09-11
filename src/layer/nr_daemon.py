@@ -376,6 +376,45 @@ def hold_floor(current, previous, strength):
     return np.clip(floor, 0, strength, out=floor)[..., None]
 
 
+class Meter:
+    """How much the network is inventing, live, over pixels the game did not move.
+
+    The same statistic as `src/bench/flicker.py`, but from inside a running game, because
+    a replay cannot reproduce one thing that matters: `--dump` drops the daemon to about
+    1.28 fps, so consecutive frames in a capture are four times further apart in game time
+    than they are in play, and the history is correspondingly less correct. Keeps its own
+    two frames rather than the temporal path's, so it reads the same with the path off.
+    """
+
+    def __init__(self):
+        self.input = None
+        self.output = None
+        self.seen = 0
+        self.still = 0.0
+        self.invented = 0.0
+        self.moving = 0.0
+
+    def add(self, colour, output):
+        if self.input is not None and self.input.shape == colour.shape:
+            moved = np.max(np.abs(colour - self.input), axis=2)
+            change = np.mean(np.abs(output - self.output), axis=2) * np.float32(255.0)
+            still = moved == 0
+            if still.any():
+                self.seen += 1
+                self.still += float(still.mean())
+                self.invented += float(change[still].mean())
+                self.moving += float(change[~still].mean()) if (~still).any() else 0.0
+        self.input, self.output = np.array(colour), np.array(output)
+
+    def report(self):
+        if not self.seen:
+            return "  meter: no two frames alike yet"
+        return (f"  meter: {100 * self.still / self.seen:.0f}% of the frame held still, "
+                f"invented {self.invented / self.seen:.2f} levels there, "
+                f"{self.moving / self.seen:.2f} where it moved  "
+                f"({self.seen} frames)")
+
+
 def process_connection(connection, backend, args):
     """One request. Reject invalid extents before allocating/receiving the body.
 
@@ -519,6 +558,8 @@ def process_connection(connection, backend, args):
             print(f"  -> {destination}/{index:03d}_{{in,out}}.png", flush=True)
         except (OSError, subprocess.CalledProcessError, ValueError) as error:
             print(f"frame returned, but dump failed: {error}", flush=True)
+    if args.meter is not None:
+        args.meter.add(colour, output[top:bottom, left:right] if boxed else output)
     note = "" if held is None else f"  interface {100 * held.mean():.0f}% left alone"
     if live.temporal > 0:
         if history_full is None:
@@ -532,6 +573,8 @@ def process_connection(connection, backend, args):
     print(f"{width}x{height} {FORMATS[vk_format][1]} in "
           f"{time.perf_counter() - clock:.2f}s  "
           f"change {changed:.5f}{note}{box}", flush=True)
+    if args.meter is not None:
+        print(args.meter.report(), flush=True)
 
 
 def main():
@@ -560,6 +603,9 @@ def main():
     parser.add_argument("--max-pixels", type=int, default=1 << 22,
                         help="refuse frames larger than this, rather than thrash")
     parser.add_argument("--dump", help="write each frame in and out as PNG, for a look")
+    parser.add_argument("--meter", action="store_true",
+                        help="report, every frame, how much the network invents over "
+                             "pixels the game did not move; costs about 5 ms")
     parser.add_argument("--timeout", type=float, default=60,
                         help="socket inactivity timeout in seconds")
     args = parser.parse_args()
@@ -572,6 +618,7 @@ def main():
             parser.error(f"--{knob.replace('_', '-')} must be between 0 and 1")
     args.live = Settings(args)
     args.history = History()
+    args.meter = Meter() if args.meter else None
 
     started = time.perf_counter()
     backend = nr_frame.ResidentBackend()
