@@ -18,26 +18,30 @@ Start the daemon so it watches the same file:
 The trigger is what the layer polls; the settings file is what the daemon re-reads.
 Neither needs the other, so `on`/`off` work even with no settings file, and a knob can
 be changed while the effect is off.
+
+`nr-toggle` is the same three files bound to a key, for when the game has the screen and
+a terminal would mean alt-tabbing out of it.
 """
-import json
-import os
 import pathlib
-import socket
 import sys
 
-SETTINGS = pathlib.Path(os.environ.get("NR_SETTINGS", "/tmp/nr_settings.json"))
-TRIGGER = pathlib.Path(os.environ.get("NR_LAYER_TRIGGER", "/tmp/nr_trigger"))
-SOCKET = pathlib.Path(os.environ.get("NR_LAYER_SOCKET", "/tmp/nr_layer.sock"))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import nr_paths                                                        # noqa: E402
+
+# Shared with `nr-toggle`, which is the same three paths bound to a key. They were
+# written out here first and copying them was how they would have drifted.
+SETTINGS, TRIGGER, SOCKET = nr_paths.SETTINGS, nr_paths.TRIGGER, nr_paths.SOCKET
+read, write, alive = nr_paths.read, nr_paths.write, nr_paths.alive
 
 PROFILES = ("standard", "natural", "cinematic", "neutral")
 KNOBS = {"profile": str, "intensity": float, "detail_strength": float,
          "colour_strength": float, "render_scale": float, "temporal": float,
-         "cut_limit": float}
+         "hold": float, "cut_limit": float}
 ALIAS = {"p": "profile", "i": "intensity", "d": "detail_strength",
          "c": "colour_strength", "s": "render_scale", "scale": "render_scale",
          "detail": "detail_strength", "colour": "colour_strength",
          "color": "colour_strength", "t": "temporal", "history": "temporal",
-         "cut": "cut_limit"}
+         "cut": "cut_limit", "h": "hold"}
 
 # Measured end to end on this machine, 2026-09-10 — the whole round trip through the
 # socket, not the graph alone. `(swapchain width, height, render_scale) -> ms`.
@@ -74,36 +78,6 @@ def _opencv():
         return False
 
 
-def read():
-    try:
-        with SETTINGS.open() as handle:
-            return json.load(handle)
-    except (OSError, ValueError):
-        return {}
-
-
-def write(values):
-    SETTINGS.parent.mkdir(parents=True, exist_ok=True)
-    temporary = SETTINGS.with_suffix(SETTINGS.suffix + ".new")
-    # written whole and renamed, so the daemon never reads a half-written file
-    with temporary.open("w") as handle:
-        json.dump(values, handle, indent=2, sort_keys=True)
-        handle.write("\n")
-    temporary.replace(SETTINGS)
-
-
-def alive():
-    if not SOCKET.exists():
-        return False
-    try:
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
-            probe.settimeout(0.5)
-            probe.connect(str(SOCKET))
-        return True
-    except OSError:
-        return False
-
-
 def status():
     values = read()
     print("  daemon    %s  (%s)" % ("listening" if alive() else "not answering", SOCKET))
@@ -120,6 +94,9 @@ def status():
         if knob == "temporal" and isinstance(shown, (int, float)):
             note = "   off — every frame is drawn alone" if not float(shown) else \
                    "   the previous frame is carried forward, gated per pixel"
+        if knob == "hold" and isinstance(shown, (int, float)):
+            note = "   off — the model's own gate alone" if not float(shown) else \
+                   "   pixels the game did not move are held still"
         print("    %-16s %s%s" % (knob, shown, note))
 
 
@@ -141,7 +118,7 @@ def apply(knob, value):
         if knob == "render_scale" and not 0.05 <= value <= 1.0:
             print("  render_scale is between 0.05 and 1")
             return
-        if knob in ("temporal", "cut_limit") and not 0.0 <= value <= 1.0:
+        if knob in ("temporal", "hold", "cut_limit") and not 0.0 <= value <= 1.0:
             print("  %s is between 0 and 1" % knob)
             return
     values = read()

@@ -73,6 +73,7 @@ test: all work/attention_ab.spv work/test_exchange work/test_settled
 	work/test_settled
 	python3 src/layer/test_ui_mask.py
 	python3 src/layer/test_temporal.py
+	python3 src/layer/test_toggle.py
 	python3 src/gpu/test_epilogue.py
 	python3 src/gpu/test_specialization.py
 	python3 src/gpu/test_softmax_pack.py

@@ -48,6 +48,17 @@ cannot ghost — the frame that changes a pixel is the frame that releases it �
 **The daemon is now stateful across frames.** Any test that sends a sequence and expects
 each frame to stand alone has to pass `--temporal 0`; `test_ui_mask.py` does.
 
+**And there is a switch on a key.** `src/layer/nr-toggle` — `Meta+N` for the rendering,
+`Meta+Shift+N` for the temporal path, a notification for the answer, and turning it on
+brings the daemon up so one press really is one press. On Wayland nothing but the
+compositor can see a key while a fullscreen game holds focus, so the binding is a Plasma
+global shortcut; `nr-toggle install` registers it and `uninstall` takes it back.
+**Three Plasma facts each look like success while doing nothing, and each cost a wrong
+turn** — writing `kglobalshortcutsrc` binds nothing, registering needs `kbuildsycoca6`
+first or `setShortcut` returns an empty list that reads like "key taken", and unbinding
+has to happen while `plasma-kglobalaccel.service` is stopped because it writes the config
+back as it exits. `notes/phase55`.
+
 ## It runs in a game, live, at 10 fps (2026-09-10 evening)
 
 Ten phases in one session, `notes/phase39` through `phase48`. The three things a next

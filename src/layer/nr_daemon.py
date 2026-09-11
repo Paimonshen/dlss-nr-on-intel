@@ -96,11 +96,17 @@ def encode(image, raw, vk_format):
     return pixels.tobytes()
 
 
-def receive(connection, count):
+def receive(connection, count, probe_ok=False):
     chunks, got = [], 0
     while got < count:
         chunk = connection.recv(min(1 << 20, count - got))
         if not chunk:
+            if probe_ok and not got:
+                # Connected and closed without a byte: that is `nr-ctl` or `nr-toggle`
+                # asking whether anything is listening. Every status line and every press
+                # of the toggle does it, and reporting each as a failed frame buries the
+                # daemon's own log in noise. A truncated frame still reports.
+                return None
             raise EOFError("the layer closed the connection")
         chunks.append(chunk)
         got += len(chunk)
@@ -420,7 +426,10 @@ def process_connection(connection, backend, args):
 
     Closing a rejected exchange makes the Vulkan layer retain its original frame.
     """
-    magic, width, height, vk_format = struct.unpack("<4I", receive(connection, 16))
+    header = receive(connection, 16, probe_ok=True)
+    if header is None:
+        return
+    magic, width, height, vk_format = struct.unpack("<4I", header)
     if magic not in (MAGIC, MAGIC_MASKED):
         raise ValueError(f"bad magic {magic:#x}")
     if not width or not height or width * height > args.max_pixels:

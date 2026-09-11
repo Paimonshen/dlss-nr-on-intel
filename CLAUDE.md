@@ -378,7 +378,9 @@ handing work to the four E-cores (**-7 %** for a theoretical +2 %). `notes/phase
 live mode (`NR_LAYER_LIVE=N`) runs continuously and reaches **10.6 fps at 512x288**, with
 the game set to that extent and the compositor doing the stretch. `src/layer/nr-ctl`
 changes profile, intensity, both strengths, the render scale and the temporal knobs
-between frames without reloading the model.
+between frames without reloading the model, and `src/layer/nr-toggle` is the same three
+files on a key — `Meta+N` on/off, `Meta+Shift+N` for the temporal path — because on
+Wayland only the compositor sees a key while a fullscreen game has focus. `notes/phase55`.
 
 **Live mode carries a frame of history, and the daemon is stateful because of it.** The
 previous output goes into feature channels 7-9 with identity reprojection — a present-time
@@ -415,5 +417,5 @@ src/     our code
 
 ---
 
-*Last updated 2026-09-11 (phases 49-54: the parallel tree mined, DOA6LR diagnosed, what the model computes in, the output extent's own costs, live rendering in a game, and the flicker found and fixed). **Read `HANDOFF.md` first** — it carries the current state and the traps. Owner runs Arch Linux, is comfortable at kernel/driver level,
+*Last updated 2026-09-11 (phases 49-55: the parallel tree mined, DOA6LR diagnosed, what the model computes in, the output extent's own costs, live rendering in a game, the flicker found and fixed, and a switch on a key). **Read `HANDOFF.md` first** — it carries the current state and the traps. Owner runs Arch Linux, is comfortable at kernel/driver level,
 prefers C for low-level work, and does not need concepts explained from scratch.*

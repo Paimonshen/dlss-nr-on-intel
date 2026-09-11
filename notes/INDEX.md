@@ -1,6 +1,6 @@
 # Index of the notes
 
-Eighty-five files, fifty-four phases. This is what each one settles, so a reader arriving
+Eighty-six files, fifty-five phases. This is what each one settles, so a reader arriving
 cold can go straight to the answer instead of the archaeology.
 
 **Read `HANDOFF.md` first** — it carries the current state, the standing conclusions and
@@ -91,6 +91,7 @@ disproved.
 | `phase52-live-in-a-game.md` | live neural rendering inside a running game, measured |
 | `phase53-why-it-flickers.md` | why a static pixel moves 3.3 levels: the network is global |
 | `phase54-flicker-fix.md` | the temporal path in live mode; 3.7x less flicker for 3.7 % of the frame |
+| `phase55-a-switch-on-a-key.md` | one key over a fullscreen game, and three Plasma facts that look like success while doing nothing |
 | `phase30-control-atlas.md` | what each vendor slider does, and one that does nothing |
 | `morning-doa5.md` | a session log, in Russian, kept for its screenshots |
 
