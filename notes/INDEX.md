@@ -1,6 +1,6 @@
 # Index of the notes
 
-Eighty-six files, fifty-five phases. This is what each one settles, so a reader arriving
+Eighty-seven files, fifty-six phases. This is what each one settles, so a reader arriving
 cold can go straight to the answer instead of the archaeology.
 
 **Read `HANDOFF.md` first** — it carries the current state, the standing conclusions and
@@ -92,6 +92,7 @@ disproved.
 | `phase53-why-it-flickers.md` | why a static pixel moves 3.3 levels: the network is global |
 | `phase54-flicker-fix.md` | the temporal path in live mode; 3.7x less flicker for 3.7 % of the frame |
 | `phase55-a-switch-on-a-key.md` | one key over a fullscreen game, and the compositor crash from binding it the wrong way |
+| `phase56-the-panel-and-the-manual.md` | every knob on one screen, one table behind the tools and the README, three bugs in a terminal's input path |
 | `phase30-control-atlas.md` | what each vendor slider does, and one that does nothing |
 | `morning-doa5.md` | a session log, in Russian, kept for its screenshots |
 

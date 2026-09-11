@@ -11,10 +11,21 @@ import json
 import os
 import pathlib
 import socket
+import subprocess
+import sys
+import time
 
 SETTINGS = pathlib.Path(os.environ.get("NR_SETTINGS", "/tmp/nr_settings.json"))
 TRIGGER = pathlib.Path(os.environ.get("NR_LAYER_TRIGGER", "/tmp/nr_trigger"))
 SOCKET = pathlib.Path(os.environ.get("NR_LAYER_SOCKET", "/tmp/nr_layer.sock"))
+LOG = pathlib.Path(os.environ.get("NR_LAYER_LOG", "/tmp/nr_daemon.log"))
+DAEMON = pathlib.Path(__file__).resolve().parent / "nr_daemon.py"
+
+# The compromise this project measured: below it the picture is not worth the frame, above
+# it the frame is not worth the picture, and the sign of the trade depends on how dark the
+# scene is rather than on the number (`notes/phase51`, `phase52`). Only used when there is
+# no settings file at all — anything already chosen wins.
+FIRST_SCALE = 0.55
 
 
 def read():
@@ -46,3 +57,38 @@ def alive():
         return True
     except OSError:
         return False
+
+
+def start_daemon(wait=10.0):
+    """Bring the model up, detached. Returns None, or why it did not.
+
+    Shared because both the toggle and the panel want it: a control that answers "no
+    daemon, go and start one" sends the user to a terminal, which is the thing they exist
+    to avoid. Turning the effect *off* deliberately leaves the daemon running — the
+    trigger is separate from the model precisely so the picture can come and go without
+    paying the load again.
+    """
+    if not DAEMON.exists():
+        return f"no daemon at {DAEMON}"
+    values = read()
+    if "render_scale" not in values:
+        values["render_scale"] = FIRST_SCALE
+        write(values)
+    try:
+        with LOG.open("a") as log:
+            subprocess.Popen(
+                # the socket too, not just the settings: with `NR_LAYER_SOCKET` set, a
+                # daemon started on the default path is one nothing else is talking to
+                [sys.executable, str(DAEMON), "--settings", str(SETTINGS),
+                 "--socket", str(SOCKET)],
+                stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                start_new_session=True, cwd=str(DAEMON.parent))
+    except OSError as error:
+        return f"could not start it: {error}"
+    # It refuses to start if one is already listening, so a second attempt is harmless.
+    deadline = time.monotonic() + wait
+    while time.monotonic() < deadline:
+        if alive():
+            return None
+        time.sleep(0.25)
+    return f"started, still loading - {LOG}"

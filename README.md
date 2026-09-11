@@ -1,0 +1,302 @@
+# DLSS 5 Neural Rendering on an Intel Xe2 iGPU
+
+NVIDIA's DLSS 5 Neural Rendering pass — the one-step pixel-space diffusion model that
+re-renders a frame's detail — running on an **Intel Arc 140V (Lunar Lake, Xe2)**
+integrated GPU under Linux, in a real game, through a Vulkan layer.
+
+No NVIDIA hardware, no NGX, no CUDA. The graph runs on Intel's XMX matrix units through
+`VK_KHR_cooperative_matrix`, and the pass is injected at `vkQueuePresentKHR`, so it
+attaches to anything that presents with Vulkan — including a Windows game under Proton.
+
+A frame of **Dead or Alive 5** goes out of the running game, through the recovered
+71-block graph, and back into the game's own swapchain: hair separating into strands,
+eyelashes resolving, skin picking up texture that is not in the input. Correlation with
+the CPU reference **0.981311**.
+
+**This is a research port, not a product.** It is slow — a 1024x768 frame takes about a
+fifth of a second — and it is a slideshow rather than a filter. Read "What to expect"
+before deciding it is broken.
+
+---
+
+## You supply the weights
+
+**The repository is code only. It contains no NVIDIA binaries and no weights derived from
+them, and it never will.** `nvngx_dlssnr.dll` is NVIDIA's; every project in this space
+requires you to bring your own copy, and so does this one.
+
+Nothing here will run until you have extracted the logical weight file from a DLL you
+already have. See [Build](#build).
+
+## What you need
+
+- An Intel GPU that exposes `VK_KHR_cooperative_matrix` with a `fp16 x fp16 -> fp32`
+  configuration. Developed and measured on **Arc 140V / Xe2, Mesa ANV**. A Vulkan device
+  alone is not enough; run `src/probe/coopmat_probe.c` if unsure.
+- Linux. Python 3 with NumPy. A C compiler, `glslangValidator`, the Vulkan loader.
+- About 2.3 GiB of memory for the device buffers at 720p — it shares system RAM.
+- OpenCV is optional and worth having: without it the two strength knobs cost 7x more.
+
+## Build
+
+```sh
+mkdir -p work
+git clone https://github.com/KhronosGroup/Vulkan-Headers.git work/vulkan-headers
+git -C work/vulkan-headers checkout f226aea0e17c3715baa1e2c9a4d927282725dd4b
+git clone https://github.com/iamwavecut/MLX-DLSS.git work/mlx-dlss
+git -C work/mlx-dlss checkout 06a3e11a8b68817127406ace5c764463543f699b
+make
+```
+
+Then extract the weights from your own DLL (needs `safetensors` as well as NumPy):
+
+```sh
+mkdir -p work/mlxw
+python3 work/mlx-dlss/python/mlxdlss/tools/extract_dlssnr_weights.py \
+        /path/to/nvngx_dlssnr.dll work/mlxw/dlssnr-packed.safetensors
+python3 work/mlx-dlss/python/mlxdlss/tools/unpack_dlssnr_weights.py \
+        work/mlxw/dlssnr-packed.safetensors work/mlxw/dlssnr-logical.safetensors
+```
+
+The result is 649 named tensors, 73 841 889 FP16 parameters. The reader checks
+`fully_logical=true` and refuses anything else — the packed file is **not** a substitute,
+and reading it as dense FP16 gives values correlating -0.02 with the truth.
+
+```sh
+make test                                        # 150-odd checks
+python3 src/ref/nr_frame.py IN.png OUT.png --resident   # one still, no game
+```
+
+## Run it in a game
+
+Two processes: a **daemon** that holds the model, and a **Vulkan layer** inside the game
+that hands it each frame. They meet over a unix socket.
+
+```sh
+python3 src/layer/nr_daemon.py --settings /tmp/nr_settings.json
+src/layer/nr-photo --steam 311730          # prints the Steam launch option to paste
+```
+
+For a native Vulkan game, `src/layer/nr-photo <game>` sets the environment itself. The
+layer does nothing until a trigger file exists, so the game runs at full speed until you
+ask for a frame.
+
+| variable | what it does |
+| --- | --- |
+| `ENABLE_NR_LAYER=1` | turn the layer on for this process |
+| `NR_LAYER_LIVE=N` | live mode: every Nth present goes through the network |
+| `NR_LAYER_TRIGGER` | the file that means "do it" (default `/tmp/nr_trigger`) |
+| `NR_LAYER_SOCKET` | where the daemon listens (default `/tmp/nr_layer.sock`) |
+| `NR_LAYER_UI_MASK=1` | mark pixels that held still and leave them as the game drew them |
+
+Without `NR_LAYER_LIVE` it is a **photo mode**: the pass fires once and holds its result
+on screen while the trigger exists. With it, every Nth frame is re-rendered and the ones
+between hold the last result — a slideshow you can play.
+
+## The three tools
+
+All three drive the same two files: a trigger, and a JSON settings file the daemon
+re-reads whenever it changes. Nothing reloads the model, so every knob below moves
+between frames while the game runs.
+
+### `nr-panel` — everything on one screen
+
+```sh
+src/layer/nr-panel
+```
+
+Arrow keys pick a knob and change it. The bottom of the screen is what the daemon is
+actually doing, read from its log rather than estimated: extent, milliseconds, the
+history gate, how much of the frame it is holding still. `space` turns the effect on and
+off and starts the daemon if it is not up; `d` gives a knob back to the daemon's own
+default; `q` leaves, and the game carries on.
+
+It is curses, not a toolkit — nothing outside the standard library, and it works the same
+over ssh.
+
+### `nr-ctl` — the same thing, one shot
+
+```sh
+src/layer/nr-ctl                       an interactive session
+src/layer/nr-ctl on                    start enhancing
+src/layer/nr-ctl off                   hand the game back
+src/layer/nr-ctl set scale 0.5
+src/layer/nr-ctl help colour_strength  what a knob actually does
+src/layer/nr-ctl rates                 measured frame times by extent and scale
+```
+
+### `nr-toggle` — on and off, from a key
+
+```sh
+src/layer/nr-toggle            flip it
+src/layer/nr-toggle temporal   flip the temporal path, to see the flicker it removes
+src/layer/nr-toggle install    print the commands and open the key settings
+```
+
+Answers with a desktop notification, because a fullscreen game covers a terminal and does
+not cover the compositor. Turning it on starts the daemon, so one key really is one key.
+
+**Bind it in your desktop's own settings.** On Wayland an application cannot grab a key
+for itself, and this tool used to register a Plasma global shortcut itself — which
+crashed the compositor on the first keypress. `notes/phase55` has the backtrace and the
+reason; the short version is that in Plasma 6.7 the shortcut registry lives inside KWin,
+so anything that edits its config files behind its back is working on a corpse.
+
+## The knobs
+
+Every one of these is post-network or an extent choice: none invalidates the weights, and
+all of them move between frames. Only `profile` costs a forward pass.
+
+<!-- knobs:begin -->
+
+### `render_scale` — the fraction of each side the network runs on
+
+`0.05` to `1`, step `0.05`, default `1`
+
+The only knob that changes the frame rate. The network runs on a frame this much smaller, and what comes back is the *head* — the detail it drew — which is then scaled up and composed against the full-resolution original, so the game's own pixels are never resampled and only the synthesised part is interpolated. Cost follows the extent and nothing else: 17 ms + 488 ms per megapixel. 0.55 is the measured compromise, but the *sign* of its effect on quality depends on how dark the scene is rather than on the number: on a bright frame 0.55 adds 15 % of local contrast to a kimono, on a dark crowd it takes 21 % away.
+
+### `profile` — which way to trade skin texture against speculars
+
+`standard` / `natural` / `cinematic` / `neutral`
+
+The three conditioning scalars the network is given. They are a clean monotone trade, not a quality ladder: everything the pass adds to skin texture it takes out of speculars and colour, and the profile chooses where on that curve to sit. `standard` is the better default for a game with bright, near-clipping skin. `cinematic` does not merely add less on such a frame — it *removes* detail, smoothing sand grain that `standard` keeps. `neutral` sets tone and structure to zero. Changing this costs a forward pass, unlike everything below it.
+
+### `intensity` — how far to go towards the model's picture, or past it
+
+`0` to `2`, step `0.05`, default `1`
+
+Blends the model's answer against the source, per pixel where an interface mask supplies one. At 1 you get the model's picture; below it you get part of the way there; above it the blend extrapolates *past* the model, which the vendor's own panel allows to 2 and ships screenshots at 1.66. Post-network and free: sweeping it does not re-run anything.
+
+### `detail_strength` — re-weights the high-frequency half of the change
+
+`0` to `2`, step `0.05`, default `1`
+
+After the blend, the difference the pass made is split into bands and each is re-weighted. This is the fine half — pores, strands, grain. Away from 1 it costs a Gaussian over the whole frame, about 7x more without OpenCV than with it.
+
+### `colour_strength` — the low-frequency half — and it runs backwards from its name
+
+`0` to `2`, step `0.05`, default `1`
+
+The coarse half of the same split: tone and colour rather than detail. **It does not restore colour.** 1.5 is the most aggressive of the measured settings — iris saturation 16.8 → 8.8, half again below the default — because it scales the strength of the pass's colour term, not the colour that survives. The name invites the opposite reading and this project spent a measurement finding out.
+
+### `temporal` — how much of the model's own history gate to trust
+
+`0` to `1`, step `0.05`, default `1`
+
+The previous output is fed back into the network's history channels, and the model's learned gate decides per pixel how much of it survives into this frame. This scales that gate. 0 turns the path off entirely, is bit-identical to drawing each frame alone, and clears the stored frame so switching back on cannot resurrect a stale one. Worth about 4 % of the frame time.
+
+### `hold` — how hard to hold pixels the game did not move
+
+`0` to `1`, step `0.05`, default `1`
+
+A floor under that gate, which the gate needs: the model is global, so on a frame where most things move it reads 0.12 even over pixels that did not move at all. Where the game handed back the same pixel the previous output is right for that pixel by construction, and this says so. It cannot ghost — the frame that changes a pixel is the frame that releases it. Together with `temporal` it takes the invention over still pixels from 3.25 levels of 255 to 0.87.
+
+### `cut_limit` — the frame-to-frame change that counts as a new shot
+
+`0` to `1`, step `0.01`, default `0.15`
+
+Mean absolute change between two presents above which the shot is taken to have cut and the history is thrown away. The gate rejects wrong history per pixel on its own, but it was characterised on a pan at full scale, so a whole-frame replacement — a round transition, a replay, a menu — is worth refusing outright.
+
+<!-- knobs:end -->
+
+## What to expect
+
+Measured on this machine, end to end through the socket — not graph time alone.
+
+| swapchain | render scale | ms | fps |
+| --- | --- | --- | --- |
+| 512x288 | 0.35 | 99 | 10.1 |
+| 512x288 | 0.50 | 108 | 9.2 |
+| 640x360 | 0.35 | 117 | 8.6 |
+| 854x480 | 0.50 | 180 | 5.6 |
+| 1024x768 | 0.55 | ~215 | 4.7 |
+| 1920x1080 | 0.55 | ~850 | 1.2 |
+
+**Set the game small.** The cost follows the extent, and a stack of full-frame passes runs
+at the *output* resolution regardless of the render scale, so the swapchain size matters
+as much as the scale does. A game at 512x288 with the compositor stretching to the panel
+is the fastest arrangement there is.
+
+The graph itself is finished as an optimisation target: GEMM is 216 ms of 488 at 720p and
+is register-bound, and every pass that only moves data already runs at the machine's
+memory ceiling. Tiling, operand staging, integer weights, the accumulator format, OpenCL,
+shared-memory bank padding and handing work to the E-cores have all been measured and all
+are closed. `notes/phase45`, `notes/phase46`.
+
+## How it works
+
+```
+game ──presents──▶ Vulkan layer ──socket──▶ daemon ──▶ 71-block U-Net on XMX
+  ▲                                                          │
+  └──────────────── the composed frame ◀─────────────────────┘
+```
+
+- **The graph** is a symmetric U-Net: five Swin stages at 32/64/128/256/512 channels down
+  to a ViT-1D bottleneck and back, 71 blocks, recovered from the DLL's intact RTTI and
+  anchored on MLX-DLSS's independent extraction of the same binary.
+- **Every GEMM runs on XMX** in FP16 with FP32 accumulate, through cooperative matrix.
+  The whole graph is resident: operands travel as 64-bit addresses in push constants, and
+  activations never come back to the host.
+- **The output is a *head***, not a picture — a residual the composition adds to the
+  game's own frame. That is why the render scale can be lowered without resampling the
+  game's pixels: only the synthesised part is interpolated.
+- **A frame of history** is fed back into the network's own history channels, and the
+  model's learned gate decides per pixel how much survives. That is what stops the
+  picture shimmering.
+
+`notes/INDEX.md` maps all fifty-five phase notes to the question each one settles, and
+several of the answers are counter-intuitive. `HANDOFF.md` is the current state and the
+traps.
+
+## Troubleshooting
+
+**"no daemon" / nothing happens.** `src/layer/nr-ctl status` says whether the daemon is
+listening and whether the effect is on. They are independent: the trigger can be up with
+no daemon, and a daemon can be idle with the trigger down.
+
+**The game runs but the picture never changes.** The layer only attaches with
+`ENABLE_NR_LAYER=1` in the *game's* environment. Steam launches the game as a child of
+the client, so exporting it in your shell does not reach it — use the launch option
+`src/layer/nr-photo --steam <appid>` prints, or launch Proton directly with `--proton`.
+
+**A 32-bit game (D3D9 through DXVK) does not load the layer.** It needs the 32-bit
+library; `make work/libnr_layer32.so` builds it and `prepare_layer.py` writes both
+manifests.
+
+**It is unbearably slow.** Look at the swapchain size before the render scale. See the
+table above; 1920x1080 is 1.2 fps and nothing will fix that but a smaller window.
+
+**The interface is being re-rendered.** `NR_LAYER_UI_MASK=1` marks pixels that did not
+move between two presents and gives them back byte-identical. It drops itself when it
+would cover more than 55 % of the frame, because that is the scene holding still rather
+than a HUD.
+
+## Layout
+
+```
+src/ref/      the CPU reference: the graph, features, composition, the temporal path
+src/gpu/      the XMX runtime — compute shaders and the resident Vulkan context
+src/layer/    the Vulkan layer, the daemon, and the three control tools
+src/bench/    measurement programs; every number in the notes came from one
+src/tools/    the DLL and weight-container readers
+notes/        what was measured, including the measurements that turned out wrong
+work/         builds, checkouts and your weights. Ignored, and stays that way.
+```
+
+## Tests
+
+```sh
+make test
+```
+
+Around 150 checks, including the layer's wire protocol, the interface mask down to the
+byte, the temporal path against MLX-DLSS's own composition, and the panel driven through
+a pseudo-terminal. They skip the weight-dependent parts if you have not supplied weights,
+and a skip is not a pass.
+
+## Credit and licences
+
+The graph was recovered by [MLX-DLSS](https://github.com/iamwavecut/MLX-DLSS) (Apache-2.0)
+from vendor captures; this port reads its weight specification and its numpy modules, and
+the two independent extractions of the same DLL agree exactly — 0 missing, 0 extra, 0
+shape mismatches. The model, the weights and the name are NVIDIA's.

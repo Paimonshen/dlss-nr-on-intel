@@ -383,7 +383,9 @@ files on a key, because on Wayland only the compositor sees a key while a fullsc
 has focus. The binding is made in System Settings and **must not** be made by us: doing it
 over kglobalaccel's D-Bus interface crashed KWin on the first keypress, because in Plasma
 6.7 that registry lives inside KWin and `plasma-kglobalaccel.service` is not even running.
-`notes/phase55`.
+`notes/phase55`. `src/layer/nr-panel` is all eight knobs on one screen, and
+`src/layer/nr_knobs.py` is the one definition that it, `nr-ctl` and `README.md` all
+render, checked by `make test`. `notes/phase56`.
 
 **Live mode carries a frame of history, and the daemon is stateful because of it.** The
 previous output goes into feature channels 7-9 with identity reprojection — a present-time
@@ -420,5 +422,5 @@ src/     our code
 
 ---
 
-*Last updated 2026-09-11 (phases 49-55: the parallel tree mined, DOA6LR diagnosed, what the model computes in, the output extent's own costs, live rendering in a game, the flicker found and fixed, and a switch on a key). **Read `HANDOFF.md` first** — it carries the current state and the traps. Owner runs Arch Linux, is comfortable at kernel/driver level,
+*Last updated 2026-09-11 (phases 49-56: the parallel tree mined, DOA6LR diagnosed, what the model computes in, the output extent's own costs, live rendering in a game, the flicker found and fixed, a switch on a key, and a panel with the manual behind it). **Read `HANDOFF.md` first** — it carries the current state and the traps. Owner runs Arch Linux, is comfortable at kernel/driver level,
 prefers C for low-level work, and does not need concepts explained from scratch.*

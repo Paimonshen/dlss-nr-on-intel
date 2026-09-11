@@ -24,8 +24,10 @@ a terminal would mean alt-tabbing out of it.
 """
 import pathlib
 import sys
+import textwrap
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import nr_knobs                                                        # noqa: E402
 import nr_paths                                                        # noqa: E402
 
 # Shared with `nr-toggle`, which is the same three paths bound to a key. They were
@@ -33,10 +35,11 @@ import nr_paths                                                        # noqa: E
 SETTINGS, TRIGGER, SOCKET = nr_paths.SETTINGS, nr_paths.TRIGGER, nr_paths.SOCKET
 read, write, alive = nr_paths.read, nr_paths.write, nr_paths.alive
 
-PROFILES = ("standard", "natural", "cinematic", "neutral")
-KNOBS = {"profile": str, "intensity": float, "detail_strength": float,
-         "colour_strength": float, "render_scale": float, "temporal": float,
-         "hold": float, "cut_limit": float}
+# One table, shared with `nr-panel` and with the manual: a knob that exists in the daemon
+# and not here is exactly the drift `nr_knobs` was written to stop, and it had already
+# happened once (`hold`).
+PROFILES = nr_knobs.PROFILES
+KNOBS = tuple(knob.name for knob in nr_knobs.KNOBS)
 ALIAS = {"p": "profile", "i": "intensity", "d": "detail_strength",
          "c": "colour_strength", "s": "render_scale", "scale": "render_scale",
          "detail": "detail_strength", "colour": "colour_strength",
@@ -54,19 +57,7 @@ RATES = (
     (640, 360, 0.50, 199.8), (640, 360, 0.35, 116.8),
     (512, 288, 0.50, 108.3), (512, 288, 0.35, 98.6),
 )
-# Graph time alone against render scale, for the estimate shown when a scale is set.
-COST = ((1.00, 490), (0.70, 233), (0.60, 188), (0.50, 146), (0.35, 78))
-
-
-def expected(scale):
-    """Rough ms and fps for a render scale, interpolated from measurements."""
-    points = sorted(COST)
-    if scale <= points[0][0]:
-        return points[0][1]
-    for (a, ta), (b, tb) in zip(points, points[1:]):
-        if a <= scale <= b:
-            return ta + (tb - ta) * (scale - a) / (b - a)
-    return points[-1][1]
+expected = nr_knobs.expected          # graph time against render scale, measured
 
 
 def _opencv():
@@ -105,7 +96,8 @@ def apply(knob, value):
     if knob not in KNOBS:
         print("  no knob %r; try: %s" % (knob, ", ".join(KNOBS)))
         return
-    if knob == "profile":
+    entry = nr_knobs.BY_NAME[knob]
+    if entry.kind == "choice":
         if value not in PROFILES:
             print("  profiles are: %s" % ", ".join(PROFILES))
             return
@@ -115,11 +107,8 @@ def apply(knob, value):
         except ValueError:
             print("  %s takes a number" % knob)
             return
-        if knob == "render_scale" and not 0.05 <= value <= 1.0:
-            print("  render_scale is between 0.05 and 1")
-            return
-        if knob in ("temporal", "hold", "cut_limit") and not 0.0 <= value <= 1.0:
-            print("  %s is between 0 and 1" % knob)
+        if not entry.low <= value <= entry.high:
+            print("  %s is between %g and %g" % (knob, entry.low, entry.high))
             return
     values = read()
     values[knob] = value
@@ -143,6 +132,23 @@ def apply(knob, value):
             print("     854x480, 7x the composition. Installing OpenCV takes that to")
             print("     32 ms; the vendored blur has the fast path and only needs it")
             print("     importable.")
+
+
+def explain(name):
+    """What a knob does, from the one table the panel and the manual also render."""
+    entry = nr_knobs.BY_NAME.get(name)
+    if entry is None:
+        print("  no knob %r; try: %s" % (name, ", ".join(KNOBS)))
+        return
+    if entry.kind == "choice":
+        span = " | ".join(PROFILES)
+    else:
+        span = "%g to %g, step %g, daemon default %g" % (
+            entry.low, entry.high, entry.step, entry.default)
+    print("  %s — %s" % (entry.label, entry.summary))
+    print("  %s\n" % span)
+    for line in textwrap.wrap(entry.detail.replace("*", ""), 76):
+        print("  " + line)
 
 
 def command(words):
@@ -176,10 +182,14 @@ def command(words):
         print("\n  Set the *game* to the swapchain size; the compositor stretches the")
         print("  result to the panel for nothing. The odd non-monotonic rows are the")
         print("  network's alignment padding, which some extents land badly on.")
-    elif head in ("help", "?"):
-        print("  on | off | status | rates | set <knob> <value> | q")
-        print("  shorthand: p <profile>, i <n>, d <n>, c <n>, s <scale>, t <0-1>")
-        print("  knobs: %s" % ", ".join(KNOBS))
+    elif head in ("help", "?", "man"):
+        if rest:
+            explain(ALIAS.get(rest[0], rest[0]))
+        else:
+            print("  on | off | status | rates | set <knob> <value> | help <knob> | q")
+            print("  shorthand: p <profile>, i <n>, d <n>, c <n>, s <scale>, t <0-1>")
+            print("  knobs: %s" % ", ".join(KNOBS))
+            print("  `help <knob>` says what one actually does, and what it costs.")
     else:
         print("  ? %s   (try `help`)" % " ".join(words))
     return True

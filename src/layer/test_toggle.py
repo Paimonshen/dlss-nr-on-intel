@@ -7,7 +7,7 @@ kglobalaccel as an integer, the flips themselves, that the two tools agree on wh
 they are talking about, and that asking the daemon whether it is alive no longer looks
 like a failed frame in its log.
 """
-import importlib.machinery, importlib.util, os, pathlib, socket, sys, tempfile
+import importlib.machinery, importlib.util, os, pathlib, socket, subprocess, sys, tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 FAILURES = []
@@ -62,7 +62,10 @@ def flip_checks(toggle, paths):
     # and turning it off does not — the trigger is separate from the model so that the
     # picture can come and go without paying the load again.
     started, said = [], []
-    toggle.start_daemon = lambda: started.append(True)
+    # `nr_paths.start_daemon`, not `toggle.start_daemon`: it moved to the shared module
+    # when the panel wanted it too, and patching the old name silently started a real
+    # daemon in the middle of a test run.
+    toggle.nr_paths.start_daemon = lambda: started.append(True)
     toggle.notify = lambda title, body: said.append((title, body))
     paths.TRIGGER.unlink(missing_ok=True)
     paths.SETTINGS.unlink(missing_ok=True)
@@ -75,7 +78,7 @@ def flip_checks(toggle, paths):
     toggle.effect()
     check("and a flip turns it on", paths.TRIGGER.exists())
 
-    check("turning it on asks for the daemon", len(started) == 2,
+    check("turning it on asks for the shared starter", len(started) == 2,
           f"{len(started)} starts across two turns on and two off")
     check("the notification says which way it went",
           [title for title, _body in said].count("Neural rendering off") == 2
@@ -102,6 +105,14 @@ def agreement_checks(toggle, paths):
     missing = set(daemon.Settings.KNOBS) - knobs
     check("nr-ctl can reach every knob the daemon has", not missing,
           f"missing: {sorted(missing)}" if missing else ", ".join(sorted(knobs)))
+
+
+def manual_checks():
+    """The README's knob section is generated from the same table the tools render."""
+    got = subprocess.run([sys.executable, str(ROOT / "src" / "tools" / "knob_doc.py"),
+                          "--check"], capture_output=True, text=True, timeout=60)
+    check("the README's knob table is current", got.returncode == 0,
+          got.stdout.strip() or "generated from nr_knobs, so it cannot drift")
 
 
 def probe_checks(daemon):
@@ -135,6 +146,7 @@ def main():
         launcher_checks(toggle, scratch)
         flip_checks(toggle, paths)
         agreement_checks(toggle, paths)
+        manual_checks()
         probe_checks(daemon)
     if FAILURES:
         print(f"\n{len(FAILURES)} FAILED: " + ", ".join(FAILURES), flush=True)

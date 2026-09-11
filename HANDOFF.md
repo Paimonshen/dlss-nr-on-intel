@@ -52,6 +52,13 @@ each frame to stand alone has to pass `--temporal 0`; `test_ui_mask.py` does.
 and turning it on brings the daemon up so one press really is one press. Bind it in System
 Settings; `nr-toggle install` prints the two commands and opens that page.
 
+**There is a panel, and one table behind everything.** `src/layer/nr-panel` puts all
+eight knobs on one screen with what each does and a status line read from the daemon's own
+log; `src/layer/nr_knobs.py` is the single definition that `nr-ctl`, the panel and
+`README.md` all render, checked by `make test` so a knob cannot exist in one and be
+missing from another — which had already happened with `hold`. `README.md` is new and is
+the front door for anyone arriving cold. `notes/phase56`.
+
 **Do not make this tool install its own shortcut. It did, and it crashed KWin on the first
 keypress.** In Plasma 6.7 the shortcut registry lives *inside* KWin —
 `org.kde.kglobalaccel` is owned by `kwin_wayland` and `plasma-kglobalaccel.service` is

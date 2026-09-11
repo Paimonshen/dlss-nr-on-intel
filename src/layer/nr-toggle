@@ -21,7 +21,6 @@ import os
 import pathlib
 import subprocess
 import sys
-import time
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import nr_paths                                                        # noqa: E402
@@ -61,48 +60,6 @@ def daemon_note():
     return "no daemon — start nr_daemon.py"
 
 
-DAEMON = HERE.parent / "nr_daemon.py"
-DAEMON_LOG = pathlib.Path("/tmp/nr_daemon.log")
-# The compromise this project measured: below it the picture is not worth the frame, above
-# it the frame is not worth the picture, and the sign of the trade depends on how dark the
-# scene is rather than on the number (`notes/phase51`, `phase52`). Only used when there is
-# no settings file at all — anything already chosen wins.
-FIRST_SCALE = 0.55
-
-
-def start_daemon():
-    """Bring the model up, detached, so one key is really one key.
-
-    A toggle that answers "no daemon, go and start one" sends the user to a terminal,
-    which is the thing it exists to avoid. Turning the effect *off* deliberately leaves
-    the daemon running: the trigger is separate from the model precisely so the picture
-    can come and go without paying the load again.
-    """
-    if not DAEMON.exists():
-        return "daemon not found next to this script"
-    values = nr_paths.read()
-    if "render_scale" not in values:
-        values["render_scale"] = FIRST_SCALE
-        nr_paths.write(values)
-    try:
-        with DAEMON_LOG.open("a") as log:
-            subprocess.Popen(
-                # the socket too, not just the settings: with `NR_LAYER_SOCKET` set, a
-                # daemon started on the default path is one nothing else is talking to
-                [sys.executable, str(DAEMON), "--settings", str(nr_paths.SETTINGS),
-                 "--socket", str(nr_paths.SOCKET)],
-                stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                start_new_session=True, cwd=str(DAEMON.parent))
-    except OSError as error:
-        return f"could not start it: {error}"
-    # It refuses to start if one is already listening, so a second press is harmless.
-    for _ in range(40):
-        if nr_paths.alive():
-            return None
-        time.sleep(0.25)
-    return f"started, still loading — {DAEMON_LOG}"
-
-
 def effect(state=None):
     if state is None:
         state = not nr_paths.TRIGGER.exists()
@@ -111,7 +68,7 @@ def effect(state=None):
         nr_paths.TRIGGER.touch()
         if not nr_paths.alive():
             notify("Neural rendering ON", "starting the model...")
-            trouble = start_daemon()
+            trouble = nr_paths.start_daemon()
             if trouble:
                 notify("Neural rendering ON", trouble)
                 return 0
