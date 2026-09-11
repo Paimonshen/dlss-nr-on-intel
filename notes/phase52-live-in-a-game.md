@@ -130,3 +130,47 @@ that helps the subject and damages the background; 1.1 fps buys the effect this 
 exists to reproduce. That is the honest trade, and it is not a trade between speed and
 *less* quality — below about half scale the sign of the effect flips on anything dark and
 distant.
+
+## The compromise, measured on one frame through seven scales
+
+One captured 1024x768 fight frame, run through the whole daemon path at each scale, so
+only the scale differs. Relative fine texture, normalised for level:
+
+| scale | ms | fps | whole frame | kimono | skin | crowd | ring floor |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 0.35 | 133 | 7.51 | **-1.6 %** | -3.5 % | -3.5 % | +0.7 % | +0.5 % |
+| 0.45 | 170 | 5.87 | +0.6 % | +4.6 % | -1.5 % | +5.3 % | -1.4 % |
+| **0.55** | **242** | **4.14** | **+2.4 %** | **+6.5 %** | **+5.6 %** | **+9.1 %** | **+6.4 %** |
+| 0.65 | 271 | 3.69 | +3.2 % | +14.7 % | +6.5 % | +10.4 % | -2.4 % |
+| 0.75 | 341 | 2.93 | +4.4 % | +16.3 % | +5.9 % | +12.3 % | -4.2 % |
+| 0.85 | 437 | 2.29 | +6.4 % | +19.5 % | +1.2 % | +15.7 % | -4.3 % |
+| 1.00 | 621 | 1.61 | +13.6 % | +41.7 % | +3.8 % | +29.1 % | -10.7 % |
+
+**0.55 is the answer for a moving picture**: the only row where no region is negative.
+242 ms, 4.1 fps.
+
+**0.35, which this session had been running all day, is negative on the whole frame.**
+Fabric -3.5 %, skin -3.5 %. At that internal size the pass is not adding detail, it is
+smoothing. Every live measurement taken at 0.35 was measuring a pass doing the opposite
+of its job.
+
+### There is no efficiency optimum in the middle
+
+Return per millisecond, on the most sensitive indicator:
+
+```
+scale 0.35   -0.026 % per ms      the money is wasted
+scale 0.55   +0.027
+scale 0.65   +0.054
+scale 1.00   +0.067 % per ms      the best buy
+```
+
+**The effect is superlinear in scale.** Detail per millisecond is *highest* at full scale,
+so there is no bargain in the middle to find — the trade is only between a moving picture
+and a good one. That also explains the shape of the whole table: the network seems to need
+a minimum size below which it cannot see structure, and above which it starts
+reconstructing it, rather than degrading smoothly.
+
+The floor going negative from 0.65 upward is the one exception and probably the same tone
+pull-back `phase42` measured: the ring floor is a bright near-white surface and the pass
+pulls its level down.
