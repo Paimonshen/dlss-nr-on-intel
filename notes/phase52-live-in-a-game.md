@@ -47,6 +47,13 @@ the codec — is measured at the *output* resolution and does not shrink with th
 The non-monotonic row at 0.25 is the network's alignment padding, familiar from the extent
 curve.
 
+**Corrected below (2026-09-11, later): that sweep covered 0.20 to 0.35 only, and the
+conclusion does not survive outside it.** At scale 1.00 the same frame takes **1.01 s** —
+1.10 fps against 6.2. Between 0.35 and 1.0 the network's cost grows sixfold and dominates
+again; it is flat only in the range where the numpy at output resolution is the majority.
+Generalising from four adjacent points was the error, and it is the same shape of error as
+the profile recommendation in `phase44`.
+
 **So the lever is the game's own resolution, not the render scale.** To go faster the game
 must present a smaller frame. `phase47` measured 512x288 at 10.6 fps end to end; the route
 to keeping that watchable on a 1080p panel is gamescope, which is now installed and which
@@ -94,3 +101,32 @@ The detector refuses more than it accepts, deliberately:
 One self-inflicted bug found on the way: the result was being written into the same array
 it was then differenced against, so the daemon reported `change 0.00000` for every
 letterboxed frame. The measurement now happens before the write-back.
+
+
+## And the render scale is a quality knob, not a speed knob
+
+Measured on the live fight, same scene, the two settings:
+
+| region | scale 0.35 | scale 1.00 |
+| --- | --- | --- |
+| whole active frame | +0.3 % | **+13.3 %** |
+| kimono, fabric | +7.8 % | **+39.4 %** |
+| skin | +5.5 % | +7.6 % |
+| **distant crowd** | **-26.7 %** | **+26.9 %** |
+| ring floor | -5.8 % | -4.9 % |
+
+(relative fine texture, normalised for level as `phase42` requires)
+
+At 0.35 the whole-frame figure is **+0.3 %** — which is not "a small effect", it is +10 %
+on the characters cancelling -27 % on the crowd. The dark, distant crowd also lifts from
+luma 30.5 to 42.6, a **40 % brightening**: at an internal 358x202 those spectators are a
+few pixels each, the network reads them as noise and smooths them.
+
+At 1.00 the same crowd *gains* 27 % and its level barely moves. At 4x the wing's feather
+barbs, the fan's characters, the crowd's faces and the ring ropes all resolve.
+
+**So the live mode's cheap end is not doing what the model is for.** 6.2 fps buys a pass
+that helps the subject and damages the background; 1.1 fps buys the effect this project
+exists to reproduce. That is the honest trade, and it is not a trade between speed and
+*less* quality — below about half scale the sign of the effect flips on anything dark and
+distant.

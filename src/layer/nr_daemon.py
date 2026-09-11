@@ -366,8 +366,13 @@ def process_connection(connection, backend, args):
     # against `whole` compares an array with itself, which reported change 0.00000.
     changed = float(np.abs(output - colour).mean())
     if boxed:
-        whole[top:bottom, left:right] = output
-        output = whole
+        # A copy, not a write into `whole`: aliasing the input and the output through one
+        # array has now caused two bugs in this function — `change` printed 0.00000, and
+        # a `--dump` saved the composed frame as both the before and the after. One frame
+        # copy is a millisecond against the round's 160.
+        full = whole.copy()
+        full[top:bottom, left:right] = output
+        output = full
     encoded = encode(output, payload, vk_format)
     if held is not None:
         # The control mask reaches `compose_head`, but `compose_detail` runs *after* it
