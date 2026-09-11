@@ -219,6 +219,43 @@ def resample(image, size):
     return axis(axis(np.asarray(image, np.float32), new_height, 0), new_width, 1)
 
 
+def active_region(colour, tolerance=np.float32(2.0 / 255.0), limit=0.45):
+    """The rows and columns a letterboxed game did not draw into.
+
+    Dead or Alive 5's smallest window is 1024x768, but it renders 16:9 inside that and
+    leaves two black bars — a quarter of the frame. Every stage downstream is measured at
+    the *output* resolution (`notes/phase51`), so those bars cost feature assembly,
+    composition, the head upscale and the codec for pixels that carry nothing.
+
+    A bar is a run of rows or columns whose brightest channel is at or below `tolerance`
+    everywhere. Scanning stops at `limit` of the extent, so a genuinely dark scene cannot
+    eat the frame, and the bars are only trusted when both sides agree to within a row —
+    a letterbox is symmetric and a dark sky is not.
+    """
+    height, width = colour.shape[:2]
+    rows = colour.max(axis=(1, 2))
+    columns = colour.max(axis=(0, 2))
+
+    def run(values, extent):
+        cap = int(extent * limit)
+        lead = tail = 0
+        while lead < cap and values[lead] <= tolerance:
+            lead += 1
+        while tail < cap and values[extent - 1 - tail] <= tolerance:
+            tail += 1
+        # asymmetric bars are not a letterbox; a single row of slack covers odd extents
+        return (lead, extent - tail) if lead and tail and abs(lead - tail) <= 1 else (0, extent)
+
+    top, bottom = run(rows, height)
+    left, right = run(columns, width)
+    # A black frame — a fade, a loading screen — is bars all the way in from both sides
+    # and would leave a sliver in the middle. 16:9 inside 4:3 keeps 75 %; anything under
+    # half is not a letterbox, it is a dark frame.
+    if (bottom - top) * (right - left) < height * width // 2:
+        return 0, height, 0, width
+    return top, bottom, left, right
+
+
 def solid_regions(held, radius=SOLID_RADIUS, majority=0.75):
     """Keep only the parts of the interface mask that sit inside a solid held-still block.
 
@@ -269,7 +306,16 @@ def process_connection(connection, backend, args):
     live = args.live
     live.refresh()
     clock = time.perf_counter()
-    colour = decode(payload, width, height, vk_format)
+    whole = decode(payload, width, height, vk_format)
+    # A letterboxed game — DoA5's smallest window is 1024x768 with 16:9 inside it — leaves
+    # a quarter of the frame black, and every stage below is measured at the output
+    # resolution (`notes/phase51`). Working on the active region alone skips that, and the
+    # bars are handed back untouched: `encode(decode(v)) == v` for all 256 values, so
+    # leaving them in the output array is byte-exact.
+    top, bottom, left, right = active_region(whole)
+    boxed = (top, bottom, left, right) != (0, height, 0, width)
+    colour = whole[top:bottom, left:right] if boxed else whole
+    active_height, active_width = colour.shape[:2]
     # The network's cost follows the extent it is given and nothing else, so a smaller
     # internal frame is the only lever that changes the frame rate (notes/phase37,
     # phase45). What comes back up is the *head* — the detail the network drew — which
@@ -277,8 +323,8 @@ def process_connection(connection, backend, args):
     # are never resampled and only the synthesised part is interpolated.
     inner = colour
     if live.render_scale < 1.0:
-        inner = resample(colour, (max(64, round(height * live.render_scale)),
-                                  max(64, round(width * live.render_scale))))
+        inner = resample(colour, (max(64, round(active_height * live.render_scale)),
+                                  max(64, round(active_width * live.render_scale))))
     geometry = nr_frame.NetworkGeometry.vendor_aligned(inner.shape[1], inner.shape[0])
     features = nr_frame.make_features(
         inner, geometry=geometry, **nr_frame.PROFILES[live.profile])
@@ -296,6 +342,8 @@ def process_connection(connection, backend, args):
         # composition rather than the input keeps the numerical path untouched.
         held = solid_regions(
             np.frombuffer(interface, np.uint8).reshape(height, width) > 127)
+        if boxed:
+            held = held[top:bottom, left:right]
         # An interface is a small part of the frame. When the held region is most of it,
         # the scene itself is standing still — a round transition, a replay pause — and
         # what is being protected is the subject, not the HUD. Composing that leaves the
@@ -308,12 +356,18 @@ def process_connection(connection, backend, args):
                   flush=True)
             held = None
     if held is not None:
-        control = np.ones((height, width, 3), np.float32)
+        control = np.ones((active_height, active_width, 3), np.float32)
         control[held, 0] = 0.0
     output = nr_frame.compose(head, colour, intensity=live.intensity,
                               detail_strength=live.detail_strength,
                               colour_strength=live.colour_strength,
                               control_mask=control)
+    # Measure before the write-back: putting the result into `whole` and then differencing
+    # against `whole` compares an array with itself, which reported change 0.00000.
+    changed = float(np.abs(output - colour).mean())
+    if boxed:
+        whole[top:bottom, left:right] = output
+        output = whole
     encoded = encode(output, payload, vk_format)
     if held is not None:
         # The control mask reaches `compose_head`, but `compose_detail` runs *after* it
@@ -324,9 +378,15 @@ def process_connection(connection, backend, args):
         # round-tripping. Taken from the parallel ProjectsCodex tree, which had it.
         protected = np.frombuffer(encoded, np.uint8).copy().reshape(height, width, 4)
         original = np.frombuffer(payload, np.uint8).reshape(height, width, 4)
-        protected[held] = original[held]
+        if boxed:
+            protected[top:bottom, left:right][held] = original[top:bottom, left:right][held]
+        else:
+            protected[held] = original[held]
         encoded = protected.tobytes()
-        output[held] = colour[held]          # so a --dump shows what was actually sent
+        if boxed:
+            output[top:bottom, left:right][held] = colour[held]
+        else:
+            output[held] = colour[held]          # so a --dump shows what was actually sent
     connection.sendall(encoded)
     if args.dump:
         import image_io
@@ -337,15 +397,17 @@ def process_connection(connection, backend, args):
             # keeps every shot instead of overwriting the last one.
             index = 1 + max((int(path.stem.split("_")[0]) for path in destination.glob("*_in.png")
                              if path.stem.split("_")[0].isdigit()), default=0)
-            image_io.save(colour, destination / f"{index:03d}_in.png")
+            image_io.save(whole, destination / f"{index:03d}_in.png")
             image_io.save(output, destination / f"{index:03d}_out.png")
             print(f"  -> {destination}/{index:03d}_{{in,out}}.png", flush=True)
         except (OSError, subprocess.CalledProcessError, ValueError) as error:
             print(f"frame returned, but dump failed: {error}", flush=True)
     note = "" if held is None else f"  interface {100 * held.mean():.0f}% left alone"
+    box = "" if not boxed else (f"  letterbox {height - (bottom - top)}px of rows and "
+                               f"{width - (right - left)}px of columns skipped")
     print(f"{width}x{height} {FORMATS[vk_format][1]} in "
           f"{time.perf_counter() - clock:.2f}s  "
-          f"change {np.abs(output - colour).mean():.5f}{note}", flush=True)
+          f"change {changed:.5f}{note}{box}", flush=True)
 
 
 def main():

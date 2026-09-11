@@ -61,3 +61,36 @@ upscales with FSR 1.0. XeSS does not exist for Linux; checked twice.
 Launching the game from two places at once — `nr-photo --proton` and Steam — leaves both
 fighting over one Wine prefix and neither starts; the second attempt then returns 53
 because the first left `wineserver` alive. Check for a running game before launching one.
+
+## Letterbox: a quarter of the frame was black
+
+The owner's smallest window for this game is **1024x768**, and the game renders 16:9
+inside it — 576 active rows and 192 black ones. Every stage below the network is measured
+at the *output* resolution, so all of them were paying for the bars.
+
+`active_region()` finds them and the frame path works on the interior alone:
+
+| frame | round |
+| --- | --- |
+| 1024x768, letterboxed | **143 ms** |
+| 1024x576, its active content | 130 ms |
+| 1280x720 | 169 ms |
+
+So the bars now cost almost nothing, and a 1024x768 window is *cheaper* than 720p while
+showing more active pixels than 512x288 would.
+
+**The bars are returned byte-identical**, which is exact rather than approximate:
+`encode(decode(v)) == v` holds for all 256 values, so leaving them in the output array is
+lossless. The test asserts that too, since the crop depends on it.
+
+The detector refuses more than it accepts, deliberately:
+
+- a bar counts only if **both** sides agree to within a row — a dark sky at the top with
+  nothing matching at the bottom is not a letterbox;
+- scanning stops at 45 % of the extent;
+- if the surviving region is under half the frame the crop is abandoned entirely, so a
+  fade to black or a loading screen does not get reduced to a sliver in the middle.
+
+One self-inflicted bug found on the way: the result was being written into the same array
+it was then differenced against, so the daemon reported `change 0.00000` for every
+letterboxed frame. The measurement now happens before the write-back.

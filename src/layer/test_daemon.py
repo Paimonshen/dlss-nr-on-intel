@@ -92,6 +92,39 @@ def resample_tests():
           "  whole factor, and leaves a constant alone")
 
 
+def letterbox_tests():
+    """`active_region` finds the bars a 4:3 window puts around a 16:9 render.
+
+    DoA5's smallest window is 1024x768 and it letterboxes 16:9 inside it, so a quarter of
+    every frame is black. Every stage downstream is measured at the output resolution
+    (notes/phase51), so skipping the bars is worth a quarter of them.
+    """
+    rng = np.random.default_rng(0)
+    boxed = np.zeros((768, 1024, 3), np.float32)
+    boxed[96:672] = rng.random((576, 1024, 3)).astype(np.float32)
+    assert daemon.active_region(boxed) == (96, 672, 0, 1024), "letterbox"
+    pillared = np.zeros((768, 1024, 3), np.float32)
+    pillared[:, 128:896] = 0.5
+    assert daemon.active_region(pillared) == (0, 768, 128, 896), "pillarbox"
+    plain = rng.random((720, 1280, 3)).astype(np.float32)
+    assert daemon.active_region(plain) == (0, 720, 0, 1280), "a full frame keeps its edges"
+    # a dark sky is black at the top and not at the bottom; a letterbox is symmetric
+    sky = np.zeros((720, 1280, 3), np.float32); sky[200:] = 0.4
+    assert daemon.active_region(sky) == (0, 720, 0, 1280), "asymmetric dark is not a bar"
+    # a fade to black is bars all the way in from both sides and must not leave a sliver
+    assert daemon.active_region(np.zeros((720, 1280, 3), np.float32)) == (0, 720, 0, 1280), \
+        "a black frame is a frame, not a letterbox"
+    # the bars are handed back untouched, which needs the codec to round-trip exactly
+    raw = np.zeros((1, 256, 4), np.uint8)
+    for channel in range(3):
+        raw[0, :, channel] = np.arange(256)
+    payload = raw.tobytes()
+    assert daemon.encode(daemon.decode(payload, 256, 1, 44), payload, 44) == payload, \
+        "encode(decode(v)) must be the identity for every byte"
+    print("letterbox: bars found, a dark frame and an asymmetric sky refused, and the\n"
+          "  codec round-trips so the bars can be left alone")
+
+
 def native_exchange_tests():
     with tempfile.TemporaryDirectory(prefix='nr-exchange-') as temporary:
         for mode in ('echo', 'reject', 'partial', 'masked'):
@@ -137,4 +170,5 @@ def native_exchange_tests():
 if __name__ == '__main__':
     request_tests()
     resample_tests()
+    letterbox_tests()
     native_exchange_tests()
