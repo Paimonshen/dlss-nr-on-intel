@@ -1,6 +1,6 @@
 # Phase 3 — the weight blob is FP16, not FP8. VERIFIED 2026-09-07.
 
-**This overturns the central premise of the project.** CLAUDE.md was built on
+**This overturns the central premise of the project.** notes/CLAUDE.md was built on
 "the model ships FP8 E4M3 weights", and everything about dequantisation,
 losslessness and BF16 followed from that. It is wrong. Reader:
 `src/tools/hnet_weights.py`.

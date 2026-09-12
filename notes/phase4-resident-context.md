@@ -49,7 +49,7 @@ memory traffic and not by the matrix units at all.
 An Arc 140V-class Xe2 part has substantially more FP16 matrix throughput available
 than this, so there is a large factor left on the table. Getting it needs the usual
 work — stage tiles through shared memory, block over K, have each subgroup hold
-several accumulators — which is exactly the optimisation CLAUDE.md says to defer until
+several accumulators — which is exactly the optimisation notes/CLAUDE.md says to defer until
 correctness is settled. Recording the baseline now means the improvement will be
 measurable later.
 

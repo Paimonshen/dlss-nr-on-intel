@@ -150,5 +150,5 @@ does not on this part: `cl_intel_subgroup_matrix_multiply_accumulate` with shape
 has no configuration for, and — visible in `clinfo` on this machine —
 **`cl_intel_subgroup_2d_block_io`** and `cl_intel_subgroup_buffer_prefetch`, the hardware
 2D block loads that Intel's own libraries use to feed XMX without spending registers on
-addressing. That is a second backend, not a flag, and CLAUDE.md has said so since the
+addressing. That is a second backend, not a flag, and notes/CLAUDE.md has said so since the
 start. It is now the only lever with a plausible factor in it.

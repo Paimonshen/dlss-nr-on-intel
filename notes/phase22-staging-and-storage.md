@@ -52,7 +52,7 @@ And bfloat16 is the worse of the two here on every count that matters:
   values, not arbitrary float32 ones.
 - The weights ship as FP16 and cooperative-matrix config 1 is `fp16 x fp16 -> fp32`, so
   float16 reaches the matrix units with zero conversion. This was already settled in
-  CLAUDE.md; the measurement above is the empirical form of it.
+  notes/CLAUDE.md; the measurement above is the empirical form of it.
 
 **Done, in float16, on the published buffers only.** Every level's value, the skips,
 the transition outputs and `full_skip` are now narrow, and the widening pass in front of

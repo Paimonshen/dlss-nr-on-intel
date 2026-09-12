@@ -35,7 +35,7 @@ its magnitude was wrong: "a projection with 16 inputs would be initialised aroun
 unpacker decodes. The logical file is **1.974x** the packed file, which is our
 "arena is 2x the container" rule seen from the other side, now with a cause.
 
-This invalidates a foundational claim in CLAUDE.md ("73,841,889 parameters stored
+This invalidates a foundational claim in notes/CLAUDE.md ("73,841,889 parameters stored
 little-endian FP16... the weights are used exactly as stored"). `data_len == 2*n_elem`
 held in 153 of 153 tensors, but that fixes the byte count, not the encoding.
 
@@ -63,7 +63,7 @@ block0  (C=32)                          block5  (C=64)
 - **Two cosine gates per block**, `attn_cos_skip` and `ffn_cos_skip`, both length C —
   consistent with the gate-on-skip form we read out of the `mma` accumulator.
 - `attn_bias` is `(H, 64, 64)` — our shape, confirmed.
-- 27 tensor roles in total, including the ones CLAUDE.md listed as named-but-unlocated:
+- 27 tensor roles in total, including the ones notes/CLAUDE.md listed as named-but-unlocated:
   `out_conv_weight`, `out_gain`, `blend_scale`, `conv_weight`, `inp_merge_cos/sin`,
   `inp_upsample_sin`.
 

@@ -1,6 +1,6 @@
 # Reproducing the resident path
 
-Read `HANDOFF.md` first for the current model contract and limitations. The tested
+Read `notes/HANDOFF.md` first for the current model contract and limitations. The tested
 machine is Intel Arc 140V (Xe2) with Mesa ANV. The runtime requires Vulkan cooperative
 matrices; having a Vulkan device alone is insufficient.
 

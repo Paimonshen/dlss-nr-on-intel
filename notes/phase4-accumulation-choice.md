@@ -45,7 +45,7 @@ It depends on what "correct" means here, and the two answers differ:
   if we ever want to check against activations captured from real hardware, which is
   the one external oracle this project can reach (the AMD lab's RTX captures).
 
-CLAUDE.md's success criterion is "matches a CPU reference", and that reference is ours
+notes/CLAUDE.md's success criterion is "matches a CPU reference", and that reference is ours
 to define — so config 1 is the sensible default and stays the default. But the FP16
 path is now built and tested (`src/gpu/gemm_coopmat_f16acc.comp`,
 `work/gemm_f16acc.spv`) and should be kept, because it is the only way to compare

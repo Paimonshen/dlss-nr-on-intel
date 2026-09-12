@@ -3,7 +3,7 @@
 Eighty-seven files, fifty-eight phases. This is what each one settles, so a reader arriving
 cold can go straight to the answer instead of the archaeology.
 
-**Read `HANDOFF.md` first** — it carries the current state, the standing conclusions and
+**Read `notes/HANDOFF.md` first** — it carries the current state, the standing conclusions and
 the traps, and **`docs/ARCHITECTURE.md`** for the recovered network as a specification
 rather than as archaeology. This index is for going deeper on one question.
 

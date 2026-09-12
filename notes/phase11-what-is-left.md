@@ -59,7 +59,7 @@ What *is* reachable, and worth aiming at:
 - **A lower internal resolution.** The extent floor is 320 and the step is 64; running
   at 640x384 for a 720p output is ~122 GFLOP, 90 ms, 11 fps at the floor.
 
-This does not contradict the brief — CLAUDE.md says playable framerates are explicitly
+This does not contradict the brief — notes/CLAUDE.md says playable framerates are explicitly
 not a goal — but it does mean "wire into a real game" means photo mode or a cutscene,
 not a live pass at 60 fps.
 

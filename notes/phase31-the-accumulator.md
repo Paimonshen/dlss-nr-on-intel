@@ -10,7 +10,7 @@ The cooperative-matrix table on this device offers six configurations, and the m
 formats it accepts are **fp16, bf16 and int8** (`notes/hw-coopmat.md`). The DLL ships
 its weights as **FP16**, and config 1 is `fp16 x fp16 -> fp32`, so the stored bytes
 reach the XMX units with **zero conversion**. That has been true since phase 3 and it
-is why CLAUDE.md forbids a BF16 conversion: it would throw away 3 of 10 mantissa bits
+is why notes/CLAUDE.md forbids a BF16 conversion: it would throw away 3 of 10 mantissa bits
 to reach a format the hardware likes no better.
 
 The two obvious alternatives are both closed and both already measured:

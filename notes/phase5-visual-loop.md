@@ -4,7 +4,7 @@
 ## Why this exists
 
 The owner redirected the goal: a *working* version that can be tested, and eventually
-run in a game, ahead of CLAUDE.md's "reimplement, do not execute NVIDIA's kernels"
+run in a game, ahead of notes/CLAUDE.md's "reimplement, do not execute NVIDIA's kernels"
 constraint. That reframes what counts as progress.
 
 The AMD project reached bitwise parity by capturing exact state from an RTX card and

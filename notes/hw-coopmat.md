@@ -2,7 +2,7 @@
 
 Probed 2026-09-07 with `src/probe/coopmat_probe.c` (built against Khronos
 Vulkan-Headers v1.4.321, run against the system loader). Raw output:
-`notes/coopmat-table.txt`. This supersedes the "open questions 1–3" in CLAUDE.md.
+`notes/coopmat-table.txt`. This supersedes the "open questions 1–3" in notes/CLAUDE.md.
 
 Device: `Intel(R) Graphics (LNL)`, Vulkan 1.4.354, Mesa ANV. Single physical device.
 
@@ -50,7 +50,7 @@ FP16 for numerical-range reasons.
 
 So the DPAS hardware *does* have TF32, but **Mesa does not expose TF32 through
 `VK_KHR_cooperative_matrix`** — it is not in the 6-config table. Same for INT4/INT2,
-which CLAUDE.md lists as XMX capabilities: not reachable from Vulkan.
+which notes/CLAUDE.md lists as XMX capabilities: not reachable from Vulkan.
 Reaching TF32 would mean an OpenCL path, which is a different backend, not a flag.
 
 ## Consequences for Phase 4 — read these before writing shaders
@@ -70,4 +70,4 @@ Reaching TF32 would mean an OpenCL path, which is a different backend, not a fla
    *(Not yet checked: `VkPhysicalDeviceCooperativeMatrix2FeaturesNV` — the extension
    also carries reduction/conversion ops that may still be usable. Worth a look
    before finalising the Phase 4 design.)*
-4. Compute stage only, as CLAUDE.md already assumed. Confirmed, not inferred.
+4. Compute stage only, as notes/CLAUDE.md already assumed. Confirmed, not inferred.

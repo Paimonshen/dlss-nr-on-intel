@@ -82,7 +82,7 @@ range has ample headroom above these weights.
 
 ## Why this matters beyond the bug
 
-CLAUDE.md's original premise was that BF16 would be the working type. BF16 has the
+notes/CLAUDE.md's original premise was that BF16 would be the working type. BF16 has the
 same 8-bit exponent as FP32 and would never have hit this. FP16's 5-bit exponent is
 what makes a quarter of these weights subnormal — the cost of the format the model
 actually ships in. The fix is cheap and exact, but it has to be *there*, and it has to

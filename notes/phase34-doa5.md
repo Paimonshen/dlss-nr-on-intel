@@ -53,6 +53,6 @@ mode can afford and a per-frame pass could not.
 
 ## Standing
 
-CLAUDE.md's Phase 5 — "wire into a real game" — is done, on the game the owner picked,
+notes/CLAUDE.md's Phase 5 — "wire into a real game" — is done, on the game the owner picked,
 with the content the model exists for. What it is not is real time: `notes/phase25` and
 `notes/phase33` between them say why, and no amount of kernel work changes it.

@@ -34,7 +34,7 @@ in `.rsrc`, as a resource, not in a bespoke section.
 
 ## Correction to the roadmap: there is no `.nv_fatbin`
 
-CLAUDE.md Phases 1–2 assumed a `.nv_fatbin` section to carve with `dd`. There is
+notes/CLAUDE.md Phases 1–2 assumed a `.nv_fatbin` section to carve with `dd`. There is
 none — the literal string `.nv_fatbin` does not occur anywhere in the file. Instead:
 
 - **15 fatbin containers** (magic `BA55ED50`), first at file offset `0xdf0e0`

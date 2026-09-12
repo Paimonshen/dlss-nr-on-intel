@@ -20,7 +20,7 @@ their sha  : A5513B1845C98A486985ED04F38E66A1854CCE33C2ABA3A505866028BD4EE3E5
                                           IDENTICAL
 ```
 
-This matters more than a second opinion. CLAUDE.md's hard constraint 2 says there is
+This matters more than a second opinion. notes/CLAUDE.md's hard constraint 2 says there is
 no NVIDIA GPU anywhere accessible and therefore no way to obtain reference data from
 the original binary. That is still true — but our decode is now **transitively
 validated against what the real runtime loads into GPU memory**, through a third

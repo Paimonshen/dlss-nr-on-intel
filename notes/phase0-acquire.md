@@ -2,7 +2,7 @@
 
 ## Status: BLOCKED. The DLL is not in the driver package.
 
-CLAUDE.md Phase 0 says "Extract `nvngx_dlssnr.dll` from the driver package".
+notes/CLAUDE.md Phase 0 says "Extract `nvngx_dlssnr.dll` from the driver package".
 That premise is **wrong**, verified 2026-09-07.
 
 ## What was done
@@ -99,7 +99,7 @@ Queried the GitHub API directly rather than trusting search results:
 
 So there is no official public copy at all: not in the driver package, not in the SDK.
 
-**This falsifies the second half of the "target binary" note in CLAUDE.md.** That note
+**This falsifies the second half of the "target binary" note in notes/CLAUDE.md.** That note
 said to *prefer the official driver copy over the leaked NBA 2K27 early-access build
 310.8.0.0*. There is no official copy to prefer. The 310.8.0.0 build is not merely the
 worse option — as of today it is the only one that exists.

@@ -158,7 +158,7 @@ wide blocks show; a wrong one gives degenerate statistics.
 
 The discipline this project has learned applies directly: **calibrate it at C=512
 first**, where the split is known, and confirm the test picks the right answer out of
-the same candidate set before running it at C=32. `HANDOFF.md` already records that
+the same candidate set before running it at C=32. `notes/HANDOFF.md` already records that
 statistical segmentation failed calibration twice — but those methods were looking for
 *boundaries* in a continuum. This is a choice among a few discrete candidates scored by
 a downstream measurement, which is a different thing, and the calibration step is what

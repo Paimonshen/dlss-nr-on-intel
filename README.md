@@ -283,7 +283,7 @@ and is not possible. It is written for someone who wants to run this somewhere e
 it is the file to read before any of the notes.
 
 `notes/INDEX.md` maps all fifty-eight phase notes to the question each one settles, and
-several of the answers are counter-intuitive. `HANDOFF.md` is the current state and the
+several of the answers are counter-intuitive. `notes/HANDOFF.md` is the current state and the
 traps.
 
 ## Troubleshooting
@@ -318,7 +318,8 @@ src/layer/    the Vulkan layer, the daemon, and the three control tools
 src/bench/    measurement programs; every number in the notes came from one
 src/tools/    the DLL and weight-container readers, and the publication check
 docs/         the recovered architecture, written as a specification
-notes/        what was measured, including the measurements that turned out wrong
+notes/        what was measured, including the measurements that turned out wrong,
+              and the working briefs the agents building this were given
 work/         builds, checkouts and your weights. Ignored, and stays that way.
 ```
 

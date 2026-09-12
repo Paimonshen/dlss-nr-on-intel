@@ -5,7 +5,7 @@ A Cyberpunk 2077 face crop goes in, a neurally-rendered frame comes out, with th
 characteristic DLSS-NR effect: individual eyelashes and eyebrow hairs resolved out of
 a smeared input, skin pores synthesised, iris and eyeliner sharpened. Nothing in this
 project had produced that before today; every previous score measured the bilinear
-scaffolding (`HANDOFF.md` §6).
+scaffolding (`notes/HANDOFF.md` §6).
 
 What changed is not a new insight of ours. It is that the weights are now **decoded
 correctly** (`notes/phase6-mlx-dlss-unpack.md`) and the graph is now the one
