@@ -1,7 +1,7 @@
 /*
  * coopmat_probe — enumerate VkCooperativeMatrixPropertiesKHR on this machine.
  *
- * Resolves CLAUDE.md open questions 1 and 3:
+ * Resolves notes/CLAUDE.md open questions 1 and 3:
  *   1. the actual cooperative matrix configuration table (vulkaninfo does not print it)
  *   3. whether FP32 accumulation is available for the BF16 configs
  *
