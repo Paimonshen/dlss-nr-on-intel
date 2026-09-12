@@ -39,6 +39,10 @@ sys.path.insert(0, str(ROOT / "src" / "ref"))
 sys.path.insert(0, str(ROOT / "src" / "gpu"))
 
 import nr_frame  # noqa: E402
+try:
+    import nr_image  # the host passes in C, when they are built
+except ImportError:  # pragma: no cover - the NumPy path is the fallback
+    nr_image = None
 
 MAGIC = 0x304E524E
 MASK_COVERAGE_LIMIT = 0.55   # above this the mask is the scene, not the interface
@@ -63,6 +67,10 @@ def decode(raw, width, height, vk_format):
         channels = [((packed >> shift) & 0x3FF).astype(np.float32) / np.float32(1023.0)
                     for shift in (0, 10, 20)]
         return np.stack(channels, axis=-1)
+    if nr_image is not None:
+        native = nr_image.decode8(raw, width, height, kind == "bgra8")
+        if native is not None:
+            return native
     pixels = np.frombuffer(raw, dtype=np.uint8).reshape(height, width, 4)
     # `pixels[..., [2, 1, 0]]` gathers into a new array, then `.astype` copies it again,
     # then the divide copies a third time — 170 ms for a 1080p frame. A reversed slice is
@@ -84,6 +92,10 @@ def encode(image, raw, vk_format):
         for index, shift in enumerate((0, 10, 20)):
             packed |= np.minimum(quantised[..., index], 1023) << np.uint32(shift)
         return packed.tobytes()
+    if nr_image is not None:
+        native = nr_image.encode8(image, raw, kind == "bgra8")
+        if native is not None:
+            return native
     pixels = np.frombuffer(raw, dtype=np.uint8).copy().reshape(*image.shape[:2], 4)
     # The old form built an int32 intermediate — four bytes a channel for a value that
     # ends up in one — and then copied each channel separately, seven full-frame passes
@@ -217,6 +229,13 @@ def resample(image, size):
         fy, fx = height // new_height, width // new_width
         return image.reshape(new_height, fy, new_width, fx, -1).mean((1, 3)).astype(np.float32)
 
+    if nr_image is not None:
+        # The bilinear branch only: the area mean above is a different filter on purpose,
+        # and is what keeps aliasing out of what the network is asked to enhance.
+        native = nr_image.bilinear(image, (new_height, new_width))
+        if native is not None:
+            return native
+
     def axis(source, count, along):
         """One bilinear pass along `along` (0 rows, 1 columns)."""
         extent = source.shape[along]
@@ -233,7 +252,10 @@ def resample(image, size):
     return axis(axis(np.asarray(image, np.float32), new_height, 0), new_width, 1)
 
 
-def active_region(colour, tolerance=np.float32(2.0 / 255.0), limit=0.45):
+LETTERBOX_TOLERANCE = np.float32(2.0 / 255.0)
+
+
+def active_region(colour, tolerance=LETTERBOX_TOLERANCE, limit=0.45):
     """The rows and columns a letterboxed game did not draw into.
 
     Dead or Alive 5's smallest window is 1024x768, but it renders 16:9 inside that and
@@ -268,6 +290,53 @@ def active_region(colour, tolerance=np.float32(2.0 / 255.0), limit=0.45):
     if (bottom - top) * (right - left) < height * width // 2:
         return 0, height, 0, width
     return top, bottom, left, right
+
+
+class Letterbox:
+    """The bars, found once and afterwards only checked.
+
+    `active_region` reduces the whole frame twice, and once everything around it went
+    native that made it the most expensive host pass in the frame — 21 ms of a 233 ms
+    frame, more than the feature assembly, the composition and both resizes together
+    (`notes/phase57`). A letterbox does not move: the game chose it when it opened the
+    swapchain.
+
+    What is checked each frame is eight lines. A bar that stopped being black, or a first
+    active line that started being black, means the answer has changed and the full scan
+    runs again. Either mistake is a slower frame, never a wrong crop.
+    """
+
+    def __init__(self):
+        self.key = None
+        self.bounds = None
+
+    def region(self, colour, key):
+        if self.key == key and self.bounds is not None and self._holds(colour):
+            return self.bounds
+        self.key = key
+        self.bounds = active_region(colour)
+        return self.bounds
+
+    def _holds(self, colour):
+        top, bottom, left, right = self.bounds
+        height, width = colour.shape[:2]
+        # The key is the caller's word that this is the same swapchain; the bounds fitting
+        # is ours. Without this a mismatched key reads other rows and crops to them.
+        if bottom > height or right > width:
+            return False
+
+        def dark(line):
+            return float(line.max()) <= LETTERBOX_TOLERANCE
+
+        for line, wanted_dark in ((colour[top - 1] if top else None, True),
+                                  (colour[bottom] if bottom < height else None, True),
+                                  (colour[:, left - 1] if left else None, True),
+                                  (colour[:, right] if right < width else None, True),
+                                  (colour[top], False), (colour[bottom - 1], False),
+                                  (colour[:, left], False), (colour[:, right - 1], False)):
+            if line is not None and dark(line) != wanted_dark:
+                return False
+        return True
 
 
 def solid_regions(held, radius=SOLID_RADIUS, majority=0.75):
@@ -451,7 +520,7 @@ def process_connection(connection, backend, args):
     # resolution (`notes/phase51`). Working on the active region alone skips that, and the
     # bars are handed back untouched: `encode(decode(v)) == v` for all 256 values, so
     # leaving them in the output array is byte-exact.
-    top, bottom, left, right = active_region(whole)
+    top, bottom, left, right = args.letterbox.region(whole, (width, height, vk_format))
     boxed = (top, bottom, left, right) != (0, height, 0, width)
     colour = whole[top:bottom, left:right] if boxed else whole
     active_height, active_width = colour.shape[:2]
@@ -471,10 +540,8 @@ def process_connection(connection, backend, args):
     shot = (width, height, vk_format, top, bottom, left, right, live.profile)
     history_inner, history_full, history_pixels = args.history.take(
         shot, inner, live.cut_limit if live.temporal > 0 else -1.0)
-    features = nr_frame.make_features(
-        inner, geometry=geometry, **nr_frame.PROFILES[live.profile])
-    if history_inner is not None:
-        nr_frame.apply_history(features, history_inner, geometry)
+    features = nr_frame.build_features(inner, geometry=geometry, history=history_inner,
+                                       **nr_frame.PROFILES[live.profile])
     head = geometry.crop(backend.run_features(features))
     if head.shape[:2] != colour.shape[:2]:
         # The fourth channel is the temporal gate. Without history it reaches nothing —
@@ -627,6 +694,7 @@ def main():
             parser.error(f"--{knob.replace('_', '-')} must be between 0 and 1")
     args.live = Settings(args)
     args.history = History()
+    args.letterbox = Letterbox()
     args.meter = Meter() if args.meter else None
 
     started = time.perf_counter()

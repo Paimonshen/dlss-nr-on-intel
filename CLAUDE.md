@@ -350,12 +350,12 @@ a live HUD, with a failure mode found and fixed the same evening (`phase43`); an
 layer is proven under a second Vulkan client, VKD3D-Proton on a 64-bit D3D12 title
 (`phase41`). What replaced them:
 
-1. **The full-frame passes *around* the network.** Once the extent is small enough the
-   graph stops being the frame, and what dominates is a stack of independent full-frame
-   passes over the *output* resolution — feature assembly, composition, the head upscale,
-   the detail blur. None shrinks with the render scale. Two were pure waste and are fixed;
-   the rest have never been examined the way the graph now has. **This is the live lever.**
-   `notes/phase47`, `phase48`.
+1. ~~**The full-frame passes *around* the network.**~~ **Taken, 2026-09-12.** They are in
+   C now — `src/ref/nr_image.c`, from the parallel `ProjectsCodex` tree and extended here
+   for the history channels and the temporal composition. Host passes **74 -> 28 ms**,
+   output byte-identical. `active_region` was the last one left and is now found once and
+   checked in eight lines rather than rescanned. `notes/phase57`, `phase47`, `phase48`.
+   What remains around the network is small; the graph is 185 ms of a 214 ms frame.
 2. **A neural upscaler.** Half the extent is three times faster and keeps only **62 %** of
    the high-frequency band, because the detail is drawn at the wrong scale and no
    interpolator can reconstruct it — that is why the vendor's own arrangement puts DLSS
@@ -422,5 +422,5 @@ src/     our code
 
 ---
 
-*Last updated 2026-09-11 (phases 49-56: the parallel tree mined, DOA6LR diagnosed, what the model computes in, the output extent's own costs, live rendering in a game, the flicker found and fixed, a switch on a key, and a panel with the manual behind it). **Read `HANDOFF.md` first** — it carries the current state and the traps. Owner runs Arch Linux, is comfortable at kernel/driver level,
+*Last updated 2026-09-11 (phases 49-57: the parallel tree mined, DOA6LR diagnosed, what the model computes in, the output extent's own costs, live rendering in a game, the flicker found and fixed, a switch on a key, a panel with the manual behind it, and the host passes in C). **Read `HANDOFF.md` first** — it carries the current state and the traps. Owner runs Arch Linux, is comfortable at kernel/driver level,
 prefers C for low-level work, and does not need concepts explained from scratch.*

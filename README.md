@@ -62,8 +62,14 @@ The result is 649 named tensors, 73 841 889 FP16 parameters. The reader checks
 `fully_logical=true` and refuses anything else — the packed file is **not** a substitute,
 and reading it as dense FP16 gives values correlating -0.02 with the truth.
 
+`make` also builds `work/libnr_image.so`: the full-frame passes around the network —
+feature assembly, the resizes, the composition, the 8-bit codecs — in C rather than NumPy,
+worth about 2.6x on the host side of a frame. It is built with `-march=native`, so rebuild
+it on the machine that runs it rather than copying it. Everything still works without it;
+`NR_HOST_NATIVE=0` selects the NumPy path for a paired measurement.
+
 ```sh
-make test                                        # 150-odd checks
+make test                                        # 180-odd checks
 python3 src/ref/nr_frame.py IN.png OUT.png --resident   # one still, no game
 ```
 
@@ -289,7 +295,8 @@ work/         builds, checkouts and your weights. Ignored, and stays that way.
 make test
 ```
 
-Around 150 checks, including the layer's wire protocol, the interface mask down to the
+Around 180 checks, including the layer's wire protocol, the native host passes
+against the NumPy they replace byte for byte, the interface mask down to the
 byte, the temporal path against MLX-DLSS's own composition, and the panel driven through
 a pseudo-terminal. They skip the weight-dependent parts if you have not supplied weights,
 and a skip is not a pass.

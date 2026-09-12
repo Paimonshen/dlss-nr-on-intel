@@ -121,7 +121,27 @@ def letterbox_tests():
     payload = raw.tobytes()
     assert daemon.encode(daemon.decode(payload, 256, 1, 44), payload, 44) == payload, \
         "encode(decode(v)) must be the identity for every byte"
-    print("letterbox: bars found, a dark frame and an asymmetric sky refused, and the\n"
+    # Found once and afterwards only checked, because reducing the whole frame twice was
+    # the most expensive host pass left once everything around it went native. A wrong
+    # cache is a wrong crop, so it has to let go of every change that matters.
+    cache = daemon.Letterbox()
+    key = (1024, 768, 44)
+    assert cache.region(boxed, key) == (96, 672, 0, 1024), "the cache finds them"
+    moved = boxed.copy()
+    moved[96:672] = 0.5                       # same bars, completely different content
+    assert cache.region(moved, key) == (96, 672, 0, 1024), "and keeps them"
+    lit = rng.random((768, 1024, 3)).astype(np.float32) * 0.8 + 0.1
+    assert cache.region(lit, key) == (0, 768, 0, 1024), "bars gone, cache let go"
+    wider = lit.copy()
+    wider[:160] = 0.0
+    wider[-160:] = 0.0
+    assert cache.region(wider, key) == (160, 608, 0, 1024), "bars grew, cache let go"
+    assert cache.region(boxed, (800, 600, 44)) == (96, 672, 0, 1024), "a new extent rescans"
+    cache.key, cache.bounds = (1280, 720, 44), (96, 672, 0, 1024)
+    assert cache.region(plain, (1280, 720, 44)) == (0, 720, 0, 1280), \
+        "bounds that do not fit the frame are refused rather than used"
+    print("letterbox: bars found, a dark frame and an asymmetric sky refused, the cache\n"
+          "  lets go when they move or vanish, and the\n"
           "  codec round-trips so the bars can be left alone")
 
 

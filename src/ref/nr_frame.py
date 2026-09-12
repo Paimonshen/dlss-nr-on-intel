@@ -96,8 +96,46 @@ AutomaticMask = features_mod.AutomaticMask
 half = features_mod.half
 scaled_color = features_mod.scaled_color
 
+try:
+    import nr_image                      # the same passes in C, when they are built
+except ImportError:                      # pragma: no cover - the fallback is the point
+    nr_image = None
+
 # half(blend_scale) of the recovered package, `notes/phase12-temporal.md`.
 BLEND_SCALE = 0.73974609375
+
+
+def build_features(colour, *, geometry, history=None, frame_index=0,
+                   normalized_style=0.0, local_tone_strength=1.0,
+                   local_structure_strength=1.0):
+    """`make_features` with the history folded in, natively where that is available.
+
+    The two steps are one pass in C: the mirror onto the network extent, the three FP16
+    roundings of `scaled_color` and the history that replaces channels 7-9 all happen
+    while each pixel is in a register. In NumPy they are a full-frame gather each, and
+    feature assembly was the largest single host pass in the frame (`notes/phase57`).
+
+    Only the plain recipe goes native — no control mask and no automatic mask — which is
+    the one a game uses; anything else falls back and is bit-identical either way.
+    """
+    values = dict(normalized_style=normalized_style,
+                  local_tone_strength=local_tone_strength,
+                  local_structure_strength=local_structure_strength)
+    native = None
+    if nr_image is not None:
+        controls = np.array([half(normalized_style), half(local_tone_strength),
+                             half(local_structure_strength), -1.0, -1.0], np.float32)
+        native = nr_image.features(
+            colour, geometry.source_rows(), geometry.source_columns(),
+            deterministic_noise(geometry.network_height, geometry.network_width,
+                                frame_index),
+            controls, history=history)
+    if native is not None:
+        return native
+    features = make_features(colour, geometry=geometry, frame_index=frame_index, **values)
+    if history is not None:
+        apply_history(features, history, geometry)
+    return features
 
 
 def apply_history(features, history, geometry=None):
@@ -271,28 +309,41 @@ def compose(head, color, *, intensity=1.0, detail_strength=1.0, colour_strength=
     clamped path — the extrapolation only replaces the final blend, and the residual,
     its half rounding and the [0,1] clamp on the result are unchanged.
     """
+    composed = None
     if history is not None or intensity > 1.0:
         head = np.asarray(head, dtype=np.float32)
         color = np.asarray(color, dtype=np.float32)
-        residual = features_mod.half(head[..., :3]) * np.float32(0.25)
-        predicted = np.clip(color + residual, 0, 1)
+        alpha = None
         if history is not None:
             if head.shape[2] < 4:
                 raise ValueError("the temporal gate is head channel 4; pass all four")
+            history = np.asarray(history, dtype=np.float32)
+            if history.shape != color.shape:
+                raise ValueError("history must match the colour image shape")
+            # The gate stays in NumPy even when the rest goes native: `expf` and NumPy's
+            # float32 exponential disagree in the last bit, and the floor folds into it
+            # here, so what is left for C is the residual, the blend and the clamps.
             alpha = history_weight(head, blend_scale=blend_scale)
             if history_confidence != 1.0:
                 alpha = alpha * np.clip(np.float32(history_confidence), 0, 1)
             if history_floor is not None:
                 floor = np.clip(np.asarray(history_floor, dtype=np.float32), 0, 1)
                 np.maximum(alpha, floor * np.float32(blend_scale), out=alpha)
-            history = np.asarray(history, dtype=np.float32)
-            if history.shape != color.shape:
-                raise ValueError("history must match the colour image shape")
-            predicted += alpha * (history - predicted)
-        blend = np.float32(intensity)
-        if control_mask is not None:
-            blend = np.asarray(control_mask, dtype=np.float32)[..., :1] * blend
-        composed = np.clip(color + blend * (predicted - color), 0, 1).astype(np.float32)
+            if nr_image is not None:
+                composed = nr_image.compose_temporal(
+                    head, color, history, None, alpha, control_mask,
+                    intensity=intensity, blend_scale=blend_scale, hold=0.0, slope=0.0)
+        elif nr_image is not None and control_mask is None:
+            composed = nr_image.compose(head, color, intensity)
+        if composed is None:
+            residual = features_mod.half(head[..., :3]) * np.float32(0.25)
+            predicted = np.clip(color + residual, 0, 1)
+            if history is not None:
+                predicted += alpha * (history - predicted)
+            blend = np.float32(intensity)
+            if control_mask is not None:
+                blend = np.asarray(control_mask, dtype=np.float32)[..., :1] * blend
+            composed = np.clip(color + blend * (predicted - color), 0, 1).astype(np.float32)
     else:
         composed = compose_head(head, color, control_mask=control_mask,
                                 intensity=intensity)

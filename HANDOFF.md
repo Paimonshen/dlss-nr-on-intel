@@ -9,7 +9,34 @@ you need the evidence behind a line in this file, rather than reading them in or
 
 ---
 
-## Latest: it stops flickering (2026-09-11)
+## Latest: the host passes are in C now (2026-09-12)
+
+The lever this file has pointed at for two days — the full-frame passes *around* the
+network, which run at the output resolution and do not shrink with the render scale — is
+taken. `ProjectsCodex` wrote them in C (their phase36); `src/ref/nr_image.c` is that
+library, extended here for the history in the feature channels and the temporal
+composition, which that tree does not have. **Host passes 74 -> 28 ms, output
+byte-identical**, checked by `src/ref/test_native_image.py` over reversed views, padded
+crops and a mirrored network extent. The frame is 259 -> 214 ms at 1024x768 / scale 0.55,
+because the graph is 185 ms of it and untouched. `notes/phase57`.
+
+Three things worth carrying forward:
+
+- **The gate and the floor's constant stay in NumPy.** `expf` and NumPy's float32
+  exponential disagree in the last bit, and `clip(1 - moved * 255 / ramp, 0, 1) * hold` is
+  the same value as `moved * slope + hold` by algebra and a different one in float32. The
+  contract is byte-identical, not nearly.
+- **`active_region` then became the largest host pass** — 21 ms, reducing the whole frame
+  twice to find bars that never move. `Letterbox` finds them once and afterwards checks
+  eight lines. 0.2 ms.
+- **Their 40 % is our 17 %, and that is the honest reading.** Their baseline feature
+  assembly was 146 ms against our 14.5: most of their headline was ground `phase47`,
+  `phase48` and `phase51` had already covered here. The new part is a factor of three.
+
+Measured on **power-saver at 1.2 GHz** — the pair is comparable, the absolutes are not
+comparable with earlier sessions.
+
+## It stops flickering (2026-09-11)
 
 The picture in live mode shimmered, and the cause was not noise in the input. Measured on
 22 consecutive presents of a real game: **2.3 % of a frame is byte-identical between two

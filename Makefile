@@ -9,16 +9,24 @@ SHADERS := work/gemm_resident.spv work/gemm_tiled.spv work/gemm_staged.spv \
            work/history.spv work/gemm_coopmat.spv work/gemm_batched.spv \
            work/gemm_f16acc.spv
 
-all: work/libxmx.so work/libnr_layer.so $(SHADERS)
+all: work/libxmx.so work/libnr_layer.so work/libnr_image.so $(SHADERS)
 
 work:
 	mkdir -p $@
 
 $(SHADERS) work/libxmx.so work/libnr_layer.so work/half_probe.spv work/attention_ab.spv: | work
-work/test_exchange work/test_settled work/libnr_layer32.so work/test_layer_loader work/test_layer_loader32: | work
+work/libnr_image.so work/test_exchange work/test_settled work/libnr_layer32.so work/test_layer_loader work/test_layer_loader32: | work
 
 work/libxmx.so: src/gpu/libxmx.c
 	$(CC) $(CFLAGS) -shared -o $@ $< -lvulkan
+
+# The host passes in C. Built for this machine: `-march=native`, so rebuild it rather
+# than copy it. The FP16 casts and the separate multiply and add are the contract —
+# fused multiply-add or fast maths would change the last bit and the output must be
+# byte-identical to the NumPy it replaces (src/ref/test_native_image.py).
+work/libnr_image.so: src/ref/nr_image.c Makefile | work
+	$(CC) -O3 -march=native -fPIC -Wall -Wextra -ffp-contract=off -fno-fast-math \
+	      -shared -o $@ $<
 
 # The Vulkan layer that puts the pass inside a running game.
 work/libnr_layer.so: src/layer/nr_layer.c
@@ -84,6 +92,7 @@ test: all work/attention_ab.spv work/test_exchange work/test_settled
 	python3 src/gpu/test_frame_execution.py
 	python3 src/gpu/test_resident.py
 	python3 src/ref/test_frame_cache.py
+	python3 src/ref/test_native_image.py
 	python3 src/ref/test_nr_model.py
 	python3 src/ref/test_temporal_controls.py
 
