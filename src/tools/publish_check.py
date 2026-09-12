@@ -51,7 +51,8 @@ PATTERNS = (
 # the commits were made and are already public in every clone.
 # Addresses that are meant to be public: the trailer git itself writes, and the address
 # GitHub hands out precisely so a personal one need not be published.
-ALLOWED = re.compile(rb"noreply@anthropic\.com|@users\.noreply\.github\.com")
+ALLOWED = re.compile(rb"noreply@anthropic\.com|@users\.noreply\.github\.com"
+                     rb"|^noreply@github\.com$")
 
 
 def tracked():
@@ -147,6 +148,8 @@ def authorship():
         if len(parts) != 3:
             continue
         for address in parts[1:]:
+            # `noreply@github.com` is the committer GitHub's own web editor writes, not a
+            # personal address; the author beside it is the one worth looking at.
             if ALLOWED.search(address.encode()):
                 continue
             seen.setdefault(address, parts[0])
