@@ -111,6 +111,27 @@ notes and the one commit message that carried them. The current files are untouc
 tip stopped containing any of it two commits ago, so the filters are no-ops there, and the
 script verifies that by comparing the tip tree before and after.
 
-It is prepared but not executed: rewriting history is destructive, an agent's safety
-classifier refused it, and that is the correct outcome. A mirror backup sits in
-`../ProjectsClaude-backup.git` and the script refuses to run without it.
+It was prepared but not executed from here: rewriting history is destructive, an agent's
+safety classifier refused it, and that is the correct outcome — the owner read it and ran
+it. A mirror backup sits in `../ProjectsClaude-backup.git` and the script refuses to run
+without it.
+
+### What it did, and how that was checked
+
+133 commits across nine branches. Afterwards, on the branches alone — `--all` includes
+`refs/original/`, which is filter-branch's own backup and still held the old history, so
+the first verification looked clean-until-you-notice-it-was-reading-the-wrong-refs:
+
+| | |
+| --- | --- |
+| authorship | one address, the noreply form, nothing else |
+| `notes/morning-doa5.md` | in 0 commits |
+| the pointers, in every blob ever on a branch | none |
+| the one commit message | clean |
+
+Then `refs/original` dropped, reflogs expired, `git gc --prune=now`: `.git` fell from
+4.1 MB to 1.1 MB, which is the old objects going. `publish_check.py --history` is silent.
+
+The check that matters most is that **nothing else changed**. The tree of the commit at
+the last common point is `0377b28b`, byte-identical to the same commit in the mirror taken
+before any of this. The rewrite touched the three things it was for and nothing else.
