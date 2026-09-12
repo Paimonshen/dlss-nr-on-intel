@@ -29,6 +29,17 @@ FORBIDDEN_SUFFIXES = {
 }
 LARGE = 200 * 1024
 
+# Large on purpose, and reviewed. A file gets in here only with a reason that survives
+# being read out loud: the point of the size limit is to catch what nobody meant to
+# commit, not to forbid what somebody decided to.
+DELIBERATE = {
+    # 304 demangled C++ symbol names from the DLL's shared-memory declarations. Names,
+    # not code; regenerable by anyone with the same binary; the evidence that
+    # notes/ptx-kernel-configs.md and notes/MODEL-SPEC.txt rest on. Owner's call, and
+    # the reasoning is in notes/phase58-before-publishing.md.
+    "notes/ptx-demangled.txt",
+}
+
 PATTERNS = (
     ("a home directory", re.compile(rb"/home/[A-Za-z0-9._-]+/")),
     ("a mail address", re.compile(rb"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")),
@@ -51,7 +62,7 @@ def scan(name, blob, findings):
     path = pathlib.PurePosixPath(name.decode("utf8", "replace"))
     if path.suffix.lower() in FORBIDDEN_SUFFIXES:
         findings.append(f"{path}: a {path.suffix} file is tracked")
-    if len(blob) > LARGE:
+    if len(blob) > LARGE and str(path) not in DELIBERATE:
         findings.append(f"{path}: {len(blob) // 1024} KB — too big for source, look at it")
     if b"\0" in blob[:8192]:
         findings.append(f"{path}: binary content")
@@ -92,7 +103,7 @@ def history():
         where = names.get(name, "(unnamed blob)")
         if pathlib.PurePosixPath(where).suffix.lower() in FORBIDDEN_SUFFIXES:
             findings.append(f"history {name[:9]}: {where} was committed once")
-        if size > LARGE:
+        if size > LARGE and where not in DELIBERATE:
             findings.append(f"history {name[:9]}: {where}, {size // 1024} KB")
         elif size:
             wanted.append((name, where))

@@ -25,7 +25,7 @@ It found four things. Three were known:
 
 | | |
 | --- | --- |
-| `notes/ptx-demangled.txt` | 259 KB of NVIDIA's demangled symbol names, verbatim |
+| `notes/ptx-demangled.txt` | 259 KB of NVIDIA's demangled symbol names, verbatim — **kept, see below** |
 | `notes/morning-doa5.md` | a home directory and a Steam library path, in a Russian log for the *other* tree |
 | `notes/phase0-acquire.md` | a named community mirror, which tag to take, and how |
 
@@ -36,10 +36,18 @@ nobody knew it was there.
 
 ## What was removed, and the line it was removed on
 
-The raw demangled symbol list is gone; `notes/ptx-kernel-configs.md` and
-`notes/MODEL-SPEC.txt` stay. **A record of what was learned from a binary is a different
-thing from a transcription of the binary**, and the dump was the second. Anyone with the
-DLL regenerates it in a minute from the commands still in `phase3-ptx-unlock.md`.
+The symbol list was taken out on the argument that **a record of what was learned from a
+binary is a different thing from a transcription of the binary**, and was then **put back
+on the owner's call**, which is the right call: the line does not fall where I first drew
+it. Those are 304 C++ symbol names from shared-memory declarations — facts about a file,
+regenerable in a minute by anyone holding it, and the evidence that
+`notes/ptx-kernel-configs.md` and `notes/MODEL-SPEC.txt` rest on. Publishing an analysis
+while withholding what it was derived from makes it unfalsifiable, which is worse than the
+thing I was avoiding.
+
+`publish_check.py` carries it as a named exception with the reason written next to it,
+rather than by loosening the size limit: the limit exists to catch what nobody meant to
+commit, not to forbid what somebody decided to.
 
 `phase0-acquire.md` keeps the half that is useful — how to tell whether the copy in your
 hands is NVIDIA's original bytes, by version record, Authenticode chain and section

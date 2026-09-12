@@ -41,15 +41,15 @@ This exactly matches the entry count the AMD lab reported independently.
 ## What PTX hands us: the complete architecture, from NVIDIA's own templates
 
 Each kernel declares shared memory under a mangled C++ symbol that carries the
-**entire layer configuration as template parameters**. Demangled with `c++filt`: 304 symbols.
-The namespace is `tin3_1` — the "tinlayout" of the kernel names.
+**entire layer configuration as template parameters**. Demangled with `c++filt` (`notes/ptx-demangled.txt`, 304 symbols). The namespace is
+`tin3_1` — the "tinlayout" of the kernel names.
 
-The raw demangled list is **not kept in the repository**. It is 0.3 MB of NVIDIA's own
-symbol names verbatim, and a transcription of their material is a different thing from a
-record of what was learned from it. Anyone with the DLL regenerates it in a minute with
-the commands above; what is kept is the analysis —
-`notes/ptx-kernel-configs.md` maps each kernel to its layer class and template
-configuration, and `notes/MODEL-SPEC.txt` is the specification that came out of it.
+The raw list is kept **deliberately**, as the evidence the analysis rests on. It is
+symbol names — facts about a binary, regenerable in a minute by anyone holding the same
+file with the commands above — not code and not a transcription of anything executable.
+The worked form is `notes/ptx-kernel-configs.md`, which maps each kernel to its layer
+class and template configuration, and `notes/MODEL-SPEC.txt`, the specification that came
+out of it. Read those; this file is for checking them.
 
 Example, from `cc_vit_1d_qkv`:
 
