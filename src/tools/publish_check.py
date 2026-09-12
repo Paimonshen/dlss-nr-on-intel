@@ -49,6 +49,8 @@ PATTERNS = (
 )
 # The one place a mail address is legitimate: git's own trailers, which are part of how
 # the commits were made and are already public in every clone.
+# Addresses that are meant to be public: the trailer git itself writes, and the address
+# GitHub hands out precisely so a personal one need not be published.
 ALLOWED = re.compile(rb"noreply@anthropic\.com|@users\.noreply\.github\.com")
 
 
@@ -127,6 +129,38 @@ def history():
     return findings
 
 
+def authorship():
+    """Who every commit says it is from.
+
+    Pushing a repository publishes the author and committer of each commit, and git's
+    default is whatever address happens to be in the local config. That is the one field
+    nobody edits and everybody forgets — this check did not look at it either until a
+    repository was about to be published with a personal mail address in all 123 commits.
+    GitHub's `<id>+<login>@users.noreply.github.com` is the address to use instead.
+    """
+    got = subprocess.run(
+        ["git", "-C", str(ROOT), "log", "--all", "--format=%H%x00%ae%x00%ce"],
+        capture_output=True, text=True, check=True)
+    seen = {}
+    for row in got.stdout.splitlines():
+        parts = row.split("\0")
+        if len(parts) != 3:
+            continue
+        for address in parts[1:]:
+            if ALLOWED.search(address.encode()):
+                continue
+            seen.setdefault(address, parts[0])
+    return [f"authorship: {address} — {count_commits(address)} commit(s), first {sha[:9]}"
+            for address, sha in sorted(seen.items())]
+
+
+def count_commits(address):
+    got = subprocess.run(
+        ["git", "-C", str(ROOT), "log", "--all", "--format=%ae %ce"],
+        capture_output=True, text=True, check=True)
+    return sum(1 for row in got.stdout.splitlines() if address in row)
+
+
 def main():
     findings = []
     for name in tracked():
@@ -139,6 +173,7 @@ def main():
 
     if "--history" in sys.argv:
         findings += history()
+        findings += authorship()
 
     if findings:
         print(f"{len(findings)} thing(s) that should not be published:\n")
