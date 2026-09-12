@@ -22,7 +22,7 @@ before deciding it is broken.
 ## You supply the weights
 
 **The repository is code only. It contains no NVIDIA binaries and no weights derived from
-them, and it never will.** `nvngx_dlssnr.dll` is NVIDIA's; every project in this space
+them.** `nvngx_dlssnr.dll` is NVIDIA's; every project in this space
 requires you to bring your own copy, and so does this one.
 
 Nothing here will run until you have extracted the logical weight file from a DLL you
