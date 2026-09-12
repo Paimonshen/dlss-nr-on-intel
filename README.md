@@ -19,6 +19,32 @@ before deciding it is broken.
 
 ---
 
+## How this was built
+
+**This project was written by AI agents.** The author supplied the machine, the binary and
+the direction, and made the decisions; the code, the measurements and the notes were
+produced by **Claude Opus 5** and, in a parallel tree, by **Astra** — whose work on the
+native host passes was taken into this one (`src/ref/nr_image.c`, `notes/phase57`).
+
+That is stated here rather than left to be noticed, because it changes how you should read
+everything else. What it means in practice:
+
+- **Nothing is asserted that was not measured.** Every number in the notes has a program
+  behind it in `src/bench/`, and `make test` is around 180 checks, including the native
+  passes against the NumPy they replace byte for byte.
+- **The wrong turns are in the notes too**, deliberately. A hypothesis about shared-memory
+  bank conflicts that measured 1.11x instead of the textbook 32x. A "driver bug" that
+  shaped three phases and does not exist. A profile recommended from one frame and
+  withdrawn after the next. Several notes say at the top that they are superseded.
+- **The author does not claim to be able to defend the code line by line.** What is
+  offered instead is the evidence: the tests, the benchmarks, and the record of how each
+  conclusion was reached — including the ones that were wrong.
+
+Judge it on that. If something here is wrong, the measurement that would show it is
+probably already in `src/bench/`.
+
+---
+
 ## You supply the weights
 
 **The repository is code only. It contains no NVIDIA binaries and no weights derived from

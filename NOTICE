@@ -41,6 +41,7 @@ Vulkan-Headers — https://github.com/KhronosGroup/Vulkan-Headers
 Provenance within this repository
 --------------------------------------------------------------------------------
 
-`src/ref/nr_image.c` began in a parallel tree by the same owner, driven by a different
-model, and was extended here. Its file header and `notes/phase57-native-host-passes.md`
-record what came from where.
+This project was written by AI agents: Claude Opus 5 in this tree, and Astra in a parallel
+one by the same owner. `src/ref/nr_image.c` began in that parallel tree and was extended
+here; its file header and `notes/phase57-native-host-passes.md` record what came from
+where. See "How this was built" in README.md.
