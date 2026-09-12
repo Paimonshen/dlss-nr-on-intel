@@ -108,11 +108,42 @@ def agreement_checks(toggle, paths):
 
 
 def manual_checks():
-    """The README's knob section is generated from the same table the tools render."""
+    """The documentation says what the programs do, and points at files that exist."""
     got = subprocess.run([sys.executable, str(ROOT / "src" / "tools" / "knob_doc.py"),
                           "--check"], capture_output=True, text=True, timeout=60)
     check("the README's knob table is current", got.returncode == 0,
           got.stdout.strip() or "generated from nr_knobs, so it cannot drift")
+
+    # A specification whose evidence pointers have rotted is worse than one without any:
+    # it looks checkable and is not.
+    import re
+
+    def resolves(target):
+        """`notes/phase45` is how this project cites a note, not a missing file.
+
+        The shorthand is used everywhere and expanding it would be churn; a wrong number
+        still has nothing to match, which is the case worth catching.
+        """
+        if (ROOT / target).exists():
+            return True
+        stem = pathlib.PurePosixPath(target)
+        if stem.parent.name == "notes" and stem.name.startswith("phase"):
+            return any((ROOT / "notes").glob(stem.name + "*"))
+        return False
+
+    broken = []
+    for page in (ROOT / "README.md", ROOT / "docs" / "ARCHITECTURE.md", ROOT / "NOTICE"):
+        if not page.exists():
+            broken.append(f"{page.name} is missing")
+            continue
+        text = page.read_text()
+        targets = re.findall(r"\]\((?!https?:|mailto:)([^)#]+)\)", text)
+        targets += [note if note.startswith("notes/") else f"notes/{note}"
+                    for note in re.findall(
+                        r"`(notes/[A-Za-z0-9._-]+|phase[0-9][A-Za-z0-9._-]*\.md)`", text)]
+        broken += [f"{page.name} -> {target}" for target in targets if not resolves(target)]
+    check("the published pages point at files that exist", not broken,
+          "README, the architecture and NOTICE" if not broken else "; ".join(broken[:3]))
 
 
 def probe_checks(daemon):

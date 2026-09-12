@@ -4,7 +4,8 @@ Eighty-seven files, fifty-eight phases. This is what each one settles, so a read
 cold can go straight to the answer instead of the archaeology.
 
 **Read `HANDOFF.md` first** — it carries the current state, the standing conclusions and
-the traps. This index is for going deeper on one question.
+the traps, and **`docs/ARCHITECTURE.md`** for the recovered network as a specification
+rather than as archaeology. This index is for going deeper on one question.
 
 Notes are the record of what was *measured*, including measurements that turned out
 wrong. Where a note is superseded it says so at the top and is kept anyway: several of

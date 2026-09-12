@@ -196,6 +196,13 @@ window (8x8) masked across 16 configurations, consistent with shifted-window MSA
 
 ## What is still missing
 
+> **Partly superseded.** Items 1 and 3 below were answered later and this section was not
+> updated — exactly the failure `notes/INDEX.md` warns about, a withdrawn finding living
+> on where it was written down. The named, shaped logical extraction settles the blob
+> slicing (item 1), and `notes/MODEL-SPEC.txt` records the 8x8 window (item 3); only the
+> shift offset is still inferred. `docs/ARCHITECTURE.md` is the current statement.
+
+
 1. **Which named parameter occupies which slice of each packed blob.** The totals are
    now pinned exactly, and the names are known, but the assignment and the internal
    order are not. Needs the layer `Init`/load path that slices the blob — *not* the

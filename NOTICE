@@ -17,9 +17,11 @@ The repository is source text only. To run anything you must supply your own cop
 `nvngx_dlssnr.dll` and extract the weights from it yourself; the README says how.
 Whether you are entitled to that copy is between you and whoever gave it to you.
 
-The notes under `notes/` describe what was measured about that binary — the recovered
-graph, tensor shapes, and the names of kernels demangled from its embedded code. They
-are a record of analysis, not a copy of the thing analysed.
+`docs/ARCHITECTURE.md` and the notes under `notes/` describe what was measured about that
+binary — the recovered graph, tensor shapes, and the names of kernels demangled from its
+embedded code. They are published deliberately, as a record of analysis rather than a copy
+of the thing analysed: no NVIDIA code, no weights and no verbatim transcription of their
+material is included, and what is here is regenerable by anyone holding the same file.
 
 --------------------------------------------------------------------------------
 Third-party work this depends on

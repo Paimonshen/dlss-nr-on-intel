@@ -250,7 +250,13 @@ game ──presents──▶ Vulkan layer ──socket──▶ daemon ──▶
   model's learned gate decides per pixel how much survives. That is what stops the
   picture shimmering.
 
-`notes/INDEX.md` maps all fifty-five phase notes to the question each one settles, and
+**[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) is the recovered network**: the extent
+rule, all sixteen input channels, the four-channel head and its composition, the block
+table, the weight container and the trap in it, and what agreement with the original is
+and is not possible. It is written for someone who wants to run this somewhere else, and
+it is the file to read before any of the notes.
+
+`notes/INDEX.md` maps all fifty-eight phase notes to the question each one settles, and
 several of the answers are counter-intuitive. `HANDOFF.md` is the current state and the
 traps.
 
@@ -285,6 +291,7 @@ src/gpu/      the XMX runtime — compute shaders and the resident Vulkan contex
 src/layer/    the Vulkan layer, the daemon, and the three control tools
 src/bench/    measurement programs; every number in the notes came from one
 src/tools/    the DLL and weight-container readers, and the publication check
+docs/         the recovered architecture, written as a specification
 notes/        what was measured, including the measurements that turned out wrong
 work/         builds, checkouts and your weights. Ignored, and stays that way.
 ```

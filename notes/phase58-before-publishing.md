@@ -50,6 +50,25 @@ notes carried the same pointer and were scrubbed with it.
 rest of the repository is not written in, pointed at screenshots that were never
 committed, and carried two absolute paths.
 
+## Decided: the recovered architecture is published
+
+The owner's call, made the same day. `docs/ARCHITECTURE.md` is the result — the extent
+rule, all sixteen input channels with their exact scaling, the four-channel head and its
+composition, the block table, the weight container and the subnormal trap inside it, the
+temporal gate with its measured discrimination, and a plain statement of what agreement
+with the original is and is not possible.
+
+It exists because "already in the repository" and "usable by someone else" are different
+things. The architecture was never removed — only the raw symbol dump was — but it was
+spread across `MODEL-SPEC.txt`, `phase3-architecture.md` and a dozen phase notes, in the
+order it was *discovered* rather than the order it is *needed*, and at least one section
+was still listing as unsolved two things that were solved later. That section now says so
+and points here.
+
+`NOTICE` states the position rather than leaving it implied: this is a record of analysis,
+no NVIDIA code, no weights, no verbatim transcription, and regenerable by anyone holding
+the same file.
+
 ## What is still to decide, and it is not a code question
 
 Both removals are only removals from the **tip**. Those bytes remain in the 120 commits
@@ -58,8 +77,4 @@ every time it is run. The choice is a rewrite that keeps the commit messages and
 every hash, or a squashed snapshot that keeps neither — and it is one to make knowingly,
 at publication, not as a side effect of a hygiene pass.
 
-The third item is not a hygiene question at all. `MODEL-SPEC.txt`, `phase3-architecture.md`
-and `ptx-kernel-configs.md` are the recovered architecture of somebody else's product.
-That is the substance of the project and the first thing a reader will look at. The
-precedent is public — OptiScaler, `DLSS-NR-on-AMD`, MLX-DLSS — and precedent is not
-permission.
+The remaining question is the history, and only the history.
