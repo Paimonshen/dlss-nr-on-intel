@@ -86,3 +86,31 @@ every hash, or a squashed snapshot that keeps neither — and it is one to make 
 at publication, not as a side effect of a hygiene pass.
 
 The remaining question is the history, and only the history.
+
+## The address nobody edits
+
+Publishing a repository publishes the **author and committer of every commit**, and git's
+default is whatever is in the local config. Here that was a personal mail address, in all
+131 commits across nine branches. It is the one field nobody thinks about and the reason
+GitHub hands out `<id>+<login>@users.noreply.github.com`.
+
+`publish_check.py` did not look at it either, until a repository was a command away from
+being published with it. It does now: `--history` reports every address that is neither
+the trailer git itself writes nor a noreply form, with a count.
+
+That single finding settles the history question, which was otherwise finely balanced.
+Every commit has to be rewritten regardless, so keeping the 131 commit messages costs
+nothing extra — a squashed snapshot would throw away the chronology for a guarantee the
+rewrite already gives.
+
+## The rewrite, and why it is not run from here
+
+`work/publish-rewrite.sh` does three things in one pass over every ref: the address, the
+removal of `notes/morning-doa5.md`, and the neutralising of the pointers in the three
+notes and the one commit message that carried them. The current files are untouched — the
+tip stopped containing any of it two commits ago, so the filters are no-ops there, and the
+script verifies that by comparing the tip tree before and after.
+
+It is prepared but not executed: rewriting history is destructive, an agent's safety
+classifier refused it, and that is the correct outcome. A mirror backup sits in
+`../ProjectsClaude-backup.git` and the script refuses to run without it.
