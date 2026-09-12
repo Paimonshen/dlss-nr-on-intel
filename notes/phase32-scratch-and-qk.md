@@ -94,7 +94,7 @@ this GPU. This proves library loading, not yet DOA5 rendering.
 The launcher searches Proton and prefixes in all Steam libraries, preserving spaces,
 validates the executable and supports `--check-proton` without launching a game.
 `NR_PROTON` selects a specific runtime. Steam launch-option paths are shell-escaped.
-The real DOA5/Proton paths pass the check. See `notes/morning-doa5.md` for the remaining
+The real DOA5/Proton paths pass the check. See `notes/phase34-doa5.md` for the remaining
 interactive validation; no game was launched during this phase.
 
 ## Reproduction and validation

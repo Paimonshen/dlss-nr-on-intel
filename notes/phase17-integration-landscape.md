@@ -13,7 +13,7 @@ new, and what it means for a machine with no NVIDIA GPU in it.
 | [NIGos/dlss5-bridge](https://github.com/NIGos/dlss5-bridge) | ReShade add-on; mirrors a DX11 or Vulkan game's DLSS onto a **private D3D12 session**. Colour, depth and motion vectors go into shared textures, are evaluated there, and are copied back | NVIDIA GPU |
 | **MGPU Bridge** (Guibout, 7 Sept 2026) | offloads NR to a **second GPU**; the game renders on one card, NR runs on the other. 44 -> 67-70 fps in Dawnwalker, up to +127 % elsewhere | two RTX 50 cards, DX12, a monitor on each |
 | [jlrouzies-fr/DLSS5-Feeder](https://github.com/jlrouzies-fr/DLSS5-Feeder) | for games with **no DLSS at all**: synthesises the DLAA contract from ReShade's backbuffer, hardware depth and **optical-flow motion vectors from a third-party shader** | NVIDIA GPU |
-| [a packaging project](https://github.com/a packaging project), [another packaging project](https://github.com/another packaging project), [a patched repack](https://github.com/a patched repack) | packaging and injection variants | NVIDIA GPU |
+| packaging and injection variants, several | how the pass is shipped to end users | NVIDIA GPU |
 | [danielblnc/DLSS-NR-on-AMD](https://github.com/danielblnc/DLSS-NR-on-AMD) | runs NVIDIA's DLL on RDNA3/4 by translation; ~33 fps at 1080p on an RX 9070 XT | AMD, DX12, an FSR game |
 
 **Every one of them loads `nvngx_dlssnr.dll`.** OptiScaler's Linux script included: it

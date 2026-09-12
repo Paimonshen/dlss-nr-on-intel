@@ -284,7 +284,7 @@ src/ref/      the CPU reference: the graph, features, composition, the temporal 
 src/gpu/      the XMX runtime — compute shaders and the resident Vulkan context
 src/layer/    the Vulkan layer, the daemon, and the three control tools
 src/bench/    measurement programs; every number in the notes came from one
-src/tools/    the DLL and weight-container readers
+src/tools/    the DLL and weight-container readers, and the publication check
 notes/        what was measured, including the measurements that turned out wrong
 work/         builds, checkouts and your weights. Ignored, and stays that way.
 ```
@@ -303,7 +303,16 @@ and a skip is not a pass.
 
 ## Credit and licences
 
+**Apache License 2.0** — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
+
 The graph was recovered by [MLX-DLSS](https://github.com/iamwavecut/MLX-DLSS) (Apache-2.0)
 from vendor captures; this port reads its weight specification and its numpy modules, and
 the two independent extractions of the same DLL agree exactly — 0 missing, 0 extra, 0
-shape mismatches. The model, the weights and the name are NVIDIA's.
+shape mismatches.
+
+DLSS, Neural Rendering and `nvngx_dlssnr.dll` are NVIDIA Corporation's. This is an
+independent reimplementation of the inference pass, not affiliated with or endorsed by
+them, and it contains no NVIDIA code. **No weights and no vendor binary are distributed
+here.** `src/tools/publish_check.py` enforces that against the tracked tree on every
+`make test`, and `make publish-check` walks the whole history as well — a deleted file
+still ships with a repository.

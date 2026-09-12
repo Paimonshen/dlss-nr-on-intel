@@ -1,6 +1,6 @@
 # Index of the notes
 
-Eighty-eight files, fifty-seven phases. This is what each one settles, so a reader arriving
+Eighty-seven files, fifty-eight phases. This is what each one settles, so a reader arriving
 cold can go straight to the answer instead of the archaeology.
 
 **Read `HANDOFF.md` first** — it carries the current state, the standing conclusions and
@@ -94,8 +94,8 @@ disproved.
 | `phase55-a-switch-on-a-key.md` | one key over a fullscreen game, and the compositor crash from binding it the wrong way |
 | `phase56-the-panel-and-the-manual.md` | every knob on one screen, one table behind the tools and the README, three bugs in a terminal's input path |
 | `phase57-native-host-passes.md` | the passes around the network in C, taken from the parallel tree; host 74 -> 28 ms, byte-identical |
+| `phase58-before-publishing.md` | the licence, what a repository carries with it, and the four things the check found |
 | `phase30-control-atlas.md` | what each vendor slider does, and one that does nothing |
-| `morning-doa5.md` | a session log, in Russian, kept for its screenshots |
 
 ## Reviews
 

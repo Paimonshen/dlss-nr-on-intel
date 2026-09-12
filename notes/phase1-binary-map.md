@@ -10,7 +10,7 @@ built   2026-08-11 20:29:31 UTC (COFF timestamp)
 version FileVersion = ProductVersion = 310.8.0.0  ("NVIDIA DLSSNR - DVS PRODUCTION")
 ```
 
-Acquired from `a community mirror` tag `the base tag`
+Supplied by the owner
 (zip sha256 `388c0a7912e15ec911b9c9e11a692142b11fe387ddf2b637d8c358138fffb3ac`).
 Provenance is **cryptographic, not reputational** — see `notes/phase0-acquire.md`.
 

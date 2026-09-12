@@ -83,6 +83,7 @@ test: all work/attention_ab.spv work/test_exchange work/test_settled
 	python3 src/layer/test_temporal.py
 	python3 src/layer/test_toggle.py
 	python3 src/layer/test_panel.py
+	python3 src/tools/publish_check.py
 	python3 src/gpu/test_epilogue.py
 	python3 src/gpu/test_specialization.py
 	python3 src/gpu/test_softmax_pack.py
@@ -102,4 +103,9 @@ test-proton: all work/libnr_layer32.so work/test_layer_loader work/test_layer_lo
 	VK_LAYER_PATH=$(CURDIR)/work/layer-check ENABLE_NR_LAYER=1 work/test_layer_loader
 	VK_LAYER_PATH=$(CURDIR)/work/layer-check ENABLE_NR_LAYER=1 work/test_layer_loader32
 
-.PHONY: all test test-proton bench
+# Everything the tracked tree must not contain, and — slower — everything the history
+# must not either. `make test` runs the first; run the second before publishing.
+publish-check:
+	python3 src/tools/publish_check.py --history
+
+.PHONY: all test test-proton bench publish-check

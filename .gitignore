@@ -9,10 +9,31 @@
 weights_ht.bin
 *.ptx
 *.cubin
+*.fatbin
+*.safetensors
+*.npy
+*.npz
+*.bin
 
 __pycache__/
 *.pyc
 
-# Third-party game screenshots: test material, not code. Kept out of the tree so a
-# cloud review does not carry copyrighted frames it has no use for.
+# Third-party game frames: test material, not code, and somebody else's copyright. A
+# single one was staged once and is still a loose object in this clone — see
+# `src/tools/publish_check.py --history`, which is what found it.
 /pngs/
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.bmp
+*.gif
+*.mp4
+*.webm
+
+# Build output and archives, none of which belongs in a source tree.
+*.so
+*.spv
+*.7z
+*.zip
+*.zst

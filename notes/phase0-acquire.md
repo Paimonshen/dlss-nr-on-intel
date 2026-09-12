@@ -74,23 +74,16 @@ No OTA endpoint appears in plaintext in either binary — the only URLs present 
 DigiCert/Microsoft certificate CRL and OCSP paths. The endpoint is built at runtime
 or stored non-obviously; recovering it would be its own reversing task.
 
-## Options for actually getting the DLL — owner's call
+## Where a copy comes from is out of scope, deliberately
 
-1. **From a game that ships it.** Matches how `nvngx_dlss*.dll` has always been
-   distributed. NBA 2K27 is the launch title. Any install that has it can supply
-   the file directly.
-2. **OTA fetch.** Would mean recovering the endpoint from `nvngx_update.exe` and/or
-   running it under Wine. Real reversing effort, uncertain payoff.
-3. **A copy already present on a Windows install** — `%ProgramData%\NVIDIA\NGX\models`
-   or the per-game directory, if one exists anywhere reachable.
+This note once listed places to look, named a community mirror and said which of its
+tags to take. That is a sourcing guide for a pre-release binary and it is not this
+project's business, so it is gone: the repository ships no NVIDIA binary and does not
+help anyone find one. Whether you are entitled to the copy you have is between you and
+whoever gave it to you.
 
-Not started pending that decision.
-
-## Housekeeping
-
-`work/driver-payload.7z` (983 MB) is a carved duplicate of the supplied `.exe`,
-which is itself duplicated in `~/Downloads`. ~2.9 GB across three copies, 22 GB free
-on `/home`. Safe to delete the carve and re-cut it from the offset above at any time.
+What is worth keeping is the other half — how to tell whether the copy in your hands is
+NVIDIA's original bytes rather than something patched. See "Verifying whatever arrives".
 
 ---
 
@@ -125,37 +118,12 @@ owner. Nothing was downloaded.
 
 ---
 
-## Mirror fidelity test — a community mirror (verified 2026-09-07)
+## Verifying whatever arrives
 
-Before trusting any community mirror with the DLSS-NR binary, test it on a version
-that also exists officially, and byte-compare.
-
-`a community mirror` mirrors every DLSS DLL version back to 3.8.10, including
-`dlss-310.7.0` — which corresponds to the official `NVIDIA/DLSS` release v310.7.0.
-Downloaded both and hashed:
-
-```
-be6e434a94ca32499515eb62ca0e6c274526055d568d0426e4c652dcdfb6ee6e  official (NVIDIA/DLSS v310.7.0)
-be6e434a94ca32499515eb62ca0e6c274526055d568d0426e4c652dcdfb6ee6e  mirror   (a community mirror dlss-310.7.0)
-```
-
-**Byte-identical.** The mirror republishes NVIDIA binaries unmodified, at least here.
-Owner account created 2022-05-15; repo created 2026-03-03, systematic historical
-archive rather than a hype-wave drop. Local copies in `work/dl/`.
-
-This is evidence about the mirror's *practice*, not proof about any specific file.
-It does not establish that `nvngx_dlssnr_310.8.0.zip` is unmodified — that still needs
-its own check once a copy exists (see below).
-
-### Which asset to take, and how to verify it
-
-Take the **base** tag `the base tag` (2026-08-27, 109 425 288 B zip, ~158 MB DLL),
-*not* `-RTX40` / `-SF` / `-SF-v2`, and not anything from `a patched repack`: those are
-patched to defeat NVIDIA's RTX-50 init gate, which breaks the Authenticode signature
-and makes authenticity unverifiable. We want NVIDIA's original bytes; the init gate is
-irrelevant to us since we never execute their code.
-
-Verification to run on whatever copy arrives, before it goes in `ref/`:
+Anything repackaged to defeat NVIDIA's RTX-50 initialisation gate has had its
+Authenticode signature broken, which makes its authenticity unverifiable — and this
+project never executes their code, so the gate is irrelevant to it anyway. Run these
+before a copy goes anywhere near `ref/`:
 
 1. size ≈ 158 MB, `file` reports PE32+ DLL x86-64;
 2. VERSIONINFO says NVIDIA DLSSNR **310.8.0.0**;
@@ -168,5 +136,4 @@ Verification to run on whatever copy arrives, before it goes in `ref/`:
 
 ### Status
 
-Download attempted 2026-09-07 and **blocked by the Claude Code permission
-classifier**. Not retried, not worked around. Acquisition is with the owner.
+Acquisition is with the owner, and stays there.

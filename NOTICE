@@ -1,0 +1,44 @@
+DLSS-NR on Intel Xe2
+Copyright 2026 uzbekunknown and the DLSS-NR on Intel Xe2 contributors
+
+Licensed under the Apache License, Version 2.0. See LICENSE.
+
+--------------------------------------------------------------------------------
+What this project is not
+--------------------------------------------------------------------------------
+
+DLSS, DLSS 5, Neural Rendering, NGX and nvngx_dlssnr.dll are NVIDIA Corporation's.
+This project is an independent reimplementation of the inference pass so that it can
+run on an Intel Xe2 GPU. It is not affiliated with, endorsed by, or supported by
+NVIDIA, and no NVIDIA source code is included.
+
+**No model weights and no NVIDIA binary are distributed here, and none ever will be.**
+The repository is source text only. To run anything you must supply your own copy of
+`nvngx_dlssnr.dll` and extract the weights from it yourself; the README says how.
+Whether you are entitled to that copy is between you and whoever gave it to you.
+
+The notes under `notes/` describe what was measured about that binary — the recovered
+graph, tensor shapes, and the names of kernels demangled from its embedded code. They
+are a record of analysis, not a copy of the thing analysed.
+
+--------------------------------------------------------------------------------
+Third-party work this depends on
+--------------------------------------------------------------------------------
+
+MLX-DLSS — https://github.com/iamwavecut/MLX-DLSS
+  Copyright the MLX-DLSS authors, licensed under the Apache License 2.0.
+  This project reads its numpy modules at runtime and reproduces its weight
+  specification; the two independent extractions of the same binary agree exactly.
+  It is fetched into `work/` at build time and is not redistributed here.
+
+Vulkan-Headers — https://github.com/KhronosGroup/Vulkan-Headers
+  Copyright the Khronos Group, licensed under the Apache License 2.0.
+  Fetched into `work/` at build time and not redistributed here.
+
+--------------------------------------------------------------------------------
+Provenance within this repository
+--------------------------------------------------------------------------------
+
+`src/ref/nr_image.c` began in a parallel tree by the same owner, driven by a different
+model, and was extended here. Its file header and `notes/phase57-native-host-passes.md`
+record what came from where.
