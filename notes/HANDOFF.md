@@ -16,7 +16,10 @@ PL2 37 W) and in Linux. **The graph did not get faster.** It sat at 1950 MHz —
 hardware ceiling, `rp0` — for 89 % of the run, and a package power limit cannot lift a
 frequency ceiling. The extent curve came out at **11 ms + 457 ms per megapixel**, about 9 %
 under the old `17 + 488`, which is inside the ten-percent between-process band and not
-attributable to the mode. **Do not record the power profile as a variable against frame
+attributable to the mode. **Those numbers were taken while Steam recompiled Counter-Strike
+2's 6.5 GB shader cache on two cores in the background**, unnoticed at the time: the
+frequency cap stands, the numbers do not — re-measure idle before quoting them. Check
+`ps` for `fossilize_replay` before any benchmark on this machine. **Do not record the power profile as a variable against frame
 time; record that the GPU was at its ceiling.** The lever is still the extent.
 `notes/phase60`.
 
@@ -456,6 +459,11 @@ followed from the wrong gate form), the leading-region projection, and "1.01x pa
 - **The test suite and a loaded daemon do not fit together.** 15 GiB shared with the iGPU;
   a resident daemon holds the model, `make test` allocates its own device buffers, and the
   run gets OOM-killed. Stop the daemon before the suite, not after.
+- **Steam compiles shaders behind your back, and it looks like a slow machine.** After a
+  Vulkan driver update it replays each game's pipeline cache — Counter-Strike 2's was
+  6.5 GB — in `fossilize_replay` workers that hold whole cores for many minutes. A
+  benchmark run alongside is measuring a machine with cores missing. `phase60` was.
+  **`ps -eo pcpu,comm --sort=-pcpu | head` before any timing run.**
 - **External write-ups are summaries, not sources.** A WebFetch of `weight_spec.json`
   returned plausible-looking shapes with a confabulated label (`block31` as "final
   output stage"). Clone the repo and read the file.

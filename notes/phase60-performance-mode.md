@@ -1,5 +1,16 @@
 # Phase 60 — the performance mode buys this workload nothing
 
+> **Correction, the same afternoon.** Every number below was measured with Steam
+> recompiling **Counter-Strike 2**'s shader cache in the background — two `fossilize_replay`
+> workers at ~98 % of a core each, 6.5 GB of pipeline cache, running the whole time and not
+> noticed until afterwards. What survives is the **frequency cap**: the GPU's own `act_freq`
+> sitting at `rp0` is a direct reading of the GPU and does not depend on CPU load. What does
+> not survive is every **number** — the fitted curve, the per-extent comparison and the two
+> whole-frame times were taken on a machine with two cores gone. Background load would
+> slow them, so a clean run may be faster still, but that is a guess and is not claimed.
+> A Steam cache replay of this size is also what a Vulkan driver update triggers, which is a
+> second candidate for the 9 % below. Re-measure on an idle machine before quoting any of it.
+
 2026-09-16. The machine was switched to its performance mode — in Windows, through a
 firmware setting Linux cannot reach, and in Linux as well. The question was whether the
 graph got faster. **It did not, and the reason is measured, not assumed.**
