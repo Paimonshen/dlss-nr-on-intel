@@ -9,7 +9,18 @@ you need the evidence behind a line in this file, rather than reading them in or
 
 ---
 
-## Latest: a third kind of client, and 10.5 fps (2026-09-16)
+## The performance mode buys nothing (2026-09-16, later)
+
+Switched to performance in Windows (a firmware setting Linux cannot reach: RAPL PL1 35 W,
+PL2 37 W) and in Linux. **The graph did not get faster.** It sat at 1950 MHz — the GPU's
+hardware ceiling, `rp0` — for 89 % of the run, and a package power limit cannot lift a
+frequency ceiling. The extent curve came out at **11 ms + 457 ms per megapixel**, about 9 %
+under the old `17 + 488`, which is inside the ten-percent between-process band and not
+attributable to the mode. **Do not record the power profile as a variable against frame
+time; record that the GPU was at its ceiling.** The lever is still the extent.
+`notes/phase60`.
+
+## A third kind of client, and 10.5 fps (2026-09-16)
 
 **Tekken 7** — Unreal Engine 4, **64-bit D3D11 through DXVK** — runs live at **10.5 fps at
 640x360**, 210 frames measured over 20 seconds, 91 ms each. Nothing was changed to make it
