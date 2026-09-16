@@ -23,6 +23,10 @@ embedded code. They are published deliberately, as a record of analysis rather t
 of the thing analysed: no NVIDIA code, no weights and no verbatim transcription of their
 material is included, and what is here is regenerable by anyone holding the same file.
 
+Comparison images live on the `media` branch, not in the code history. They are frames
+from commercial games — Tekken 7 © Bandai Namco Entertainment — shown to compare a rendering
+technique, and they remain their publishers' property.
+
 --------------------------------------------------------------------------------
 Third-party work this depends on
 --------------------------------------------------------------------------------

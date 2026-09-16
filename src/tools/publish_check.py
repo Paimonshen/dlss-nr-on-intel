@@ -39,6 +39,14 @@ DELIBERATE = {
     # the reasoning is in notes/phase58-before-publishing.md.
     "notes/ptx-demangled.txt",
 }
+# Before/after comparison frames, on the orphan `media` branch so the code history stays
+# text only. Each one is chosen by the owner, not by whoever builds the image — they are
+# the project's public face, and they are somebody else's game.
+DELIBERATE_PREFIXES = ("comparisons/",)
+
+
+def deliberate(path):
+    return path in DELIBERATE or path.startswith(DELIBERATE_PREFIXES)
 
 PATTERNS = (
     ("a home directory", re.compile(rb"/home/[A-Za-z0-9._-]+/")),
@@ -49,6 +57,21 @@ PATTERNS = (
 )
 # The one place a mail address is legitimate: git's own trailers, which are part of how
 # the commits were made and are already public in every clone.
+# Filesystem-path patterns only: a web address has path segments too, and `/media/` is as
+# ordinary in a URL as it is telling in a local path. `file://` is deliberately not exempt —
+# that *is* a local path.
+PATH_PATTERNS = {"a home directory", "a mounted volume"}
+WEB = re.compile(rb"https?://[^\s)>\]\"'`]+")
+
+
+def in_web_address(blob, start):
+    line_start = blob.rfind(b"\n", 0, start) + 1
+    line_end = blob.find(b"\n", start)
+    line = blob[line_start:line_end if line_end >= 0 else len(blob)]
+    offset = start - line_start
+    return any(m.start() <= offset < m.end() for m in WEB.finditer(line))
+
+
 # Addresses that are meant to be public: the trailer git itself writes, and the address
 # GitHub hands out precisely so a personal one need not be published.
 ALLOWED = re.compile(rb"noreply@anthropic\.com|@users\.noreply\.github\.com"
@@ -72,6 +95,8 @@ def scan(name, blob, findings):
     for what, pattern in PATTERNS:
         for hit in pattern.finditer(blob):
             if ALLOWED.search(hit.group(0)):
+                continue
+            if what in PATH_PATTERNS and in_web_address(blob, hit.start()):
                 continue
             line = blob.count(b"\n", 0, hit.start()) + 1
             findings.append(f"{path}:{line}: {what}")
@@ -104,9 +129,11 @@ def history():
             continue
         name, size = parts[0], int(parts[2])
         where = names.get(name, "(unnamed blob)")
+        if deliberate(where):
+            continue
         if pathlib.PurePosixPath(where).suffix.lower() in FORBIDDEN_SUFFIXES:
             findings.append(f"history {name[:9]}: {where} was committed once")
-        if size > LARGE and where not in DELIBERATE:
+        if size > LARGE:
             findings.append(f"history {name[:9]}: {where}, {size // 1024} KB")
         elif size:
             wanted.append((name, where))
@@ -124,6 +151,8 @@ def history():
             for what, pattern in PATTERNS:
                 for hit in pattern.finditer(blob):
                     if ALLOWED.search(hit.group(0)):
+                        continue
+                    if what in PATH_PATTERNS and in_web_address(blob, hit.start()):
                         continue
                     findings.append(f"history {name[:9]}: {where} holds {what}")
                     break

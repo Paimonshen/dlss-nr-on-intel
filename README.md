@@ -19,6 +19,32 @@ before deciding it is broken.
 
 ---
 
+## What it looks like
+
+![Tekken 7, Sergei Dragunov. Left: the game's own frame. Right: the same frame through DLSS-NR on an Intel Arc 140V.](https://raw.githubusercontent.com/Uzbekunknown/dlss-nr-on-intel/media/comparisons/tekken7-dragunov.jpg)
+
+Tekken 7, a still captured at 1920x1080 with the model at full resolution; crops enlarged
+2x. Measured rather than eyeballed, with texture normalised for the change in brightness —
+on this model the brightness moves, and it fools the eye:
+
+| region | brightness | relative texture | colour change |
+| --- | --- | ---: | ---: |
+| face | 78 -> 57 | **+22 %** | 23.5 |
+| jacket weave | 90 -> 71 | **+50 %** | 19.4 |
+| embroidery | 135 -> 115 | +36 % | 20.6 |
+| background | 35 -> 34 | -9 % | **4.8** |
+
+The character is re-rendered and the background is left almost alone. The skin loses the
+game's flush and gains pores and fine lines, the weave sharpens, and the brass buttons lose
+their shine: what the pass adds to texture it takes out of speculars. **Whether that is
+better is taste, not measurement** — it is photographic where the game is stylised.
+
+This is a still. Live, the same game runs at **10.5 fps at 640x360**.
+
+<sub>Tekken 7 © Bandai Namco Entertainment, shown for comparison.</sub>
+
+---
+
 ## How this was built
 
 **This project was written by AI agents.** The author supplied the machine, the binary and
