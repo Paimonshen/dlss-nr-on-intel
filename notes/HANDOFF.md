@@ -9,6 +9,16 @@ you need the evidence behind a line in this file, rather than reading them in or
 
 ---
 
+## Latest: the parameter count was wrong, and so were two published claims (2026-09-16)
+
+**145 755 123 parameters, not 73 841 889.** The large matrices are FP8 E4M3, one byte each;
+73 841 889 was the weight section's bytes divided by two, the dense-FP16 misreading withdrawn
+as an encoding on 2026-09-08 and never re-checked as a count. The "~148 M FP8" press figure
+was right. Fallen with it, from the published `docs/ARCHITECTURE.md`: **GQA 4:1** (`qkv` is
+`(C, 3C)`, full MHA — this file had already withdrawn it) and **27 % subnormals** (the real
+weights hold 7). Corrected in README, the architecture and the brief. **Before quoting any
+number about the weights, sum the logical shapes.** `notes/phase61`.
+
 ## The performance mode buys nothing (2026-09-16, later)
 
 Switched to performance in Windows (a firmware setting Linux cannot reach: RAPL PL1 35 W,

@@ -26,7 +26,7 @@ returns is a *residual* to add to the frame it was given.
 
 Internally: a symmetric U-Net of **71 blocks** — five encoder and five decoder stages of
 shifted-window (Swin) attention, an eight-block ViT-1D bottleneck, and an upsample between
-them. **73 841 889 parameters, FP16.** Vendor codenames in the binary: feature `CG2R`,
+them. **145 755 123 parameters**, the large matrices stored as FP8. Vendor codenames: feature `CG2R`,
 engine `HNet`, configs `crazy-cuckoo` and `hnet-vigilant-squid`.
 
 ## 2. The contract — this is the reusable part
@@ -113,43 +113,53 @@ Five encoder stages at **32 / 64 / 128 / 256 / 512 channels**, head dimension **
 1024 -> 512`; five decoder stages back. Attention is shifted-window over **8x8 windows, 64
 tokens**.
 
-Every block is a packed blob of several parameters concatenated, which is why the on-disk
-sizes never factor into `in x out`. The budgets solve exactly:
+One transformer layer at C = 256 (8 heads), exactly as the extraction gives it:
 
-- **Grouped-query attention, 4:1.** `QKV = 1.5C² = Q(C²) + K(C²/4) + V(C²/4)`.
-- **Attention bias** is `heads * 64 * 64 = 128C`, stored in a 12-bit fragment permutation.
-- **Transition blocks** are a standard block plus one extra `C²`.
-- **The cosine gate** is exactly `C` long, after eight zero pad bytes, at every width. It
-  is the anchor that makes the fused Swin layout readable — getting it wrong puts the gate
-  inside `wq` and everything downstream is quietly wrong.
+| tensor | shape | |
+| --- | --- | --- |
+| `qkv_weight` | (C, 3C) | Q, K and V, each C x C — **full multi-head attention** |
+| `projection_weight` | (C, C) | |
+| `attn_bias` | (heads, 64, 64) | a relative bias over the 8x8 window, `128C` in total |
+| `attn_scale` | (heads) | **FP32**, per head |
+| `attn_cos_skip`, `ffn_cos_skip` | (C) | the cosine gates on the skip, exactly `C` long |
+| `ffn_expand_weight` | (heads, 4, 8, 32, 32) | grouped expansion |
+| `ffn_branch_projection_weight` | (heads, 4, 32, 32) | |
+| `ffn_output_projection_weight` | (C, C) | |
+
+**There is no grouped-query attention.** An early reading of the container sizes suggested
+4:1 and a `1.5C²` QKV; the logical `qkv` is `(C, 3C)`, and the apparent halving was the
+storage format, not the attention (section 4). This file said otherwise when it was first
+published, repeating a claim the project's own notes had already withdrawn.
 
 The non-linearity in attention is a **softmax**, hand-rolled in `f16x2` with hard logit
-clamps and **no max subtraction**. `attn_scale` is FP32, per head.
+clamps and **no max subtraction**.
 
-`notes/MODEL-SPEC.txt` is the per-block table: width, sub-layer count, element count and
-layout for all 71 blocks, accounting for every one of the 73 841 889 parameters with zero
-remainder. `src/tools/model_spec.py` regenerates it.
+`notes/MODEL-SPEC.txt` tabulates the **container** — per-block element counts and layout as
+stored. Those counts are storage, not parameters: their total, 73 841 889, is the weight
+section's size divided by two. The logical shape list is MLX-DLSS's `weight_spec.json`.
 
 ## 4. The weights
 
-**The container does not hold plain dense FP16.** It holds packed backend payloads —
-permuted into `mma` fragment order, partly E4M3 — and the fact that `data_len == 2 *
-n_elem` fixes the byte count, not the encoding. Read as dense FP16 the values correlate
-**−0.02** with the truth. Use a logical, named, shaped extraction; MLX-DLSS's tools
-produce one from a DLL you supply.
+**145 755 123 parameters, in three storage formats.** The large matrices — 143.0 M
+parameters — are **FP8 E4M3, one byte each**, in NVIDIA's QMMA tile layout. The small
+tensors — attention biases, branch projections, cosine gates, 2.7 M — are FP16. The 714
+`attn_scale` values are FP32. At those widths the model fits the DLL's 147.7 MB weight
+section to within half a percent; stored densely as FP16 it would need 291.5 MB.
 
-There is **no dequantisation step**: the weights are used as they arrive.
+So there **is** a decode step: the extraction turns the E4M3 bytes into float and writes FP16
+tensors, and those are what this implementation computes with. Read the container bytes as
+dense FP16 instead and the values correlate **−0.02** with the truth — and, because its
+headers say `data_len == 2 * n_elem`, the parameter count comes out at 73.8 M, half the real
+one. This project made both mistakes, and published the second.
 
-### The trap that costs a quarter of the network
+### Subnormals: a real hardware trap that these weights do not trigger
 
-**27.22 % of the parameters — 20.1 M of 73.8 M — are FP16 subnormals.** The median tensor
-is 9.64 % subnormal, the worst is 82.92 %, and 20 tensors are over half. Intel's XMX units
-flush subnormal FP16 operands to zero, so run naively a quarter of the network evaluates
-to zero, silently, with no error anywhere. A per-tensor `2^k` rescale fixes it exactly and
-returns the residual error to the 5e-06 of ordinary FP32 accumulation.
-
-Any matrix unit with flush-to-zero behaviour will have this problem. It is the single most
-expensive thing to discover late.
+Intel's XMX units flush subnormal FP16 operands to zero. That is real, and a per-tensor
+`2^k` rescale guards against it exactly. But **the real weights hold 7 subnormal values in
+145.8 M**: E4M3's smallest non-zero magnitude sits far above FP16's normal threshold, so
+decoded FP8 cannot land there. An earlier figure of 27 % was measured on the misread
+container bytes and says nothing about the model. If your weights arrive in another format,
+count before assuming either way.
 
 ## 5. Numerics, and what agreement is possible
 

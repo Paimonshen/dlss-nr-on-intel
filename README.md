@@ -128,7 +128,8 @@ python3 work/mlx-dlss/python/mlxdlss/tools/unpack_dlssnr_weights.py \
         work/mlxw/dlssnr-packed.safetensors work/mlxw/dlssnr-logical.safetensors
 ```
 
-The result is 649 named tensors, 73 841 889 FP16 parameters. The reader checks
+The result is 649 named tensors, **145 755 123 parameters**: the large matrices are
+stored in the DLL as FP8 E4M3, one byte each, and decoded to FP16. The reader checks
 `fully_logical=true` and refuses anything else — the packed file is **not** a substitute,
 and reading it as dense FP16 gives values correlating -0.02 with the truth.
 

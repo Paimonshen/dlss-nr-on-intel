@@ -1,6 +1,6 @@
 # Index of the notes
 
-Eighty-nine files, sixty phases. This is what each one settles, so a reader arriving
+Ninety files, sixty-one phases. This is what each one settles, so a reader arriving
 cold can go straight to the answer instead of the archaeology.
 
 **Read `notes/HANDOFF.md` first** — it carries the current state, the standing conclusions and
@@ -98,6 +98,7 @@ disproved.
 | `phase58-before-publishing.md` | the licence, what a repository carries with it, and the four things the check found |
 | `phase59-tekken7.md` | 64-bit D3D11 through DXVK, 10.5 fps at 640x360, and the highest history gate yet |
 | `phase60-performance-mode.md` | the laptop's performance mode buys nothing: the GPU is frequency-capped at 1950 MHz, not power-capped |
+| `phase61-the-parameter-count.md` | **145 755 123 parameters, not 73 841 889** — the published count was the byte count halved; GQA and 27 % subnormals fall with it |
 | `phase30-control-atlas.md` | what each vendor slider does, and one that does nothing |
 
 ## Reviews
