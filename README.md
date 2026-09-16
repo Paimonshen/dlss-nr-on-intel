@@ -6,16 +6,12 @@ integrated GPU under Linux, in a real game, through a Vulkan layer.
 
 No NVIDIA hardware, no NGX, no CUDA. The graph runs on Intel's XMX matrix units through
 `VK_KHR_cooperative_matrix`, and the pass is injected at `vkQueuePresentKHR`, so it
-attaches to anything that presents with Vulkan — including a Windows game under Proton.
+attaches to anything that presents with Vulkan — including a Windows game under Proto.
 
-A frame of **Dead or Alive 5** goes out of the running game, through the recovered
-71-block graph, and back into the game's own swapchain: hair separating into strands,
-eyelashes resolving, skin picking up texture that is not in the input. Correlation with
-the CPU reference **0.981311**.
+**This is a research port, not a product.**  
+Read "What to expect" before deciding it is broken.
 
-**This is a research port, not a product.** It is slow — a 1024x768 frame takes about a
-fifth of a second — and it is a slideshow rather than a filter. Read "What to expect"
-before deciding it is broken.
+**All breakdowns and analysis are written by AI.**
 
 ---
 
@@ -34,7 +30,7 @@ below: the same frame through DLSS-NR on this Intel Arc 140V.
 
 ![Dead or Alive 5 Last Round: a three-quarter close-up by fire, game on the left, DLSS-NR on the right](https://raw.githubusercontent.com/Uzbekunknown/dlss-nr-on-intel/media/comparisons/doa5-fire.jpg)
 
-**Mortal Kombat 1** — Unreal Engine, **D3D12** through VKD3D-Proton, 1600x900:
+**Mortal Kombat 1** — Modified Unreal Engine 4, **D3D12** through VKD3D-Proton, 1600x900:
 
 ![Mortal Kombat 1: Omni-Man and Homelander, game on the left, DLSS-NR on the right](https://raw.githubusercontent.com/Uzbekunknown/dlss-nr-on-intel/media/comparisons/mk1-faces.jpg)
 
