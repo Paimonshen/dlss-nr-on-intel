@@ -9,7 +9,29 @@ you need the evidence behind a line in this file, rather than reading them in or
 
 ---
 
-## Latest: the host passes are in C now (2026-09-12)
+## Latest: a third kind of client, and 10.5 fps (2026-09-16)
+
+**Tekken 7** — Unreal Engine 4, **64-bit D3D11 through DXVK** — runs live at **10.5 fps at
+640x360**, 210 frames measured over 20 seconds, 91 ms each. Nothing was changed to make it
+work. That is the third kind of Vulkan client: 32-bit D3D9/DXVK (`phase34`), 64-bit
+D3D12/VKD3D (`phase41`), and now this. `notes/phase59`.
+
+Two things worth carrying:
+
+- **The history gate reads 0.573**, the highest yet, against 0.38-0.54 in a DoA5 fight and
+  0.12 on the replay `phase54` was measured on. The gate is global — it reports how much of
+  the *whole frame* agrees with its history — and Tekken's camera barely moves. 86 % of the
+  frame also takes the floor. The most stable live picture so far, for a reason that
+  belongs to the game rather than to anything here.
+- **UE4 hands over a swapchain the size of the window**, so `Letterbox` finds nothing and
+  costs its eight lines. DoA5's quarter-frame bars are not universal.
+
+Do not take a game's API from its executable: UE4 carries `D3D11RHI`, `D3D12RHI`,
+`VulkanRHI` and `OpenGLDrv` in the string table of every build, and the configuration is
+inside the pak files. `/proc/<pid>/maps` on the running process settles it — and shows
+whether the layer attached, in the same line.
+
+## The host passes are in C now (2026-09-12)
 
 The lever this file has pointed at for two days — the full-frame passes *around* the
 network, which run at the output resolution and do not shrink with the render scale — is
