@@ -61,6 +61,41 @@ suggestive rather than clean. What is not in doubt is that the frame at this ext
 lower render scale for a longer frame. The native host passes (`phase57`) are the
 difference.
 
+## Before and after, measured
+
+A still of **Sergei Dragunov** on the customisation screen — beret, grey hair, beard, a
+jacket with embroidered eagles — at **1920x1080 and render scale 1.0**, so the detail is
+drawn at the scale it is shown at (`phase37`: a smaller extent keeps only 62 % of the high
+band). Four frames dumped; the third, with history active (gate 0.641, 97 % held).
+
+Relative texture is the luma high-pass RMS divided by the region's own mean, because on
+this model the level moves and the level fools the eye (`HANDOFF`, traps):
+
+| region | luma | relative texture | mean colour change |
+| --- | --- | --- | ---: |
+| face | 78 -> 57 | **+22 %** | 23.5 |
+| beard | 103 -> 83 | +16 % | 23.7 |
+| eagle embroidery | 135 -> 115 | +36 % | 20.6 |
+| jacket weave | 90 -> 71 | **+50 %** | 19.4 |
+| background, hangar | 35 -> 34 | -9 % | **4.8** |
+
+Three things, all consistent with Dead or Alive 5:
+
+- **The subject is re-rendered and the background is left almost alone** — a colour change
+  of ~20 levels on the character against 4.8 on the hangar behind him.
+- **The level comes down 15-27 % on the subject.** The game's face is bright and flushed
+  orange-red around the eyes and cheekbones; the pass takes the flush out and the
+  brightness down, and puts texture in — pores and fine lines around the eyes, individual
+  beard hairs, a sharper weave in the jacket.
+- **Speculars go.** The brass buttons lose most of their shine. That is `phase44`'s trade
+  seen again on a different game and a different art style: what goes into texture comes
+  out of speculars and colour.
+
+Whether the result is *better* is not a measurement. It is photographic where the game is
+stylised, and the flush it removes may well have been the artists' choice.
+
+`work/tekken/dragunov_before_after.png`, not committed — game frames are somebody else's.
+
 ## A mistake worth writing down
 
 The daemon was started by the toggle, and this session deleted `/tmp/nr_daemon.log` before
