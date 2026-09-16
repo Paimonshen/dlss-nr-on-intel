@@ -14,11 +14,10 @@ you need the evidence behind a line in this file, rather than reading them in or
 Switched to performance in Windows (a firmware setting Linux cannot reach: RAPL PL1 35 W,
 PL2 37 W) and in Linux. **The graph did not get faster.** It sat at 1950 MHz — the GPU's
 hardware ceiling, `rp0` — for 89 % of the run, and a package power limit cannot lift a
-frequency ceiling. The extent curve came out at **11 ms + 457 ms per megapixel**, about 9 %
-under the old `17 + 488`, which is inside the ten-percent between-process band and not
-attributable to the mode. **Those numbers were taken while Steam recompiled Counter-Strike
-2's 6.5 GB shader cache on two cores in the background**, unnoticed at the time: the
-frequency cap stands, the numbers do not — re-measure idle before quoting them. Check
+frequency ceiling. Re-measured idle in three processes: **15 ms + 449 ms per megapixel**, and the
+whole frame at **209-210 ms against 214 on power-saver with the same code — 2 %, noise**.
+The first run had Steam recompiling Counter-Strike 2's shaders on two cores unnoticed; the
+graph did not notice (GPU-bound, within 1-5 ms), one whole-frame time did (245 ms). Check
 `ps` for `fossilize_replay` before any benchmark on this machine. **Do not record the power profile as a variable against frame
 time; record that the GPU was at its ceiling.** The lever is still the extent.
 `notes/phase60`.

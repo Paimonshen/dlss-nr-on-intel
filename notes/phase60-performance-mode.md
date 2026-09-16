@@ -1,15 +1,12 @@
 # Phase 60 — the performance mode buys this workload nothing
 
-> **Correction, the same afternoon.** Every number below was measured with Steam
-> recompiling **Counter-Strike 2**'s shader cache in the background — two `fossilize_replay`
-> workers at ~98 % of a core each, 6.5 GB of pipeline cache, running the whole time and not
-> noticed until afterwards. What survives is the **frequency cap**: the GPU's own `act_freq`
-> sitting at `rp0` is a direct reading of the GPU and does not depend on CPU load. What does
-> not survive is every **number** — the fitted curve, the per-extent comparison and the two
-> whole-frame times were taken on a machine with two cores gone. Background load would
-> slow them, so a clean run may be faster still, but that is a guess and is not claimed.
-> A Steam cache replay of this size is also what a Vulkan driver update triggers, which is a
-> second candidate for the 9 % below. Re-measure on an idle machine before quoting any of it.
+> **Correction, then re-measured.** The first numbers below were taken with Steam replaying
+> Counter-Strike 2's 6.5 GB shader cache — two `fossilize_replay` workers at ~98 % of a core
+> each, unnoticed. Flagged the same afternoon, then **re-measured on an idle machine**, and
+> the result is in "Idle, three processes" below. In short: the **graph** numbers held — it
+> is GPU-bound and two busy cores barely touched it, within 1-5 ms at every extent — while
+> one of the two **whole-frame** times, 245 ms, was the background load; idle it is 209-210.
+> The conclusion did not change.
 
 2026-09-16. The machine was switched to its performance mode — in Windows, through a
 firmware setting Linux cannot reach, and in Linux as well. The question was whether the
@@ -73,9 +70,37 @@ The Linux half can be flipped; the firmware half cannot be reached from Linux at
 is the reason it was set in Windows. Not done, because the practical answer does not depend
 on it: nothing about this workload is limited by the thing the mode changes.
 
+## Idle, three processes
+
+Re-run with no shader compilation, load 0.39, Steam's web UI the only thing awake. Three
+separate processes of `extent_curve.py`, and the GPU at 1950 MHz for 92-94 % of each:
+
+| network extent | run 1 | run 2 | run 3 | median | spread | with the background load |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 448x256 | 66 | 67 | 65 | 66 | 3.0 % | 64 |
+| 640x384 | 129 | 136 | 127 | 129 | 7.0 % | 126 |
+| 768x448 | 173 | 176 | 169 | 173 | 4.0 % | 168 |
+| 1024x576 | 279 | 283 | 279 | 279 | 1.4 % | 280 |
+| 1280x768 | 456 | 454 | 456 | 456 | 0.4 % | 459 |
+
+Median fit **15 ms + 449 ms per megapixel**. The contaminated run sits within 1-5 ms of this
+at every extent: **the graph did not notice two cores going missing**, because it runs on the
+GPU. The spread between processes is mostly under 5 % here, tighter than the ten percent
+recorded for whole frames — best-of-five removes most of what buffer placement adds.
+
+The whole frame, the `phase57` stage profile, twice: **209 and 210 ms**, graph 180-182.
+That is the comparison that isolates the mode, because it is the same code as `phase57`
+measured on power-saver at **214 ms**: **2 %**, inside the noise. The earlier 245 ms was the
+background load; 215 was not.
+
+Against the old formula the slope is 8 % lower, and that is now outside today's band — but
+the same-code comparison says the mode is worth 2 %, and the GPU sat at the same ceiling, so
+the rest belongs to what changed between `phase45` and now: the Vulkan driver updated, which
+is also what set Steam recompiling.
+
 ## What that means for anyone tuning this
 
 The lever is the **extent**, as it has been since `phase25`. The formula to plan with is now
-`11 ms + 457 ms per megapixel` on this machine — call it the same curve as before within its
+`15 ms + 449 ms per megapixel` on this machine, idle — call it the same curve as before within its
 band — and the laptop's power mode is not a variable worth recording against it, except to
 say the GPU was at its ceiling.
