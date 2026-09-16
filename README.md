@@ -21,21 +21,27 @@ before deciding it is broken.
 
 ## What it looks like
 
-Stills captured at 1920x1080 with the model at full resolution. Left: the game's own frame.
-Right: the same frame through DLSS-NR on this Intel Arc 140V.
+Stills with the model at full resolution. Left, or on top: the game's own frame. Right, or
+below: the same frame through DLSS-NR on this Intel Arc 140V.
 
-**Tekken 7** — Unreal Engine 4, crops enlarged 2x:
+**Tekken 7** — Unreal Engine 4, D3D11, 1920x1080, crops enlarged 2x:
 
 ![Tekken 7, Sergei Dragunov: face and jacket, game on the left, DLSS-NR on the right](https://raw.githubusercontent.com/Uzbekunknown/dlss-nr-on-intel/media/comparisons/tekken7-dragunov.jpg)
 
-**Dead or Alive 5 Last Round** — a different engine and a different art style:
+**Dead or Alive 5 Last Round** — D3D9, 1920x1080, a different engine and art style:
 
 ![Dead or Alive 5 Last Round: a front-facing close-up, game on the left, DLSS-NR on the right](https://raw.githubusercontent.com/Uzbekunknown/dlss-nr-on-intel/media/comparisons/doa5-closeup.jpg)
 
 ![Dead or Alive 5 Last Round: a three-quarter close-up by fire, game on the left, DLSS-NR on the right](https://raw.githubusercontent.com/Uzbekunknown/dlss-nr-on-intel/media/comparisons/doa5-fire.jpg)
 
-Measured rather than eyeballed. Texture is normalised for the change in brightness, because
-on this model the brightness moves and it fools the eye:
+**Mortal Kombat 1** — Unreal Engine, **D3D12** through VKD3D-Proton, 1600x900:
+
+![Mortal Kombat 1: Omni-Man and Homelander, game on the left, DLSS-NR on the right](https://raw.githubusercontent.com/Uzbekunknown/dlss-nr-on-intel/media/comparisons/mk1-faces.jpg)
+
+![Mortal Kombat 1: a whole fight frame, game on top, DLSS-NR below](https://raw.githubusercontent.com/Uzbekunknown/dlss-nr-on-intel/media/comparisons/mk1-fight.jpg)
+
+Measured rather than eyeballed. Texture is the high-frequency energy normalised for the
+change in brightness, because on this model the brightness moves and it fools the eye:
 
 | image | region | brightness | relative texture | colour change |
 | --- | --- | --- | ---: | ---: |
@@ -47,19 +53,27 @@ on this model the brightness moves and it fools the eye:
 | | background | | -22 % | **4.3** |
 | DoA5, by the fire | face | 96 -> 83 | +12 % | 15.6 |
 | | background, fire | | -3 % | 8.9 |
+| Mortal Kombat 1 | Omni-Man's face | 131 -> 132 | **-14 %** | 15.6 |
+| | Homelander's face | 131 -> 131 | **-24 %** | 14.6 |
+| | the whole fight frame | 56 -> 57 | -2 % | 6.8 |
 
-Two things hold in every image: **the character is re-rendered and the background is left
-almost alone**, and **the character comes out darker** — skin loses the game's glow and
-flush, and what the pass adds to texture it takes out of speculars, which is why the brass
-buttons lose their shine. What differs is how much texture it adds: a great deal on Tekken's
-fabric, little on Dead or Alive's already-smooth skin, where the change is mostly tone and
-shading. **Whether any of it is better is taste, not measurement** — it is photographic where
-the games are stylised.
+**The three games do not get the same treatment, and that is the honest summary.** On
+Tekken 7 and Dead or Alive 5 the character comes out darker and gains texture — a great deal
+on Tekken's fabric, little on Dead or Alive's already-smooth skin — while the background is
+left almost alone. On Mortal Kombat 1, whose faces are already rendered in fine detail, the
+brightness does not move and the fine detail on the faces goes *down*: what changes is the
+colour, with the warm filmic grade and the glow on the skin taken out. That is not film grain
+being removed — a flat defocused patch of the same frame has none to remove — but whether
+what goes is skin detail or the game's own sharpening has not been measured.
+
+Across all of them, what the pass adds in one place it takes from another. **Whether any of
+it is better is taste, not measurement** — it is photographic where the games are stylised.
 
 These are stills. Live, Tekken 7 runs at **10.5 fps at 640x360**.
 
 <sub>Tekken 7 © Bandai Namco Entertainment. Dead or Alive 5 Last Round © Koei Tecmo Games.
-Shown for comparison.</sub>
+Mortal Kombat 1 © Warner Bros. Entertainment Inc.; its guest characters belong to their
+respective owners. Shown for comparison.</sub>
 
 ---
 

@@ -9,7 +9,17 @@ you need the evidence behind a line in this file, rather than reading them in or
 
 ---
 
-## Latest: the parameter count was wrong, and so were two published claims (2026-09-16)
+## Latest: a D3D12 game with a picture — Mortal Kombat 1 (2026-09-16)
+
+The first D3D12 title with a picture, not just an attach. Run off the BitLocker Windows
+partition: `steamapps/compatdata` symlinked to Linux, Windows' own `shadercache` left alone,
+VKD3D/DXVK cache paths set explicitly. **Render scale 1.0 at 1920x1200 gets the game
+OOM-killed** — its D3D12 buffers and the model's do not fit in 15 GiB together; 0.55 live was
+fine. And the pass behaves unlike Tekken and DoA5: brightness unchanged, fine detail on the
+faces *down* 14-24 %, the visible change the warm grade and skin glow coming out. Not film
+grain — measured. `notes/phase62`.
+
+## The parameter count was wrong, and so were two published claims (2026-09-16)
 
 **145 755 123 parameters, not 73 841 889.** The large matrices are FP8 E4M3, one byte each;
 73 841 889 was the weight section's bytes divided by two, the dense-FP16 misreading withdrawn

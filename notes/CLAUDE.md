@@ -374,8 +374,10 @@ layer is proven under a second Vulkan client, VKD3D-Proton on a 64-bit D3D12 tit
    interpolator can reconstruct it — that is why the vendor's own arrangement puts DLSS
    after the pass. XeSS is the substitute and is unverified on Linux/Vulkan here.
    `notes/phase37`.
-3. **A DX12 game that starts.** The layer is ready; DOA6LR dies for a reason inside its own
-   build, not in our stack. `notes/phase41`.
+3. ~~**A DX12 game that starts.**~~ **Done, 2026-09-16: Mortal Kombat 1**, D3D12 through
+   VKD3D-Proton, with a picture — run off the BitLocker Windows partition with the Proton
+   prefix kept on Linux. Full render scale does not fit in memory beside it. `notes/phase62`.
+   (DOA6LR still dies inside its own build: `phase41`.)
 
 **Performance inside the graph is finished, and now measured rather than inferred.**
 `xmx_profile()` timestamps every pass (`src/bench/frame_profile.py`): GEMM is 216 ms of
