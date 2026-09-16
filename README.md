@@ -21,27 +21,45 @@ before deciding it is broken.
 
 ## What it looks like
 
-![Tekken 7, Sergei Dragunov. Left: the game's own frame. Right: the same frame through DLSS-NR on an Intel Arc 140V.](https://raw.githubusercontent.com/Uzbekunknown/dlss-nr-on-intel/media/comparisons/tekken7-dragunov.jpg)
+Stills captured at 1920x1080 with the model at full resolution. Left: the game's own frame.
+Right: the same frame through DLSS-NR on this Intel Arc 140V.
 
-Tekken 7, a still captured at 1920x1080 with the model at full resolution; crops enlarged
-2x. Measured rather than eyeballed, with texture normalised for the change in brightness —
-on this model the brightness moves, and it fools the eye:
+**Tekken 7** — Unreal Engine 4, crops enlarged 2x:
 
-| region | brightness | relative texture | colour change |
-| --- | --- | ---: | ---: |
-| face | 78 -> 57 | **+22 %** | 23.5 |
-| jacket weave | 90 -> 71 | **+50 %** | 19.4 |
-| embroidery | 135 -> 115 | +36 % | 20.6 |
-| background | 35 -> 34 | -9 % | **4.8** |
+![Tekken 7, Sergei Dragunov: face and jacket, game on the left, DLSS-NR on the right](https://raw.githubusercontent.com/Uzbekunknown/dlss-nr-on-intel/media/comparisons/tekken7-dragunov.jpg)
 
-The character is re-rendered and the background is left almost alone. The skin loses the
-game's flush and gains pores and fine lines, the weave sharpens, and the brass buttons lose
-their shine: what the pass adds to texture it takes out of speculars. **Whether that is
-better is taste, not measurement** — it is photographic where the game is stylised.
+**Dead or Alive 5 Last Round** — a different engine and a different art style:
 
-This is a still. Live, the same game runs at **10.5 fps at 640x360**.
+![Dead or Alive 5 Last Round: a front-facing close-up, game on the left, DLSS-NR on the right](https://raw.githubusercontent.com/Uzbekunknown/dlss-nr-on-intel/media/comparisons/doa5-closeup.jpg)
 
-<sub>Tekken 7 © Bandai Namco Entertainment, shown for comparison.</sub>
+![Dead or Alive 5 Last Round: a three-quarter close-up by fire, game on the left, DLSS-NR on the right](https://raw.githubusercontent.com/Uzbekunknown/dlss-nr-on-intel/media/comparisons/doa5-fire.jpg)
+
+Measured rather than eyeballed. Texture is normalised for the change in brightness, because
+on this model the brightness moves and it fools the eye:
+
+| image | region | brightness | relative texture | colour change |
+| --- | --- | --- | ---: | ---: |
+| Tekken 7 | face | 78 -> 57 | **+22 %** | 23.5 |
+| | jacket weave | 90 -> 71 | **+50 %** | 19.4 |
+| | embroidery | 135 -> 115 | +36 % | 20.6 |
+| | background | 35 -> 34 | -9 % | **4.8** |
+| DoA5, close-up | face | 107 -> 90 | +4 % | 20.3 |
+| | background | | -22 % | **4.3** |
+| DoA5, by the fire | face | 96 -> 83 | +12 % | 15.6 |
+| | background, fire | | -3 % | 8.9 |
+
+Two things hold in every image: **the character is re-rendered and the background is left
+almost alone**, and **the character comes out darker** — skin loses the game's glow and
+flush, and what the pass adds to texture it takes out of speculars, which is why the brass
+buttons lose their shine. What differs is how much texture it adds: a great deal on Tekken's
+fabric, little on Dead or Alive's already-smooth skin, where the change is mostly tone and
+shading. **Whether any of it is better is taste, not measurement** — it is photographic where
+the games are stylised.
+
+These are stills. Live, Tekken 7 runs at **10.5 fps at 640x360**.
+
+<sub>Tekken 7 © Bandai Namco Entertainment. Dead or Alive 5 Last Round © Koei Tecmo Games.
+Shown for comparison.</sub>
 
 ---
 
