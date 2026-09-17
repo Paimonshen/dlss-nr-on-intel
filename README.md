@@ -161,20 +161,33 @@ that hands it each frame. They meet over a unix socket.
 
 ```sh
 python3 src/layer/nr_daemon.py --settings /tmp/nr_settings.json
-src/layer/nr-photo --steam 311730          # prints the Steam launch option to paste
+NR_LIVE=1 src/layer/nr-photo --steam <appid>   # prints the Steam launch option to paste
 ```
 
-For a native Vulkan game, `src/layer/nr-photo <game>` sets the environment itself. The
-layer does nothing until a trigger file exists, so the game runs at full speed until you
-ask for a frame.
+**Generate the launch option on your own machine, in your own clone, and paste what it
+prints.** Do not copy one from this page, a forum post or somebody else's screen: it carries
+the absolute path to *their* checkout, and on yours that path points at nothing, so the layer
+silently never loads. The line looks like this, with your path in place of the placeholder:
+
+```
+VK_LAYER_PATH=/path/to/your/clone/work/layer VK_INSTANCE_LAYERS=VK_LAYER_dlssnr_intel ENABLE_NR_LAYER=1 NR_LAYER_SOCKET=/tmp/nr_layer.sock NR_LAYER_TRIGGER=/tmp/nr_trigger NR_LAYER_LIVE=1 %command%
+```
+
+`nr-photo` also writes the layer manifests into `work/layer` for you; if you move the clone,
+run it again. Leave out `NR_LIVE=1` for photo mode. For a native Vulkan game,
+`src/layer/nr-photo <game>` sets the environment itself.
 
 | variable | what it does |
 | --- | --- |
+| `VK_LAYER_PATH` | where the layer's manifest is — **your** clone's `work/layer` |
 | `ENABLE_NR_LAYER=1` | turn the layer on for this process |
+| `NR_LAYER_SOCKET` | where the daemon listens. **Required, no default** — without it the layer never contacts the daemon at all. The daemon and the tools use `/tmp/nr_layer.sock` |
+| `NR_LAYER_TRIGGER` | the file that means "do it". **Required for the toggle** — without it, live mode captures every frame whether the effect is on or not. The tools use `/tmp/nr_trigger` |
 | `NR_LAYER_LIVE=N` | live mode: every Nth present goes through the network |
-| `NR_LAYER_TRIGGER` | the file that means "do it" (default `/tmp/nr_trigger`) |
-| `NR_LAYER_SOCKET` | where the daemon listens (default `/tmp/nr_layer.sock`) |
 | `NR_LAYER_UI_MASK=1` | mark pixels that held still and leave them as the game drew them |
+
+**If your frame rate drops as soon as the game starts and the daemon's log shows no frames**,
+one of the first four is missing or wrong: the layer is capturing and has nowhere to send it.
 
 Without `NR_LAYER_LIVE` it is a **photo mode**: the pass fires once and holds its result
 on screen while the trigger exists. With it, every Nth frame is re-rendered and the ones
@@ -358,6 +371,16 @@ manifests.
 
 **It is unbearably slow.** Look at the swapchain size before the render scale. See the
 table above; 1920x1080 is 1.2 fps and nothing will fix that but a smaller window.
+
+**`frame rejected/failed ... xmx_graph_run: resident submit (-4)`.** `-4` is
+`VK_ERROR_DEVICE_LOST`: the GPU was reset under the daemon, and every later frame fails the
+same way until the daemon is restarted. It has two usual causes. Either the GPU hung on a
+long compute submission — likeliest at a large extent, so try a 640x360 window and render
+scale 0.35 first — or the driver's cooperative-matrix support on your GPU is not the one this
+was built on: it is tested **only on an Intel Arc 140V (Lunar Lake, Xe2) with Mesa ANV**. If
+you report it, the useful things are `vulkaninfo --summary`, your Mesa and kernel versions,
+the extent and scale, and what `sudo dmesg | grep -iE 'xe|i915|hang|reset|guc'` says right
+after it happens.
 
 **The interface is being re-rendered.** `NR_LAYER_UI_MASK=1` marks pixels that did not
 move between two presents and gives them back byte-identical. It drops itself when it
