@@ -101,6 +101,7 @@ disproved.
 | `phase61-the-parameter-count.md` | **145 755 123 parameters, not 73 841 889** — the published count was the byte count halved; GQA and 27 % subnormals fall with it |
 | `phase62-mortal-kombat-1.md` | the first D3D12 title with a picture; full scale does not fit in memory; on MK1 the pass changes colour and removes fine detail rather than adding it |
 | `phase63-a-discrete-gpu.md` | the first report from other hardware: an Arc B580 runs 50x slower than this iGPU because `memtype()` preferred host-cached memory, which on a discrete card is system RAM; and a benchmark that never checked its calls printed 495 TFLOP/s for a dispatch that failed |
+| `phase64-auditing-the-readme.md` | seven wrong claims on the published page, including a pinned commit that never existed and a frame-time table a third too slow; the rates table and the file references are now generated and checked |
 | `phase30-control-atlas.md` | what each vendor slider does, and one that does nothing |
 
 ## Reviews

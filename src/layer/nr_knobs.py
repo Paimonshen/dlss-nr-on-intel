@@ -22,7 +22,7 @@ KNOBS = (
         "much smaller, and what comes back is the *head* — the detail it drew — which is "
         "then scaled up and composed against the full-resolution original, so the game's "
         "own pixels are never resampled and only the synthesised part is interpolated. "
-        "Cost follows the extent and nothing else: 17 ms + 488 ms per megapixel. "
+        "Cost follows the extent and nothing else: about 15 ms + 450 ms per megapixel. "
         "0.55 is the measured compromise, but the *sign* of its effect on quality depends "
         "on how dark the scene is rather than on the number: on a bright frame 0.55 adds "
         "15 % of local contrast to a kimono, on a dark crowd it takes 21 % away.",
@@ -102,6 +102,22 @@ DEFAULTS = {knob.name: knob.default for knob in KNOBS}
 # shown when a scale is set; the round trip through the socket is larger and depends on
 # the swapchain size as much as on the scale.
 COST = ((1.00, 490), (0.70, 233), (0.60, 188), (0.50, 146), (0.35, 78))
+
+# The whole round trip, median of five frames each, measured by `src/bench/live_rates.py`
+# on 2026-09-18 — the daemon's own cost, with no game competing for the GPU. `nr-ctl rates`,
+# the panel and the README all read this one table; the README's copy is generated from it
+# by `src/tools/knob_doc.py`, because the hand-written one went two days out of date the
+# moment the host passes moved to C and then stayed wrong for a week.
+RATES = (
+    (512, 288, 0.35, 72.2),
+    (512, 288, 0.50, 71.6),
+    (640, 360, 0.35, 74.3),
+    (640, 360, 0.50, 80.0),
+    (854, 480, 0.50, 105.2),
+    (1024, 768, 0.55, 167.9),
+    (1920, 1080, 0.55, 412.3),
+)
+RATES_MEASURED = "2026-09-18"
 
 
 def expected(scale):

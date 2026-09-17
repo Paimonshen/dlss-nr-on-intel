@@ -111,18 +111,26 @@ already have. See [Build](#build).
 ## What you need
 
 - An Intel GPU that exposes `VK_KHR_cooperative_matrix` with a `fp16 x fp16 -> fp32`
-  configuration. Developed and measured on **Arc 140V / Xe2, Mesa ANV**. A Vulkan device
-  alone is not enough; run `src/probe/coopmat_probe.c` if unsure.
+  configuration. Developed and measured on **Arc 140V / Xe2, Mesa ANV**; an Arc B580
+  (discrete Battlemage) reports the same six configurations. A Vulkan device alone is not
+  enough, and the probe needs neither weights nor the rest of the build:
+
+  ```sh
+  gcc -Iwork/vulkan-headers/include src/probe/coopmat_probe.c -o /tmp/probe -lvulkan
+  /tmp/probe      # drop the -I if your distribution installs the Vulkan headers
+  ```
 - Linux. Python 3 with NumPy. A C compiler, `glslangValidator`, the Vulkan loader.
 - About 2.3 GiB of memory for the device buffers at 720p — it shares system RAM.
-- OpenCV is optional and worth having: without it the two strength knobs cost 7x more.
+- OpenCV is optional and worth having: it is the fast path for the blur that moving
+  `detail_strength` or `colour_strength` needs — 32 ms against 110 at 854x480
+  (`notes/phase48`). Everything else is the same without it.
 
 ## Build
 
 ```sh
 mkdir -p work
-git clone https://github.com/KhronosGroup/Vulkan-Headers.git work/vulkan-headers
-git -C work/vulkan-headers checkout f226aea0e17c3715baa1e2c9a4d927282725dd4b
+git clone --depth 1 --branch v1.4.321 \
+          https://github.com/KhronosGroup/Vulkan-Headers.git work/vulkan-headers
 git clone https://github.com/iamwavecut/MLX-DLSS.git work/mlx-dlss
 git -C work/mlx-dlss checkout 06a3e11a8b68817127406ace5c764463543f699b
 make
@@ -253,7 +261,7 @@ all of them move between frames. Only `profile` costs a forward pass.
 
 `0.05` to `1`, step `0.05`, default `1`
 
-The only knob that changes the frame rate. The network runs on a frame this much smaller, and what comes back is the *head* — the detail it drew — which is then scaled up and composed against the full-resolution original, so the game's own pixels are never resampled and only the synthesised part is interpolated. Cost follows the extent and nothing else: 17 ms + 488 ms per megapixel. 0.55 is the measured compromise, but the *sign* of its effect on quality depends on how dark the scene is rather than on the number: on a bright frame 0.55 adds 15 % of local contrast to a kimono, on a dark crowd it takes 21 % away.
+The only knob that changes the frame rate. The network runs on a frame this much smaller, and what comes back is the *head* — the detail it drew — which is then scaled up and composed against the full-resolution original, so the game's own pixels are never resampled and only the synthesised part is interpolated. Cost follows the extent and nothing else: about 15 ms + 450 ms per megapixel. 0.55 is the measured compromise, but the *sign* of its effect on quality depends on how dark the scene is rather than on the number: on a bright frame 0.55 adds 15 % of local contrast to a kimono, on a dark crowd it takes 21 % away.
 
 ### `profile` — which way to trade skin texture against speculars
 
@@ -301,16 +309,23 @@ Mean absolute change between two presents above which the shot is taken to have 
 
 ## What to expect
 
-Measured on this machine, end to end through the socket — not graph time alone.
+<!-- rates:begin -->
+
+Measured through the socket on 2026-09-18 by `python3 src/bench/live_rates.py` — the whole round trip a game waits for, median of five frames, not graph time alone:
 
 | swapchain | render scale | ms | fps |
-| --- | --- | --- | --- |
-| 512x288 | 0.35 | 99 | 10.1 |
-| 512x288 | 0.50 | 108 | 9.2 |
-| 640x360 | 0.35 | 117 | 8.6 |
-| 854x480 | 0.50 | 180 | 5.6 |
-| 1024x768 | 0.55 | ~215 | 4.7 |
-| 1920x1080 | 0.55 | ~850 | 1.2 |
+| --- | ---: | ---: | ---: |
+| 512x288 | 0.35 | 72 | 13.9 |
+| 512x288 | 0.50 | 72 | 14.0 |
+| 640x360 | 0.35 | 74 | 13.5 |
+| 640x360 | 0.50 | 80 | 12.5 |
+| 854x480 | 0.50 | 105 | 9.5 |
+| 1024x768 | 0.55 | 168 | 6.0 |
+| 1920x1080 | 0.55 | 412 | 2.4 |
+
+That is the daemon's own cost with nothing else on the GPU. A game adds its own frame to it: **Tekken 7** measured **10.5 fps at 640x360** in a live fight (`notes/phase59`).
+
+<!-- rates:end -->
 
 **Set the game small.** The cost follows the extent, and a stack of full-frame passes runs
 at the *output* resolution regardless of the render scale, so the swapchain size matters
@@ -370,7 +385,8 @@ library; `make work/libnr_layer32.so` builds it and `prepare_layer.py` writes bo
 manifests.
 
 **It is unbearably slow.** Look at the swapchain size before the render scale. See the
-table above; 1920x1080 is 1.2 fps and nothing will fix that but a smaller window.
+table above; 1920x1080 is 2.4 fps in the daemon alone and nothing will fix that but a
+smaller window.
 
 **`GPU lost, stopping` in the daemon's log** — or, from a clone older than 2026-09-17,
 `frame rejected/failed ... xmx_graph_run: resident submit (-4)` on every frame. `-4` is
@@ -397,7 +413,9 @@ src/ref/      the CPU reference: the graph, features, composition, the temporal 
 src/gpu/      the XMX runtime — compute shaders and the resident Vulkan context
 src/layer/    the Vulkan layer, the daemon, and the three control tools
 src/bench/    measurement programs; every number in the notes came from one
-src/tools/    the DLL and weight-container readers, and the publication check
+src/probe/    what your GPU can do, answered before anything else is built
+src/tools/    the DLL and weight-container readers, and the checks that keep this
+              page honest: what may be published, and what may still be claimed
 docs/         the recovered architecture, written as a specification
 notes/        what was measured, including the measurements that turned out wrong,
               and the working briefs the agents building this were given
@@ -413,7 +431,10 @@ make test
 Around 180 checks, including the layer's wire protocol, the native host passes
 against the NumPy they replace byte for byte, the interface mask down to the
 byte, the temporal path against MLX-DLSS's own composition, and the panel driven through
-a pseudo-terminal. They skip the weight-dependent parts if you have not supplied weights,
+a pseudo-terminal. This page is checked too: the knob and frame-time tables are generated
+from the same table the tools read, every `src/…` path here has to exist, and
+`src/tools/claims_check.py` fails the suite if a withdrawn claim — a number this project
+published and then corrected — turns up anywhere but the notes that withdrew it. They skip the weight-dependent parts if you have not supplied weights,
 and a skip is not a pass.
 
 ## Credit and licences

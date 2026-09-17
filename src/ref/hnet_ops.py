@@ -2,6 +2,11 @@
 """
 hnet_ops — operators for the DLSS-NR CPU reference.
 
+**Superseded — do not build on this.** Its slices come from the dense-FP16 reading of the
+container that `notes/phase6` replaced, and the GQA split asserted below does not exist:
+`qkv_weight` is `(C, 3C)`, full multi-head attention (`notes/phase61`). The live operators
+are in `src/ref/nr_model.py`.
+
 Design rule: every tensor slice is taken at an offset and length that the spec
 (`notes/MODEL-SPEC.txt`) states exactly. Role assignments that are *inferred* rather
 than measured are marked HYPOTHESIS in the code and are checked at runtime, so a

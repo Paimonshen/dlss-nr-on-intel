@@ -141,6 +141,13 @@ def manual_checks():
         targets += [note if note.startswith("notes/") else f"notes/{note}"
                     for note in re.findall(
                         r"`(notes/[A-Za-z0-9._-]+|phase[0-9][A-Za-z0-9._-]*\.md)`", text)]
+        # a renamed program is the other half of the same rot: `src/layer/nr-panel` in a
+        # code span is an instruction, and an instruction that names nothing is worse than
+        # none. `work/` is deliberately not checked — it is built, not shipped.
+        targets += re.findall(r"`((?:src|docs)/[A-Za-z0-9._/-]+)`", text)
+        targets += re.findall(
+            r"^\s*(?:[A-Z_][A-Z0-9_]*=\S+ )*(?:python3 |gcc [^`\n]*?)?"
+            r"((?:src|docs)/[A-Za-z0-9._/-]+)", text, re.M)
         broken += [f"{page.name} -> {target}" for target in targets if not resolves(target)]
     check("the published pages point at files that exist", not broken,
           "README, the architecture and NOTICE" if not broken else "; ".join(broken[:3]))

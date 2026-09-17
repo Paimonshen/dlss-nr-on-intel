@@ -500,6 +500,18 @@ followed from the wrong gate form), the leading-region projection, and "1.01x pa
   6.5 GB — in `fossilize_replay` workers that hold whole cores for many minutes. A
   benchmark run alongside is measuring a machine with cores missing. `phase60` was.
   **`ps -eo pcpu,comm --sort=-pcpu | head` before any timing run.**
+- **Numbers in a published page rot silently, and the page keeps being read.** The
+  README's frame-time table was measured on 2026-09-10 and survived the host passes moving
+  to C two days later: for a week it understated this machine by a third, and at 1080p by
+  half, on the same page that quoted Tekken's 10.5 fps and contradicted it. It is now
+  generated from `nr_knobs.RATES` by `src/tools/knob_doc.py`, with `src/bench/live_rates.py`
+  behind the numbers, and `make test` fails if the page and the table disagree. Sibling
+  check: `src/tools/claims_check.py` fails the suite if a withdrawn claim appears outside
+  the notes that withdrew it — it found eight on the day it was written. `notes/phase64`.
+- **A pinned dependency nobody re-clones is a dead pin.** The README's Vulkan-Headers
+  commit did not exist in KhronosGroup/Vulkan-Headers at all, so the build's second line
+  failed for every reader from a clean checkout; the local copy has no `.git` and could
+  never have shown it. Pin by tag (`--branch v1.4.321`), which fails loudly at clone time.
 - **External write-ups are summaries, not sources.** A WebFetch of `weight_spec.json`
   returned plausible-looking shapes with a confabulated label (`block31` as "final
   output stage"). Clone the repo and read the file.

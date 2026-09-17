@@ -2,6 +2,12 @@
 """
 hnet_model — materialise the whole DLSS-NR network as named, shaped tensors.
 
+**Superseded — do not build on this.** It decodes the weight container as dense FP16, which
+`notes/phase6` showed is not what the container holds (correlation -0.02 with the logical
+tensors), and the claims below about GQA and the subnormal fraction fell with that decode
+(`notes/phase61`). The live path is `src/ref/nr_model.py` on
+`work/mlxw/dlssnr-logical.safetensors`. Kept for the PTX-derived findings in the comments.
+
 This is the artifact everything downstream builds on: it turns 147 MB of opaque
 FP16 into 71 blocks of addressable parameters, and it is self-validating. Every
 slice must consume exactly its region; any leftover or overrun raises. If this

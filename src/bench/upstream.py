@@ -4,7 +4,7 @@
 Community mods for the real feature (matiasLombo's Neural Upstream, through
 DLSS5-Autopilot) move the neural pass *before* the game's upscaler, so it runs at the
 render resolution rather than the output one. The cost of this network follows the
-extent it is given — 17 ms + 488 ms per megapixel (`notes/phase25`) — so a game
+extent it is given — about 15 ms + 450 ms per megapixel (`notes/phase60`) — so a game
 rendering at half and upscaling should cost a quarter.
 
 We have no upscaler to hide behind, so this measures the honest local version: shrink,

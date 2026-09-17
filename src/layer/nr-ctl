@@ -51,12 +51,7 @@ ALIAS = {"p": "profile", "i": "intensity", "d": "detail_strength",
 # The network's cost follows the extent it is given and nothing else, but at these sizes
 # the numpy either side of it — feature assembly and composition, both at the output
 # resolution — is the larger half, so the swapchain size matters as much as the scale.
-RATES = (
-    (854, 480, 0.50, 180.1), (854, 480, 0.35, 176.6),
-    (720, 405, 0.50, 200.1), (720, 405, 0.35, 207.9),
-    (640, 360, 0.50, 199.8), (640, 360, 0.35, 116.8),
-    (512, 288, 0.50, 108.3), (512, 288, 0.35, 98.6),
-)
+RATES = nr_knobs.RATES                # measured; see src/bench/live_rates.py
 expected = nr_knobs.expected          # graph time against render scale, measured
 
 
@@ -174,14 +169,14 @@ def command(words):
         else:
             apply(head, rest[0])
     elif head in ("rates", "fps"):
-        print("  measured end to end, whole round trip (2026-09-10):\n")
+        print("  measured end to end, whole round trip (%s):\n" % nr_knobs.RATES_MEASURED)
         print("    %-14s %8s %9s %8s" % ("swapchain", "scale", "ms", "fps"))
         for width, height, scale, ms in RATES:
             print("    %-14s %8.2f %9.1f %8.2f"
                   % ("%dx%d" % (width, height), scale, ms, 1000.0 / ms))
         print("\n  Set the *game* to the swapchain size; the compositor stretches the")
-        print("  result to the panel for nothing. The odd non-monotonic rows are the")
-        print("  network's alignment padding, which some extents land badly on.")
+        print("  result to the panel for nothing. This is the daemon's own cost, with")
+        print("  nothing else on the GPU; a game adds its own frame to it.")
     elif head in ("help", "?", "man"):
         if rest:
             explain(ALIAS.get(rest[0], rest[0]))

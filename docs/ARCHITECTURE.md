@@ -136,7 +136,7 @@ clamps and **no max subtraction**.
 
 `notes/MODEL-SPEC.txt` tabulates the **container** — per-block element counts and layout as
 stored. Those counts are storage, not parameters: their total, 73 841 889, is the weight
-section's size divided by two. The logical shape list is MLX-DLSS's `weight_spec.json`.
+section's size divided by two, and the model has **145 755 123** (`notes/phase61`). The logical shape list is MLX-DLSS's `weight_spec.json`.
 
 ## 4. The weights
 
