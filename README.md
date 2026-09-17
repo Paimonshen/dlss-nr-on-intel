@@ -6,7 +6,7 @@ integrated GPU under Linux, in a real game, through a Vulkan layer.
 
 No NVIDIA hardware, no NGX, no CUDA. The graph runs on Intel's XMX matrix units through
 `VK_KHR_cooperative_matrix`, and the pass is injected at `vkQueuePresentKHR`, so it
-attaches to anything that presents with Vulkan — including a Windows game under Proto.
+attaches to anything that presents with Vulkan — including a Windows game under Proton.
 
 **This is a research port, not a product.**  
 Read "What to expect" before deciding it is broken.
