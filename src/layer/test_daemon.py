@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise request bounds, codecs and the native layer's disconnect behavior."""
 import contextlib
+import ctypes
 import io
 import pathlib
 import socket
@@ -187,8 +188,74 @@ def native_exchange_tests():
     print('daemon/layer: early bounds, HDR/alpha round trips, truncation, a masked\n  request whose answer is smaller, and a SIGPIPE-safe exchange OK')
 
 
+def device_lost_tests():
+    """A lost GPU stops the daemon with one line; any other failure costs one frame.
+
+    `VK_ERROR_DEVICE_LOST` is final: every later submit on that device fails the same way.
+    A daemon that logs it and carries on spends the rest of the session copying frames it
+    cannot render. It is told apart by the library's own record, not by `(-4)` in a message.
+    """
+    import xmxres
+    assert daemon.DeviceLost is xmxres.DeviceLost
+    library = ctypes.CDLL(str(ROOT / 'work' / 'libxmx.so'))
+    assert library.xmx_device_lost() == 0, "a device nobody has lost is not lost"
+    message = lambda: b'resident submit (-4)'
+    lost = xmxres.failure(SimpleNamespace(xmx_error=message, xmx_device_lost=lambda: 1),
+                          'xmx_graph_run')
+    other = xmxres.failure(SimpleNamespace(xmx_error=message, xmx_device_lost=lambda: 0),
+                           'xmx_graph_run')
+    assert isinstance(lost, xmxres.DeviceLost), "the record decides"
+    assert type(other) is RuntimeError, "and the text does not"
+    assert str(lost) == 'xmx_graph_run: resident submit (-4)', str(lost)
+
+    failures = [RuntimeError('xmx_graph_run: resident fence wait (2)'), lost]
+    handled = []
+
+    def failing(connection, backend, args):
+        handled.append(connection)
+        raise failures[len(handled) - 1]
+
+    original = daemon.process_connection
+    output = io.StringIO()
+    with tempfile.TemporaryDirectory() as directory:
+        path = str(pathlib.Path(directory) / 'lost.sock')
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(path)
+        server.listen(4)
+        # if the loss were swallowed the loop would wait for a third frame: fail, not hang
+        server.settimeout(5)
+        clients = []
+        for _ in failures:
+            client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            client.connect(path)                 # queued in the backlog until accepted
+            clients.append(client)
+        daemon.process_connection = failing
+        try:
+            with contextlib.redirect_stdout(output):
+                daemon.serve(server, None, SimpleNamespace(timeout=1))
+        except SystemExit as stop:
+            assert stop.code == 1, stop.code
+        else:
+            raise AssertionError('serve returned after a lost device')
+        finally:
+            daemon.process_connection = original
+            server.close()
+        for client in clients:
+            client.settimeout(1)
+            assert client.recv(1) == b'', "closed, so the layer keeps the game's frame"
+            client.close()
+    lines = output.getvalue().splitlines()
+    assert len(handled) == 2, len(handled)
+    assert len(lines) == 2, lines
+    assert lines[0].startswith('frame rejected/failed'), lines[0]
+    assert lines[1].startswith('GPU lost, stopping') and '(-4)' in lines[1], lines[1]
+    print('device lost: told apart by the library, one line in the log, and the daemon\n'
+          '  stops; any other failure still costs only its frame')
+
+
 if __name__ == '__main__':
     request_tests()
     resample_tests()
     letterbox_tests()
     native_exchange_tests()
+    device_lost_tests()

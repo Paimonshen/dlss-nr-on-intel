@@ -56,6 +56,23 @@ def _publish(epilogue, narrow):
 _lib = None
 
 
+class DeviceLost(RuntimeError):
+    """`VK_ERROR_DEVICE_LOST`: the device went away under this process, normally the
+    driver resetting a hung GPU.
+
+    Unlike every other failure here it is final. Each later submit on this device fails
+    the same way, so a caller should stop rather than retry; a new process gets a new
+    device.
+    """
+
+
+def failure(lib, call):
+    """The exception for a call that returned an error, told apart by the library's own
+    record of a lost device rather than by the text of the message."""
+    message = f"{call}: {lib.xmx_error().decode()}"
+    return DeviceLost(message) if lib.xmx_device_lost() else RuntimeError(message)
+
+
 def _load():
     global _lib
     if _lib is not None:
@@ -83,7 +100,8 @@ def _load():
             ("xmx_rec_row", [ctypes.c_uint] + [ctypes.c_int] * 4 + [ctypes.c_uint] * 5
              + [ctypes.c_float]),
             ("xmx_profile", [ctypes.c_int]),
-            ("xmx_rec_history", [ctypes.c_int] * 3 + [ctypes.c_uint] * 5)):
+            ("xmx_rec_history", [ctypes.c_int] * 3 + [ctypes.c_uint] * 5),
+            ("xmx_device_lost", [])):
         getattr(lib, name).argtypes = args
         getattr(lib, name).restype = ctypes.c_int
     lib.xmx_buf_ptr.argtypes = [ctypes.c_int]
@@ -108,7 +126,7 @@ def _load():
                                  ("XMX_TILED_SPV", "gemm_tiled.spv"),
                                  ("XMX_STAGED_SPV", "gemm_staged.spv"))]
     if lib.xmx_res_init(*[p.encode() for p in spv]) != 0:
-        raise RuntimeError("xmx_res_init: " + lib.xmx_error().decode())
+        raise failure(lib, "xmx_res_init")
     _lib = lib
     return lib
 
@@ -126,7 +144,7 @@ class Buffer:
         self._lib = _load()
         self.id = self._lib.xmx_buf_create(int(nbytes))
         if self.id < 0:
-            raise RuntimeError("xmx_buf_create: " + self._lib.xmx_error().decode())
+            raise failure(self._lib, "xmx_buf_create")
         self.nbytes = int(nbytes)
 
     def view(self, dtype=np.float32, shape=None):
@@ -160,12 +178,12 @@ class CommandGraph:
         self._lib = lib
         self.id = lib.xmx_graph_capture()
         if self.id < 0:
-            raise RuntimeError("xmx_graph_capture: " + lib.xmx_error().decode())
+            raise failure(lib, "xmx_graph_capture")
 
     def run(self):
         passes = self._lib.xmx_graph_run(self.id)
         if passes < 0:
-            raise RuntimeError("xmx_graph_run: " + self._lib.xmx_error().decode())
+            raise failure(self._lib, "xmx_graph_run")
         return passes
 
     def free(self):

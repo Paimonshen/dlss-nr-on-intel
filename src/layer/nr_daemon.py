@@ -39,6 +39,7 @@ sys.path.insert(0, str(ROOT / "src" / "ref"))
 sys.path.insert(0, str(ROOT / "src" / "gpu"))
 
 import nr_frame  # noqa: E402
+from xmxres import DeviceLost  # noqa: E402
 try:
     import nr_image  # the host passes in C, when they are built
 except ImportError:  # pragma: no cover - the NumPy path is the fallback
@@ -490,6 +491,35 @@ class Meter:
                 f"({self.seen} frames)")
 
 
+DEVICE_LOST = (
+    "GPU lost, stopping: the Vulkan device went away under the model ({error}), normally "
+    "the driver resetting a hung GPU, and nothing on it can run again in this process. "
+    "Turn the effect off and on to start a fresh daemon. If it keeps happening, lower the "
+    "render scale and the game's window size, and look for a hang or reset in `sudo dmesg`.")
+
+
+def serve(server, backend, args):
+    """Answer frames until interrupted, or until the GPU is gone.
+
+    A frame that fails costs that frame: the game keeps its own picture and the next one is
+    tried. A lost device is not that. Every frame after it fails the same way, at the full
+    cost of the copy, and the log fills with one line repeated — so it is said once and the
+    daemon exits, which also lets `nr-toggle` and the panel see that there is no model.
+    """
+    while True:
+        connection, _ = server.accept()
+        try:
+            connection.settimeout(args.timeout)
+            process_connection(connection, backend, args)
+        except DeviceLost as error:
+            print(DEVICE_LOST.format(error=error), flush=True)
+            raise SystemExit(1) from error
+        except (EOFError, OSError, ValueError, RuntimeError) as error:
+            print(f"frame rejected/failed; game keeps original: {error}", flush=True)
+        finally:
+            connection.close()
+
+
 def process_connection(connection, backend, args):
     """One request. Reject invalid extents before allocating/receiving the body.
 
@@ -720,15 +750,7 @@ def main():
     print(f"listening on {args.socket}", flush=True)
 
     try:
-        while True:
-            connection, _ = server.accept()
-            try:
-                connection.settimeout(args.timeout)
-                process_connection(connection, backend, args)
-            except (EOFError, OSError, ValueError, RuntimeError) as error:
-                print(f"frame rejected/failed; game keeps original: {error}", flush=True)
-            finally:
-                connection.close()
+        serve(server, backend, args)
     except KeyboardInterrupt:
         pass
     finally:

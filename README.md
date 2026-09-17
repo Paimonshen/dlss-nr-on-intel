@@ -372,15 +372,18 @@ manifests.
 **It is unbearably slow.** Look at the swapchain size before the render scale. See the
 table above; 1920x1080 is 1.2 fps and nothing will fix that but a smaller window.
 
-**`frame rejected/failed ... xmx_graph_run: resident submit (-4)`.** `-4` is
-`VK_ERROR_DEVICE_LOST`: the GPU was reset under the daemon, and every later frame fails the
-same way until the daemon is restarted. It has two usual causes. Either the GPU hung on a
-long compute submission — likeliest at a large extent, so try a 640x360 window and render
-scale 0.35 first — or the driver's cooperative-matrix support on your GPU is not the one this
-was built on: it is tested **only on an Intel Arc 140V (Lunar Lake, Xe2) with Mesa ANV**. If
-you report it, the useful things are `vulkaninfo --summary`, your Mesa and kernel versions,
-the extent and scale, and what `sudo dmesg | grep -iE 'xe|i915|hang|reset|guc'` says right
-after it happens.
+**`GPU lost, stopping` in the daemon's log** — or, from a clone older than 2026-09-17,
+`frame rejected/failed ... xmx_graph_run: resident submit (-4)` on every frame. `-4` is
+`VK_ERROR_DEVICE_LOST`: the device went away under the daemon, normally the driver resetting
+a hung GPU, and nothing on it can run again in that process. So the daemon says so once and
+exits; turning the effect on again starts a fresh one. It has not been seen on the machine
+this was built on, so the two likely causes are guesses. Either the GPU hung on a long
+compute submission — likeliest at a large extent, so try a 640x360 window and render scale
+0.35 first — or the driver's cooperative-matrix support on your GPU is not the one this was
+built on: it is tested **only on an Intel Arc 140V (Lunar Lake, Xe2) with Mesa ANV**. If you
+report it, the useful things are `vulkaninfo --summary`, your Mesa and kernel versions, the
+extent and scale, and what `sudo dmesg | grep -iE 'xe|i915|hang|reset|guc'` says right after
+it happens.
 
 **The interface is being re-rendered.** `NR_LAYER_UI_MASK=1` marks pixels that did not
 move between two presents and gives them back byte-identical. It drops itself when it

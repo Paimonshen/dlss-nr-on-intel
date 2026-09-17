@@ -13,7 +13,12 @@
 #include <string.h>
 #include <vulkan/vulkan.h>
 
-#define FAIL(msg, r) do { snprintf(g.err, sizeof g.err, "%s (%d)", msg, (int)(r)); return -1; } while (0)
+/* A lost device is recorded as well as described: it is the one failure after which nothing
+ * on this device can succeed again, so a caller has to be able to tell it from the rest
+ * without reading the message. It stays set. */
+#define FAIL(msg, r) do { int fail_code = (int)(r); \
+	if (fail_code == VK_ERROR_DEVICE_LOST) g.lost = 1; \
+	snprintf(g.err, sizeof g.err, "%s (%d)", msg, fail_code); return -1; } while (0)
 
 struct buf { VkBuffer b; VkDeviceMemory m; void *p; VkDeviceSize cap; };
 
@@ -35,7 +40,7 @@ static struct {
 	/* GPU-side profiling. One timestamp after each recorded pass, so pass i costs
 	 * ts[i+1]-ts[i]; the barrier between passes makes that attribution exact. */
 	VkQueryPool qpool; unsigned prof, prof_n; float ts_period;
-	char name[256]; char err[256]; int ready;
+	char name[256]; char err[256]; int ready, lost;
 } g;
 
 #define MAX_SPECIALIZED 256
@@ -73,6 +78,7 @@ struct push {
 };
 
 const char *xmx_error(void) { return g.err; }
+int xmx_device_lost(void) { return g.lost; }
 const char *xmx_device(void) { return g.name; }
 
 /* HOST_CACHED first, then anything host-visible.
