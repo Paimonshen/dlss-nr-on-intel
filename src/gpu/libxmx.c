@@ -40,7 +40,7 @@ static struct {
 	/* GPU-side profiling. One timestamp after each recorded pass, so pass i costs
 	 * ts[i+1]-ts[i]; the barrier between passes makes that attribution exact. */
 	VkQueryPool qpool; unsigned prof, prof_n; float ts_period;
-	char name[256]; char err[256]; int ready, lost;
+	char name[256]; char err[256]; int ready, lost, discrete;
 } g;
 
 #define MAX_SPECIALIZED 256
@@ -81,21 +81,41 @@ const char *xmx_error(void) { return g.err; }
 int xmx_device_lost(void) { return g.lost; }
 const char *xmx_device(void) { return g.name; }
 
-/* HOST_CACHED first, then anything host-visible.
+/* Where the operands live, which is not the same question on the two kinds of GPU.
  *
- * This machine offers memoryTypes[1] = DEVICE_LOCAL|HOST_VISIBLE|HOST_COHERENT and
- * memoryTypes[2] = the same plus HOST_CACHED. Taking the first match landed on the
- * uncached one, where reading the result back ran at ~80 MB/s and buried a 1.35
- * TFLOP/s kernel: a 147456x32x128 GEMM spent 1073 ms moving 85 MB. */
+ * On this shared-memory APU, HOST_CACHED first: memoryTypes[1] is
+ * DEVICE_LOCAL|HOST_VISIBLE|HOST_COHERENT and memoryTypes[2] is the same plus
+ * HOST_CACHED, and taking the first match landed on the uncached one, where reading the
+ * result back ran at ~80 MB/s and buried a 1.35 TFLOP/s kernel: a 147456x32x128 GEMM
+ * spent 1073 ms moving 85 MB.
+ *
+ * On a discrete GPU that preference is a trap. HOST_CACHED there means system memory, so
+ * every operand would be read across PCIe while the card's own memory sits unused —
+ * consistent with an Arc B580 measuring 50-141 GFLOP/s on shapes this iGPU runs at
+ * 1027-3470. So device-local first there, which resizable BAR makes host-visible as well.
+ * With the BAR unresized that window is 256 MB, far under the buffers a frame needs, and
+ * preferring it would turn a slow run into a failed allocation — hence the heap-size floor,
+ * which sends such a card back to system memory. Untested: there is no discrete GPU on the
+ * machine this was written on. */
+#define HOST_VISIBLE_VRAM_FLOOR (1024ull * 1024 * 1024)
 static uint32_t memtype(uint32_t bits, VkMemoryPropertyFlags want)
 {
 	VkPhysicalDeviceMemoryProperties mp;
 	vkGetPhysicalDeviceMemoryProperties(g.pd, &mp);
-	for (uint32_t pass = 0; pass < 2; pass++) {
-		VkMemoryPropertyFlags need = want | (pass ? 0 : VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
-		for (uint32_t i = 0; i < mp.memoryTypeCount; i++)
-			if ((bits & (1u << i)) && (mp.memoryTypes[i].propertyFlags & need) == need)
-				return i;
+	const VkMemoryPropertyFlags prefer[3] = {
+		g.discrete ? VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT : VK_MEMORY_PROPERTY_HOST_CACHED_BIT,
+		g.discrete ? VK_MEMORY_PROPERTY_HOST_CACHED_BIT : VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+		0 };
+	for (uint32_t pass = 0; pass < 3; pass++) {
+		VkMemoryPropertyFlags need = want | prefer[pass];
+		for (uint32_t i = 0; i < mp.memoryTypeCount; i++) {
+			if (!(bits & (1u << i))) continue;
+			if ((mp.memoryTypes[i].propertyFlags & need) != need) continue;
+			if (g.discrete && (need & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+			    && mp.memoryHeaps[mp.memoryTypes[i].heapIndex].size < HOST_VISIBLE_VRAM_FLOOR)
+				continue;
+			return i;
+		}
 	}
 	return UINT32_MAX;
 }
@@ -231,6 +251,7 @@ int xmx_init(const char *spv_path)
 	VkPhysicalDeviceProperties props;
 	vkGetPhysicalDeviceProperties(g.pd, &props);
 	snprintf(g.name, sizeof g.name, "%s", props.deviceName);
+	g.discrete = props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
 
 	uint32_t nq = 0;
 	vkGetPhysicalDeviceQueueFamilyProperties(g.pd, &nq, NULL);

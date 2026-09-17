@@ -350,7 +350,7 @@ table, the weight container and the trap in it, and what agreement with the orig
 and is not possible. It is written for someone who wants to run this somewhere else, and
 it is the file to read before any of the notes.
 
-`notes/INDEX.md` maps all fifty-eight phase notes to the question each one settles, and
+`notes/INDEX.md` maps every phase note to the question each one settles, and
 several of the answers are counter-intuitive. `notes/HANDOFF.md` is the current state and the
 traps.
 

@@ -39,6 +39,7 @@ sys.path.insert(0, str(ROOT / "src" / "ref"))
 sys.path.insert(0, str(ROOT / "src" / "gpu"))
 
 import nr_frame  # noqa: E402
+import xmx  # noqa: E402  (for the device name, once the model is up)
 from xmxres import DeviceLost  # noqa: E402
 try:
     import nr_image  # the host passes in C, when they are built
@@ -729,7 +730,10 @@ def main():
 
     started = time.perf_counter()
     backend = nr_frame.ResidentBackend()
-    print(f"model ready in {time.perf_counter() - started:.1f}s", flush=True)
+    # which GPU, because the library takes the first Vulkan device and a machine can
+    # have more than one, or a different one than the person assumes
+    print(f"model ready in {time.perf_counter() - started:.1f}s"
+          f" on {xmx.device_name()}", flush=True)
 
     if os.path.lexists(args.socket):
         if not stat.S_ISSOCK(os.lstat(args.socket).st_mode):

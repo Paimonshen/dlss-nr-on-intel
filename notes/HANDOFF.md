@@ -4,12 +4,29 @@ State of the DLSS-NR on Intel Xe2 project as of **2026-09-11**. notes/CLAUDE.md 
 original brief; **this file overrides it wherever they disagree**, and after
 2026-09-09 they disagree about something foundational.
 
-`notes/INDEX.md` says what each of the fifty-four phase notes settles — go there when
+`notes/INDEX.md` says what each phase note settles — go there when
 you need the evidence behind a line in this file, rather than reading them in order.
 
 ---
 
-## Latest: a D3D12 game with a picture — Mortal Kombat 1 (2026-09-16)
+## Latest: somebody else ran it, on a discrete GPU (2026-09-18)
+
+An **Arc B580** — discrete Battlemage, same cooperative-matrix table as this iGPU, config
+for config — measured **50x slower** than the Arc 140V on the same GEMM shapes. Cause:
+`memtype()` in `libxmx.c` preferred `HOST_CACHED` for every buffer, which is right on this
+shared-memory APU (`phase8`: 80 MB/s readback from the uncached type) and means *system RAM*
+on a card with its own memory. Every operand crossed PCIe; 12 GB of VRAM sat idle. The
+preference now follows `deviceType`, with a 1 GiB heap floor so a card without resizable BAR
+falls back instead of failing to allocate. **Untested — there is no discrete GPU here**; this
+machine takes the same branch as before and is unchanged.
+
+Two traps came with it. `bench.py` never checked what `xmx_gemm` returned, so a call that
+failed instantly printed **495 058 GFLOP/s** and hid the one interesting event in their log.
+And their `make test` failure (`test_ui_mask`, empty answer) carries no diagnosis, because
+the harness only prints the daemon's stdout if the daemon exits; `nr_frame.py --resident` is
+the reproducer that shows the error. `notes/phase63`.
+
+## A D3D12 game with a picture — Mortal Kombat 1 (2026-09-16)
 
 The first D3D12 title with a picture, not just an attach. Run off the BitLocker Windows
 partition: `steamapps/compatdata` symlinked to Linux, Windows' own `shadercache` left alone,
