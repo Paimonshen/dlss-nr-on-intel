@@ -677,9 +677,14 @@ def process_connection(connection, backend, args):
             note += f"  gate {gate:.3f}{hold}, cut {args.history.cut:.4f}"
     box = "" if not boxed else (f"  letterbox {height - (bottom - top)}px of rows and "
                                f"{width - (right - left)}px of columns skipped")
+    # in+run+out: the two host transfers around the graph. They are a memcpy where the GPU
+    # shares this memory and a trip across PCIe where it does not, and a single frame time
+    # cannot tell those apart — which is exactly the question on a discrete card.
+    carried, ran, read = getattr(backend, "split", (0.0, 0.0, 0.0))
+    split = f"  gpu {1000 * carried:.0f}+{1000 * ran:.0f}+{1000 * read:.0f}ms" if ran else ""
     print(f"{width}x{height} {FORMATS[vk_format][1]} in "
           f"{time.perf_counter() - clock:.2f}s  "
-          f"change {changed:.5f}{note}{box}", flush=True)
+          f"change {changed:.5f}{note}{split}{box}", flush=True)
     if args.meter is not None:
         print(args.meter.report(), flush=True)
 

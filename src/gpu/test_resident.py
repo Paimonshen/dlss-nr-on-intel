@@ -61,7 +61,7 @@ def test_operators(runtime):
                         M._half_rounded(values))
         for name, got, want in zip(("e4m3", "gate", "half"), outputs, expected):
             check(f"{name} ({label})",
-                  np.array_equal(got.view()[:count], want, equal_nan=True))
+                  np.array_equal(xmxres.host_view(got, count=count), want, equal_nan=True))
         for buffer in [source, *outputs]:
             buffer.free()
 
@@ -110,7 +110,7 @@ def test_chain(runtime, weights, tokens=4096):
         return runtime.submit()
 
     passes = record()
-    result = device["out"].view(shape=(tokens, channels)).copy()
+    result = xmxres.host_view(device["out"], shape=(tokens, channels)).copy()
     check("the chain records as one submit", passes == 7, f"{passes} passes")
     scale = float(np.abs(reference).max())
     plumbing = float(np.abs(result - half_input).max()) / scale
@@ -222,7 +222,7 @@ def test_attention(runtime, weights, block=9, heads=4, height=24, width=32):
             ("context", device["ctx"], context),
             ("merged publish", device["merged"], merged),
             ("attention output", device["out"], expected)):
-        check(name, np.array_equal(buffer.view(shape=want.shape), want))
+        check(name, np.array_equal(xmxres.host_view(buffer, shape=want.shape), want))
     for buffer in device.values():
         buffer.free()
 
@@ -240,9 +240,10 @@ def test_permutations(runtime):
     runtime.reverse(windowed, back, height, width, channels)
     runtime.submit()
     expected = M.partition_windows(value, 8)
-    check("partition_windows", np.array_equal(windowed.view(shape=expected.shape), expected))
+    check("partition_windows",
+          np.array_equal(xmxres.host_view(windowed, shape=expected.shape), expected))
     check("reverse_windows round trip",
-          np.array_equal(back.view(shape=value.shape), value))
+          np.array_equal(xmxres.host_view(back, shape=value.shape), value))
 
     windows, tokens = expected.shape[0], 64
     projected = rng.standard_normal((windows, tokens, 3 * channels)).astype(np.float32)
@@ -258,9 +259,10 @@ def test_permutations(runtime):
     runtime.submit()
     for index, (name, part) in enumerate(zip("qkv", np.split(projected, 3, axis=-1))):
         want = part.reshape(windows, tokens, heads, 32).transpose(0, 2, 1, 3)
-        check(f"split_heads {name}", np.array_equal(parts[index].view(shape=want.shape), want))
+        check(f"split_heads {name}",
+              np.array_equal(xmxres.host_view(parts[index], shape=want.shape), want))
     want = context.transpose(0, 2, 1, 3).reshape(windows, tokens, channels)
-    check("merge_heads", np.array_equal(merged.view(shape=want.shape), want))
+    check("merge_heads", np.array_equal(xmxres.host_view(merged, shape=want.shape), want))
     for buffer in [source, windowed, back, device, merged, device_context, *parts]:
         buffer.free()
 

@@ -35,17 +35,17 @@ def main():
                     rt.cosine_publish(split, out, count // 32, tokens=tokens, heads=heads,
                                       scale=scaling, narrow=narrow, from_half=True)
                     rt.submit()
-                    separate = out.view(dtype)[:count].copy()
+                    separate = np.array(xmxres.host_view(out, dtype, count=count), copy=True)
                     selected = projection[:, :, part].transpose(0, 2, 1, 3).copy()
                     expected = M.vendor_cosine_publish(selected, scale_values if part == 0 else None)
                     np.testing.assert_array_equal(separate, expected.reshape(-1).astype(dtype))
-                    out.view(dtype)[:] = -11
+                    xmxres.host_write(out, np.full(out.nbytes // np.dtype(dtype).itemsize, -11, dtype))
                     rt.begin()
                     rt.cosine_publish(source, out, count // 32, tokens=tokens, heads=heads,
                                       scale=scaling, narrow=narrow, qkv_part=part)
                     rt.submit()
-                    np.testing.assert_array_equal(out.view(dtype)[:count], separate)
-                    np.testing.assert_array_equal(out.view(dtype)[count:], -11)
+                    np.testing.assert_array_equal(xmxres.host_view(out, dtype, count=count), separate)
+                    np.testing.assert_array_equal(xmxres.host_view(out, dtype)[count:], -11)
                     cases += 1
     # In a partial workgroup every lane must participate in gather/scatter,
     # even when it does not own a valid row.
@@ -55,13 +55,14 @@ def main():
         for narrow in (False, True):
             dtype = np.float16 if narrow else np.float32
             out = rt.buffer(rows * width + 32, dtype)
-            out.view(dtype)[:] = -11
+            xmxres.host_write(out, np.full(out.nbytes // np.dtype(dtype).itemsize, -11, dtype))
             rt.begin()
             rt.softmax(source, out, rows, width, narrow=narrow)
             rt.submit()
-            np.testing.assert_array_equal(out.view(dtype)[:rows*width],
+            np.testing.assert_array_equal(xmxres.host_view(out, dtype, count=rows*width),
                                           M.vendor_approximate_softmax(logits).reshape(-1).astype(dtype))
-            np.testing.assert_array_equal(out.view(dtype)[rows*width:], -11)
+            np.testing.assert_array_equal(
+                xmxres.host_view(out, dtype)[rows*width:], -11)
     print(f'QKV fusion: {cases} exact cases; partial cosine/softmax workgroups match CPU')
 
 

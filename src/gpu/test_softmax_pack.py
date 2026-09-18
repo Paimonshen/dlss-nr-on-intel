@@ -51,7 +51,7 @@ def main():
         for narrow in (False, True):
             dtype = np.float16 if narrow else np.float32
             out = rt.buffer(rows * stride + 32, dtype)
-            out.view(dtype)[:] = -11
+            xmxres.host_write(out, np.full(out.nbytes // np.dtype(dtype).itemsize, -11, dtype))
             for mask in (0, 7):
                 rt.specialize(mask)
                 expected = None
@@ -61,7 +61,7 @@ def main():
                     rt.softmax(source, out, rows, width, stride=stride, cap=cap,
                                bias=bias, heads=bias_heads or 1, narrow=narrow)
                     rt.submit()
-                    actual = out.view(dtype).copy()
+                    actual = np.array(xmxres.host_view(out, dtype), copy=True)
                     assert np.isfinite(actual).all()
                     np.testing.assert_array_equal(actual[-32:], np.full(32, -11, dtype=dtype))
                     if expected is None:

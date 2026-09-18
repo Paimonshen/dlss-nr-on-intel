@@ -16,11 +16,11 @@ def main():
     rt.scale(copied, output, 80, 3)
     graph = rt.capture()
     for offset in (0, 11, -4):
-        source.view()[:] = np.arange(64, dtype=np.float32) + offset
+        xmxres.host_write(source, np.arange(64, dtype=np.float32) + offset)
         assert graph.run() == 3
         expected = np.zeros(80, dtype=np.float32)
         expected[8:72] = (np.arange(64, dtype=np.float32) + offset)*6
-        np.testing.assert_array_equal(output.view(), expected)
+        np.testing.assert_array_equal(xmxres.host_view(output, count=80), expected)
         # Ordinary command buffer reuse must leave captured commands intact.
         rt.begin()
         rt.scale(source, temporary, 64, -1)
@@ -56,7 +56,8 @@ def main():
         graph = rt.capture()
         graph.run()
         graph.free()
-    np.testing.assert_array_equal(source.view(), temporary.view())
+    np.testing.assert_array_equal(xmxres.host_view(source, count=64),
+                                  xmxres.host_view(temporary, count=64))
     print('graph: transfer/compute barriers, changed input, lifetime, validation OK')
 
 

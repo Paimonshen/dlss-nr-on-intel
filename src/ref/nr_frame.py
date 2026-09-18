@@ -215,8 +215,13 @@ class ResidentBackend:
         self._module = nr_frame_resident
         self.runtime = xmxres.Runtime()
         self.weights, _ = nr_model.load_logical(weights_path or WEIGHTS)
+        # one upload for as long as the backend is open: the extent changes under a knob
+        # and the weights do not depend on it. Built on the first frame, not here, so that
+        # constructing a backend still allocates nothing on the device.
+        self.device_weights = None
         nr_model.FUSE_BRANCHED = True
         self._frames = {}
+        self.split = (0.0, 0.0, 0.0)
         self.max_cached_frames = max_cached_frames
 
     def frame(self, height, width):
@@ -226,7 +231,10 @@ class ResidentBackend:
         else:
             while len(self._frames) >= self.max_cached_frames:
                 self._frames.pop(next(iter(self._frames))).close()
-            frame = self._module.ResidentFrame(self.runtime, self.weights, height, width)
+            if self.device_weights is None:
+                self.device_weights = self._module.DeviceWeights(self.runtime, self.weights)
+            frame = self._module.ResidentFrame(self.runtime, self.device_weights,
+                                               height, width)
         self._frames[key] = frame
         return frame
 
@@ -234,10 +242,18 @@ class ResidentBackend:
         for frame in self._frames.values():
             frame.close()
         self._frames.clear()
+        # closing means everything, including the weights; the next frame uploads them
+        # again, which is what this cost before they were shared
+        if self.device_weights is not None:
+            self.device_weights.close()
+            self.device_weights = None
 
     def run_features(self, features):
         height, width = features.shape[:2]
-        return self.frame(height, width).run(features)
+        frame = self.frame(height, width)
+        head = frame.run(features)
+        self.split = frame.split          # host write, graph, host read
+        return head
 
 
 def run_head(model, color, *, profile="standard", frame_index=0, style_index=None,

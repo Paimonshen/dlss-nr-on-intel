@@ -9,7 +9,31 @@ you need the evidence behind a line in this file, rather than reading them in or
 
 ---
 
-## Latest: somebody else ran it, on a discrete GPU (2026-09-18)
+## Latest: the graph runs in memory the host cannot address (2026-09-19)
+
+The rest of the discrete-card answer. `phase63` put the operands in the card's memory; that
+still needed the card's memory to be *mappable*, and without resizable BAR the window is
+256 MB, so the code fell back to system RAM — the 50x trap again. Now the graph's buffers can
+be device-local and **unmapped**: the host reaches them through explicit copies on their own
+command buffer, and `Buffer.view()` on one raises instead of handing back a shadow.
+
+**`XMX_STAGING=1` forces that path on this iGPU**, which is how it is tested: where memory
+lives cannot change what the graph computes, so every test becomes a test of the discrete
+path. The head is bit-identical (`9e1e37d981fbcf01` either way) and `make test` is green in
+both modes, 181 checks each.
+
+Two more from the same work: the daemon's frame line ends with `gpu <in>+<run>+<out>ms`,
+because on a card the outer two are PCIe and one total cannot tell them apart; and the
+weights moved above the frames, so changing the render scale no longer re-uploads 292 MB
+(first frame at a second extent: 335 ms -> 78). `notes/phase65`.
+
+**Still `vkQueueWaitIdle` twice a frame in the layer.** `nr_layer.c:527` has said for weeks
+that the proper route is the present's own semaphores and that it "has to change before the
+pass runs every frame". It runs every frame. On this iGPU the network hides it; on a fast
+card it stalls the game's whole pipeline, and a game that presents from a queue other than
+the one it renders on can hand us an unfinished image.
+
+## Somebody else ran it, on a discrete GPU (2026-09-18)
 
 An **Arc B580** — discrete Battlemage, same cooperative-matrix table as this iGPU, config
 for config — measured **50x slower** than the Arc 140V on the same GEMM shapes. Cause:

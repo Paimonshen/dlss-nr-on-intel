@@ -27,11 +27,13 @@ def check_gemm(rt, m, n, k, batch, transposed, rng):
         # XMX flushes half subnormals; keep this layout test's independent numpy
         # control on the hardware's actual operands (phase4-subnormal-flush).
         values[np.abs(values) < np.finfo(np.float16).tiny] = 0
-        buf.view(np.float16)[:] = values
+        xmxres.host_write(buf, values)
     expected = []
     for item in range(batch):
-        av = a.view(np.float16)[offsets[0] + item * strides[0]:][:m * lda].reshape(m, lda)[:, :k]
-        bv = b.view(np.float16)[offsets[1] + item * strides[1]:][:b_rows * ldb].reshape(b_rows, ldb)
+        a_host = xmxres.host_view(a, np.float16)
+        b_host = xmxres.host_view(b, np.float16)
+        av = a_host[offsets[0] + item * strides[0]:][:m * lda].reshape(m, lda)[:, :k]
+        bv = b_host[offsets[1] + item * strides[1]:][:b_rows * ldb].reshape(b_rows, ldb)
         bv = bv[:, :k].T if transposed else bv[:, :n]
         expected.append(av.astype(np.float32) @ bv.astype(np.float32))
     for narrow in (False, True):
@@ -45,13 +47,14 @@ def check_gemm(rt, m, n, k, batch, transposed, rng):
             baseline = None
             for mask in (0, 7):
                 rt.specialize(mask)
-                c.view(dtype)[:] = -123
+                xmxres.host_write(c, np.full(c.nbytes // np.dtype(dtype).itemsize,
+                                             -123, dtype))
                 rt.begin()
                 rt.gemm(a, b, c, m, n, k, batch=batch, strides=strides,
                         leading=(lda, ldb, ldc), offsets=offsets, transpose_b=transposed,
                         epilogue=epilogue, narrow=narrow)
                 rt.submit()
-                result = c.view(dtype).copy()
+                result = np.array(xmxres.host_view(c, dtype), copy=True)
                 assert np.all(result[~written] == -123), "GEMM overwrote padding/guards"
                 if baseline is None:
                     baseline = result
@@ -78,8 +81,9 @@ def check_dynamic_scale(rt):
             rt.begin()
             rt.to_half(source, target, 1024, scale=scale)
             rt.submit()
-            np.testing.assert_array_equal(target.view(np.float16),
-                                          (source.view() * scale).astype(np.float16))
+            np.testing.assert_array_equal(
+                xmxres.host_view(target, np.float16, count=1024),
+                (xmxres.host_view(source, count=1024) * scale).astype(np.float16))
     source.free()
     target.free()
     print("  exact: cached pipelines consume changing scale values", flush=True)

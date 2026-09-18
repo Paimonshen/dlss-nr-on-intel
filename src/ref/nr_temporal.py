@@ -98,17 +98,20 @@ class GpuHistory:
         height, width, channels = history.shape
         pixels = height * width
         source = self._buffer("history", pixels * channels)
-        source.view()[:pixels * channels] = history.reshape(-1)
+        self.rt.write(source, history.reshape(-1))
         coordinates = self._buffer("uv", pixels * 2)
-        view = coordinates.view(shape=(pixels, 2))
-        view[:, 0] = np.asarray(u, dtype=np.float32).reshape(-1)
-        view[:, 1] = np.asarray(v, dtype=np.float32).reshape(-1)
+        # built host-side and written whole: the two columns are a strided write, and a
+        # buffer in the card's own memory is not addressable to write into column by column
+        pairs = np.empty((pixels, 2), np.float32)
+        pairs[:, 0] = np.asarray(u, dtype=np.float32).reshape(-1)
+        pairs[:, 1] = np.asarray(v, dtype=np.float32).reshape(-1)
+        self.rt.write(coordinates, pairs)
         target = self._buffer("out", pixels * channels)
         self.rt.begin()
         self.rt.sample_history(source, coordinates, target, height, width, channels,
                                absolute=True)
         self.rt.submit()
-        return target.view(shape=(height, width, channels)).copy()
+        return np.array(self.rt.read(target, shape=(height, width, channels)), copy=True)
 
 
 def install_gpu_history(runtime):

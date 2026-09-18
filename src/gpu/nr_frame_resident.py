@@ -36,6 +36,9 @@ import nr_model  # noqa: E402
 import nr_resident as R  # noqa: E402
 import xmxres  # noqa: E402
 
+
+host_copy = xmxres.host_view          # diagnostics read buffers the graph never returns
+
 ENCODER = ((range(1, 4), 4, 1), (range(5, 8), 8, 2),
            (range(9, 14), 14, 4), (range(15, 22), 22, 8))
 DECODER = ((48, range(49, 56), 4, 8), (56, range(57, 62), 3, 4),
@@ -55,28 +58,19 @@ class Edge:
         self.sine = None if sine is None else runtime.buffer_from(sine)
 
 
-class ResidentFrame:
-    """The graph, its weights and its buffers, for one network extent."""
+class DeviceWeights:
+    """Every weight buffer, and nothing that depends on the extent.
 
-    def __init__(self, runtime, weights, height, width):
+    They used to be the frame's, and a frame belongs to one extent — so moving the render
+    scale rebuilt them, ~292 MB written again for a knob. Nothing in them knows the extent:
+    blocks are keyed by index, edges by index and direction. So they live here, one set per
+    backend, and a new extent rebuilds the graph and its scratch alone.
+    """
+
+    def __init__(self, runtime, weights):
         self.rt, self.weights = runtime, weights
-        self.height, self.width = height, width
-        self.levels = self._plan(height, width)
-        self._scratch, self._blocks, self._buffers, self._edges = {}, {}, {}, {}
-        self._graphs = {}
-        self._arena = xmxres.ScratchArena(runtime) if os.environ.get("NR_SCRATCH_ARENA", "1") != "0" else None
-        self._closed = False
+        self._blocks, self._edges = {}, {}
         self._upload_edges()
-
-    @staticmethod
-    def _plan(height, width):
-        levels = [(height, width, 32), (height // 2, width // 2, 32),
-                  (height // 4, width // 4, 64), (height // 8, width // 8, 128),
-                  (height // 16, width // 16, 256)]
-        h, w = pad8(levels[4][0]) // 2, pad8(levels[4][1]) // 2
-        levels.append((h, w, 512))
-        levels.append((pad8(h) // 2, pad8(w) // 2, 1024))
-        return levels
 
     def _upload_edges(self):
         take = lambda name: self.weights[name]
@@ -95,8 +89,6 @@ class ResidentFrame:
         head[16:, :4] = take("block70.layer0.out_conv_weight")
         self.head = self.rt.buffer_from(head, np.float16)
 
-    # -- lazily built and reused -----------------------------------------
-
     def block(self, index, heads, family="window"):
         if (index, family) not in self._blocks:
             builder = {"split": lambda: R.SplitBlockWeights(self.rt, self.weights, index),
@@ -105,6 +97,64 @@ class ResidentFrame:
                                                         heads=heads)}[family]
             self._blocks[(index, family)] = builder()
         return self._blocks[(index, family)]
+
+    def edge(self, index, kind):
+        if (index, kind) not in self._edges:
+            prefix = f"block{index}.layer0"
+            self._edges[(index, kind)] = Edge(
+                self.rt, self.weights[f"{prefix}.weight0"],
+                self.weights.get(f"{prefix}.sin") if kind == "up" else None)
+        return self._edges[(index, kind)]
+
+    def close(self):
+        self._blocks.clear()
+        self._edges.clear()
+        for name in ResidentFrame.WEIGHT_NAMES:
+            if hasattr(self, name):
+                delattr(self, name)
+
+
+class ResidentFrame:
+    """The graph and its buffers, for one network extent. The weights are shared."""
+
+    # the six named weight buffers live on `DeviceWeights` now; the body of a frame still
+    # says `self.adapter`, because where they are kept is not that code's business
+    WEIGHT_NAMES = ("adapter", "bottleneck", "decoder_input", "merge_sin", "merge_cos", "head")
+
+    def __getattr__(self, name):
+        if name in ResidentFrame.WEIGHT_NAMES:
+            return getattr(self.__dict__["w"], name)
+        raise AttributeError(name)
+
+    def __init__(self, runtime, weights, height, width):
+        self.split = (0.0, 0.0, 0.0)      # host write, graph, host read, of the last frame
+        # a caller may hand over shared weights or the raw tensors; the benches and tests
+        # hand over tensors, and then this frame owns the upload as it always did
+        self.w = weights if isinstance(weights, DeviceWeights) else DeviceWeights(runtime, weights)
+        self._owns_weights = self.w is not weights
+        self.rt, self.weights = runtime, self.w.weights
+        self.height, self.width = height, width
+        self.levels = self._plan(height, width)
+        self._scratch, self._blocks, self._buffers, self._edges = {}, {}, {}, {}
+        self._graphs = {}
+        self._arena = xmxres.ScratchArena(runtime) if os.environ.get("NR_SCRATCH_ARENA", "1") != "0" else None
+        self._closed = False
+
+    @staticmethod
+    def _plan(height, width):
+        levels = [(height, width, 32), (height // 2, width // 2, 32),
+                  (height // 4, width // 4, 64), (height // 8, width // 8, 128),
+                  (height // 16, width // 16, 256)]
+        h, w = pad8(levels[4][0]) // 2, pad8(levels[4][1]) // 2
+        levels.append((h, w, 512))
+        levels.append((pad8(h) // 2, pad8(w) // 2, 1024))
+        return levels
+
+
+    # -- lazily built and reused -----------------------------------------
+
+    def block(self, index, heads, family="window"):
+        return self.w.block(index, heads, family)
 
     def scratch(self, block, height, width, tokens=None):
         key = (height, width, tokens, block.channels, block.heads,
@@ -120,25 +170,24 @@ class ResidentFrame:
             self._edges[rounded] = R.TransitionScratch(self.rt, rounded, 0, arena=self._arena)
         return self._edges[rounded]
 
+    # Two buffers in the whole graph are touched by the host, once each per frame: the
+    # features go in and the head comes back. They are named here so they can be put where
+    # the host can reach them — cached for the strided read of the head — while everything
+    # else follows the device, which on a discrete card means the card's own memory.
+    HOST_SIDE = {"features": xmxres.HOST_WRITE, "head": xmxres.HOST_READ}
+
     def buffer(self, name, elements, dtype=np.float32):
-        # `head` is the one buffer that travels the other way: the device writes it once and
-        # the host reads four of every sixteen floats out of it, which is a strided read and
-        # wants cached memory. Every other buffer here is read by the device, many times.
         existing = self._buffers.get(name)
         if existing is None or existing.nbytes < elements * np.dtype(dtype).itemsize:
             if existing is not None:
                 existing.free()
-            existing = self.rt.buffer(elements, dtype, host_read=name == "head")
+            existing = self.rt.buffer(elements, dtype,
+                                      kind=self.HOST_SIDE.get(name, xmxres.GRAPH))
             self._buffers[name] = existing
         return existing
 
     def edge(self, index, kind):
-        if (index, kind) not in self._edges:
-            prefix = f"block{index}.layer0"
-            self._edges[(index, kind)] = Edge(
-                self.rt, self.weights[f"{prefix}.weight0"],
-                self.weights.get(f"{prefix}.sin") if kind == "up" else None)
-        return self._edges[(index, kind)]
+        return self.w.edge(index, kind)
 
     def _prepare_scratch(self):
         """Plan every role's maximum size before a buffer address can be recorded."""
@@ -177,9 +226,9 @@ class ResidentFrame:
             cache.clear()
         if self._arena is not None:
             self._arena.free()
-        for name in ("adapter", "bottleneck", "decoder_input", "merge_sin", "merge_cos", "head"):
-            if hasattr(self, name):
-                delattr(self, name)
+        # shared weights outlive the frame; ones this frame uploaded itself do not
+        if self._owns_weights:
+            self.w.close()
 
     def __del__(self):
         try:
@@ -212,6 +261,7 @@ class ResidentFrame:
         if capture is not None or timing is not None:
             execution = "block"
         batched = execution != "block"
+        staged = rt.staging
         key = rt.graph_key()
         recording = False
 
@@ -223,7 +273,7 @@ class ResidentFrame:
 
         def keep(name, buffer, count, shape=None, dtype=np.float32):
             if capture is not None:
-                data = buffer.view(dtype)[:count].astype(np.float32)
+                data = host_copy(buffer, dtype, count).astype(np.float32)
                 capture[name] = data if shape is None else data.reshape(shape)
 
         height, width = self.height, self.width
@@ -244,13 +294,22 @@ class ResidentFrame:
 
         stem = self.buffer("stem", pixels * 32)
         source = self.buffer("features", pixels * 16)
-        source.view(shape=(pixels, 16))[...] = features.reshape(-1, 16)
+        # the three parts of a frame, timed separately: on a card the two transfers are
+        # PCIe and the middle one is the GPU, and a single total cannot tell them apart
+        mark = _time.perf_counter()
+        xmxres.host_write(source, features.reshape(-1, 16), rows=(pixels, 16))
+        carried = _time.perf_counter() - mark
         if execution == "replay" and key in self._graphs:
+            mark = _time.perf_counter()
             passes = self._graphs[key].run()
+            ran = _time.perf_counter() - mark
             if submits is not None:
                 submits.append(passes)
-            return self.buffer("head", pixels * 16).view(shape=(pixels, 16))[:, :4].reshape(
-                height, width, 4).copy()
+            mark = _time.perf_counter()
+            out = np.array(xmxres.host_view(self.buffer("head", pixels * 16),
+                                            shape=(pixels, 16))[:, :4], copy=True)
+            self.split = (carried, ran, _time.perf_counter() - mark)
+            return out.reshape(height, width, 4)
         begin()
         rt.to_half(source, self.buffer("features16", pixels * 16, np.float16), pixels * 16)
         rt.gemm(self.buffer("features16", pixels * 16, np.float16), self.adapter, stem,
@@ -295,8 +354,10 @@ class ResidentFrame:
                 submit()
             keep(f"l{level}", value, h * w * channels, (1, h, w, channels), np.float16)
             skips[level] = self.buffer(f"skip{level}", h * w * channels, np.float16)
-            if batched:
+            if batched or staged:
+                begin()
                 rt.copy(value, skips[level], h * w * channels * 2)
+                submit()
             else:
                 skips[level].view(np.float16)[:h * w * channels] = \
                     value.view(np.float16)[:h * w * channels]
@@ -331,8 +392,10 @@ class ResidentFrame:
             submit()
         keep("l5", value, h * w * channels, (1, h, w, channels), np.float16)
         split_skip = self.buffer("split_skip", h * w * channels, np.float16)
-        if batched:
+        if batched or staged:
+            begin()
             rt.copy(value, split_skip, h * w * channels * 2)
+            submit()
         else:
             split_skip.view(np.float16)[:h * w * channels] = \
                 value.view(np.float16)[:h * w * channels]
@@ -353,17 +416,17 @@ class ResidentFrame:
             begin()
             # Published values are exact in both widths. Convert on-device when
             # batching; the block mode retains the original host-copy reference.
-            if batched:
+            if batched or staged:
                 rt.from_half(deep, scratch.value, tokens * gchannels)
             else:
                 scratch.value.view()[:tokens * gchannels] = \
                     deep.view(np.float16)[:tokens * gchannels]
             R.record_global_block(rt, block, scratch)
             rt.e4m3(scratch.out, scratch.out, scratch.padded * gchannels)
-            if batched:
+            if batched or staged:
                 rt.to_half(scratch.out, deep, tokens * gchannels)
             submit()
-            if not batched:
+            if not batched and not staged:
                 deep.view(np.float16)[:tokens * gchannels] = \
                     scratch.out.view()[:tokens * gchannels]
 
@@ -432,5 +495,6 @@ class ResidentFrame:
             counter[0] = rt.submit()
         if submits is not None:
             submits.append(counter[0])
-        return self.buffer("head", pixels * 16).view(shape=(pixels, 16))[:, :4].reshape(
-            height, width, 4).copy()
+        return np.array(xmxres.host_view(self.buffer("head", pixels * 16),
+                                        shape=(pixels, 16))[:, :4],
+                        copy=True).reshape(height, width, 4)

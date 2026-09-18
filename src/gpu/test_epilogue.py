@@ -27,7 +27,8 @@ a = rt.buffer_from(A, np.float16); b = rt.buffer_from(B, np.float16)
 def run(epilogue, narrow):
     c = rt.buffer(M * N, np.float16 if narrow else np.float32)
     rt.begin(); rt.gemm(a, b, c, M, N, K, epilogue=epilogue, narrow=narrow); rt.submit()
-    out = c.view(np.float16 if narrow else np.float32)[:M * N].reshape(M, N).astype(np.float32)
+    out = xmxres.host_view(c, np.float16 if narrow else np.float32,
+                           count=M * N).reshape(M, N).astype(np.float32)
     c.free()
     return out
 

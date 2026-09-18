@@ -40,7 +40,11 @@ def main():
         assert not recordings
         recordings.clear()
         np.testing.assert_array_equal(frame.run(features, execution='block'), head)
-        assert len(recordings) == 73, len(recordings)
+        # Block mode submits once per block. With the card's memory unmapped it also cannot
+        # keep its host-copy reference for the five skips, which become device copies with
+        # a recording each — the same bytes, five more submissions.
+        expected = 78 if rt.staging else 73
+        assert len(recordings) == expected, (len(recordings), expected)
         recordings.clear()
         np.testing.assert_array_equal(frame.run(features, execution='single'), head)
         assert len(recordings) == 1

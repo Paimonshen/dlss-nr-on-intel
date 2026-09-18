@@ -206,11 +206,11 @@ def record_global_block(runtime, w, s, source=None, target=None):
 def run_global_block(runtime, w, s, value):
     """Host convenience: `value` is (tokens, channels)."""
     tokens, channels = value.shape
-    s.value.view(shape=(s.padded, channels))[:tokens] = value
+    xmxres.host_write(s.value, value, rows=(s.padded, channels))
     runtime.begin()
     record_global_block(runtime, w, s)
     passes = runtime.submit()
-    return s.out.view(shape=(s.padded, channels))[:tokens].copy(), passes
+    return xmxres.host_view(s.out, shape=(s.padded, channels))[:tokens].copy(), passes
 
 
 class BlockScratch:
@@ -383,11 +383,11 @@ def record_block(runtime, w, s, source=None, target=None, publish=0, source_half
 
 def run_block(runtime, w, s, value):
     """Host convenience: one block, one submit, numpy in and numpy out."""
-    s.value.view(shape=value.shape)[...] = value
+    xmxres.host_write(s.value, value)
     runtime.begin()
     record_block(runtime, w, s)
     passes = runtime.submit()
-    return s.out.view(shape=value.shape).copy(), passes
+    return xmxres.host_view(s.out, shape=value.shape).copy(), passes
 
 
 # --------------------------------------------------------------------------

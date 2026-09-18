@@ -5,8 +5,19 @@ import numpy as np
 import nr_frame
 
 
+class Weights:
+    """Stands in for the shared weight buffers: built once, closed with the backend."""
+
+    def __init__(self, runtime, weights):
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+
+
 class Frame:
     def __init__(self, runtime, weights, height, width):
+        self.weights = weights
         self.closed = False
         self.height, self.width = height, width
 
@@ -16,18 +27,24 @@ class Frame:
 
 def main():
     backend = object.__new__(nr_frame.ResidentBackend)
-    backend._module = SimpleNamespace(ResidentFrame=Frame)
+    backend._module = SimpleNamespace(ResidentFrame=Frame, DeviceWeights=Weights)
     backend.runtime = backend.weights = None
     backend._frames = {}
+    backend.device_weights = None
     backend.max_cached_frames = 2
     first = backend.frame(384, 384)
     second = backend.frame(768, 1280)
+    # every extent shares one upload; that is the point of them living above the frames
+    assert first.weights is second.weights and not first.weights.closed
     assert backend.frame(384, 384) is first
     third = backend.frame(1088, 1920)
     assert second.closed and not first.closed and not third.closed
     assert len(backend._frames) == 2
+    shared = first.weights
     backend.close()
     assert first.closed and third.closed and not backend._frames
+    assert shared.closed and backend.device_weights is None, "closing releases the weights"
+    backend.max_cached_frames = 2
     backend.max_cached_frames = 1
     first = backend.frame(384, 384)
     assert backend.frame(384, 384) is first

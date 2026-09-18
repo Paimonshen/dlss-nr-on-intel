@@ -83,6 +83,13 @@ def _load():
             ("xmx_res_init", [ctypes.c_char_p] * 6),
             ("xmx_buf_create", [ctypes.c_ulonglong]),
             ("xmx_buf_create_kind", [ctypes.c_ulonglong, ctypes.c_int]),
+            ("xmx_buf_host_visible", [ctypes.c_int]),
+            ("xmx_buf_zero", [ctypes.c_int]),
+            ("xmx_staging_mode", []),
+            ("xmx_buf_upload", [ctypes.c_int, ctypes.c_void_p,
+                               ctypes.c_ulonglong, ctypes.c_ulonglong]),
+            ("xmx_buf_download", [ctypes.c_int, ctypes.c_void_p,
+                                 ctypes.c_ulonglong, ctypes.c_ulonglong]),
             ("xmx_buf_destroy", [ctypes.c_int]),
             ("xmx_begin", []),
             ("xmx_abort", []),
@@ -136,33 +143,71 @@ def align(value, multiple):
     return -(-value // multiple) * multiple
 
 
-class Buffer:
-    """A device buffer that is also addressable as a numpy array.
+# what a buffer is for, which decides where it lives
+GRAPH, HOST_READ, HOST_WRITE = 0, 1, 2
 
-    `host_read` is for the buffers the host reads back rather than only writes. It costs
-    nothing on a shared-memory GPU, where there is one pool; on a discrete card it decides
-    whether a strided readback runs out of cached memory or out of the card's, across PCIe.
+
+class Buffer:
+    """A device buffer, addressable as a numpy array when the host can see it.
+
+    `kind` says what it is for. `HOST_READ` and `HOST_WRITE` are the buffers the host
+    touches — always mapped, cached for reading. `GRAPH` follows the device: mapped where
+    the host can see the card's memory, device-local and **unmapped** where it cannot, and
+    then `view()` refuses rather than handing back memory the device will not see.
+
+    That refusal is the point. The alternative — a host shadow that someone must remember
+    to upload — was tried by somebody else's port of this and produced frames rendered from
+    data that never left the host, with no error anywhere. A buffer either is addressable or
+    says so.
     """
 
-    __slots__ = ("id", "nbytes", "_lib")
+    __slots__ = ("id", "nbytes", "kind", "_lib")
 
-    def __init__(self, nbytes, host_read=False):
+    def __init__(self, nbytes, kind=GRAPH):
         self._lib = _load()
-        self.id = self._lib.xmx_buf_create_kind(int(nbytes), 1 if host_read else 0)
+        self.id = self._lib.xmx_buf_create_kind(int(nbytes), int(kind))
         if self.id < 0:
             raise failure(self._lib, "xmx_buf_create")
         self.nbytes = int(nbytes)
+        self.kind = int(kind)
+
+    @property
+    def mapped(self):
+        return bool(self._lib.xmx_buf_host_visible(self.id))
 
     def view(self, dtype=np.float32, shape=None):
         pointer = self._lib.xmx_buf_ptr(self.id)
+        if not pointer:
+            raise RuntimeError(
+                "this buffer is in device memory the host cannot address: use upload() or "
+                "download(), or a HOST_READ/HOST_WRITE buffer the graph copies through")
         count = self.nbytes // np.dtype(dtype).itemsize
         array = np.ctypeslib.as_array(
             ctypes.cast(pointer, ctypes.POINTER(ctypes.c_uint8)), shape=(self.nbytes,))
         array = array.view(dtype)[:count]
         return array if shape is None else array[:int(np.prod(shape))].reshape(shape)
 
+    def upload(self, array, offset=0):
+        """Host data into this buffer: a memcpy when mapped, a staged copy when not."""
+        array = np.ascontiguousarray(array)
+        if self._lib.xmx_buf_upload(self.id, array.ctypes.data, int(offset),
+                                    int(array.nbytes)) != 0:
+            raise failure(self._lib, "xmx_buf_upload")
+        return self
+
+    def download(self, dtype=np.float32, count=None, offset=0):
+        out = np.empty(count if count is not None
+                       else self.nbytes // np.dtype(dtype).itemsize, dtype)
+        if self._lib.xmx_buf_download(self.id, out.ctypes.data, int(offset),
+                                      int(out.nbytes)) != 0:
+            raise failure(self._lib, "xmx_buf_download")
+        return out
+
     def zero(self):
-        self.view(np.uint8)[:] = 0
+        # the library decides how: a memset when mapped, a recorded fill when not, because
+        # the scratch arena clears roles in the middle of the recording that will use them
+        if self._lib.xmx_buf_zero(self.id) != 0:
+            raise failure(self._lib, "xmx_buf_zero")
         return self
 
     def free(self):
@@ -175,6 +220,37 @@ class Buffer:
             self.free()
         except Exception:
             pass
+
+
+def host_view(buffer, dtype=np.float32, shape=None, count=None):
+    """Read a buffer from the host, addressable or not.
+
+    A mapped buffer hands back its own memory, as it always did. An unmapped one — the
+    graph's buffers on a card whose memory the host cannot see — is copied out through
+    staging. Tests and diagnostics read buffers the graph never sends back, and should not
+    have to know which kind they are holding.
+    """
+    if getattr(buffer, "mapped", True):
+        array = buffer.view(dtype, shape)
+        return array if count is None else array[:count]
+    array = buffer.download(dtype, count)
+    return array if shape is None else array[:int(np.prod(shape))].reshape(shape)
+
+
+def host_write(buffer, array, rows=None):
+    """Put host data into a buffer, addressable or not.
+
+    `rows` is for the padded scratch layouts: the first rows of a `(padded, channels)`
+    buffer are contiguous at its start, so writing them is one copy either way.
+    """
+    array = np.ascontiguousarray(array)
+    if getattr(buffer, "mapped", True):
+        if rows is None:
+            buffer.view(dtype=array.dtype, shape=array.shape)[...] = array
+        else:
+            buffer.view(dtype=array.dtype, shape=rows)[:array.shape[0]] = array
+        return buffer
+    return buffer.upload(array)
 
 
 class CommandGraph:
@@ -282,8 +358,18 @@ class _ScratchBuffer:
     def id(self):
         return self._get().id
 
+    @property
+    def mapped(self):
+        return self._get().mapped
+
     def view(self, dtype=np.float32, shape=None):
         return self._get().view(dtype, shape)
+
+    def upload(self, array, offset=0):
+        return self._get().upload(array, offset)
+
+    def download(self, dtype=np.float32, count=None, offset=0):
+        return self._get().download(dtype, count, offset)
 
     def zero(self):
         self._zero = True
@@ -350,17 +436,37 @@ class Runtime:
 
     # -- allocation ----------------------------------------------------
 
-    def buffer(self, count, dtype=np.float32, host_read=False):
-        return Buffer(int(count) * np.dtype(dtype).itemsize, host_read=host_read)
+    @property
+    def staging(self):
+        """Whether the graph's buffers are unmapped, so the host reaches them by copies."""
+        return bool(self.lib.xmx_staging_mode())
+
+    def buffer(self, count, dtype=np.float32, kind=GRAPH):
+        return Buffer(int(count) * np.dtype(dtype).itemsize, kind=kind)
+
+    # the same two helpers as methods, for callers outside this package: `src/ref` reaches
+    # a runtime through an object, not through an import path
+    def read(self, buffer, dtype=np.float32, shape=None, count=None):
+        return host_view(buffer, dtype, shape, count)
+
+    def write(self, buffer, array, rows=None):
+        return host_write(buffer, array, rows)
 
     def buffer_from(self, array, dtype=np.float32, pad=0):
         """A device buffer holding `array`, optionally padded with zeros at the end."""
         array = np.ascontiguousarray(array, dtype=dtype)
         buffer = Buffer((array.size + int(pad)) * array.dtype.itemsize)
-        flat = buffer.view(dtype)
-        flat[:array.size] = array.reshape(-1)
-        if pad:
-            flat[array.size:] = 0
+        if buffer.mapped:
+            flat = buffer.view(dtype)
+            flat[:array.size] = array.reshape(-1)
+            if pad:
+                flat[array.size:] = 0
+        else:
+            # the weights go up once per extent, not once per frame; a staged copy is the
+            # right cost here and the only one available with no mapping
+            if pad:
+                buffer.zero()
+            buffer.upload(array.reshape(-1))
         return buffer
 
     # -- recording -----------------------------------------------------

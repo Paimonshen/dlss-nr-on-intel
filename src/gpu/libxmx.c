@@ -37,11 +37,15 @@ static struct {
 	int syncing;
 	unsigned staging;
 	VkCommandBuffer rcb; VkFence rfence; int recording, recorded, rready;
+	/* transfers have their own command buffer: the weights are created while the
+	 * frame's graph is being recorded, so a staged upload cannot borrow `rcb` */
+	VkCommandBuffer tcb; VkFence tfence;
 	/* GPU-side profiling. One timestamp after each recorded pass, so pass i costs
 	 * ts[i+1]-ts[i]; the barrier between passes makes that attribution exact. */
 	VkQueryPool qpool; unsigned prof, prof_n; float ts_period;
 	char name[256]; char err[256]; char memory[256]; char memory_read[256];
-	int ready, lost, discrete;
+	int ready, lost, discrete, unmapped;
+	struct buf stage;
 } g;
 
 #define MAX_SPECIALIZED 256
@@ -68,7 +72,8 @@ static unsigned prof_hits[PROF_KINDS];
  * of being read back to the host after every GEMM; on a shared-memory APU the mapping
  * is HOST_CACHED, so the host can still write inputs and read outputs in place. */
 #define MAX_RBUF 8192
-struct rbuf { VkBuffer b; VkDeviceMemory m; void *p; VkDeviceAddress addr; VkDeviceSize size; int live; };
+struct rbuf { VkBuffer b; VkDeviceMemory m; void *p; VkDeviceAddress addr;
+		 VkDeviceSize size; int live, mapped; };
 static struct rbuf rbufs[MAX_RBUF];
 
 struct push {
@@ -118,6 +123,54 @@ const char *xmx_device(void) { return g.name; }
  * machine this was written on. */
 #define HOST_VISIBLE_VRAM_FLOOR (1024ull * 1024 * 1024)
 
+/* Two ways to reach the card's memory, and the second one is not optional.
+ *
+ * Where the whole of VRAM is host-visible — a shared-memory APU, or a discrete card with
+ * resizable BAR — the graph's buffers are mapped and the host writes into them directly.
+ * Where it is not, a mapped buffer can only be system memory, which is the 50x trap
+ * (`notes/phase63`). Then the graph's buffers are device-local and unmapped, and the host
+ * reaches them through copies.
+ *
+ * `XMX_STAGING=1` forces the second path on hardware that would take the first. That is
+ * how it is tested here: correctness does not depend on where the memory is, so the iGPU
+ * can run the code a card without resizable BAR would run. */
+static int want_unmapped(void)
+{
+	const char *forced = getenv("XMX_STAGING");
+	if (forced && *forced) return atoi(forced) != 0;
+	if (!g.discrete) return 0;
+	VkPhysicalDeviceMemoryProperties mp;
+	vkGetPhysicalDeviceMemoryProperties(g.pd, &mp);
+	const VkMemoryPropertyFlags want = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+					 | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
+	for (uint32_t i = 0; i < mp.memoryTypeCount; i++)
+		if ((mp.memoryTypes[i].propertyFlags & want) == want
+		    && mp.memoryHeaps[mp.memoryTypes[i].heapIndex].size >= HOST_VISIBLE_VRAM_FLOOR)
+			return 0;                      /* resizable BAR: map it and write in place */
+	return 1;
+}
+
+static void note_memory(const VkPhysicalDeviceMemoryProperties *mp, uint32_t type, int host_read);
+
+/* Device-local for the graph, host-visibility not required. */
+static uint32_t memtype_device(uint32_t bits)
+{
+	VkPhysicalDeviceMemoryProperties mp;
+	vkGetPhysicalDeviceMemoryProperties(g.pd, &mp);
+	for (uint32_t pass = 0; pass < 2; pass++)
+		for (uint32_t i = 0; i < mp.memoryTypeCount; i++) {
+			VkMemoryPropertyFlags f = mp.memoryTypes[i].propertyFlags;
+			if (!(bits & (1u << i))) continue;
+			if (!(f & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) continue;
+			/* first pass prefers memory the host cannot see, which on a discrete
+			 * card is the card's own and on this APU does not exist */
+			if (!pass && (f & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)) continue;
+			note_memory(&mp, i, 0);
+			return i;
+		}
+	return UINT32_MAX;
+}
+
 /* Say where the buffers went, in one line, because the answer decides everything about
  * this machine's speed and nobody can see it from outside: on a discrete card, operands in
  * system memory are read across PCIe, and that is what an unresized BAR leaves us with. */
@@ -125,7 +178,11 @@ static void note_memory(const VkPhysicalDeviceMemoryProperties *mp, uint32_t typ
 {
 	VkMemoryPropertyFlags f = mp->memoryTypes[type].propertyFlags;
 	double heap = (double)mp->memoryHeaps[mp->memoryTypes[type].heapIndex].size / (1 << 30);
-	const char *where = host_read
+	const char *where = (!host_read && g.unmapped)
+		? ((f & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)
+		   ? "card memory, unmapped by choice (staging forced)"
+		   : "card memory, not host-visible: the host reaches it by copies")
+		: host_read
 		? ((f & VK_MEMORY_PROPERTY_HOST_CACHED_BIT)
 		   ? "readback cached"
 		   : "READBACK UNCACHED - the host reads the head with a stride, and on a discrete "
@@ -550,14 +607,22 @@ int xmx_res_init(const char *gemm_spv, const char *unary_spv, const char *row_sp
 					    .commandPool = g.cpool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
 					    .commandBufferCount = 1 };
 	if ((r = vkAllocateCommandBuffers(g.dev, &cba, &g.rcb))) FAIL("resident command buffer", r);
+	if ((r = vkAllocateCommandBuffers(g.dev, &cba, &g.tcb))) FAIL("transfer command buffer", r);
 	VkFenceCreateInfo fi = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
 	if ((r = vkCreateFence(g.dev, &fi, NULL, &g.rfence))) FAIL("resident fence", r);
+	if ((r = vkCreateFence(g.dev, &fi, NULL, &g.tfence))) FAIL("transfer fence", r);
+	g.unmapped = want_unmapped();
 	g.rready = 1;
 	return 0;
 }
 
-/* `host_read` marks a buffer the host reads back — the head, and nothing else so far. */
-int xmx_buf_create_kind(unsigned long long bytes, int host_read)
+/* `kind`: 0 the graph's own buffers, 1 a buffer the host reads back, 2 one it writes.
+ *
+ * Kinds 1 and 2 are always mapped — they exist to be touched by the host, and on an
+ * unmapped device they are the staging the graph copies through. Kind 0 follows the
+ * device: mapped where the host can see the card's memory, device-local and unmapped
+ * where it cannot. */
+int xmx_buf_create_kind(unsigned long long bytes, int kind)
 {
 	if (!g.rready) FAIL("resident runtime not initialised", 0);
 	int id = -1;
@@ -573,10 +638,13 @@ int xmx_buf_create_kind(unsigned long long bytes, int host_read)
 	if (r) FAIL("vkCreateBuffer (resident)", r);
 	VkMemoryRequirements mr;
 	vkGetBufferMemoryRequirements(g.dev, rb->b, &mr);
-	const char *failure = "no host-visible memory type";
-	uint32_t mt = memtype(mr.memoryTypeBits,
-			      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
-			      | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, host_read);
+	int unmapped = kind == 0 && g.unmapped;
+	const char *failure = unmapped ? "no device-local memory type"
+				       : "no host-visible memory type";
+	uint32_t mt = unmapped ? memtype_device(mr.memoryTypeBits)
+			       : memtype(mr.memoryTypeBits,
+					 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+					 | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, kind == 1);
 	if (mt == UINT32_MAX) goto failed_kind;
 	VkMemoryAllocateFlagsInfo fl = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO,
 					 .flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT };
@@ -586,8 +654,11 @@ int xmx_buf_create_kind(unsigned long long bytes, int host_read)
 	if ((r = vkAllocateMemory(g.dev, &ai, NULL, &rb->m))) goto failed_kind;
 	failure = "vkBindBufferMemory (resident)";
 	if ((r = vkBindBufferMemory(g.dev, rb->b, rb->m, 0))) goto failed_kind;
-	failure = "vkMapMemory (resident)";
-	if ((r = vkMapMemory(g.dev, rb->m, 0, VK_WHOLE_SIZE, 0, &rb->p))) goto failed_kind;
+	if (!unmapped) {
+		failure = "vkMapMemory (resident)";
+		if ((r = vkMapMemory(g.dev, rb->m, 0, VK_WHOLE_SIZE, 0, &rb->p))) goto failed_kind;
+	}
+	rb->mapped = !unmapped;
 	VkBufferDeviceAddressInfo ai2 = { .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = rb->b };
 	rb->addr = vkGetBufferDeviceAddress(g.dev, &ai2);
 	rb->size = bi.size;
@@ -602,6 +673,139 @@ failed_kind:
 }
 
 int xmx_buf_create(unsigned long long bytes) { return xmx_buf_create_kind(bytes, 0); }
+
+int xmx_buf_host_visible(int id)
+{
+	return (id >= 0 && id < MAX_RBUF && rbufs[id].live && rbufs[id].mapped) ? 1 : 0;
+}
+
+int xmx_staging_mode(void) { return g.unmapped; }
+
+/* One growable host-visible buffer, for the transfers that happen once rather than every
+ * frame — the weights, and anything a test reads back. Per-frame traffic does not come
+ * through here: it is recorded into the graph as a copy, so a frame is still one submit. */
+static int submit_commands(VkCommandBuffer commands, int passes);
+
+/* A transfer runs on its own command buffer and fence so it can happen while the frame's
+ * graph is still being recorded, which is when the weights arrive. */
+static int submit_transfer(void)
+{
+	VkResult r = vkEndCommandBuffer(g.tcb);
+	if (r) FAIL("end transfer", r);
+	if ((r = vkResetFences(g.dev, 1, &g.tfence))) FAIL("reset transfer fence", r);
+	VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1,
+			    .pCommandBuffers = &g.tcb };
+	if ((r = vkQueueSubmit(g.q, 1, &si, g.tfence))) FAIL("transfer submit", r);
+	if ((r = vkWaitForFences(g.dev, 1, &g.tfence, VK_TRUE, 60ull * 1000000000ull)))
+		FAIL("transfer fence", r);
+	return 0;
+}
+
+static int begin_transfer(void)
+{
+	VkCommandBufferBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+					.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT };
+	vkResetCommandBuffer(g.tcb, 0);
+	VkResult r = vkBeginCommandBuffer(g.tcb, &bi);
+	if (r) FAIL("begin transfer", r);
+	return 0;
+}
+
+static int ensure_stage(VkDeviceSize size)
+{
+	if (g.stage.cap >= size) return 0;
+	if (g.stage.b) {
+		vkUnmapMemory(g.dev, g.stage.m);
+		vkDestroyBuffer(g.dev, g.stage.b, NULL);
+		vkFreeMemory(g.dev, g.stage.m, NULL);
+		g.stage = (struct buf){ 0 };
+	}
+	VkBufferCreateInfo bi = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = size,
+				  .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT
+					   | VK_BUFFER_USAGE_TRANSFER_DST_BIT };
+	VkResult r = vkCreateBuffer(g.dev, &bi, NULL, &g.stage.b);
+	if (r) FAIL("vkCreateBuffer (stage)", r);
+	VkMemoryRequirements mr;
+	vkGetBufferMemoryRequirements(g.dev, g.stage.b, &mr);
+	uint32_t mt = memtype(mr.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+			      | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, 1);
+	if (mt == UINT32_MAX) FAIL("no host-visible staging type", 0);
+	VkMemoryAllocateInfo ai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+				    .allocationSize = mr.size, .memoryTypeIndex = mt };
+	if ((r = vkAllocateMemory(g.dev, &ai, NULL, &g.stage.m))) FAIL("vkAllocateMemory (stage)", r);
+	if ((r = vkBindBufferMemory(g.dev, g.stage.b, g.stage.m, 0))) FAIL("vkBindBufferMemory (stage)", r);
+	if ((r = vkMapMemory(g.dev, g.stage.m, 0, VK_WHOLE_SIZE, 0, &g.stage.p))) FAIL("vkMapMemory (stage)", r);
+	g.stage.cap = size;
+	return 0;
+}
+
+static int stage_copy(int to_device, int id, const void *src, void *dst,
+		      unsigned long long offset, unsigned long long bytes)
+{
+	if (id < 0 || id >= MAX_RBUF || !rbufs[id].live) FAIL("buffer is not live", 0);
+	if (offset + bytes > rbufs[id].size) FAIL("transfer runs past the buffer", 0);
+	if (!bytes) return 0;
+	if (rbufs[id].mapped) {
+		unsigned char *p = (unsigned char *)rbufs[id].p + offset;
+		if (to_device) memcpy(p, src, (size_t)bytes);
+		else memcpy(dst, p, (size_t)bytes);
+		return 0;
+	}
+	if (ensure_stage((VkDeviceSize)bytes)) return -1;
+	if (to_device) memcpy(g.stage.p, src, (size_t)bytes);
+	if (begin_transfer()) return -1;
+	VkBufferCopy region = { .srcOffset = to_device ? 0 : offset,
+				.dstOffset = to_device ? offset : 0, .size = bytes };
+	if (to_device) vkCmdCopyBuffer(g.tcb, g.stage.b, rbufs[id].b, 1, &region);
+	else vkCmdCopyBuffer(g.tcb, rbufs[id].b, g.stage.b, 1, &region);
+	if (submit_transfer()) return -1;
+	if (!to_device) memcpy(dst, g.stage.p, (size_t)bytes);
+	return 0;
+}
+
+/* Clearing a buffer the host cannot address is the device's job, and it has to work
+ * whether or not a graph is being recorded: the scratch arena allocates and clears its
+ * roles lazily, in the middle of the recording that is about to use them. */
+static int stage_copy(int to_device, int id, const void *src, void *dst,
+		      unsigned long long offset, unsigned long long bytes);
+
+int xmx_buf_zero(int id)
+{
+	if (id < 0 || id >= MAX_RBUF || !rbufs[id].live) FAIL("buffer is not live", 0);
+	if (rbufs[id].mapped) {
+		memset(rbufs[id].p, 0, (size_t)rbufs[id].size);
+		return 0;
+	}
+	/* Never into the graph, even while one is being recorded: a recorded fill runs again
+	 * on every replay, and `buffer_from` zeroes a weight buffer's padding *before*
+	 * uploading the weights — so the graph would wipe them on its way past, every frame.
+	 * Clearing means now, on the transfer queue, like the memset it replaces. */
+	if (rbufs[id].size & 3) {
+		/* vkCmdFillBuffer works in whole words and may not run past the buffer, so a
+		 * size that is not a multiple of four would leave a tail dirty. Rare enough to
+		 * pay for with a copy rather than a second code path. */
+		unsigned char *zeros = calloc(1, (size_t)rbufs[id].size);
+		if (!zeros) FAIL("out of memory clearing a buffer", 0);
+		int bad = stage_copy(1, id, zeros, NULL, 0, rbufs[id].size);
+		free(zeros);
+		return bad;
+	}
+	if (begin_transfer()) return -1;
+	vkCmdFillBuffer(g.tcb, rbufs[id].b, 0, rbufs[id].size, 0);
+	return submit_transfer();
+}
+
+int xmx_buf_upload(int id, const void *src, unsigned long long offset, unsigned long long bytes)
+{
+	if (!src) FAIL("upload source is null", 0);
+	return stage_copy(1, id, src, NULL, offset, bytes);
+}
+
+int xmx_buf_download(int id, void *dst, unsigned long long offset, unsigned long long bytes)
+{
+	if (!dst) FAIL("download destination is null", 0);
+	return stage_copy(0, id, NULL, dst, offset, bytes);
+}
 
 unsigned long long xmx_buf_total_bytes(void)
 {
@@ -623,7 +827,7 @@ unsigned long long xmx_buf_bytes(int id)
 int xmx_buf_destroy(int id)
 {
 	if (id < 0 || id >= MAX_RBUF || !rbufs[id].live) return 0;
-	vkUnmapMemory(g.dev, rbufs[id].m);
+	if (rbufs[id].mapped) vkUnmapMemory(g.dev, rbufs[id].m);
 	vkDestroyBuffer(g.dev, rbufs[id].b, NULL);
 	vkFreeMemory(g.dev, rbufs[id].m, NULL);
 	rbufs[id] = (struct rbuf){ 0 };
