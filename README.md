@@ -119,6 +119,12 @@ already have. See [Build](#build).
   gcc -Iwork/vulkan-headers/include src/probe/coopmat_probe.c -o /tmp/probe -lvulkan
   /tmp/probe      # drop the -I if your distribution installs the Vulkan headers
   ```
+- A **discrete** Arc works too, and does not need resizable BAR: where the card's memory
+  cannot be mapped, the graph keeps its operands there anyway and the host reaches them by
+  copies. Turn resizable BAR on if you can — it is the faster of the two paths and Arc wants
+  it for everything else — but it is no longer the difference between working and crawling.
+  This is written from one owner's report and tested by forcing the same path on the
+  integrated GPU; it has not been measured on a discrete card.
 - Linux. Python 3 with NumPy. A C compiler, `glslangValidator`, the Vulkan loader.
 - About 2.3 GiB of memory for the device buffers at 720p — it shares system RAM.
 - OpenCV is optional and worth having: it is the fast path for the blur that moving
@@ -400,6 +406,21 @@ built on: it is tested **only on an Intel Arc 140V (Lunar Lake, Xe2) with Mesa A
 report it, the useful things are `vulkaninfo --summary`, your Mesa and kernel versions, the
 extent and scale, and what `sudo dmesg | grep -iE 'xe|i915|hang|reset|guc'` says right after
 it happens.
+
+**It is far slower on a discrete Arc than the table says.** The daemon's log opens with
+where its buffers went, which decides everything else:
+
+```
+model ready in 12.4s on Intel(R) Arc(tm) B580 Graphics (BMG G21)
+buffers in card memory: type 1, heap 11.6 GiB, DEVICE_LOCAL HOST_VISIBLE …; readback cached: …
+```
+
+`card memory` is right, mapped or not. **`SYSTEM MEMORY ACROSS PCIE`** means the operands are
+being read across the bus while the card's own memory sits unused, which costs about 50x — it
+should not happen any more, so report it. Each frame line then ends with
+`gpu <in>+<run>+<out>ms`: the host transfer in, the graph, the transfer out. If the outer two
+dominate, the traffic is the problem; if the middle one does, the graph is. `XMX_STAGING=1`
+and `=0` force the two memory paths for a comparison.
 
 **The interface is being re-rendered.** `NR_LAYER_UI_MASK=1` marks pixels that did not
 move between two presents and gives them back byte-identical. It drops itself when it
