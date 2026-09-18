@@ -734,6 +734,7 @@ def main():
     # have more than one, or a different one than the person assumes
     print(f"model ready in {time.perf_counter() - started:.1f}s"
           f" on {xmx.device_name()}", flush=True)
+    print(f"buffers in {xmx.memory_note()}", flush=True)
 
     if os.path.lexists(args.socket):
         if not stat.S_ISSOCK(os.lstat(args.socket).st_mode):

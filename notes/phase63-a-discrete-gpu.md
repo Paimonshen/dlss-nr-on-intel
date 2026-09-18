@@ -87,6 +87,28 @@ message that would name the failure never reached them. The reproducer that does
 is `python3 src/ref/nr_frame.py in.png out.png --resident` — no sockets, no game, the
 exception on the terminal.
 
+## The machine now says where its buffers are
+
+Their next report was the useful kind: **0.2 fps, and the frame time barely moves when the
+render scale is lowered.** That second half is a prediction the hypothesis above makes. A
+cost that does not follow the extent is a *fixed* cost per frame, and this graph has one —
+292 MB of weights, read once per frame whatever the extent, because the render scale shrinks
+the activations and not the model. Across PCIe that is the whole frame; in the card's own
+memory it is under a millisecond.
+
+So `xmx_memory()` reports the memory type the chooser lands on, and the daemon logs it under
+`model ready` while `bench.py` prints it above the table:
+
+```
+buffers: card memory: type 1, heap 11.6 GiB, DEVICE_LOCAL HOST_VISIBLE HOST_COHERENT
+buffers: SYSTEM MEMORY ACROSS PCIE - resizable BAR is off, or its window is under 1 GiB
+```
+
+The second line is the one that matters for them: **the fix is inert with the BAR
+unresized**, by design — the 1 GiB floor sends such a card back to system memory rather than
+failing to allocate. Asked before the first buffer exists, which is when the daemon logs it,
+the answer is still knowable: the same choice runs against every type the device has.
+
 ## Still open
 
 - **The `-4` itself.** A 50x slowdown makes a submission long enough to hit the driver's

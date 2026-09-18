@@ -46,6 +46,7 @@ def _load(spv="gemm_coopmat.spv"):
     lib.xmx_gemm_batched.restype = ctypes.c_int
     lib.xmx_error.restype = ctypes.c_char_p
     lib.xmx_device.restype = ctypes.c_char_p
+    lib.xmx_memory.restype = ctypes.c_char_p
     if lib.xmx_init(str(ROOT / "work" / spv).encode()) != 0:
         raise RuntimeError("xmx_init: " + lib.xmx_error().decode())
     _lib = lib
@@ -54,6 +55,11 @@ def _load(spv="gemm_coopmat.spv"):
 
 def device_name():
     return _load().xmx_device().decode()
+
+
+def memory_note():
+    """Where the buffers landed, which on a discrete card is the whole performance story."""
+    return _load().xmx_memory().decode()
 
 
 def _shift(x):

@@ -20,7 +20,12 @@ import xmx
 
 xmx._load()
 lib = xmx._lib
-print("device: %s\n" % xmx.device_name())
+print("device: %s" % xmx.device_name())
+
+
+def report_memory():
+    """After the first allocation, not before: the choice is made when a buffer is made."""
+    print("buffers: %s\n" % xmx.memory_note())
 
 
 def gemm(M, N, K, A, B, C, iters):
@@ -43,6 +48,8 @@ def run(M, N, K, iters):
     return dt, flops / dt / 1e9
 
 
+run(64, 64, 64, 1)                     # one small call, so there is a buffer to report on
+report_memory()
 print("  %-22s %-8s %-12s %-12s %s" % ("shape", "iters", "time (s)", "GFLOP/s", "per dispatch"))
 for M, N, K, it in [(512, 512, 512, 200), (1024, 1024, 1024, 100),
                     (2048, 2048, 512, 50), (4096, 1024, 1024, 40),

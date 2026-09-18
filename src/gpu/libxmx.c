@@ -40,7 +40,8 @@ static struct {
 	/* GPU-side profiling. One timestamp after each recorded pass, so pass i costs
 	 * ts[i+1]-ts[i]; the barrier between passes makes that attribution exact. */
 	VkQueryPool qpool; unsigned prof, prof_n; float ts_period;
-	char name[256]; char err[256]; int ready, lost, discrete;
+	char name[256]; char err[256]; char memory[256];
+	int ready, lost, discrete;
 } g;
 
 #define MAX_SPECIALIZED 256
@@ -79,6 +80,16 @@ struct push {
 
 const char *xmx_error(void) { return g.err; }
 int xmx_device_lost(void) { return g.lost; }
+/* Asked before the first buffer exists — which is when the daemon logs it — the answer is
+ * still knowable: run the same choice against every type the device has. */
+static uint32_t memtype(uint32_t bits, VkMemoryPropertyFlags want);
+const char *xmx_memory(void)
+{
+	if (!g.ready) return "not initialised";
+	if (!g.memory[0])
+		memtype(~0u, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+	return g.memory[0] ? g.memory : "no host-visible memory type";
+}
 const char *xmx_device(void) { return g.name; }
 
 /* Where the operands live, which is not the same question on the two kinds of GPU.
@@ -98,6 +109,24 @@ const char *xmx_device(void) { return g.name; }
  * which sends such a card back to system memory. Untested: there is no discrete GPU on the
  * machine this was written on. */
 #define HOST_VISIBLE_VRAM_FLOOR (1024ull * 1024 * 1024)
+
+/* Say where the buffers went, in one line, because the answer decides everything about
+ * this machine's speed and nobody can see it from outside: on a discrete card, operands in
+ * system memory are read across PCIe, and that is what an unresized BAR leaves us with. */
+static void note_memory(const VkPhysicalDeviceMemoryProperties *mp, uint32_t type)
+{
+	VkMemoryPropertyFlags f = mp->memoryTypes[type].propertyFlags;
+	double heap = (double)mp->memoryHeaps[mp->memoryTypes[type].heapIndex].size / (1 << 30);
+	const char *where = !g.discrete ? "shared memory (one pool)"
+		: (f & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+		? "card memory"
+		: "SYSTEM MEMORY ACROSS PCIE - resizable BAR is off, or its window is under 1 GiB";
+	snprintf(g.memory, sizeof g.memory, "%s: type %u, heap %.1f GiB,%s%s%s%s", where, type, heap,
+		 (f & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) ? " DEVICE_LOCAL" : "",
+		 (f & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) ? " HOST_VISIBLE" : "",
+		 (f & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) ? " HOST_COHERENT" : "",
+		 (f & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) ? " HOST_CACHED" : "");
+}
 static uint32_t memtype(uint32_t bits, VkMemoryPropertyFlags want)
 {
 	VkPhysicalDeviceMemoryProperties mp;
@@ -114,6 +143,7 @@ static uint32_t memtype(uint32_t bits, VkMemoryPropertyFlags want)
 			if (g.discrete && (need & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
 			    && mp.memoryHeaps[mp.memoryTypes[i].heapIndex].size < HOST_VISIBLE_VRAM_FLOOR)
 				continue;
+			note_memory(&mp, i);
 			return i;
 		}
 	}
