@@ -109,6 +109,39 @@ unresized**, by design — the 1 GiB floor sends such a card back to system memo
 failing to allocate. Asked before the first buffer exists, which is when the daemon logs it,
 the answer is still knowable: the same choice runs against every type the device has.
 
+## The buffer that travels the other way
+
+At 4 fps they said it plainly: *140v memory does not get called the same way as my b580,
+vram and ram it is not the same as yours, i need some kind of edit on libxmx.c*. Right on
+both counts.
+
+Everything the graph touches is read by the device, many times, and belongs in the card's
+memory. **One buffer goes the other way.** The head comes back to the host as
+`buffer("head", pixels * 16).view(shape=(pixels, 16))[:, :4]` — four of every sixteen
+floats, a strided read of 15 MB at a 1024x768 frame to extract 3.8 MB. On a shared-memory
+APU that is a memcpy. On a discrete card, in write-combined device memory, it is a strided
+uncached read across PCIe, which is the slowest access this hardware has, and it does not
+shrink with anything.
+
+So buffer creation takes a `host_read` flag (`xmx_buf_create_kind`), and the chooser gives
+such a buffer cached memory even on a discrete card — the device writes it once, streaming,
+and the host reads it cached. `ResidentFrame.buffer` sets it for `head` and for nothing
+else, because nothing else is read back.
+
+**On this machine it is a no-op and that is the check**: one pool, so both kinds land on
+memory type 2, `bench.py` reports both lines identically, 1024x768 at scale 0.55 measures
+169 ms against a published 168, and `make test` is green with the output byte-identical.
+The report now prints both placements, which is what a discrete card needs to show:
+
+```
+buffers: card memory: type 1, …; readback cached: type 3, …
+buffers: card memory: type 1, …; READBACK UNCACHED - the host reads the head with a stride …
+```
+
+Still their measurement to make. What the hypothesis predicts, if they pull this: the frame
+time drops by roughly the head's size over PCIe read speed, and what remains scales with the
+extent again rather than sitting flat.
+
 ## Still open
 
 - **The `-4` itself.** A 50x slowdown makes a submission long enough to hit the driver's

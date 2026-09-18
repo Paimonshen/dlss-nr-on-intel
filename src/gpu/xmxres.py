@@ -82,6 +82,7 @@ def _load():
     for name, args in (
             ("xmx_res_init", [ctypes.c_char_p] * 6),
             ("xmx_buf_create", [ctypes.c_ulonglong]),
+            ("xmx_buf_create_kind", [ctypes.c_ulonglong, ctypes.c_int]),
             ("xmx_buf_destroy", [ctypes.c_int]),
             ("xmx_begin", []),
             ("xmx_abort", []),
@@ -136,13 +137,18 @@ def align(value, multiple):
 
 
 class Buffer:
-    """A device buffer that is also addressable as a numpy array."""
+    """A device buffer that is also addressable as a numpy array.
+
+    `host_read` is for the buffers the host reads back rather than only writes. It costs
+    nothing on a shared-memory GPU, where there is one pool; on a discrete card it decides
+    whether a strided readback runs out of cached memory or out of the card's, across PCIe.
+    """
 
     __slots__ = ("id", "nbytes", "_lib")
 
-    def __init__(self, nbytes):
+    def __init__(self, nbytes, host_read=False):
         self._lib = _load()
-        self.id = self._lib.xmx_buf_create(int(nbytes))
+        self.id = self._lib.xmx_buf_create_kind(int(nbytes), 1 if host_read else 0)
         if self.id < 0:
             raise failure(self._lib, "xmx_buf_create")
         self.nbytes = int(nbytes)
@@ -344,8 +350,8 @@ class Runtime:
 
     # -- allocation ----------------------------------------------------
 
-    def buffer(self, count, dtype=np.float32):
-        return Buffer(int(count) * np.dtype(dtype).itemsize)
+    def buffer(self, count, dtype=np.float32, host_read=False):
+        return Buffer(int(count) * np.dtype(dtype).itemsize, host_read=host_read)
 
     def buffer_from(self, array, dtype=np.float32, pad=0):
         """A device buffer holding `array`, optionally padded with zeros at the end."""

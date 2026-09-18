@@ -40,7 +40,7 @@ static struct {
 	/* GPU-side profiling. One timestamp after each recorded pass, so pass i costs
 	 * ts[i+1]-ts[i]; the barrier between passes makes that attribution exact. */
 	VkQueryPool qpool; unsigned prof, prof_n; float ts_period;
-	char name[256]; char err[256]; char memory[256];
+	char name[256]; char err[256]; char memory[256]; char memory_read[256];
 	int ready, lost, discrete;
 } g;
 
@@ -82,13 +82,21 @@ const char *xmx_error(void) { return g.err; }
 int xmx_device_lost(void) { return g.lost; }
 /* Asked before the first buffer exists — which is when the daemon logs it — the answer is
  * still knowable: run the same choice against every type the device has. */
-static uint32_t memtype(uint32_t bits, VkMemoryPropertyFlags want);
+static uint32_t memtype(uint32_t bits, VkMemoryPropertyFlags want, int host_read);
 const char *xmx_memory(void)
 {
+	static char both[600];
 	if (!g.ready) return "not initialised";
 	if (!g.memory[0])
-		memtype(~0u, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-	return g.memory[0] ? g.memory : "no host-visible memory type";
+		memtype(~0u, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+			| VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, 0);
+	if (!g.memory_read[0])
+		memtype(~0u, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+			| VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, 1);
+	if (!g.memory[0]) return "no host-visible memory type";
+	snprintf(both, sizeof both, "%s%s%s", g.memory,
+		 g.memory_read[0] ? "; " : "", g.memory_read);
+	return both;
 }
 const char *xmx_device(void) { return g.name; }
 
@@ -113,37 +121,51 @@ const char *xmx_device(void) { return g.name; }
 /* Say where the buffers went, in one line, because the answer decides everything about
  * this machine's speed and nobody can see it from outside: on a discrete card, operands in
  * system memory are read across PCIe, and that is what an unresized BAR leaves us with. */
-static void note_memory(const VkPhysicalDeviceMemoryProperties *mp, uint32_t type)
+static void note_memory(const VkPhysicalDeviceMemoryProperties *mp, uint32_t type, int host_read)
 {
 	VkMemoryPropertyFlags f = mp->memoryTypes[type].propertyFlags;
 	double heap = (double)mp->memoryHeaps[mp->memoryTypes[type].heapIndex].size / (1 << 30);
-	const char *where = !g.discrete ? "shared memory (one pool)"
+	const char *where = host_read
+		? ((f & VK_MEMORY_PROPERTY_HOST_CACHED_BIT)
+		   ? "readback cached"
+		   : "READBACK UNCACHED - the host reads the head with a stride, and on a discrete "
+		     "card that is a strided read across PCIe")
+		: !g.discrete ? "shared memory (one pool)"
 		: (f & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
 		? "card memory"
 		: "SYSTEM MEMORY ACROSS PCIE - resizable BAR is off, or its window is under 1 GiB";
-	snprintf(g.memory, sizeof g.memory, "%s: type %u, heap %.1f GiB,%s%s%s%s", where, type, heap,
+	char *slot = host_read ? g.memory_read : g.memory;
+	size_t room = host_read ? sizeof g.memory_read : sizeof g.memory;
+	snprintf(slot, room, "%s: type %u, heap %.1f GiB,%s%s%s%s", where, type, heap,
 		 (f & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) ? " DEVICE_LOCAL" : "",
 		 (f & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) ? " HOST_VISIBLE" : "",
 		 (f & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) ? " HOST_COHERENT" : "",
 		 (f & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) ? " HOST_CACHED" : "");
 }
-static uint32_t memtype(uint32_t bits, VkMemoryPropertyFlags want)
+static uint32_t memtype(uint32_t bits, VkMemoryPropertyFlags want, int host_read)
 {
 	VkPhysicalDeviceMemoryProperties mp;
 	vkGetPhysicalDeviceMemoryProperties(g.pd, &mp);
+	/* A buffer the host reads is the exception to the rule above. The head comes back as
+	 * four of every sixteen floats — a strided read — and uncached memory serves that at a
+	 * fraction of its streaming rate, which on a discrete card is a fraction of PCIe. The
+	 * device writes it once; the host reads it once. Cached wins that trade even when the
+	 * cached memory is on the other side of the bus. */
 	const VkMemoryPropertyFlags prefer[3] = {
-		g.discrete ? VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT : VK_MEMORY_PROPERTY_HOST_CACHED_BIT,
-		g.discrete ? VK_MEMORY_PROPERTY_HOST_CACHED_BIT : VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+		(host_read || !g.discrete) ? VK_MEMORY_PROPERTY_HOST_CACHED_BIT
+					   : VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+		(host_read || !g.discrete) ? VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+					   : VK_MEMORY_PROPERTY_HOST_CACHED_BIT,
 		0 };
 	for (uint32_t pass = 0; pass < 3; pass++) {
 		VkMemoryPropertyFlags need = want | prefer[pass];
 		for (uint32_t i = 0; i < mp.memoryTypeCount; i++) {
 			if (!(bits & (1u << i))) continue;
 			if ((mp.memoryTypes[i].propertyFlags & need) != need) continue;
-			if (g.discrete && (need & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+			if (g.discrete && !host_read && (need & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
 			    && mp.memoryHeaps[mp.memoryTypes[i].heapIndex].size < HOST_VISIBLE_VRAM_FLOOR)
 				continue;
-			note_memory(&mp, i);
+			note_memory(&mp, i, host_read);
 			return i;
 		}
 	}
@@ -249,7 +271,7 @@ static int ensure(struct buf *b, VkDeviceSize size)
 	VkMemoryRequirements mr;
 	vkGetBufferMemoryRequirements(g.dev, b->b, &mr);
 	uint32_t mt = memtype(mr.memoryTypeBits,
-			      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+			      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, 0);
 	if (mt == UINT32_MAX) FAIL("no host-visible memory type", 0);
 	VkMemoryAllocateInfo ai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
 				    .allocationSize = mr.size, .memoryTypeIndex = mt };
@@ -530,7 +552,8 @@ int xmx_res_init(const char *gemm_spv, const char *unary_spv, const char *row_sp
 	return 0;
 }
 
-int xmx_buf_create(unsigned long long bytes)
+/* `host_read` marks a buffer the host reads back — the head, and nothing else so far. */
+int xmx_buf_create_kind(unsigned long long bytes, int host_read)
 {
 	if (!g.rready) FAIL("resident runtime not initialised", 0);
 	int id = -1;
@@ -548,30 +571,33 @@ int xmx_buf_create(unsigned long long bytes)
 	vkGetBufferMemoryRequirements(g.dev, rb->b, &mr);
 	const char *failure = "no host-visible memory type";
 	uint32_t mt = memtype(mr.memoryTypeBits,
-			      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-	if (mt == UINT32_MAX) goto failed;
+			      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+			      | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, host_read);
+	if (mt == UINT32_MAX) goto failed_kind;
 	VkMemoryAllocateFlagsInfo fl = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO,
 					 .flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT };
 	VkMemoryAllocateInfo ai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = &fl,
 				    .allocationSize = mr.size, .memoryTypeIndex = mt };
 	failure = "vkAllocateMemory (resident)";
-	if ((r = vkAllocateMemory(g.dev, &ai, NULL, &rb->m))) goto failed;
+	if ((r = vkAllocateMemory(g.dev, &ai, NULL, &rb->m))) goto failed_kind;
 	failure = "vkBindBufferMemory (resident)";
-	if ((r = vkBindBufferMemory(g.dev, rb->b, rb->m, 0))) goto failed;
+	if ((r = vkBindBufferMemory(g.dev, rb->b, rb->m, 0))) goto failed_kind;
 	failure = "vkMapMemory (resident)";
-	if ((r = vkMapMemory(g.dev, rb->m, 0, VK_WHOLE_SIZE, 0, &rb->p))) goto failed;
+	if ((r = vkMapMemory(g.dev, rb->m, 0, VK_WHOLE_SIZE, 0, &rb->p))) goto failed_kind;
 	VkBufferDeviceAddressInfo ai2 = { .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = rb->b };
 	rb->addr = vkGetBufferDeviceAddress(g.dev, &ai2);
 	rb->size = bi.size;
 	rb->live = 1;
 	return id;
-failed:
+failed_kind:
 	if (rb->p) vkUnmapMemory(g.dev, rb->m);
 	if (rb->b) vkDestroyBuffer(g.dev, rb->b, NULL);
 	if (rb->m) vkFreeMemory(g.dev, rb->m, NULL);
 	*rb = (struct rbuf){ 0 };
 	FAIL(failure, r);
 }
+
+int xmx_buf_create(unsigned long long bytes) { return xmx_buf_create_kind(bytes, 0); }
 
 unsigned long long xmx_buf_total_bytes(void)
 {

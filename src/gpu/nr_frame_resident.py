@@ -121,11 +121,14 @@ class ResidentFrame:
         return self._edges[rounded]
 
     def buffer(self, name, elements, dtype=np.float32):
+        # `head` is the one buffer that travels the other way: the device writes it once and
+        # the host reads four of every sixteen floats out of it, which is a strided read and
+        # wants cached memory. Every other buffer here is read by the device, many times.
         existing = self._buffers.get(name)
         if existing is None or existing.nbytes < elements * np.dtype(dtype).itemsize:
             if existing is not None:
                 existing.free()
-            existing = self.rt.buffer(elements, dtype)
+            existing = self.rt.buffer(elements, dtype, host_read=name == "head")
             self._buffers[name] = existing
         return existing
 
