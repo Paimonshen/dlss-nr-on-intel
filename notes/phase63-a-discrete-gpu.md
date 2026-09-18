@@ -142,6 +142,35 @@ Still their measurement to make. What the hypothesis predicts, if they pull this
 time drops by roughly the head's size over PCIe read speed, and what remains scales with the
 extent again rather than sitting flat.
 
+## What a discrete card still pays, after both fixes
+
+Enumerated from the code rather than guessed at, because the next question was "is that
+everything?" and the honest answer is no — it is the largest of several.
+
+- **The weights cross the bus again on every extent change.** `ResidentFrame` owns them, and
+  a new render scale or window size builds a new frame: ~292 MB written across PCIe before
+  the first frame at that extent. The weights do not depend on the extent, so this is
+  avoidable — a weight cache outliving the frame — but it is a refactor of who owns and frees
+  them, and it is invisible here, where the same upload is a memcpy. Measure steady state,
+  not the frame after a knob moves.
+- **The features cross it every frame.** Sixteen float32 channels per output pixel, ~15 MB
+  at 1024x768, written into card memory. Structural: the input has to get there. Halving it
+  is possible (the network reads them as half anyway) and has never been worth doing here.
+- **The link itself.** A card in a x4 slot, or on PCIe 3.0, doubles every cost above. That
+  is `LnkSta` in `lspci -vv`, not something the code can see.
+- **Without resizable BAR both fixes are inert**, by design: the 1 GiB floor sends the card
+  back to system memory rather than failing to allocate in a 256 MB window.
+- **The kernel's block sizes were tuned on this iGPU** — 16x32, register-bound (`phase26`) on
+  64 XMX engines. A card with several times the engines may want a different tile, and that
+  is not an environment variable: `XMX_TILE_M`/`XMX_TILE_N` have to match the `-DRM`/`-DRN`
+  the SPIR-V was built with, so it is a shader rebuild. Also unmeasured: at a 512x288 network
+  extent a large GPU may simply be starved, which would make *bigger* extents scale better
+  there than here. A prediction, and theirs to test.
+
+`src/gpu/bench.py`'s own result buffer is now marked `host_read` as well — the benchmark
+they will measure with was reading `C` back uncached, which would have understated exactly
+the card this is all about.
+
 ## Still open
 
 - **The `-4` itself.** A 50x slowdown makes a submission long enough to hit the driver's

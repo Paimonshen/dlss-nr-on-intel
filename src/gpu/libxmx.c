@@ -259,7 +259,10 @@ int xmx_specialize(unsigned mask)
 unsigned xmx_specialized_count(void) { return specialized_count; }
 unsigned xmx_specialization(void) { return g.specialize; }
 
-static int ensure(struct buf *b, VkDeviceSize size)
+/* `host_read` as in `xmx_buf_create_kind`: C is the result the host reads back, A and B are
+ * operands it only writes. The plain GEMM path is the benchmark's path, so getting this
+ * wrong would mis-measure the very card the rule above exists for. */
+static int ensure(struct buf *b, VkDeviceSize size, int host_read)
 {
 	if (b->cap >= size)
 		return 0;
@@ -271,7 +274,8 @@ static int ensure(struct buf *b, VkDeviceSize size)
 	VkMemoryRequirements mr;
 	vkGetBufferMemoryRequirements(g.dev, b->b, &mr);
 	uint32_t mt = memtype(mr.memoryTypeBits,
-			      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, 0);
+			      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+			      | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, host_read);
 	if (mt == UINT32_MAX) FAIL("no host-visible memory type", 0);
 	VkMemoryAllocateInfo ai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
 				    .allocationSize = mr.size, .memoryTypeIndex = mt };
@@ -385,8 +389,8 @@ int xmx_init(const char *spv_path)
 int xmx_reserve(unsigned M, unsigned N, unsigned K, void **pa, void **pb, void **pc)
 {
 	if (!g.ready) FAIL("not initialised", 0);
-	if (ensure(&g.A, (VkDeviceSize)M * K * 2) || ensure(&g.B, (VkDeviceSize)K * N * 2)
-	    || ensure(&g.C, (VkDeviceSize)M * N * 4))
+	if (ensure(&g.A, (VkDeviceSize)M * K * 2, 0) || ensure(&g.B, (VkDeviceSize)K * N * 2, 0)
+	    || ensure(&g.C, (VkDeviceSize)M * N * 4, 1))
 		return -1;
 	if (pa) *pa = g.A.p;
 	if (pb) *pb = g.B.p;
@@ -400,7 +404,7 @@ int xmx_gemm(unsigned M, unsigned N, unsigned K, const void *a, const void *b, v
 {
 	if (!g.ready) FAIL("not initialised", 0);
 	VkDeviceSize sa = (VkDeviceSize)M * K * 2, sb = (VkDeviceSize)K * N * 2, sc = (VkDeviceSize)M * N * 4;
-	if (ensure(&g.A, sa) || ensure(&g.B, sb) || ensure(&g.C, sc))
+	if (ensure(&g.A, sa, 0) || ensure(&g.B, sb, 0) || ensure(&g.C, sc, 1))
 		return -1;
 	VkDescriptorBufferInfo dbi[3] = { { g.A.b, 0, sa }, { g.B.b, 0, sb }, { g.C.b, 0, sc } };
 	VkWriteDescriptorSet w[3];
@@ -461,7 +465,7 @@ int xmx_reserve_bytes(unsigned long long a, unsigned long long b, unsigned long 
 		      void **pa, void **pb, void **pc)
 {
 	if (!g.ready) FAIL("not initialised", 0);
-	if (ensure(&g.A, a) || ensure(&g.B, b) || ensure(&g.C, c))
+	if (ensure(&g.A, a, 0) || ensure(&g.B, b, 0) || ensure(&g.C, c, 1))
 		return -1;
 	if (pa) *pa = g.A.p;
 	if (pb) *pb = g.B.p;
