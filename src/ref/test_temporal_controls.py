@@ -21,8 +21,36 @@ def check(name, ok, detail=""):
         FAILURES.append(name)
 
 
+def scene(seed, level):
+    """A stand-in frame: structure at four scales, so panning it moves detail rather than
+    flat colour, and `level` sets how bright the scene is so two of them make a cut.
+
+    The pictures this was written against are game screenshots in `pngs/`, which is not in
+    the repository and must not be — they are somebody else's. On the machine that has them
+    they are still used; everywhere else the test runs on these.
+    """
+    height, width = 320, 512
+    rng = np.random.default_rng(seed)
+    image = np.zeros((height, width, 3), np.float32)
+    for cells, weight in ((4, 0.55), (16, 0.25), (64, 0.15), (160, 0.05)):
+        coarse = rng.random((cells, cells, 3)).astype(np.float32)
+        grown = np.repeat(np.repeat(coarse, -(-height // cells), axis=0),
+                          -(-width // cells), axis=1)
+        image += weight * grown[:height, :width]
+    return np.clip(image * level, 0, 1)
+
+
+def frame(name, seed, level):
+    local = ROOT / "pngs" / name
+    return image_io.load(str(local)) if local.exists() else scene(seed, level)
+
+
 def main():
-    source = image_io.load(str(ROOT / "pngs" / "Cyberpunk-2077_02.jpg"))
+    if not nr_frame.WEIGHTS.exists():
+        print(f"temporal controls: skipped (no logical weights at "
+              f"{nr_frame.WEIGHTS.name}) — a skip is not a pass")
+        return 0
+    source = frame("Cyberpunk-2077_02.jpg", seed=2, level=0.9)
     frames, motions = nr_temporal.pan_sequence(source, shift=(6, 0), size=(192, 192), frames=4)
     model = nr_frame.ResidentBackend()
     nr_temporal.install_gpu_history(model.runtime)
@@ -34,7 +62,7 @@ def main():
 
     # One transition, not two: the first half pans across one scene and the second
     # half across another, so there is exactly one luma step to find.
-    other = image_io.load(str(ROOT / "pngs" / "Cyberpunk-2077_01.jpg"))
+    other = frame("Cyberpunk-2077_01.jpg", seed=1, level=0.45)
     second, _ = nr_temporal.pan_sequence(other, shift=(6, 0), size=(192, 192), frames=2)
     cut_frames = frames[:2] + second
     luma_step = float(np.abs(cut_frames[2].mean(axis=2) - cut_frames[1].mean(axis=2)).mean())

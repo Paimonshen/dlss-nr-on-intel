@@ -84,7 +84,7 @@ That is stated here rather than left to be noticed, because it changes how you s
 everything else. What it means in practice:
 
 - **Nothing is asserted that was not measured.** Every number in the notes has a program
-  behind it in `src/bench/`, and `make test` is around 180 checks, including the native
+  behind it in `src/bench/`, and `make test` is around 190 checks, including the native
   passes against the NumPy they replace byte for byte.
 - **The wrong turns are in the notes too**, deliberately. A hypothesis about shared-memory
   bank conflicts that measured 1.11x instead of the textbook 32x. A "driver bug" that
@@ -126,6 +126,8 @@ already have. See [Build](#build).
   This is written from one owner's report and tested by forcing the same path on the
   integrated GPU; it has not been measured on a discrete card.
 - Linux. Python 3 with NumPy. A C compiler, `glslangValidator`, the Vulkan loader.
+- **ImageMagick** for the still-frame tools, which read and write pictures through
+  `magick`. The game path does not touch it.
 - About 2.3 GiB of memory for the device buffers at 720p — it shares system RAM.
 - OpenCV is optional and worth having: it is the fast path for the blur that moving
   `detail_strength` or `colour_strength` needs — 32 ms against 110 at 854x480
@@ -164,7 +166,7 @@ it on the machine that runs it rather than copying it. Everything still works wi
 `NR_HOST_NATIVE=0` selects the NumPy path for a paired measurement.
 
 ```sh
-make test                                        # 180-odd checks
+make test                                        # 190-odd checks, fewer without weights
 python3 src/ref/nr_frame.py IN.png OUT.png --resident   # one still, no game
 ```
 
@@ -199,7 +201,7 @@ run it again. Leave out `NR_LIVE=1` for photo mode. For a native Vulkan game,
 | `NR_LAYER_TRIGGER` | the file that means "do it". **Required for the toggle** — without it, live mode captures every frame whether the effect is on or not. The tools use `/tmp/nr_trigger` |
 | `NR_LAYER_LIVE=N` | live mode: every Nth present goes through the network |
 | `NR_LAYER_UI_MASK=1` | mark pixels that held still and leave them as the game drew them |
-| `NR_LAYER_SYNC=semaphore` | wait on the present's own semaphores instead of draining the queue twice a frame. Faster and more correct in principle, and experimental in practice: tested on a headless swapchain here, not yet in a game |
+| `NR_LAYER_SYNC=semaphore` | wait on the present's own semaphores instead of draining the queue twice a frame — **for discrete cards, and still experimental**, see below |
 
 **If your frame rate drops as soon as the game starts and the daemon's log shows no frames**,
 one of the first four is missing or wrong: the layer is capturing and has nowhere to send it.
@@ -423,6 +425,17 @@ should not happen any more, so report it. Each frame line then ends with
 dominate, the traffic is the problem; if the middle one does, the graph is. `XMX_STAGING=1`
 and `=0` force the two memory paths for a comparison.
 
+**You have a discrete card and want to help.** `NR_LAYER_SYNC=semaphore` is the reason that
+switch exists. By default the layer drains the whole queue twice per present to know the
+frame is finished — a sledgehammer that also ignores the semaphores the present brought, so a
+game that renders on one queue and presents from another can hand over an unfinished image.
+The semaphore path does it properly. On the integrated chip this was built on it measures
+**exactly the same** — 210 ms a frame either way in Tekken 7 — because the game's own work is
+nothing beside the network. On a card fast enough for the game to matter, it should be the
+difference; nobody has measured that yet. It is tested here on a headless swapchain and in
+two games (D3D11 and D3D9 under DXVK), which is why it is a switch rather than the default.
+Turn it on, play, and say whether anything tore, stalled or looked stale.
+
 **The interface is being re-rendered.** `NR_LAYER_UI_MASK=1` marks pixels that did not
 move between two presents and gives them back byte-identical. It drops itself when it
 would cover more than 55 % of the frame, because that is the scene holding still rather
@@ -450,7 +463,7 @@ work/         builds, checkouts and your weights. Ignored, and stays that way.
 make test
 ```
 
-Around 180 checks, including the layer's wire protocol, the native host passes
+Around 190 checks, including the layer's wire protocol, the native host passes
 against the NumPy they replace byte for byte, the interface mask down to the
 byte, the temporal path against MLX-DLSS's own composition, and the panel driven through
 a pseudo-terminal. This page is checked too: the knob and frame-time tables are generated

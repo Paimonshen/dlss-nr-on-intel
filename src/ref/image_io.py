@@ -14,18 +14,32 @@ from pathlib import Path
 import numpy as np
 
 
+def _magick():
+    """ImageMagick, or a sentence saying so.
+
+    Every picture in and out of this project goes through `magick`, and a missing binary
+    otherwise surfaces as a CalledProcessError from a subprocess nobody expected.
+    """
+    import shutil
+    if shutil.which("magick") is None:
+        raise RuntimeError("ImageMagick is needed to read and write images: install it "
+                           "(Arch: `pacman -S imagemagick`). The game path does not need "
+                           "it; the still-frame tools do.")
+    return "magick"
+
+
 def load(path, size=None):
     """-> (H, W, 3) float32 in [0,1]."""
     with tempfile.TemporaryDirectory() as temporary:
         d = Path(temporary)
-        args = ["magick", str(path)]
+        args = [_magick(), str(path)]
         if size:
             args += ["-resize", "%dx%d!" % (size[1], size[0])]
         args += ["-depth", "8", str(d / "o.rgb")]
         subprocess.run(args, check=True, capture_output=True)
         raw = np.frombuffer((d / "o.rgb").read_bytes(), dtype=np.uint8)
         if size is None:
-            probe = subprocess.run(["magick", "identify", "-format", "%w %h", str(path)],
+            probe = subprocess.run([_magick(), "identify", "-format", "%w %h", str(path)],
                                    check=True, capture_output=True, text=True)
             width, height = (int(value) for value in probe.stdout.split()[:2])
             size = (height, width)
@@ -42,7 +56,7 @@ def save(arr, path):
     with tempfile.TemporaryDirectory() as temporary:
         d = Path(temporary)
         (d / "i.rgb").write_bytes((a * 255.0 + 0.5).astype(np.uint8).tobytes())
-        subprocess.run(["magick", "-size", "%dx%d" % (W, H), "-depth", "8",
+        subprocess.run([_magick(), "-size", "%dx%d" % (W, H), "-depth", "8",
                         "rgb:" + str(d / "i.rgb"), str(path)], check=True, capture_output=True)
     return path
 

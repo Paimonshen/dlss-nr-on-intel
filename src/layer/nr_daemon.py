@@ -733,6 +733,12 @@ def main():
     args.letterbox = Letterbox()
     args.meter = Meter() if args.meter else None
 
+    if not nr_frame.WEIGHTS.exists():
+        # The first thing a new clone hits, and a traceback is a poor way to say it.
+        raise SystemExit(
+            f"no weights at {nr_frame.WEIGHTS}.\n"
+            "They are NVIDIA's and are not distributed here: extract them from your own "
+            "copy of nvngx_dlssnr.dll as the README's Build section describes.")
     started = time.perf_counter()
     backend = nr_frame.ResidentBackend()
     # which GPU, because the library takes the first Vulkan device and a machine can

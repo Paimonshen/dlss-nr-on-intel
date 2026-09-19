@@ -52,6 +52,11 @@
  * Default `idle` until somebody has run `semaphore` through a real game on both a discrete
  * card and this iGPU. One environment variable either way. */
 #define SYNC_SLOTS 4
+/* How many of a present's wait semaphores this layer is prepared to take over. Taking
+ * *some* of them is not an option: the ones left behind would stay signalled with nothing
+ * left to consume them, since the present is redirected onto ours. A present that brings
+ * more than this keeps all of its own and is handled the old way. */
+#define NR_MAX_WAITS 16
 static int sync_semaphores;
 
 struct device_data {
@@ -87,6 +92,7 @@ struct device_data {
 	const VkSemaphore *present_wait;
 	uint32_t present_wait_count;
 	VkSemaphore present_signal;
+	int present_plain;                     /* this present keeps its own semaphores */
 	int have_earlier;
 	unsigned char *outgoing;        /* colour followed by the mask, for one send */
 	VkDeviceSize outgoing_size;
@@ -669,7 +675,7 @@ static int transfer(struct device_data *data, struct swapchain_data *chain, VkQu
 	PFN_vkFreeCommandBuffers free_commands = (PFN_vkFreeCommandBuffers)
 		data->get_device_proc(data->device, "vkFreeCommandBuffers");
 
-	int ringed = sync_semaphores && ensure_ring(data) == 0;
+	int ringed = sync_semaphores && !data->present_plain && ensure_ring(data) == 0;
 	unsigned slot = data->ring_next % SYNC_SLOTS;
 	VkCommandBuffer commands;
 	if (ringed) {
@@ -744,26 +750,37 @@ static int transfer(struct device_data *data, struct swapchain_data *chain, VkQu
 
 	/* The first submit of a present inherits the semaphores the game gave the present,
 	 * so this copy happens after the frame is drawn rather than after the queue is
-	 * empty. Every submit signals its slot, and the present is redirected onto the last
-	 * one, so the game's own image is not read or written under it. */
-	VkPipelineStageFlags stages[8];
+	 * empty.
+	 *
+	 * Only the write-back signals. A binary semaphore may not be signalled while it is
+	 * already signalled, and nothing waits on a readback's: the host waits on its fence
+	 * here, so by the time anything else runs that copy is finished and a semaphore
+	 * would only be a signal nobody consumes — left standing until the ring came round
+	 * and signalled it a second time, which is exactly what the spec forbids
+	 * (`VUID-vkQueueSubmit-pSignalSemaphores-00067`). Drivers let it pass in silence,
+	 * which is worse rather than better: three games and a headless test had nothing to
+	 * say about it. */
+	VkSemaphore signal = to_image ? data->ring_done[slot] : VK_NULL_HANDLE;
+	VkPipelineStageFlags stages[NR_MAX_WAITS];
 	uint32_t waits = data->present_wait_count;
-	if (waits > 8) waits = 8;
 	for (uint32_t i = 0; i < waits; i++) stages[i] = VK_PIPELINE_STAGE_TRANSFER_BIT;
 	VkSubmitInfo submission = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
 				    .waitSemaphoreCount = waits,
 				    .pWaitSemaphores = waits ? data->present_wait : NULL,
 				    .pWaitDstStageMask = waits ? stages : NULL,
 				    .commandBufferCount = 1, .pCommandBuffers = &commands,
-				    .signalSemaphoreCount = 1,
-				    .pSignalSemaphores = &data->ring_done[slot] };
+				    .signalSemaphoreCount = signal ? 1 : 0,
+				    .pSignalSemaphores = signal ? &signal : NULL };
 	if (submit(queue, 1, &submission, data->ring_fence[slot]) != VK_SUCCESS) {
 		data->ring_used[slot] = 0;
 		return -1;
 	}
 	data->ring_used[slot] = 1;
 	data->present_wait_count = 0;          /* consumed; the present must not wait again */
-	data->present_signal = data->ring_done[slot];
+	/* A present with nothing to wait on is correct when only the readback ran: its fence
+	 * is waited below, so the copy — and the game's own drawing, which it waited on — are
+	 * finished before the present is even called. */
+	if (signal) data->present_signal = signal;
 	if (!to_image) {
 		/* Only this direction stalls the host, and only on its own work: the pixels
 		 * are about to be read out of the staging buffer. */
@@ -916,8 +933,10 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
 
 	/* Offered, not yet taken: a transfer claims them, and if none runs this present goes
 	 * through untouched with its own. */
+	data->present_plain = info->waitSemaphoreCount > NR_MAX_WAITS;
 	data->present_wait = info->pWaitSemaphores;
-	data->present_wait_count = sync_semaphores ? info->waitSemaphoreCount : 0;
+	data->present_wait_count = (sync_semaphores && !data->present_plain)
+		? info->waitSemaphoreCount : 0;
 	data->present_signal = VK_NULL_HANDLE;
 
 	/* Live mode is a slideshow rather than a photo: every Nth present goes through the

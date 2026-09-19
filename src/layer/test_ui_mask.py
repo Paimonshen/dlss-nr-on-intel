@@ -12,6 +12,7 @@ import numpy as np
 import nr_daemon
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
+WEIGHTS = ROOT / "work" / "mlxw" / "dlssnr-logical.safetensors"
 MAGIC, MAGIC_MASKED = 0x304E524E, 0x314E524E
 FORMAT_B8G8R8A8 = 44
 SOCKET = "/tmp/nr_ui_mask_test.sock"
@@ -79,6 +80,10 @@ def strength_test(payload, colour, mask, interior):
 
 
 def main():
+    if not WEIGHTS.exists():
+        print(f"{pathlib.Path(__file__).stem}: skipped (no logical weights at "
+              f"{WEIGHTS.name}) — a skip is not a pass")
+        return 0
     pathlib.Path(SOCKET).unlink(missing_ok=True)
     daemon = subprocess.Popen([sys.executable, str(ROOT / "src" / "layer" / "nr_daemon.py"),
                                # The mask contract is about one frame. With the temporal

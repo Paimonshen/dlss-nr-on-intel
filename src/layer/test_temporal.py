@@ -17,6 +17,7 @@ import numpy as np
 import nr_daemon
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
+WEIGHTS = ROOT / "work" / "mlxw" / "dlssnr-logical.safetensors"
 sys.path.insert(0, str(ROOT / "src" / "ref"))
 import nr_frame  # noqa: E402
 
@@ -269,6 +270,10 @@ def daemon_checks():
 
 
 def main():
+    if not WEIGHTS.exists():
+        print(f"{pathlib.Path(__file__).stem}: skipped (no logical weights at "
+              f"{WEIGHTS.name}) — a skip is not a pass")
+        return 0
     reference_checks()
     holder_checks()
     daemon_checks()
