@@ -24,6 +24,7 @@ import json
 import math
 import os
 import pathlib
+import re
 import socket
 import stat
 import struct
@@ -499,6 +500,22 @@ DEVICE_LOST = (
     "render scale and the game's window size, and look for a hang or reset in `sudo dmesg`.")
 
 
+# Vulkan says what went wrong as a number, and the person playing sees only a frame that did
+# not change. These are the two a knob can cause.
+FAILURES = {
+    -1: ("  — out of host memory. The daemon and the game share one pool on an integrated "
+         "GPU: lower the render scale, or the game's resolution."),
+    -2: ("  — the buffers for this extent do not fit in the GPU's memory. Lower the render "
+         "scale, or the game's resolution; the cost follows the extent."),
+}
+
+
+def explain(error):
+    """A sentence for the failures a player can do something about."""
+    code = re.search(r"\((-\d+)\)\s*$", str(error))
+    return FAILURES.get(int(code.group(1)), "") if code else ""
+
+
 def serve(server, backend, args):
     """Answer frames until interrupted, or until the GPU is gone.
 
@@ -516,7 +533,8 @@ def serve(server, backend, args):
             print(DEVICE_LOST.format(error=error), flush=True)
             raise SystemExit(1) from error
         except (EOFError, OSError, ValueError, RuntimeError) as error:
-            print(f"frame rejected/failed; game keeps original: {error}", flush=True)
+            print(f"frame rejected/failed; game keeps original: {error}{explain(error)}",
+                  flush=True)
         finally:
             connection.close()
 

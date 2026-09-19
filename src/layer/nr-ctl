@@ -64,6 +64,9 @@ def _opencv():
         return False
 
 
+FIELDS_EXTENT = __import__("re").compile(r"^\d+x\d+ ")
+
+
 def status():
     values = read()
     print("  daemon    %s  (%s)" % ("listening" if alive() else "not answering", SOCKET))
@@ -84,6 +87,40 @@ def status():
             note = "   off — the model's own gate alone" if not float(shown) else \
                    "   pixels the game did not move are held still"
         print("    %-16s %s%s" % (knob, shown, note))
+
+
+def report(lines=8):
+    """Everything a bug report needs, in one paste.
+
+    Somebody whose frames quietly stop being processed sees a game that looks normal and a
+    log they have no reason to know about. This is the command to ask them for: what is
+    running, on which GPU, with which knobs, and what the daemon said about the last frames
+    — including the ones it refused.
+    """
+    import subprocess
+    here = pathlib.Path(__file__).resolve().parents[2]
+    version = subprocess.run(["git", "-C", str(here), "log", "--format=%h %cs", "-1"],
+                             capture_output=True, text=True)
+    print("  version   %s" % (version.stdout.strip() or "not a git clone"))
+    status()
+    log = nr_paths.LOG
+    if not log.exists():
+        print("  log       %s — nothing yet; the daemon writes it when started by these tools"
+              % log)
+        return
+    text = log.read_text(errors="replace").splitlines()
+    device = [l for l in text if l.startswith(("model ready", "buffers in"))]
+    frames = [l for l in text if FIELDS_EXTENT.match(l)]
+    refused = [l for l in text if "rejected/failed" in l or "GPU lost" in l]
+    print("  log       %s  (%d frames, %d refused)" % (log, len(frames), len(refused)))
+    for line in device[-2:]:
+        print("    %s" % line[:110])
+    for line in frames[-lines:]:
+        print("    %s" % line[:110])
+    if refused:
+        print("  refused, most recent last:")
+        for line in refused[-3:]:
+            print("    %s" % line[:160])
 
 
 def apply(knob, value):
@@ -168,6 +205,8 @@ def command(words):
             print("  %s <value>" % head)
         else:
             apply(head, rest[0])
+    elif head in ("report", "bug"):
+        report()
     elif head in ("rates", "fps"):
         print("  measured end to end, whole round trip (%s):\n" % nr_knobs.RATES_MEASURED)
         print("    %-14s %8s %9s %8s" % ("swapchain", "scale", "ms", "fps"))
@@ -181,7 +220,7 @@ def command(words):
         if rest:
             explain(ALIAS.get(rest[0], rest[0]))
         else:
-            print("  on | off | status | rates | set <knob> <value> | help <knob> | q")
+            print("  on | off | status | report | rates | set <knob> <value> | help <knob> | q")
             print("  shorthand: p <profile>, i <n>, d <n>, c <n>, s <scale>, t <0-1>")
             print("  knobs: %s" % ", ".join(KNOBS))
             print("  `help <knob>` says what one actually does, and what it costs.")

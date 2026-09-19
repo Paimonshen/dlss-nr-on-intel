@@ -240,7 +240,14 @@ src/layer/nr-ctl off                   hand the game back
 src/layer/nr-ctl set scale 0.5
 src/layer/nr-ctl help colour_strength  what a knob actually does
 src/layer/nr-ctl rates                 measured frame times by extent and scale
+src/layer/nr-ctl report                everything a bug report needs, in one paste
 ```
+
+`report` is the one to run when the picture stops changing and you cannot tell why: it
+prints the version, whether the daemon is listening, which GPU it took and where its buffers
+went, every knob, the last frames with the time split, and — the part nobody thinks to look
+for — the frames the daemon **refused**. A frame that fails is invisible while you play: the
+game simply shows its own picture.
 
 ### `nr-toggle` — on and off, from a key
 
@@ -379,6 +386,12 @@ several of the answers are counter-intuitive. `notes/HANDOFF.md` is the current 
 traps.
 
 ## Troubleshooting
+
+**The picture stops changing, and nothing looks broken.** Run `src/layer/nr-ctl report`.
+A failing frame does not announce itself — the daemon writes a line and the game keeps its
+own picture — so the two things to look at are the refused count and the last frames. Raising
+the render scale is the usual cause: the buffers for a large extent may not fit, and then
+every frame is refused with `(-2)`.
 
 **"no daemon" / nothing happens.** `src/layer/nr-ctl status` says whether the daemon is
 listening and whether the effect is on. They are independent: the trigger can be up with

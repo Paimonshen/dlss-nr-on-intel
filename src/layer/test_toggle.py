@@ -107,6 +107,33 @@ def agreement_checks(toggle, paths):
           f"missing: {sorted(missing)}" if missing else ", ".join(sorted(knobs)))
 
 
+def report_checks(control, paths, scratch):
+    """`nr-ctl report` is what a stranger is asked to paste when frames stop being
+    processed. It has to hold together when there is no daemon, no log and no git."""
+    import contextlib, io
+    log = pathlib.Path(scratch) / "daemon.log"
+    paths.LOG = control.nr_paths.LOG = log
+    spoken = io.StringIO()
+    with contextlib.redirect_stdout(spoken):
+        control.report()
+    check("report survives a machine with nothing running", "log" in spoken.getvalue(),
+          "no daemon, no log")
+    log.write_text(
+        "model ready in 0.4s on Intel(R) Graphics (LNL)\n"
+        "buffers in shared memory (one pool): type 2, heap 11.5 GiB\n"
+        "1280x720 B8G8R8A8_UNORM in 0.21s  change 0.03  gpu 1+176+1ms\n"
+        "frame rejected/failed; game keeps original: xmx_buf_create: "
+        "vkAllocateMemory (resident) (-2)  — the buffers for this extent do not fit\n")
+    spoken = io.StringIO()
+    with contextlib.redirect_stdout(spoken):
+        control.report()
+    said = spoken.getvalue()
+    check("report carries the GPU, a frame and the refusal",
+          "Intel(R) Graphics" in said and "gpu 1+176+1ms" in said and "(-2)" in said
+          and "1 refused" in said,
+          "the four things a bug report is asked for")
+
+
 def manual_checks():
     """The documentation says what the programs do, and points at files that exist."""
     got = subprocess.run([sys.executable, str(ROOT / "src" / "tools" / "knob_doc.py"),
@@ -184,6 +211,7 @@ def main():
         launcher_checks(toggle, scratch)
         flip_checks(toggle, paths)
         agreement_checks(toggle, paths)
+        report_checks(load(ROOT / "src" / "layer" / "nr-ctl", "nr_ctl_report"), paths, scratch)
         manual_checks()
         probe_checks(daemon)
     if FAILURES:
