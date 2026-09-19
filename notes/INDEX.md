@@ -103,6 +103,7 @@ disproved.
 | `phase63-a-discrete-gpu.md` | the first report from other hardware: an Arc B580 runs 50x slower than this iGPU because `memtype()` preferred host-cached memory, which on a discrete card is system RAM; and a benchmark that never checked its calls printed 495 TFLOP/s for a dispatch that failed |
 | `phase64-auditing-the-readme.md` | seven wrong claims on the published page, including a pinned commit that never existed and a frame-time table a third too slow; the rates table and the file references are now generated and checked |
 | `phase65-the-discrete-memory-path.md` | the graph's buffers no longer have to be addressable by the host, so a card without resizable BAR keeps its operands in its own memory; forced on this iGPU by `XMX_STAGING=1`, and the frame is bit-identical |
+| `phase66-the-present-has-a-test.md` | the present's own semaphores instead of a queue idle, behind `NR_LAYER_SYNC`; a headless swapchain makes the layer's copy out and back testable without a game, and the first run found `present_now` calling itself |
 | `phase30-control-atlas.md` | what each vendor slider does, and one that does nothing |
 
 ## Reviews

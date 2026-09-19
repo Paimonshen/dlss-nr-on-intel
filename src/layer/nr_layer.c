@@ -37,6 +37,23 @@
 #define MAX_SWAPCHAINS 8
 #define MAX_IMAGES 8
 
+/* How the layer knows the game's frame is finished, and the game knows ours is.
+ *
+ * `idle` is what this started as: `vkQueueWaitIdle` around the transfer, which is a
+ * sledgehammer — it waits for everything the game has submitted, not for the one copy we
+ * care about, and it ignores the present's own semaphores entirely, so a game that renders
+ * on one queue and presents on another can hand over an unfinished image. It was written
+ * for a photo mode, where the stall is the point.
+ *
+ * `semaphore` is the proper route the comment on `transfer` has asked for since: our submit
+ * waits on the present's semaphores, the present waits on ours instead, and only the
+ * readback — which the host has to look at — waits on a fence of its own.
+ *
+ * Default `idle` until somebody has run `semaphore` through a real game on both a discrete
+ * card and this iGPU. One environment variable either way. */
+#define SYNC_SLOTS 4
+static int sync_semaphores;
+
 struct device_data {
 	VkDevice device;
 	VkPhysicalDevice physical;
@@ -56,6 +73,20 @@ struct device_data {
 	 * game that never triggers pays nothing for this. */
 	unsigned char *earlier;
 	VkDeviceSize earlier_size;
+	/* Present-time synchronisation, when `NR_LAYER_SYNC=semaphore`. A ring, because the
+	 * write-back is never waited for: its command buffer, its fence and the semaphore it
+	 * signals all have to stay untouched until the present that consumes them is through.
+	 * Four is enough for any swapchain we have seen and costs three objects each. */
+	VkCommandBuffer ring_commands[SYNC_SLOTS];
+	VkFence ring_fence[SYNC_SLOTS];
+	VkSemaphore ring_done[SYNC_SLOTS];
+	int ring_used[SYNC_SLOTS];
+	unsigned ring_next;
+	int ring_ready;
+	/* what the present being handled has handed over, and what it must wait on instead */
+	const VkSemaphore *present_wait;
+	uint32_t present_wait_count;
+	VkSemaphore present_signal;
 	int have_earlier;
 	unsigned char *outgoing;        /* colour followed by the mask, for one send */
 	VkDeviceSize outgoing_size;
@@ -297,6 +328,8 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateInstance(const VkInstanceCreateInfo *inf
 		ui_mask = mask && strcmp(mask, "0") != 0;
 		const char *every = getenv("NR_LAYER_EVERY");
 		capture_every = every ? strtol(every, NULL, 10) : 0;
+		const char *sync = getenv("NR_LAYER_SYNC");
+		sync_semaphores = sync && !strcmp(sync, "semaphore");
 		const char *live = getenv("NR_LAYER_LIVE");
 		live_every = live ? strtol(live, NULL, 10) : 0;
 		if (live_every < 0) live_every = 0;
@@ -307,6 +340,9 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateInstance(const VkInstanceCreateInfo *inf
 		if (live_every > 0 && getenv("NR_LAYER_TRIGGER"))
 			fprintf(stderr, "[nr_layer] live runs while the trigger exists; "
 				"remove it to hand the game back\n");
+		if (sync_semaphores)
+			fprintf(stderr, "[nr_layer] sync: the present's own semaphores, not a "
+				"queue idle\n");
 		fprintf(stderr, "[nr_layer] active; socket=%s trigger=%s capture=%s every=%ld\n",
 			socket_path ? socket_path : "(none)",
 			trigger_path ? trigger_path : "(none)",
@@ -582,6 +618,35 @@ static int ensure_resources(struct device_data *data, VkDeviceSize needed)
 	return data->result ? 0 : -1;
 }
 
+static int ensure_ring(struct device_data *data)
+{
+	if (data->ring_ready) return 0;
+	if (!data->pool) return -1;
+	PFN_vkAllocateCommandBuffers allocate_commands = (PFN_vkAllocateCommandBuffers)
+		data->get_device_proc(data->device, "vkAllocateCommandBuffers");
+	PFN_vkCreateFence create_fence = (PFN_vkCreateFence)
+		data->get_device_proc(data->device, "vkCreateFence");
+	PFN_vkCreateSemaphore create_semaphore = (PFN_vkCreateSemaphore)
+		data->get_device_proc(data->device, "vkCreateSemaphore");
+	if (!allocate_commands || !create_fence || !create_semaphore) return -1;
+	VkCommandBufferAllocateInfo alloc = {
+		.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+		.commandPool = data->pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+		.commandBufferCount = SYNC_SLOTS };
+	if (allocate_commands(data->device, &alloc, data->ring_commands) != VK_SUCCESS)
+		return -1;
+	VkFenceCreateInfo fi = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+	VkSemaphoreCreateInfo si = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
+	for (int i = 0; i < SYNC_SLOTS; i++) {
+		if (create_fence(data->device, &fi, NULL, &data->ring_fence[i]) != VK_SUCCESS
+		    || create_semaphore(data->device, &si, NULL, &data->ring_done[i]) != VK_SUCCESS)
+			return -1;
+		data->ring_used[i] = 0;
+	}
+	data->ring_ready = 1;
+	return 0;
+}
+
 static int transfer(struct device_data *data, struct swapchain_data *chain, VkQueue queue,
 		    uint32_t index, int to_image)
 {
@@ -604,12 +669,31 @@ static int transfer(struct device_data *data, struct swapchain_data *chain, VkQu
 	PFN_vkFreeCommandBuffers free_commands = (PFN_vkFreeCommandBuffers)
 		data->get_device_proc(data->device, "vkFreeCommandBuffers");
 
+	int ringed = sync_semaphores && ensure_ring(data) == 0;
+	unsigned slot = data->ring_next % SYNC_SLOTS;
 	VkCommandBuffer commands;
-	VkCommandBufferAllocateInfo alloc = {
-		.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-		.commandPool = data->pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-		.commandBufferCount = 1 };
-	if (allocate_commands(data->device, &alloc, &commands) != VK_SUCCESS) return -1;
+	if (ringed) {
+		/* The slot comes back round; whatever it was doing four presents ago is over
+		 * by now, but saying so is the difference between reusing a command buffer and
+		 * overwriting one still in flight. */
+		if (data->ring_used[slot]) {
+			PFN_vkWaitForFences wait_fences = (PFN_vkWaitForFences)
+				data->get_device_proc(data->device, "vkWaitForFences");
+			PFN_vkResetFences reset_fences = (PFN_vkResetFences)
+				data->get_device_proc(data->device, "vkResetFences");
+			wait_fences(data->device, 1, &data->ring_fence[slot], VK_TRUE,
+				    10ull * 1000000000ull);
+			reset_fences(data->device, 1, &data->ring_fence[slot]);
+		}
+		commands = data->ring_commands[slot];
+		data->ring_next++;
+	} else {
+		VkCommandBufferAllocateInfo alloc = {
+			.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+			.commandPool = data->pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+			.commandBufferCount = 1 };
+		if (allocate_commands(data->device, &alloc, &commands) != VK_SUCCESS) return -1;
+	}
 	VkCommandBufferBeginInfo beginning = {
 		.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
 		.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT };
@@ -648,12 +732,47 @@ static int transfer(struct device_data *data, struct swapchain_data *chain, VkQu
 		VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, NULL, 0, NULL, 1, &back);
 	end(commands);
 
-	wait(queue);
+	if (!ringed) {
+		wait(queue);
+		VkSubmitInfo submission = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+					    .commandBufferCount = 1, .pCommandBuffers = &commands };
+		submit(queue, 1, &submission, VK_NULL_HANDLE);
+		wait(queue);
+		free_commands(data->device, data->pool, 1, &commands);
+		return 0;
+	}
+
+	/* The first submit of a present inherits the semaphores the game gave the present,
+	 * so this copy happens after the frame is drawn rather than after the queue is
+	 * empty. Every submit signals its slot, and the present is redirected onto the last
+	 * one, so the game's own image is not read or written under it. */
+	VkPipelineStageFlags stages[8];
+	uint32_t waits = data->present_wait_count;
+	if (waits > 8) waits = 8;
+	for (uint32_t i = 0; i < waits; i++) stages[i] = VK_PIPELINE_STAGE_TRANSFER_BIT;
 	VkSubmitInfo submission = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-				    .commandBufferCount = 1, .pCommandBuffers = &commands };
-	submit(queue, 1, &submission, VK_NULL_HANDLE);
-	wait(queue);
-	free_commands(data->device, data->pool, 1, &commands);
+				    .waitSemaphoreCount = waits,
+				    .pWaitSemaphores = waits ? data->present_wait : NULL,
+				    .pWaitDstStageMask = waits ? stages : NULL,
+				    .commandBufferCount = 1, .pCommandBuffers = &commands,
+				    .signalSemaphoreCount = 1,
+				    .pSignalSemaphores = &data->ring_done[slot] };
+	if (submit(queue, 1, &submission, data->ring_fence[slot]) != VK_SUCCESS) {
+		data->ring_used[slot] = 0;
+		return -1;
+	}
+	data->ring_used[slot] = 1;
+	data->present_wait_count = 0;          /* consumed; the present must not wait again */
+	data->present_signal = data->ring_done[slot];
+	if (!to_image) {
+		/* Only this direction stalls the host, and only on its own work: the pixels
+		 * are about to be read out of the staging buffer. */
+		PFN_vkWaitForFences wait_fences = (PFN_vkWaitForFences)
+			data->get_device_proc(data->device, "vkWaitForFences");
+		if (wait_fences(data->device, 1, &data->ring_fence[slot], VK_TRUE,
+				10ull * 1000000000ull) != VK_SUCCESS)
+			return -1;
+	}
 	return 0;
 }
 
@@ -748,6 +867,20 @@ static int process_frame(struct device_data *data, struct swapchain_data *chain,
 	return 0;
 }
 
+/* The present, with its waits replaced by ours if a transfer consumed them. A semaphore
+ * wait is a consume: having taken the game's, we must not hand them to the present as
+ * well, and the present must wait on the copy that took them. */
+static VkResult present_now(struct device_data *data, VkQueue queue,
+			    const VkPresentInfoKHR *info)
+{
+	if (!sync_semaphores || !data || !data->present_signal)
+		return data->present(queue, info);
+	VkPresentInfoKHR patched = *info;
+	patched.waitSemaphoreCount = 1;
+	patched.pWaitSemaphores = &data->present_signal;
+	return data->present(queue, &patched);
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
 						  const VkPresentInfoKHR *info)
 {
@@ -781,6 +914,12 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
 		for (int i = 0; i < 8; i++) if (devices[i].device) { data = &devices[i]; break; }
 	if (!data) return VK_ERROR_INITIALIZATION_FAILED;
 
+	/* Offered, not yet taken: a transfer claims them, and if none runs this present goes
+	 * through untouched with its own. */
+	data->present_wait = info->pWaitSemaphores;
+	data->present_wait_count = sync_semaphores ? info->waitSemaphoreCount : 0;
+	data->present_signal = VK_NULL_HANDLE;
+
 	/* Live mode is a slideshow rather than a photo: every Nth present goes through the
 	 * network and the frames between re-blit the last result, so the picture is steady
 	 * instead of alternating with the game's own. The trigger file is not consulted —
@@ -812,7 +951,7 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
 				transfer(data, chain, queue, index, 1);
 			}
 		}
-		return data->present(queue, info);
+		return present_now(data, queue, info);
 	}
 
 	/* A file is the trigger, not a key: it works the same on X11 and Wayland, needs
@@ -859,7 +998,7 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
 			data->have_earlier = 0;
 		}
 	}
-	return data->present(queue, info);
+	return present_now(data, queue, info);
 }
 
 #define INTERCEPT(name) if (!strcmp(pName, "vk" #name)) return (PFN_vkVoidFunction)nr_##name

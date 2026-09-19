@@ -199,6 +199,7 @@ run it again. Leave out `NR_LIVE=1` for photo mode. For a native Vulkan game,
 | `NR_LAYER_TRIGGER` | the file that means "do it". **Required for the toggle** — without it, live mode captures every frame whether the effect is on or not. The tools use `/tmp/nr_trigger` |
 | `NR_LAYER_LIVE=N` | live mode: every Nth present goes through the network |
 | `NR_LAYER_UI_MASK=1` | mark pixels that held still and leave them as the game drew them |
+| `NR_LAYER_SYNC=semaphore` | wait on the present's own semaphores instead of draining the queue twice a frame. Faster and more correct in principle, and experimental in practice: tested on a headless swapchain here, not yet in a game |
 
 **If your frame rate drops as soon as the game starts and the daemon's log shows no frames**,
 one of the first four is missing or wrong: the layer is capturing and has nowhere to send it.

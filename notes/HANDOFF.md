@@ -9,7 +9,29 @@ you need the evidence behind a line in this file, rather than reading them in or
 
 ---
 
-## Latest: the graph runs in memory the host cannot address (2026-09-19)
+## Latest: the present has a test, and `NR_LAYER_SYNC=semaphore` (2026-09-19, later)
+
+The layer's two `vkQueueWaitIdle` calls per present are now optional. `NR_LAYER_SYNC=semaphore`
+waits on the semaphores the present brought, signals one of a ring of four, and redirects the
+present onto it; only the readback stalls, on its own fence. **Default is still `idle`** until
+somebody runs the other one through a real game.
+
+**What matters more than the switch: the present path has a test at last.**
+`VK_EXT_headless_surface` gives a swapchain with no screen, so `src/layer/test_present.c` plus
+`test_present.py` drive real presents through the layer against a stand-in daemon and check
+both directions — what the game drew reaches the daemon, and what the daemon answered is in
+the image next time round. In `make test`, both sync modes, both memory modes.
+
+Its first run caught `present_now` calling itself, added an hour earlier: every application
+would have died on its first present. It also cost four experiments aimed at Mesa before the
+obvious check — **build the old code and run the new test against it** — put the blame back
+where it belonged. `notes/phase66`.
+
+The test does **not** prove the wait is load-bearing: removing the wait on the game's
+semaphores leaves every check passing, because on this machine the clear finishes long before
+the copy is submitted. That needs a game, or a card fast enough to lose the race.
+
+## The graph runs in memory the host cannot address (2026-09-19)
 
 The rest of the discrete-card answer. `phase63` put the operands in the card's memory; that
 still needed the card's memory to be *mappable*, and without resizable BAR the window is
