@@ -425,9 +425,11 @@ class Runtime:
         self.lib = _load()
         self.recorded = 0
         self.fuse_qk = os.environ.get("NR_FUSE_QK", "1") != "0"
+        self.batch_ffn = os.environ.get("NR_BATCH_FFN", "1") != "0"
 
     def graph_key(self):
-        return self.lib.xmx_specialization() | (int(self.fuse_qk) << 3)
+        return (self.lib.xmx_specialization() | (int(self.fuse_qk) << 3)
+                | (int(self.batch_ffn) << 4))
 
     @property
     def buffer_bytes(self):

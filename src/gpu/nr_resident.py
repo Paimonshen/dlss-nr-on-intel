@@ -264,6 +264,25 @@ class BlockScratch:
                 value.free()
 
 
+def _ffn_groups(runtime, a, b, c, rows, cols, inner, groups, *, leading, strides,
+                epilogue):
+    """Independent group products, with the same tiles and rounding in either mode.
+
+    Batch strides advance the group, row strides advance the pixel within that group.
+    In particular, a zero A batch stride broadcasts the branched FFN input; output
+    groups occupy disjoint column slices, not consecutive dense matrices.
+    """
+    if runtime.batch_ffn:
+        runtime.gemm(a, b, c, rows, cols, inner, batch=groups, strides=strides,
+                     leading=leading, epilogue=epilogue, narrow=True)
+    else:
+        with runtime.independent():
+            for group in range(groups):
+                runtime.gemm(a, b, c, rows, cols, inner, leading=leading,
+                             offsets=tuple(group * step for step in strides),
+                             epilogue=epilogue, narrow=True)
+
+
 def record_feed_forward(runtime, w, s, source, source_half=False):
     """The block's feed-forward, into `s.ffn`. Branched or plain, as the block is.
 
@@ -276,18 +295,12 @@ def record_feed_forward(runtime, w, s, source, source_half=False):
     if not source_half:
         runtime.to_half(source, s.value16, pixels * channels)
     if w.branched:
-        with runtime.independent():
-            for head in range(w.groups):
-                runtime.gemm(value16, w.expand, s.hidden16, pixels, 128, channels,
-                             leading=(0, 0, s.hidden_width),
-                             offsets=(0, head * channels * 128, head * 128),
-                             epilogue=xmxres.EPI_GATE_E4M3, narrow=True)
-        with runtime.independent():
-            for head in range(w.groups):
-                runtime.gemm(s.hidden16, w.branch, s.heads16, pixels, 32, 128,
-                             leading=(s.hidden_width, 0, channels),
-                             offsets=(head * 128, head * 128 * 32, head * 32),
-                             epilogue=xmxres.EPI_E4M3, narrow=True)
+        _ffn_groups(runtime, value16, w.expand, s.hidden16, pixels, 128, channels,
+                    w.groups, leading=(0, 0, s.hidden_width),
+                    strides=(0, channels * 128, 128), epilogue=xmxres.EPI_GATE_E4M3)
+        _ffn_groups(runtime, s.hidden16, w.branch, s.heads16, pixels, 32, 128,
+                    w.groups, leading=(s.hidden_width, 0, channels),
+                    strides=(128, 128 * 32, 32), epilogue=xmxres.EPI_E4M3)
         runtime.gemm(s.heads16, w.ffn_out, s.branch, pixels, channels, channels)
         # the fused multi-head kernels publish the residual before attention reads it,
         # which the residual now does on its way out
@@ -314,18 +327,12 @@ def record_split_feed_forward(runtime, w, s, source, source_half=False):
         runtime.to_half(source, s.value16, pixels * channels)
     runtime.gemm(value16, w.first, s.heads16, pixels, channels, channels,
                  epilogue=xmxres.EPI_E4M3, narrow=True)
-    with runtime.independent():
-        for group in range(groups):
-            runtime.gemm(s.heads16, w.expand, s.hidden16, pixels, 256, 64,
-                         leading=(channels, 0, wide),
-                         offsets=(group * 64, group * 64 * 256, group * 256),
-                         epilogue=xmxres.EPI_GATE, narrow=True)
-    with runtime.independent():
-        for group in range(groups):
-            runtime.gemm(s.hidden16, w.project, s.core16, pixels, 64, 256,
-                         leading=(wide, 0, channels),
-                         offsets=(group * 256, group * 256 * 64, group * 64),
-                         epilogue=xmxres.EPI_E4M3, narrow=True)
+    _ffn_groups(runtime, s.heads16, w.expand, s.hidden16, pixels, 256, 64,
+                groups, leading=(channels, 0, wide),
+                strides=(64, 64 * 256, 256), epilogue=xmxres.EPI_GATE)
+    _ffn_groups(runtime, s.hidden16, w.project, s.core16, pixels, 64, 256,
+                groups, leading=(wide, 0, channels),
+                strides=(256, 256 * 64, 64), epilogue=xmxres.EPI_E4M3)
     runtime.gemm(s.core16, w.weight3, s.branch, pixels, channels, channels)
     runtime.residual(s.branch, source, w.ffn_cos, s.ffn, pixels * channels, channels,
                      b_half=source_half)

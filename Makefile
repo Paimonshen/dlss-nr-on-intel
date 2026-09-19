@@ -80,6 +80,7 @@ bench: all work/half_probe.spv
 	python3 src/bench/split_cost.py
 
 test: all work/attention_ab.spv work/test_exchange work/test_settled work/test_present
+	python3 src/gpu/test_ffn_batch.py --gpu
 	python3 src/layer/test_daemon.py
 	work/test_settled
 	python3 src/layer/test_ui_mask.py
@@ -102,6 +103,12 @@ test: all work/attention_ab.spv work/test_exchange work/test_settled work/test_p
 	python3 src/ref/test_nr_model.py
 	python3 src/ref/test_temporal_controls.py
 
+# Focused checks for the FFN schedule, including a complete frame with both variants.
+# Repeat with XMX_STAGING=1 to cover device buffers without host mappings.
+test-ffn: all
+	python3 src/gpu/test_ffn_batch.py --gpu
+	python3 src/gpu/test_frame_execution.py
+
 test-proton: all work/libnr_layer32.so work/test_layer_loader work/test_layer_loader32
 	python3 src/layer/test_launcher.py
 	python3 src/layer/prepare_layer.py work/layer-check
@@ -113,4 +120,4 @@ test-proton: all work/libnr_layer32.so work/test_layer_loader work/test_layer_lo
 publish-check:
 	python3 src/tools/publish_check.py --history
 
-.PHONY: all test test-proton bench publish-check
+.PHONY: all test test-ffn test-proton bench publish-check
