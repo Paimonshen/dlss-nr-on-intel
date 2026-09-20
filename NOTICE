@@ -47,6 +47,13 @@ Vulkan-Headers — https://github.com/KhronosGroup/Vulkan-Headers
 Provenance within this repository
 --------------------------------------------------------------------------------
 
+The optional CMake build and src/gpu/test_gemm_contract.py are adapted from
+andyvand/dlss-nr-on-vulkan (Apache License 2.0), commit
+1519a7a9035a94bc40f2d45d52caafe5a2ad9800:
+https://github.com/andyvand/dlss-nr-on-vulkan
+The adaptations target this tree's Linux/XMX runtime; the fork's portable GEMM,
+macOS/Windows runtime and C frame library are not included in these changes.
+
 This project was written by AI agents: Claude Opus 5 in this tree, and Astra in a parallel
 one by the same owner. `src/ref/nr_image.c` began in that parallel tree and was extended
 here; its file header and `notes/phase57-native-host-passes.md` record what came from

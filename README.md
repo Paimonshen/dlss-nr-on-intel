@@ -144,6 +144,26 @@ git -C work/mlx-dlss checkout 06a3e11a8b68817127406ace5c764463543f699b
 make
 ```
 
+Alternatively, after fetching the same dependencies, build with CMake 3.21 or newer:
+
+```sh
+cmake -S . -B work/cmake
+cmake --build work/cmake -j4
+ctest --test-dir work/cmake --output-on-failure
+```
+
+This builds the current **Linux/XMX** runtime. It finds Vulkan headers in the SDK,
+system paths or `work/vulkan-headers`, and writes artifacts into `work/` so the existing
+daemon and launchers can use them. Choose a Python environment with
+`-DPython3_EXECUTABLE=/path/to/venv/bin/python`; it needs NumPy and the dependencies above.
+Use `-DNR_BUILD_LAYER=OFF` for a compute-only build, or `-DNR_BUILD_TESTS=OFF` to omit tests.
+The CMake build and additional GEMM checks are adapted from
+[andyvand's fork](https://github.com/andyvand/dlss-nr-on-vulkan); see `NOTICE`.
+Its macOS/Windows runtime and C frame library are separate changes, not included here.
+The normal CMake build covers the 64-bit layer; use the existing Makefile target for
+`work/libnr_layer32.so` when a 32-bit game needs it. Avoid running both build systems
+at the same time because they write the same artifacts.
+
 Then extract the weights from your own DLL (needs `safetensors` as well as NumPy):
 
 ```sh
