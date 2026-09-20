@@ -426,10 +426,13 @@ class Runtime:
         self.recorded = 0
         self.fuse_qk = os.environ.get("NR_FUSE_QK", "1") != "0"
         self.batch_ffn = os.environ.get("NR_BATCH_FFN", "1") != "0"
+        self.input_fp16 = os.environ.get("NR_INPUT_FP16", "0") != "0"
+        self.compact_head = os.environ.get("NR_COMPACT_HEAD", "0") != "0"
 
     def graph_key(self):
         return (self.lib.xmx_specialization() | (int(self.fuse_qk) << 3)
-                | (int(self.batch_ffn) << 4))
+                | (int(self.batch_ffn) << 4) | (int(self.input_fp16) << 5)
+                | (int(self.compact_head) << 6))
 
     @property
     def buffer_bytes(self):
@@ -518,13 +521,17 @@ class Runtime:
         return self
 
     def gemm(self, a, b, c, rows, cols, inner, *, batch=1, strides=None, transpose_b=False,
-             leading=None, offsets=(0, 0, 0), epilogue=0, narrow=False):
+             leading=None, offsets=(0, 0, 0), epilogue=0, narrow=False,
+             compact_output=False):
         """C = A @ B for tile-aligned extents; A and B are float16, C float32.
 
         `strides` are element counts per batch item, defaulting to the dense packing;
         `leading` overrides the row strides of A, B and C, and `offsets` shifts each
         operand's base in elements, so a GEMM can read or write a slice of a wider
         buffer — which is how the branched and split feed-forwards place their heads.
+        `compact_output` stores only the first four of sixteen columns in FP32,
+        using the base kernel's shared-memory scatter. Batch output stride defaults
+        to rows*4; custom leading/offsets and epilogues are deliberately excluded.
         Extents must already be multiples of 8 / 16 / 16: cooperative-matrix loads are
         not bounds-checked on this device (`cooperativeMatrixRobustBufferAccess` is
         false), so the padding has to be in the buffer, not in a guard.
@@ -532,10 +539,16 @@ class Runtime:
         for extent, multiple, name in ((rows, TM, "rows"), (cols, TN, "cols"), (inner, TK, "inner")):
             if extent % multiple:
                 raise ValueError(f"{name}={extent} must be a multiple of {multiple}")
+        if compact_output:
+            if cols != 16 or narrow or epilogue or leading is not None or offsets != (0, 0, 0):
+                raise ValueError('compact output requires 16 columns, plain FP32 and no custom leading/offsets')
+            leading = (0, 0, 4)
         if strides is None:
-            strides = (rows * inner, cols * inner if transpose_b else inner * cols, rows * cols)
+            strides = (rows * inner, cols * inner if transpose_b else inner * cols,
+                       rows * (4 if compact_output else cols))
         lda, ldb, ldc = leading or (0, 0, 0)
-        flags = (1 if transpose_b else 0) | _publish(epilogue, narrow)
+        flags = ((1 if transpose_b else 0) | _publish(epilogue, narrow)
+                 | (0x10000 if compact_output else 0))
         if self.lib.xmx_rec_gemm(a.id, b.id, c.id, rows, cols, inner, batch,
                                  strides[0], strides[1], strides[2], flags,
                                  lda, ldb, ldc, *offsets) != 0:

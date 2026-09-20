@@ -969,6 +969,11 @@ int xmx_rec_gemm(int a, int b, int c, unsigned M, unsigned N, unsigned K, unsign
 	 * are indistinguishable — see notes/phase22-staging-and-storage.md. */
 	int staged = M % 64 == 0 && N % 32 == 0 && K % 32 == 0 && K >= g.staging;
 	int tiled = M % g.tilem == 0 && N % g.tilen == 0 && K >= g.tiling;
+	if (bt & 0x10000u) {
+		if (N != 16 || ldc != 4 || (bt & 0x1f00u))
+			FAIL("compact head requires N=16, ldc=4 and plain FP32 output", 0);
+		staged = tiled = 0;  /* its shared-memory scatter is one 8x16 tile */
+	}
 	VkPipeline pipeline;
 	if (resident_pipeline(staged ? 2 : (tiled ? 1 : 0), bt,
 			      staged ? g.rstaged : (tiled ? g.rtiled : g.rgemm), &pipeline)) return -1;

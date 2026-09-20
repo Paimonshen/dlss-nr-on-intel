@@ -190,6 +190,15 @@ make test                                        # 190-odd checks, fewer without
 python3 src/ref/nr_frame.py IN.png OUT.png --resident   # one still, no game
 ```
 
+Two optional I/O experiments are available on this branch: `NR_INPUT_FP16=1` halves
+the network input buffer and removes its GPU conversion pass; `NR_COMPACT_HEAD=1`
+writes only the four useful output channels, reducing that buffer to a quarter of
+its size without another dispatch. **Both default off.** The first was slower on
+140V, and the second saved less than 1% of warm frame time in the measured pairs.
+B570/B580 results are still needed. Set these in the daemon's environment, not only
+the game's. For exact checks and paired benchmarks, see
+[the I/O experiment notes](notes/improve-compact-io.md).
+
 ## Run it in a game
 
 Two processes: a **daemon** that holds the model, and a **Vulkan layer** inside the game

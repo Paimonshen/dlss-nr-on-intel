@@ -79,8 +79,10 @@ def host_checks():
         rt.lib = SimpleNamespace(xmx_specialization=lambda: mask)
         for rt.fuse_qk in (False, True):
             for rt.batch_ffn in (False, True):
-                keys.add(rt.graph_key())
-    assert len(keys) == 32
+                for rt.input_fp16 in (False, True):
+                    for rt.compact_head in (False, True):
+                        keys.add(rt.graph_key())
+    assert len(keys) == 128
     # Exercise the production recorders too, not just the batching helper. Multiplicity
     # is the current 71-block model's grouped FFN inventory; no weights are needed.
     savings = 0

@@ -141,13 +141,17 @@ void main() {
 
     uint epilogue = (operation_flags() >> 8) & 0xFu;
     bool narrow = (operation_flags() & 0x1000u) != 0u;
+    // The 32->4 head still computes a legal 8x16 cooperative-matrix tile, but
+    // only writes its four useful columns. Runtime restricts this to the base
+    // kernel, FP32 output, N=16 and ldc=4.
+    bool compact_head = (operation_flags() & 0x10000u) != 0u;
     /* A float16 accumulator cannot take the direct store, and this is the one thing
      * that genuinely does not work: `pc.c` is a `float[]`, so storing a float16 matrix
      * into it is the component-type mismatch itself
      * (notes/phase38-there-was-no-bug.md). The path below converts to a float32 matrix
      * first and stores that — no shared memory involved. */
 #ifndef ACC16
-    if (epilogue == 0u && !narrow) {
+    if (epilogue == 0u && !narrow && !compact_head) {
         for (uint i = 0; i < RM; i++)
             for (uint j = 0; j < RN; j++)
                 coopMatStore(acc[i][j], pc.c.v, co + (row + i * TM) * ldc + col + j * TN,
@@ -166,7 +170,7 @@ void main() {
         for (uint j = 0; j < RN; j++) {
             for (uint e = 0; e < acc[i][j].length(); e++)
                 acc[i][j][e] = ACC(publish(epilogue, float(acc[i][j][e])));
-            if (narrow) {
+            if (narrow || compact_head) {
                 coopMatStore(acc[i][j], stage, i * TM * BN + j * TN, BN,
                              gl_CooperativeMatrixLayoutRowMajor);
                 continue;
@@ -180,10 +184,15 @@ void main() {
             coopMatStore(acc[i][j], pc.c.v, at, ldc, gl_CooperativeMatrixLayoutRowMajor);
 #endif
         }
-    if (!narrow) return;
+    if (!narrow && !compact_head) return;
 
     subgroupMemoryBarrierShared();
     subgroupBarrier();
+    if (compact_head) {
+        uint e = gl_LocalInvocationID.x;
+        pc.c.v[co + (row + e / 4u) * ldc + e % 4u] = float(stage[(e / 4u) * BN + e % 4u]);
+        return;
+    }
     /* Four consecutive elements per lane, so the stores coalesce. */
     for (uint e = gl_LocalInvocationID.x * 4u; e < BM * BN; e += 32u * 4u) {
         uint at = co + (row + e / BN) * ldc + col + e % BN;

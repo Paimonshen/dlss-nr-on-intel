@@ -174,7 +174,17 @@ class ResidentFrame:
     # features go in and the head comes back. They are named here so they can be put where
     # the host can reach them — cached for the strided read of the head — while everything
     # else follows the device, which on a discrete card means the card's own memory.
-    HOST_SIDE = {"features": xmxres.HOST_WRITE, "head": xmxres.HOST_READ}
+    HOST_SIDE = {"features": xmxres.HOST_WRITE, "features_host16": xmxres.HOST_WRITE,
+                 "head": xmxres.HOST_READ, "head4": xmxres.HOST_READ}
+
+    def head_buffer(self):
+        return self.buffer("head4" if self.rt.compact_head else "head",
+                           self.height * self.width * (4 if self.rt.compact_head else 16))
+
+    def read_head(self):
+        channels = 4 if self.rt.compact_head else 16
+        return np.array(xmxres.host_view(self.head_buffer(),
+                        shape=(self.height, self.width, channels))[..., :4], copy=True)
 
     def buffer(self, name, elements, dtype=np.float32):
         existing = self._buffers.get(name)
@@ -293,11 +303,20 @@ class ResidentFrame:
                 timing[stage[0]][1] += 1
 
         stem = self.buffer("stem", pixels * 32)
-        source = self.buffer("features", pixels * 16)
-        # the three parts of a frame, timed separately: on a card the two transfers are
-        # PCIe and the middle one is the GPU, and a single total cannot tell them apart
+        # Separate names keep captured graphs' addresses valid when switching modes.
+        # HOST_WRITE is always mapped, including when graph buffers use staging.
+        source = self.buffer("features_host16" if rt.input_fp16 else "features",
+                             pixels * 16, np.float16 if rt.input_fp16 else np.float32)
+        # Wall times around host writes, graph completion and host reads. They are
+        # not PCIe counters: GPU access to mapped host memory occurs during the graph.
         mark = _time.perf_counter()
-        xmxres.host_write(source, features.reshape(-1, 16), rows=(pixels, 16))
+        if rt.input_fp16:
+            # Convert directly into the mapped input: no temporary half array and no
+            # FP32 buffer crosses the host/device boundary before a GPU to_half pass.
+            np.copyto(source.view(np.float16, (pixels, 16)), features.reshape(pixels, 16),
+                      casting="unsafe")
+        else:
+            xmxres.host_write(source, features.reshape(-1, 16), rows=(pixels, 16))
         carried = _time.perf_counter() - mark
         if execution == "replay" and key in self._graphs:
             mark = _time.perf_counter()
@@ -306,14 +325,16 @@ class ResidentFrame:
             if submits is not None:
                 submits.append(passes)
             mark = _time.perf_counter()
-            out = np.array(xmxres.host_view(self.buffer("head", pixels * 16),
-                                            shape=(pixels, 16))[:, :4], copy=True)
+            out = self.read_head()
             self.split = (carried, ran, _time.perf_counter() - mark)
             return out.reshape(height, width, 4)
         begin()
-        rt.to_half(source, self.buffer("features16", pixels * 16, np.float16), pixels * 16)
-        rt.gemm(self.buffer("features16", pixels * 16, np.float16), self.adapter, stem,
-                pixels, 32, 16)
+        if rt.input_fp16:
+            source16 = source
+        else:
+            source16 = self.buffer("features16", pixels * 16, np.float16)
+            rt.to_half(source, source16, pixels * 16)
+        rt.gemm(source16, self.adapter, stem, pixels, 32, 16)
         submit()
 
         # block 0 runs at full resolution; its output is both the skip the post block
@@ -485,7 +506,7 @@ class ResidentFrame:
                        source=merged, target=out)
         rt.to_half(out, self.buffer("out16", pixels * 32, np.float16), pixels * 32)
         rt.gemm(self.buffer("out16", pixels * 32, np.float16), self.head,
-                self.buffer("head", pixels * 16), pixels, 16, 32)
+                self.head_buffer(), pixels, 16, 32, compact_output=rt.compact_head)
         submit()
 
         if execution == "replay":
@@ -495,6 +516,4 @@ class ResidentFrame:
             counter[0] = rt.submit()
         if submits is not None:
             submits.append(counter[0])
-        return np.array(xmxres.host_view(self.buffer("head", pixels * 16),
-                                        shape=(pixels, 16))[:, :4],
-                        copy=True).reshape(height, width, 4)
+        return self.read_head()

@@ -125,7 +125,7 @@ if(NR_BUILD_TESTS)
   foreach(name publish_check claims_check)
     nr_test(${name} "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/src/tools/${name}.py")
   endforeach()
-  foreach(name gemm_contract epilogue specialization softmax_pack qkv_fusion
+  foreach(name gemm_contract input_fp16 compact_head epilogue specialization softmax_pack qkv_fusion
       scratch_arena graph frame_execution resident)
     nr_test(gpu_${name} "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/src/gpu/test_${name}.py")
   endforeach()

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Paired FFN schedule benchmark: replayed full graph, no game or image codecs.
+"""Paired runtime benchmark: replayed full graph, no game or image codecs.
 
 Report warm wall times, not per-dispatch estimates. The input, buffers and shaders
 are shared; both graphs are captured before timing. Every result must match exactly.
@@ -23,20 +23,27 @@ def main():
     parser.add_argument('--size', nargs=2, type=int, metavar=('HEIGHT', 'WIDTH'),
                         default=(576, 1024), help='input extent, before model padding')
     parser.add_argument('--pairs', type=int, default=8)
+    parser.add_argument('--optimization', choices=('ffn', 'input', 'head'), default='ffn',
+                        help='compare FFN batching, FP16 input or compact head output')
     args = parser.parse_args()
     if min(*args.size, args.pairs) <= 0:
         parser.error('size and pairs must be positive')
     color = np.random.default_rng(67).random((*args.size, 3), dtype=np.float32)
-    features = nr_frame.make_features(color, **nr_frame.PROFILES['standard'])
+    geometry = nr_frame.NetworkGeometry.vendor_aligned(args.size[1], args.size[0])
+    features = nr_frame.build_features(color, geometry=geometry, **nr_frame.PROFILES['standard'])
     backend = nr_frame.ResidentBackend()
     try:
         rt = backend.runtime
+        setting, variable = {'ffn': ('batch_ffn', 'NR_BATCH_FFN'),
+                             'input': ('input_fp16', 'NR_INPUT_FP16'),
+                             'head': ('compact_head', 'NR_COMPACT_HEAD')}[args.optimization]
         frame = backend.frame(*features.shape[:2])
         samples = {False: [], True: []}
+        splits = {False: [], True: []}
         counts = {}
         expected = None
         for mode in (False, True):
-            rt.batch_ffn = mode
+            setattr(rt, setting, mode)
             passes = []
             head = frame.run(features, execution='replay', submits=passes)
             counts[mode] = passes[0]
@@ -48,20 +55,28 @@ def main():
             np.testing.assert_array_equal(frame.run(features, execution='replay'), expected)
         print(f'device: {xmx.device_name()}', flush=True)
         print(f'buffers: {xmx.memory_note()}', flush=True)
-        print(f'network extent: {features.shape[1]}x{features.shape[0]}; '
+        print(f'input extent: {args.size[1]}x{args.size[0]}; '
+              f'network extent: {features.shape[1]}x{features.shape[0]}; '
               f'{args.pairs} alternating pairs', flush=True)
+        fixed = ', '.join(f'{name}={int(getattr(rt, name))}'
+                          for name in ('batch_ffn', 'input_fp16', 'compact_head') if name != setting)
+        print(f'comparing {variable}; fixed {fixed}; staging={rt.staging}', flush=True)
         for pair in range(args.pairs):
             for mode in ((False, True) if pair % 2 == 0 else (True, False)):
-                rt.batch_ffn = mode
+                setattr(rt, setting, mode)
                 started = time.perf_counter()
                 head = frame.run(features, execution='replay')
                 samples[mode].append(1000 * (time.perf_counter() - started))
+                splits[mode].append(frame.split)
                 np.testing.assert_array_equal(head, expected)
         for mode in (False, True):
             values = samples[mode]
-            print(f'NR_BATCH_FFN={int(mode)}: {counts[mode]} recorded passes, '
+            print(f'{variable}={int(mode)}: {counts[mode]} recorded passes, '
                   f'median {statistics.median(values):.3f} ms, '
                   f'range {min(values):.3f}..{max(values):.3f} ms')
+            parts = [1000 * statistics.median(x[i] for x in splits[mode]) for i in range(3)]
+            print('  host write / graph wait / host read: '
+                  + ' / '.join(f'{v:.3f}' for v in parts) + ' ms (wall times, not PCIe counters)')
         before, after = (statistics.median(samples[m]) for m in (False, True))
         print(f'pass reduction: {counts[False] - counts[True]}; '
               f'warm frame speedup: {before / after:.3f}x; '
