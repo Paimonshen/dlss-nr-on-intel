@@ -199,6 +199,12 @@ B570/B580 results are still needed. Set these in the daemon's environment, not o
 the game's. For exact checks and paired benchmarks, see
 [the I/O experiment notes](notes/improve-compact-io.md).
 
+`NR_JOINT_QKV=1` is another optional experiment: it combines preparation of Q, K
+and V into one dispatch, removing 140 passes per frame. It is **off by default**:
+on 140V at network extent 448x320 it increased warm frame time from 79.1 to 83.2 ms.
+See [the QKV experiment and diagnostic notes](notes/improve-joint-qkv.md) for exact
+checks, the paired benchmark and profiling commands for B570/B580.
+
 ## Run it in a game
 
 Two processes: a **daemon** that holds the model, and a **Vulkan layer** inside the game
@@ -324,7 +330,7 @@ Blends the model's answer against the source, per pixel where an interface mask 
 
 `0` to `2`, step `0.05`, default `1`
 
-After the blend, the difference the pass made is split into bands and each is re-weighted. This is the fine half — pores, strands, grain. Away from 1 it costs a Gaussian over the whole frame, about 7x more without OpenCV than with it.
+After the blend, the difference the pass made is split into bands and each is re-weighted. This is the fine half — pores, strands, grain. Away from 1 it costs a Gaussian over the whole frame. OpenCV provides a faster blur implementation; the cost depends on the machine and frame size.
 
 ### `colour_strength` — the low-frequency half — and it runs backwards from its name
 

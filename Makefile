@@ -84,6 +84,7 @@ test: all work/attention_ab.spv work/test_exchange work/test_settled work/test_p
 	python3 src/gpu/test_gemm_contract.py
 	python3 src/gpu/test_input_fp16.py
 	python3 src/gpu/test_compact_head.py
+	python3 src/gpu/test_joint_qkv.py
 	python3 src/layer/test_daemon.py
 	work/test_settled
 	python3 src/layer/test_ui_mask.py

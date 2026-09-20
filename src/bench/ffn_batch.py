@@ -23,8 +23,8 @@ def main():
     parser.add_argument('--size', nargs=2, type=int, metavar=('HEIGHT', 'WIDTH'),
                         default=(576, 1024), help='input extent, before model padding')
     parser.add_argument('--pairs', type=int, default=8)
-    parser.add_argument('--optimization', choices=('ffn', 'input', 'head'), default='ffn',
-                        help='compare FFN batching, FP16 input or compact head output')
+    parser.add_argument('--optimization', choices=('ffn', 'input', 'head', 'qkv'), default='ffn',
+                        help='compare FFN batching, FP16 input, compact head or joint QKV preparation')
     args = parser.parse_args()
     if min(*args.size, args.pairs) <= 0:
         parser.error('size and pairs must be positive')
@@ -34,9 +34,12 @@ def main():
     backend = nr_frame.ResidentBackend()
     try:
         rt = backend.runtime
+        if args.optimization == 'qkv' and not rt.fuse_qk:
+            raise SystemExit('QKV comparison requires NR_FUSE_QK=1; the split reference bypasses this option')
         setting, variable = {'ffn': ('batch_ffn', 'NR_BATCH_FFN'),
                              'input': ('input_fp16', 'NR_INPUT_FP16'),
-                             'head': ('compact_head', 'NR_COMPACT_HEAD')}[args.optimization]
+                             'head': ('compact_head', 'NR_COMPACT_HEAD'),
+                             'qkv': ('joint_qkv', 'NR_JOINT_QKV')}[args.optimization]
         frame = backend.frame(*features.shape[:2])
         samples = {False: [], True: []}
         splits = {False: [], True: []}
@@ -59,7 +62,8 @@ def main():
               f'network extent: {features.shape[1]}x{features.shape[0]}; '
               f'{args.pairs} alternating pairs', flush=True)
         fixed = ', '.join(f'{name}={int(getattr(rt, name))}'
-                          for name in ('batch_ffn', 'input_fp16', 'compact_head') if name != setting)
+                          for name in ('batch_ffn', 'fuse_qk', 'input_fp16', 'compact_head', 'joint_qkv')
+                          if name != setting)
         print(f'comparing {variable}; fixed {fixed}; staging={rt.staging}', flush=True)
         for pair in range(args.pairs):
             for mode in ((False, True) if pair % 2 == 0 else (True, False)):

@@ -107,6 +107,7 @@ def _load():
              + [ctypes.c_uint, ctypes.c_uint, ctypes.c_float] + [ctypes.c_uint] * 5),
             ("xmx_rec_row", [ctypes.c_uint] + [ctypes.c_int] * 4 + [ctypes.c_uint] * 5
              + [ctypes.c_float]),
+            ("xmx_rec_qkv", [ctypes.c_int] * 5 + [ctypes.c_uint] * 3),
             ("xmx_profile", [ctypes.c_int]),
             ("xmx_rec_history", [ctypes.c_int] * 3 + [ctypes.c_uint] * 5),
             ("xmx_device_lost", [])):
@@ -428,11 +429,12 @@ class Runtime:
         self.batch_ffn = os.environ.get("NR_BATCH_FFN", "1") != "0"
         self.input_fp16 = os.environ.get("NR_INPUT_FP16", "0") != "0"
         self.compact_head = os.environ.get("NR_COMPACT_HEAD", "0") != "0"
+        self.joint_qkv = os.environ.get("NR_JOINT_QKV", "0") != "0"
 
     def graph_key(self):
         return (self.lib.xmx_specialization() | (int(self.fuse_qk) << 3)
                 | (int(self.batch_ffn) << 4) | (int(self.input_fp16) << 5)
-                | (int(self.compact_head) << 6))
+                | (int(self.compact_head) << 6) | (int(self.joint_qkv) << 7))
 
     @property
     def buffer_bytes(self):
@@ -480,6 +482,22 @@ class Runtime:
         if self.lib.xmx_begin() != 0:
             raise RuntimeError("xmx_begin: " + self.lib.xmx_error().decode())
         self.recorded = 0
+        return self
+
+    def prepare_qkv(self, source, q, k, v, scale, windows, tokens, heads):
+        if min(windows, tokens, heads) <= 0:
+            raise ValueError('QKV extents must be positive')
+        if (len({q.id, k.id, v.id}) != 3 or source.id in (q.id, k.id, v.id)
+                or scale.id in (q.id, k.id, v.id)):
+            raise ValueError('QKV outputs must be separate from each other and the input')
+        rows = windows * tokens * heads
+        if source.nbytes < rows * 3 * 32 * 4 or scale.nbytes < heads * 4:
+            raise ValueError('QKV input or scale buffer is too small')
+        if any(buf.nbytes < rows * 32 * 2 for buf in (q, k, v)):
+            raise ValueError('QKV output buffer is too small')
+        if self.lib.xmx_rec_qkv(source.id, q.id, k.id, v.id, scale.id, rows, tokens, heads):
+            raise failure(self.lib, 'xmx_rec_qkv')
+        self.recorded += 1
         return self
 
     def independent(self):

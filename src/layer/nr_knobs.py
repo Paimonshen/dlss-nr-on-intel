@@ -52,7 +52,8 @@ KNOBS = (
         "re-weights the high-frequency half of the change",
         "After the blend, the difference the pass made is split into bands and each is "
         "re-weighted. This is the fine half — pores, strands, grain. Away from 1 it costs "
-        "a Gaussian over the whole frame, about 7x more without OpenCV than with it.",
+        "a Gaussian over the whole frame. OpenCV provides a faster blur implementation; "
+        "the cost depends on the machine and frame size.",
     ),
     Knob(
         "colour_strength", "colour strength", "number", 0.0, 2.0, 0.05, 1.0,

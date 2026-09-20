@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stddef.h>
 #include <vulkan/vulkan.h>
 
 /* A lost device is recorded as well as described: it is the one failure after which nothing
@@ -82,6 +83,7 @@ struct push {
 	float p0, p1, p2, p3;
 	uint32_t lda, ldb, ldc, spare;
 };
+_Static_assert(offsetof(struct push, lda) == 80, "attention QKV scale pointer ABI");
 
 const char *xmx_error(void) { return g.err; }
 int xmx_device_lost(void) { return g.lost; }
@@ -1012,6 +1014,30 @@ int xmx_rec_unary(unsigned kind, int a, int b, int c, int d, unsigned n, unsigne
 
 /* Row-wise passes: the cosine publish reduces 32 channels through the kernel's own
  * fragment tree, the softmax reduces a window's tokens. One invocation per row. */
+/* One dispatch for independent Q, K and V workgroup planes. The fifth pointer
+ * occupies byte offset 80, the lda/ldb fields unused by attention.comp. */
+int xmx_rec_qkv(int source, int q, int k, int v, int scale,
+		unsigned rows, unsigned tokens, unsigned heads)
+{
+	if (!g.recording) FAIL("not recording", 0);
+	if (!rows || !tokens || !heads) FAIL("invalid QKV extent", 0);
+	const unsigned flags = 2u | 0x1000u | 0x20000u;
+	VkDeviceAddress scale_addr = addr_of(scale);
+	struct push p = { .a = addr_of(source), .b = addr_of(q), .c = addr_of(k),
+		.d = addr_of(v), .m = rows, .n = tokens, .batch = heads, .flags = flags,
+		.lda = (uint32_t)scale_addr, .ldb = (uint32_t)(scale_addr >> 32) };
+	if (!p.a || !p.b || !p.c || !p.d || !scale_addr) FAIL("QKV operand is not live", 0);
+	VkPipeline pipeline;
+	if (resident_pipeline(4, flags, g.rrow, &pipeline)) return -1;
+	vkCmdBindPipeline(g.rcb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+	vkCmdPushConstants(g.rcb, g.rpl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
+	vkCmdDispatch(g.rcb, (rows + 31) / 32, 3, 1);
+	barrier();
+	stamp(PK_ROW, 2);
+	g.recorded++;
+	return 0;
+}
+
 int xmx_rec_row(unsigned kind, int a, int b, int c, int d, unsigned rows, unsigned width,
 		unsigned heads, unsigned scaled, unsigned stride, float cap)
 {

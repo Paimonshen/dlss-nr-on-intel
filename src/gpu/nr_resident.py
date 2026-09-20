@@ -152,6 +152,9 @@ class GlobalScratch:
 
 def record_qkv(runtime, w, s, windows, tokens, channels, heads):
     """Split V; optionally normalize Q/K directly from the projection buffer."""
+    if runtime.fuse_qk and runtime.joint_qkv:
+        runtime.prepare_qkv(s.proj, s.q16, s.k16, s.v16, w.scale, windows, tokens, heads)
+        return
     if runtime.fuse_qk:
         with runtime.independent():
             runtime.cosine_publish(s.proj, s.q16, windows * heads * tokens,

@@ -702,7 +702,9 @@ def process_connection(connection, backend, args):
     split = f"  gpu {1000 * carried:.0f}+{1000 * ran:.0f}+{1000 * read:.0f}ms" if ran else ""
     print(f"{width}x{height} {FORMATS[vk_format][1]} in "
           f"{time.perf_counter() - clock:.2f}s  "
-          f"change {changed:.5f}{note}{split}{box}", flush=True)
+          f"change {changed:.5f}{note}{split}{box}"
+          f"  network {geometry.network_width}x{geometry.network_height}"
+          f" scale {live.render_scale:g}", flush=True)
     if args.meter is not None:
         print(args.meter.report(), flush=True)
 
@@ -764,6 +766,12 @@ def main():
     print(f"model ready in {time.perf_counter() - started:.1f}s"
           f" on {xmx.device_name()}", flush=True)
     print(f"buffers in {xmx.memory_note()}", flush=True)
+    rt = backend.runtime
+    print("runtime options " + " ".join(
+        f"{name}={int(getattr(rt, attr))}" for name, attr in (
+            ("NR_BATCH_FFN", "batch_ffn"), ("NR_FUSE_QK", "fuse_qk"),
+            ("NR_JOINT_QKV", "joint_qkv"), ("NR_INPUT_FP16", "input_fp16"),
+            ("NR_COMPACT_HEAD", "compact_head"))), flush=True)
 
     if os.path.lexists(args.socket):
         if not stat.S_ISSOCK(os.lstat(args.socket).st_mode):
