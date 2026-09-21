@@ -473,16 +473,31 @@ should not happen any more, so report it. Each frame line then ends with
 dominate, the traffic is the problem; if the middle one does, the graph is. `XMX_STAGING=1`
 and `=0` force the two memory paths for a comparison.
 
-**You have a discrete card and want to help.** `NR_LAYER_SYNC=semaphore` is the reason that
-switch exists. By default the layer drains the whole queue twice per present to know the
-frame is finished — a sledgehammer that also ignores the semaphores the present brought, so a
-game that renders on one queue and presents from another can hand over an unfinished image.
-The semaphore path does it properly. On the integrated chip this was built on it measures
-**exactly the same** — 210 ms a frame either way in Tekken 7 — because the game's own work is
-nothing beside the network. On a card fast enough for the game to matter, it should be the
-difference; nobody has measured that yet. It is tested here on a headless swapchain and in
-two games (D3D11 and D3D9 under DXVK), which is why it is a switch rather than the default.
-Turn it on, play, and say whether anything tore, stalled or looked stale.
+**Capture synchronization.** The layer waits on all semaphores supplied to the current
+present, then waits for its own copy fences before the CPU reads or reuses the staging
+buffer. It never waits on other application queues or recycles a semaphore still owned by
+presentation. `NR_LAYER_SYNC=idle` and `=semaphore` remain accepted as legacy aliases for
+this single path. The headless test uses separate queues and delayed writes; its negative
+control must detect a layer with the wait deliberately removed. See
+[the synchronization and MK1 check](notes/improve-present-fences.md).
+
+**Direct Proton launch exits before rendering.** `nr-photo --proton` now supplies
+`SteamAppId`, `SteamGameId` and `STEAM_COMPAT_APP_ID`, as Steam normally does. For a log:
+
+```sh
+PROTON_LOG=1 NR_PROTON=/path/to/Proton/proton src/layer/nr-photo --proton <appid> /path/to/game.exe
+```
+
+The launcher prints the runtime and log path (`work/proton-logs` by default).
+`--check-proton` verifies paths, not a successful game launch. If several Proton installs
+are found, select the one wanted with `NR_PROTON`, or launch through Steam.
+
+**The game vanishes when loading characters or a level.** Check the kernel journal for
+an OOM kill before diagnosing a GPU error. On a shared-memory iGPU, the game and every
+resident daemon compete for the same RAM. During the MK1 check, a second daemon and a
+1920x1200 swapchain exhausted memory; stopping the duplicate and using a smaller window
+allowed real frames to be processed. A small render scale reduces the network's buffers,
+but does not shrink the game's textures or all full-resolution host passes.
 
 **The interface is being re-rendered.** `NR_LAYER_UI_MASK=1` marks pixels that did not
 move between two presents and gives them back byte-identical. It drops itself when it
