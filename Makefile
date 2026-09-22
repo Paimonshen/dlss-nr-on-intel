@@ -7,9 +7,9 @@ CFLAGS  := -O2 -fPIC -Wall -Wextra -Wno-unused-parameter -Iwork/vulkan-headers/i
 SHADERS := work/gemm_resident.spv work/gemm_tiled.spv work/gemm_staged.spv \
            work/resident.spv work/attention.spv \
            work/history.spv work/gemm_coopmat.spv work/gemm_batched.spv \
-           work/gemm_f16acc.spv
+           work/gemm_f16acc.spv work/gemm_coopmat_int8.spv
 
-all: work/libxmx.so work/libnr_layer.so work/libnr_image.so $(SHADERS)
+all: work/libxmx.so work/libnr_layer.so work/libnr_image.so work/gemm_runner $(SHADERS)
 
 work:
 	mkdir -p $@
@@ -65,6 +65,16 @@ work/attention_ab.spv: src/gpu/attention.comp src/gpu/publish.glsl src/gpu/speci
 	$(GLSL) -DSOFTMAX_AB -o $@ $<
 work/history.spv: src/gpu/history.comp
 	$(GLSL) -o $@ $<
+# Configuration 4, the integer twin. Built always; used only where
+# notes/improve-int8-bottleneck.md measured the trade as worth taking.
+work/gemm_coopmat_int8.spv: src/gpu/gemm_coopmat_int8.comp
+	$(GLSL) -o $@ $<
+
+# The one-shot runner behind test_gemm.py and test_gemm_int8.py: its own
+# instance and device per call, and the operand width read from the files.
+work/gemm_runner: src/gpu/gemm_runner.c | work
+	$(CC) $(CFLAGS) -o $@ $< -lvulkan
+
 work/gemm_coopmat.spv: src/gpu/gemm_coopmat.comp
 	$(GLSL) -o $@ $<
 work/gemm_batched.spv: src/gpu/gemm_coopmat_batched.comp
@@ -94,6 +104,7 @@ test: all work/attention_ab.spv work/test_exchange work/test_settled work/test_p
 	python3 src/layer/test_panel.py
 	python3 src/tools/publish_check.py
 	python3 src/tools/claims_check.py
+	python3 src/gpu/test_gemm_int8.py
 	python3 src/gpu/test_epilogue.py
 	python3 src/gpu/test_specialization.py
 	python3 src/gpu/test_softmax_pack.py
