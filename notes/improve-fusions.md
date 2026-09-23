@@ -122,6 +122,29 @@ Writing the same expression in a new shader would have left the choice to the co
 every element written. Three whole frames bit-identical, in both memory modes. Paired:
 1280x720 **268.1 -> 260.2 ms**, 1920x1080 571.2 -> 555.6, 384x384 unchanged (50.7 -> 50.8).
 
+## The narrow feed-forward in one kernel (2026-09-24)
+
+A profile per call site (`frame_profile.py --calls`) put the feed-forward at 96 ms of a
+265 ms frame, and the 32-channel blocks' share — block 0, block 70 and the eight at half
+resolution — at 33.6 ms in four call sites, every one of them at the memory ceiling. The
+reason was the hidden layer: 128 wide, written as half by the expand and read back by the
+projection, 504 MB per block at 720p.
+
+`ffn_fused.comp` takes 16 rows through the expand, its gate and publish, the projection
+and the residual in one subgroup, 32 hidden columns at a time through 1 KB of shared memory,
+so the hidden layer never leaves the chip. Every accumulator takes the same multiply-adds
+in the same K order as the two GEMMs did, the publish and the residual are their own
+includes, and 144 kernel cases and three whole frames are bit-identical, in both memory
+modes. On the GPU clock the four call sites' 33.6 ms became 21.7; paired wall time at
+1280x720 fell 9-14 ms across runs, at 1920x1080 27.6 ms (549.9 -> 522.3).
+
+**Spills were not the problem, and removing them made it slower.** The first version
+spilled (34 registers out, 36 back in, reported by `INTEL_DEBUG=cs`). Narrowing the chunk
+to 16 columns removed every spill and cost 9 % (21.7 -> 23.7 ms): twice the barriers and
+shared-memory round trips for the same arithmetic. The compiler's spill count is a symptom
+worth reading, not a target in itself; the kept version reads its input again per chunk,
+which takes the spills to 31:33 for the same time.
+
 ## Left behind, deliberately
 
 - `window_attention_qkv.comp`: off by default in Codex's tree (`NR_FUSE_QKV_ATTENTION`) and

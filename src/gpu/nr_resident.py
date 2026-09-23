@@ -351,6 +351,11 @@ def record_feed_forward(runtime, w, s, source, source_half=False, source16=None)
         record_project_residual(runtime, s.heads16, w.ffn_out, s.branch, source, w.ffn_cos,
                                 s.ffn, pixels, channels, channels,
                                 epilogue=xmxres.EPI_E4M3, skip_half=source_half)
+    elif (runtime.fuse_ffn and channels == 32 and s.hidden_width % 32 == 0
+          and pixels % 16 == 0):
+        # both GEMMs in one pass, the hidden layer never written (ffn_fused.comp)
+        runtime.ffn_fused(value16, w.expand, w.branch, s.ffn, source, w.ffn_cos, pixels,
+                          channels, s.hidden_width, skip_half=source_half)
     else:
         runtime.gemm(value16, w.expand, s.hidden16, pixels, s.hidden_width, channels,
                      epilogue=xmxres.EPI_GATE_E4M3, narrow=True)

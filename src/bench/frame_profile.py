@@ -59,6 +59,8 @@ def label(family, sub):
         return "unary: %s" % UNARY.get(sub, "kind %d" % sub)
     if family == "row":
         return "row: %s" % ROW.get(sub, "kind %d" % sub)
+    if family == "gemm" and sub == 31:
+        return "ffn fused"          # libxmx stamps the fused feed-forward as kind 31
     if family.startswith("gemm"):
         return "%s (flags %d)" % (family, sub)
     return family
@@ -76,6 +78,13 @@ def _describe(name, args):
     if name == "xmx_rec_gemm_qkv":
         m, c = args[6], args[7]
         return "gemm+qkv epilogue %dx%dx%d" % (m, 3 * c, c)
+    if name == "xmx_rec_ffn":
+        return "ffn fused %dx%dx%d flags %#x" % (args[6], args[7], args[8], args[9])
+    if name == "xmx_rec_gemm_dual":
+        return "gemm+half copy %dx%dx%d" % args[4:7]
+    if name == "xmx_rec_unary2":
+        return "unary %s n=%d C=%d, two outputs" % (
+            UNARY.get(args[0] & 0xFF, "kind %d" % (args[0] & 0xFF)), args[6], args[7])
     if name == "xmx_rec_unary":
         return "unary %s n=%d C=%d" % (UNARY.get(args[0] & 0xFF, "kind %d" % (args[0] & 0xFF)),
                                        args[5], args[6])

@@ -25,12 +25,12 @@ def main():
     parser.add_argument('--pairs', type=int, default=8)
     parser.add_argument('--optimization',
                         choices=('ffn', 'input', 'head', 'qkv', 'merge', 'qkv-epilogue',
-                                 'glue'),
+                                 'glue', 'ffn-fused'),
                         default='ffn',
                         help='compare FFN batching, FP16 input, compact head, joint QKV '
                              'preparation, the head merge in the fused attention, the '
-                             'QKV projection finished in its own epilogue or the fused '
-                             'full-resolution glue')
+                             'QKV projection finished in its own epilogue, the fused '
+                             'full-resolution glue or the fused narrow feed-forward')
     args = parser.parse_args()
     if min(*args.size, args.pairs) <= 0:
         parser.error('size and pairs must be positive')
@@ -52,6 +52,7 @@ def main():
                              'merge': ('fuse_attention_merge', 'NR_FUSE_ATTENTION_MERGE'),
                              'qkv-epilogue': ('qkv_epilogue', 'NR_QKV_EPILOGUE'),
                              'glue': ('fuse_glue', 'NR_FUSE_GLUE'),
+                             'ffn-fused': ('fuse_ffn', 'NR_FUSE_FFN'),
                              }[args.optimization]
         frame = backend.frame(*features.shape[:2])
         samples = {False: [], True: []}
@@ -78,7 +79,7 @@ def main():
                           for name in ('batch_ffn', 'fuse_qk', 'input_fp16', 'compact_head',
                                        'joint_qkv', 'fuse_residual', 'fuse_window_residual',
                                        'fuse_window_attention', 'fuse_attention_merge',
-                                       'qkv_epilogue', 'fuse_glue')
+                                       'qkv_epilogue', 'fuse_glue', 'fuse_ffn')
                           if name != setting)
         print(f'comparing {variable}; fixed {fixed}; staging={rt.staging}', flush=True)
         for pair in range(args.pairs):

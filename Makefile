@@ -7,7 +7,8 @@ CFLAGS  := -O2 -fPIC -Wall -Wextra -Wno-unused-parameter -Iwork/vulkan-headers/i
 SHADERS := work/gemm_resident.spv work/gemm_tiled.spv work/gemm_staged.spv \
            work/resident.spv work/attention.spv \
            work/history.spv work/gemm_coopmat.spv work/gemm_batched.spv \
-           work/gemm_f16acc.spv work/gemm_coopmat_int8.spv work/window_attention.spv
+           work/gemm_f16acc.spv work/gemm_coopmat_int8.spv work/window_attention.spv \
+           work/ffn_fused.spv
 
 all: work/libxmx.so work/libnr_layer.so work/libnr_image.so work/gemm_runner $(SHADERS)
 
@@ -79,6 +80,10 @@ work/gemm_coopmat_int8.spv: src/gpu/gemm_coopmat_int8.comp
 work/gemm_runner: src/gpu/gemm_runner.c | work
 	$(CC) $(CFLAGS) -o $@ $< -lvulkan
 
+# A 32-channel block's feed-forward in one pass, the hidden layer kept on chip.
+work/ffn_fused.spv: src/gpu/ffn_fused.comp $(GEMM_GLSL)
+	$(GLSL) -o $@ $<
+
 # Window attention's QK^T, softmax and PV in one pass (ProjectsCodex's phase42).
 work/window_attention.spv: src/gpu/window_attention.comp src/gpu/publish.glsl
 	$(GLSL) -o $@ $<
@@ -119,6 +124,7 @@ test: all work/attention_ab.spv work/test_exchange work/test_settled work/test_p
 	python3 src/gpu/test_window_attention.py
 	python3 src/gpu/test_gemm_qkv.py
 	python3 src/gpu/test_glue.py
+	python3 src/gpu/test_ffn_fused.py
 	python3 src/gpu/test_epilogue.py
 	python3 src/gpu/test_specialization.py
 	python3 src/gpu/test_softmax_pack.py

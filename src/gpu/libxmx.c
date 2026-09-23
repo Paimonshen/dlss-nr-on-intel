@@ -32,7 +32,8 @@ static struct {
 	struct buf A, B, C;
 	/* resident path */
 	VkPipelineLayout rpl; VkPipeline rgemm, rtiled, rstaged, runary, rrow, rhistory, rwindow[2];
-	char *rpaths[5];
+	VkPipeline rffn;          /* the fused feed-forward, built on first use */
+	char *rpaths[6];
 	unsigned specialize;
 	unsigned tiling, tilem, tilen;
 	int syncing;
@@ -302,7 +303,8 @@ static unsigned block_size(const char *name, unsigned fallback)
 static int resident_pipeline(unsigned family, unsigned flags, VkPipeline fallback,
 			     VkPipeline *out)
 {
-	unsigned mask = family < 3 ? 1u : (family == 3 ? 2u : 4u);
+	/* family 5, the fused feed-forward, is a GEMM and specialises with them */
+	unsigned mask = (family < 3 || family == 5) ? 1u : (family == 3 ? 2u : 4u);
 	*out = fallback;
 	if (!(g.specialize & mask)) return 0;
 	for (unsigned i = 0; i < specialized_count; i++) {
@@ -1227,6 +1229,45 @@ int xmx_rec_window_attention(int q, int k, int v, int bias, int out,
 		      1u + (batches - 1u) / 65535u);
 	barrier();
 	stamp(PK_ROW, 3);        /* WINDOW_ATTENTION, as window_attention.comp names it */
+	g.recorded++;
+	return 0;
+}
+
+/* A 32-channel block's whole feed-forward in one dispatch (`ffn_fused.comp`): the expand,
+ * its gate and publish, the projection and the residual, with the hidden layer kept in
+ * shared memory instead of written out as half and read back. One subgroup per 16 rows,
+ * on the x axis of the grid, whose limit is 2^31-1 rather than y's 65535. Its profile
+ * stamp is the base GEMM family's kind 31, which no plain GEMM's flags can reach. */
+int xmx_ffn_init(const char *path)
+{
+	if (!g.rready) FAIL("resident runtime not initialised", 0);
+	if (g.rffn) return 0;
+	free(g.rpaths[5]);
+	if (!(g.rpaths[5] = strdup(path))) FAIL("pipeline path allocation", 0);
+	return build_pipeline(path, g.rpl, &g.rffn);
+}
+
+int xmx_rec_ffn(int a, int expand, int projection, int out, int skip, int cosine,
+		unsigned M, unsigned channels, unsigned hidden, unsigned flags)
+{
+	if (!g.recording || !g.rffn) FAIL("fused feed-forward not ready for recording", 0);
+	if (channels != 32u || !hidden || hidden % 32u || !M || M % 16u)
+		FAIL("fused feed-forward needs 32 channels, hidden a multiple of 32, 16-row blocks", 0);
+	if (flags & ~0x41f00u)
+		FAIL("fused feed-forward takes an epilogue, a half output and a half skip only", 0);
+	struct push p = { .a = addr_of(a), .b = addr_of(expand), .c = addr_of(out),
+			  .d = addr_of(skip), .m = M, .n = channels, .k = hidden,
+			  .flags = flags | 0x20000u, .residual_cos = addr_of(cosine),
+			  .qkv_scale = addr_of(projection) };
+	if (!p.a || !p.b || !p.c || !p.d || !p.residual_cos || !p.qkv_scale)
+		FAIL("fused feed-forward operand is not a live buffer", 0);
+	VkPipeline pipeline;
+	if (resident_pipeline(5, p.flags, g.rffn, &pipeline)) return -1;
+	vkCmdBindPipeline(g.rcb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+	vkCmdPushConstants(g.rcb, g.rpl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
+	vkCmdDispatch(g.rcb, M / 16u, 1, 1);
+	barrier();
+	stamp(PK_GEMM, 31);
 	g.recorded++;
 	return 0;
 }
