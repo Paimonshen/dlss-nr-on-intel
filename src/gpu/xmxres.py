@@ -130,6 +130,10 @@ def _load():
     lib.xmx_profile_ms.restype = ctypes.c_double
     lib.xmx_profile_count.argtypes = [ctypes.c_uint]
     lib.xmx_profile_count.restype = ctypes.c_uint
+    lib.xmx_profile_each_count.argtypes = []
+    lib.xmx_profile_each_count.restype = ctypes.c_uint
+    lib.xmx_profile_each_ms.argtypes = [ctypes.c_uint]
+    lib.xmx_profile_each_ms.restype = ctypes.c_double
     # The shader paths take an environment override so a variant can be measured
     # against the shipped one without editing the tree.
     spv = [os.environ.get(name) or str(ROOT / "work" / default)
@@ -407,6 +411,13 @@ def profile(on=True):
 
 def profile_reset():
     _load().xmx_profile_reset()
+
+
+def profile_each():
+    """Every pass's milliseconds since the last reset, in recording order; -1 where the
+    device counter wrapped. What `profile_totals` sums away."""
+    lib = _load()
+    return [lib.xmx_profile_each_ms(i) for i in range(lib.xmx_profile_each_count())]
 
 
 def profile_totals():

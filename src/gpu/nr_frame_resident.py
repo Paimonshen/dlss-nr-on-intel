@@ -496,17 +496,19 @@ class ResidentFrame:
         merged = self.buffer("merged", pixels * 32)
         upsampled = self.buffer("upsampled", pixels * 32)
         block70 = self.block(70, 1)
-        out = self.buffer("out", pixels * 32)
+        # The head reads block 70's output as half, and nothing reads it as float32, so
+        # the block's closing residual stores half itself: the same rounding the separate
+        # to_half pass applied, without 126 MB of float32 written at 720p to be read once.
+        out16 = self.buffer("out16", pixels * 32, np.float16)
         begin()
         rt.upsample2(value, upsampled, w, height, width, 32, a_half=True)
         rt.scale_channel(upsampled, self.merge_sin, merged, pixels * 32, 32)
         rt.residual(merged, full_skip, self.merge_cos, merged, pixels * 32, 32,
                     b_half=True)
         R.record_block(rt, block70, self.scratch(block70, height, width),
-                       source=merged, target=out)
-        rt.to_half(out, self.buffer("out16", pixels * 32, np.float16), pixels * 32)
-        rt.gemm(self.buffer("out16", pixels * 32, np.float16), self.head,
-                self.head_buffer(), pixels, 16, 32, compact_output=rt.compact_head)
+                       source=merged, target=out16, target_half=True)
+        rt.gemm(out16, self.head, self.head_buffer(), pixels, 16, 32,
+                compact_output=rt.compact_head)
         submit()
 
         if execution == "replay":

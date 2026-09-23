@@ -68,6 +68,10 @@ enum { PK_GEMM = 0, PK_TILED, PK_STAGED, PK_UNARY, PK_ROW, PK_HISTORY, PK_COPY, 
 static unsigned char stamp_kind[MAX_STAMPS];
 static double prof_ms[PROF_KINDS];
 static unsigned prof_hits[PROF_KINDS];
+/* Every pass's own duration, in recording order, since the last reset: what the totals
+ * above sum away. `frame_profile.py --calls` pairs it with the calls that recorded them. */
+static double prof_each[MAX_STAMPS];
+static unsigned prof_each_n;
 
 /* Device-resident buffers. The graph's activations live here between blocks instead
  * of being read back to the host after every GEMM; on a shared-memory APU the mapping
@@ -1224,8 +1228,12 @@ static void collect(unsigned stamps, const unsigned char *kinds)
 				  VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT) != VK_SUCCESS)
 		return;
 	for (unsigned i = 1; i < stamps; i++) {
-		if (ticks[i] < ticks[i - 1]) continue;      /* a wrapped counter is not a duration */
-		prof_ms[kinds[i]] += (double)(ticks[i] - ticks[i - 1]) * g.ts_period * 1e-6;
+		/* a wrapped counter is not a duration; -1 keeps the order for the caller */
+		double ms = ticks[i] < ticks[i - 1] ? -1.0
+			  : (double)(ticks[i] - ticks[i - 1]) * g.ts_period * 1e-6;
+		if (prof_each_n < MAX_STAMPS) prof_each[prof_each_n++] = ms;
+		if (ms < 0) continue;
+		prof_ms[kinds[i]] += ms;
 		prof_hits[kinds[i]]++;
 	}
 }
@@ -1333,10 +1341,14 @@ void xmx_profile_reset(void)
 {
 	memset(prof_ms, 0, sizeof prof_ms);
 	memset(prof_hits, 0, sizeof prof_hits);
+	prof_each_n = 0;
 }
 
 /* Milliseconds and pass count for one kind, where a kind is `family * 32 + subkind`.
  * Reading a kind that never ran gives 0, which is the honest answer. */
+unsigned xmx_profile_each_count(void) { return prof_each_n; }
+double xmx_profile_each_ms(unsigned i) { return i < prof_each_n ? prof_each[i] : -1.0; }
+
 double xmx_profile_ms(unsigned kind)
 {
 	return kind < PROF_KINDS ? prof_ms[kind] : 0.0;

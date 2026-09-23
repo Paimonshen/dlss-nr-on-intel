@@ -8,6 +8,7 @@
 #extension GL_KHR_memory_scope_semantics : require
 #extension GL_KHR_cooperative_matrix : require
 #extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_shuffle : require
 
 #include "publish.glsl"
 
@@ -28,9 +29,16 @@ layout(push_constant, scalar) uniform Push {
     FloatBuf bias;
 } pc;
 
-shared float scores[8 * 64];
-shared float16_t probabilities[8 * 64];
-shared float reciprocals[8];
+/* Exactly 2 KB of shared memory, and that is the point. Workgroup shared memory is
+ * allocated in powers of two here, and this pass is bound by how many workgroups fit on a
+ * core: at 3104 bytes it took 4 KB, and padded to 8 KB it ran 76 % slower. So the logits
+ * are staged 32 keys at a time — a row's 64 never have to be in shared memory at once,
+ * because each becomes its weight in place before the next half is stored — the weights
+ * are kept as halves, which they are exactly, and the row reciprocals travel by shuffle
+ * rather than through shared memory. Every value and every order of summation is the
+ * same as when all 64 logits were staged together. */
+shared float scores[8 * 32];              // one half of the keys' logits, 8 rows
+shared float16_t probabilities[8 * 64];   // weights, then normalised probabilities
 
 // Same coupled half-pair transform as attention.comp, with FP32 bias addition
 // before half rounding. The denominator is summed in FP32 in token order.
@@ -52,6 +60,7 @@ void main() {
     uint row = gl_WorkGroupID.x * 8u;
     uint offset = batch * 64u * 32u;
     uint local = gl_LocalInvocationID.x;
+    uint head_bias = (batch % pc.heads) * 4096u + row * 64u;
     {
         coopmat<float, gl_ScopeSubgroup, 8, 16, gl_MatrixUseAccumulator> acc[4];
         for (uint j = 0u; j < 4u; j++)
@@ -67,31 +76,40 @@ void main() {
                 acc[j] = coopMatMulAdd(q, k, acc[j]);
             }
         }
-        for (uint j = 0u; j < 4u; j++)
-            coopMatStore(acc[j], scores, j * 16u, 64u, gl_CooperativeMatrixLayoutRowMajor);
+        /* Keys 0-31, then 32-63, through the same 1 KB. Lanes 0-15 take one row of a pair
+         * and 16-31 the other, two adjacent keys each: the vendor's pairs never straddle
+         * the halves, since both start on an even key. */
+        for (uint half_keys = 0u; half_keys < 2u; half_keys++) {
+            for (uint j = 0u; j < 2u; j++)
+                coopMatStore(acc[half_keys * 2u + j], scores, j * 16u, 32u,
+                             gl_CooperativeMatrixLayoutRowMajor);
+            subgroupMemoryBarrierShared();
+            subgroupBarrier();
+            for (uint at = local * 2u; at < 8u * 32u; at += 64u) {
+                uint r = at / 32u, key = half_keys * 32u + at % 32u;
+                vec2 w = weights(r * 32u, head_bias + r * 64u + half_keys * 32u, at % 32u);
+                probabilities[r * 64u + key] = float16_t(w.x);       // exact: a half value
+                probabilities[r * 64u + key + 1u] = float16_t(w.y);
+            }
+            subgroupMemoryBarrierShared();
+            subgroupBarrier();
+        }
     }
-    subgroupMemoryBarrierShared();
-    subgroupBarrier();
-    uint head_bias = (batch % pc.heads) * 4096u + row * 64u;
-    for (uint at = local * 2u; at < 8u * 64u; at += 64u) {
-        uint base = (at / 64u) * 64u;
-        vec2 w = weights(base, head_bias + base, at % 64u);
-        scores[at] = w.x; scores[at + 1u] = w.y;
-    }
-    subgroupMemoryBarrierShared();
-    subgroupBarrier();
+    float reciprocal = 0.0;
     if (local < 8u) {
         float total = 0.0;
         for (uint i = 0u; i < 64u; i += 2u) {
-            total += scores[local * 64u + i];
-            total += scores[local * 64u + i + 1u];
+            total += float(probabilities[local * 64u + i]);
+            total += float(probabilities[local * 64u + i + 1u]);
         }
-        reciprocals[local] = half_round(1.0 / half_round(total));
+        reciprocal = half_round(1.0 / half_round(total));
     }
+    /* the sums above read every weight of a row; the loop below overwrites them */
     subgroupMemoryBarrierShared();
     subgroupBarrier();
     for (uint at = local; at < 8u * 64u; at += 32u) {
-        precise float product = scores[at] * reciprocals[at / 64u];
+        /* every lane of an iteration is on the same row, so this is a broadcast */
+        precise float product = float(probabilities[at]) * subgroupShuffle(reciprocal, at / 64u);
         probabilities[at] = float16_t(e4m3(half_round(product)));
     }
     subgroupMemoryBarrierShared();

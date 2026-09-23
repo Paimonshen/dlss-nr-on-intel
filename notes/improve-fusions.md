@@ -80,6 +80,27 @@ The benchmark also showed the head read 1.5-2x slower with the merge on (720p 4.
 alternating frames each, with and without the benchmark's per-frame comparison. The graph
 saving did: 13.6 ms at 720p there too.
 
+## Window attention in 2 KB of shared memory (2026-09-24)
+
+The fused attention declared 3104 bytes of shared memory: 2 KB of logits, 1 KB of
+probabilities and 32 bytes of reciprocals. Shared memory is allocated in powers of two on
+this hardware (`improve-qkv-epilogue.md` found it the hard way), so every workgroup took
+4 KB and only half as many fit on a core as the thread slots allow. Padding the same shader
+to 8 KB made it **76 % slower** (56.3 -> 99.2 ms of a 1280x768 frame), which says the pass is
+bound by how many workgroups are resident, not by its arithmetic.
+
+It now takes exactly 2 KB: the logits are staged 32 keys at a time, each half becoming its
+weights before the next is stored; the weights are kept as halves, which they are exactly;
+and the row reciprocals go by `subgroupShuffle` instead of shared memory. Every value and
+every order of summation is unchanged — 48 kernel cases and three whole frames
+bit-identical, one of them a real game frame. **56.3 -> 46.1 ms**, and the compiler reports
+128 registers and no spills, so the pass is now fully resident.
+
+With it, block 70 stores its output as half for the head directly, since nothing reads the
+float32: one `to_half` pass and 126 MB of float32 at 720p gone. Graph time at 1280x768,
+same script, same clean machine, morning against evening: **274.3 -> 257.7 ms**; the extent
+curve is 10 ms + 259 ms per megapixel.
+
 ## Left behind, deliberately
 
 - `window_attention_qkv.comp`: off by default in Codex's tree (`NR_FUSE_QKV_ATTENTION`) and
