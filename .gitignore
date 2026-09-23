@@ -37,3 +37,11 @@ __pycache__/
 *.7z
 *.zip
 *.zst
+
+# Windows build artifacts (the layer is also compiled with MSVC on Windows).
+*.obj
+*.lib
+*.exp
+*.ilk
+*.pdb
+*.objs/
