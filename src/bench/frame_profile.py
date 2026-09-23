@@ -39,6 +39,15 @@ def _kinds(path, pattern):
 
 UNARY = _kinds("src/gpu/resident.comp", r"([A-Z][A-Z0-9_]*)\s*=\s*(\d+)u")
 ROW = _kinds("src/gpu/attention.comp", r"([A-Z][A-Z0-9_]*)\s*=\s*(\d+)u")
+# The fused window attention is a row-family pass too, and names its own kind. Two
+# shaders sharing one kind number is how it hid as "qkv prepare" for a while: both said
+# 2, and only one of them was read. So both are read, and a shared number is an error.
+_WINDOW = _kinds("src/gpu/window_attention.comp", r"(WINDOW_[A-Z0-9_]*)\s*=\s*(\d+)u")
+_CLASH = set(ROW) & set(_WINDOW)
+if _CLASH:
+    raise SystemExit(f"row profile kinds collide between attention.comp and "
+                     f"window_attention.comp: {sorted(_CLASH)}")
+ROW.update(_WINDOW)
 
 
 def label(family, sub):

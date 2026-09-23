@@ -1141,7 +1141,7 @@ int xmx_rec_window_attention(int q, int k, int v, int bias, int out,
 	vkCmdDispatch(g.rcb, 8, batches < 65535u ? batches : 65535u,
 		      1u + (batches - 1u) / 65535u);
 	barrier();
-	stamp(PK_ROW, 2);        /* WINDOW_ATTENTION, as window_attention.comp names it */
+	stamp(PK_ROW, 3);        /* WINDOW_ATTENTION, as window_attention.comp names it */
 	g.recorded++;
 	return 0;
 }
