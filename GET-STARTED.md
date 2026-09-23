@@ -16,6 +16,15 @@ cooperative-matrix units, either:
 > so does this one. Nothing runs until you extract the logical weight file from a
 > DLL you already have. See [Weights](#weights-you-supply-these) below.
 
+> **The tracked source is NVIDIA-private-free.** Everything that parses or recovers
+> internals of `nvngx_dlssnr.dll` — the PE/`.rsrc`/`WEIGHTS_HT`/fatbin/PTX readers and
+> the superseded graph-recovery research code — has been moved **out of the tracked
+> tree** into `work/nvidia-private/` (git-ignored, never published). What remains in
+> `src/` is the inference path that only *consumes* the user-supplied
+> `dlssnr-logical.safetensors` (an Apache-2.0 MLX-DLSS layout), plus the publishing
+> guard tools. A release built here is therefore complete except for the weights;
+> [Build a release](#build-a-release) + [Weights](#weights-you-supply-these) below.
+
 ---
 
 ## 0. Prerequisites
@@ -79,6 +88,28 @@ python3 src/layer/nr_daemon.py --settings work/nr_settings.json --socket <endpoi
 
 - Linux endpoint: a filesystem path, e.g. `/tmp/nr_layer.sock`.
 - Windows endpoint: a named-pipe name, e.g. `\\.\pipe\nr_dlssnr_intel`.
+
+---
+
+## 1b. Build a release
+
+`make` (or the MSVC line above) builds the pieces into `work/`. To assemble a
+**distributable, near-complete release** that is only missing the weights, use the
+release script:
+
+```sh
+# Linux / WSL
+scripts/build_release.sh
+# Windows (PowerShell, with MSVC + Git + Vulkan SDK on PATH)
+scripts/build_release.ps1
+```
+
+It collects the compiled runtime, the daemon/layer/inference source, and the
+Apache-2.0 MLX-DLSS numpy halves (cloned and pinned) into `dist/`. It
+**deliberately omits** `work/mlxw/dlssnr-logical.safetensors` and any
+`nvngx_dlssnr.dll` — those are NVIDIA's and never shipped. `dist/README-release.txt`
+states exactly what the user must still add. After the weights step below, the
+release runs unchanged.
 
 ---
 
