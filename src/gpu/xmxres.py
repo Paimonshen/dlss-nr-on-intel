@@ -109,7 +109,7 @@ def _load():
             ("xmx_rec_gemm_qkv", [ctypes.c_int] * 6 + [ctypes.c_uint] * 4),
             ("xmx_rec_gemm_dual", [ctypes.c_int] * 4 + [ctypes.c_uint] * 3),
             ("xmx_ffn_init", [ctypes.c_char_p]),
-            ("xmx_rec_ffn", [ctypes.c_int] * 6 + [ctypes.c_uint] * 4),
+            ("xmx_rec_ffn", [ctypes.c_int] * 6 + [ctypes.c_uint] * 5),
             ("xmx_rec_unary2", [ctypes.c_uint] + [ctypes.c_int] * 5
              + [ctypes.c_uint, ctypes.c_uint, ctypes.c_float] + [ctypes.c_uint] * 5),
             ("xmx_rec_window_attention", [ctypes.c_int] * 5 + [ctypes.c_uint] * 3),
@@ -472,6 +472,8 @@ class Runtime:
         self.fuse_glue = os.environ.get("NR_FUSE_GLUE", "1") != "0"
         # A 32-channel block's feed-forward in one pass, the hidden layer on chip.
         self.fuse_ffn = os.environ.get("NR_FUSE_FFN", "1") != "0"
+        # The branched blocks' per-group expand and projection, the same way.
+        self.fuse_branched_ffn = os.environ.get("NR_FUSE_BRANCHED_FFN", "0") != "0"
 
     def graph_key(self):
         return (self.lib.xmx_specialization() | (int(self.fuse_qk) << 3)
@@ -486,7 +488,8 @@ class Runtime:
                 | (int(self.fuse_attention_merge) << 11)
                 | (int(self.qkv_epilogue) << 12)
                 | (int(self.fuse_glue) << 13)
-                | (int(self.fuse_ffn) << 14))
+                | (int(self.fuse_ffn) << 14)
+                | (int(self.fuse_branched_ffn) << 15))
 
     @property
     def buffer_bytes(self):
@@ -675,30 +678,42 @@ class Runtime:
         self.recorded += 1
         return self
 
-    def ffn_fused(self, a, expand, projection, target, skip, cosine, rows, channels, hidden,
-                  *, epilogue=0, narrow=False, skip_half=False):
-        """A 32-channel block's feed-forward in one pass: the expand, its gate and publish,
-        the projection and the residual — what `gemm(..., EPI_GATE_E4M3, narrow)` into a
-        hidden buffer and `gemm_residual` out of it write, bit for bit
-        (`src/gpu/test_ffn_fused.py`), with the hidden layer never leaving the chip."""
-        if channels != 32 or hidden <= 0 or hidden % 32 or rows <= 0 or rows % 16:
-            raise ValueError("fused feed-forward needs 32 channels, hidden a multiple of 32 "
-                             "and 16-row blocks")
-        inputs = {a.id, expand.id, projection.id, skip.id, cosine.id}
-        if target.id in inputs - {skip.id} or (target.id == skip.id and narrow != skip_half):
+    def ffn_fused(self, a, expand, projection, target, rows, channels, hidden, *, groups=1,
+                  skip=None, cosine=None, epilogue=0, narrow=False, skip_half=False):
+        """A feed-forward in one pass, the hidden layer never leaving the chip.
+
+        With one group of 32 channels and a `skip`, the narrow blocks' whole feed-forward:
+        what `gemm(..., EPI_GATE_E4M3, narrow)` into a hidden buffer and `gemm_residual` out
+        of it write, bit for bit. With `groups`, the branched blocks' per-group expand and
+        projection into `target`'s column slices — what their two grouped GEMMs write —
+        and no residual. `src/gpu/test_ffn_fused.py`.
+        """
+        out = groups * 32
+        if (channels <= 0 or channels % 16 or hidden <= 0 or hidden % 32 or rows <= 0
+                or rows % 16 or groups <= 0):
+            raise ValueError("fused feed-forward needs channels a multiple of 16, hidden of "
+                             "32 and 16-row blocks")
+        if (skip is None) != (cosine is None) or (skip is not None and (groups != 1
+                                                                           or channels != 32)):
+            raise ValueError("the fused residual is for one group of 32 channels")
+        inputs = {a.id, expand.id, projection.id} | ({cosine.id} if cosine is not None else set())
+        if target.id in inputs or (skip is not None and target.id == skip.id
+                                   and narrow != skip_half):
             raise ValueError("fused feed-forward output must not alias its inputs")
-        for buf, size in ((a, rows * channels * 2), (expand, channels * hidden * 2),
-                          (projection, hidden * channels * 2), (cosine, channels * 4),
-                          (skip, rows * channels * (2 if skip_half else 4)),
-                          (target, rows * channels * (2 if narrow else 4))):
-            if buf.nbytes < size:
-                raise ValueError("fused feed-forward buffer is too small")
+        sizes = [(a, rows * channels * 2), (expand, groups * channels * hidden * 2),
+                 (projection, groups * hidden * 32 * 2), (target, rows * out * (2 if narrow else 4))]
+        if skip is not None:
+            sizes += [(cosine, channels * 4), (skip, rows * channels * (2 if skip_half else 4))]
+        if any(buf.nbytes < size for buf, size in sizes):
+            raise ValueError("fused feed-forward buffer is too small")
         path = os.environ.get("XMX_FFN_SPV") or str(ROOT / "work" / "ffn_fused.spv")
         if self.lib.xmx_ffn_init(path.encode()) != 0:
             raise RuntimeError("fused feed-forward pipeline: " + self.lib.xmx_error().decode())
         flags = _publish(epilogue, narrow) | (0x40000 if skip_half else 0)
-        if self.lib.xmx_rec_ffn(a.id, expand.id, projection.id, target.id, skip.id, cosine.id,
-                                rows, channels, hidden, flags) != 0:
+        if self.lib.xmx_rec_ffn(a.id, expand.id, projection.id, target.id,
+                                skip.id if skip is not None else -1,
+                                cosine.id if cosine is not None else -1,
+                                rows, channels, hidden, groups, flags) != 0:
             raise RuntimeError("xmx_rec_ffn: " + self.lib.xmx_error().decode())
         self.recorded += 1
         return self

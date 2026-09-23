@@ -1248,24 +1248,33 @@ int xmx_ffn_init(const char *path)
 }
 
 int xmx_rec_ffn(int a, int expand, int projection, int out, int skip, int cosine,
-		unsigned M, unsigned channels, unsigned hidden, unsigned flags)
+		unsigned M, unsigned cin, unsigned hidden, unsigned groups, unsigned flags)
 {
 	if (!g.recording || !g.rffn) FAIL("fused feed-forward not ready for recording", 0);
-	if (channels != 32u || !hidden || hidden % 32u || !M || M % 16u)
-		FAIL("fused feed-forward needs 32 channels, hidden a multiple of 32, 16-row blocks", 0);
+	if (!cin || cin % 16u || !hidden || hidden % 32u || !M || M % 16u || !groups)
+		FAIL("fused feed-forward needs channels a multiple of 16, hidden of 32, 16-row blocks", 0);
 	if (flags & ~0x41f00u)
 		FAIL("fused feed-forward takes an epilogue, a half output and a half skip only", 0);
+	/* The residual reads its skip in the output's own layout, which is only the dense
+	 * one when there is a single group of 32 channels. */
+	int residual = skip >= 0 || cosine >= 0;
+	if (residual && (groups != 1u || cin != 32u || skip < 0 || cosine < 0))
+		FAIL("the fused residual is for one group of 32 channels, with skip and cosine", 0);
+	if (!residual && (flags & 0x40000u)) FAIL("a half skip without a residual", 0);
 	struct push p = { .a = addr_of(a), .b = addr_of(expand), .c = addr_of(out),
-			  .d = addr_of(skip), .m = M, .n = channels, .k = hidden,
-			  .flags = flags | 0x20000u, .residual_cos = addr_of(cosine),
+			  .m = M, .n = cin, .k = hidden, .batch = groups,
+			  .sa = cin * hidden, .sb = hidden * 32u,
+			  .ldc = groups > 1u ? groups * 32u : 0u,
+			  .flags = flags | (residual ? 0x20000u : 0u),
 			  .qkv_scale = addr_of(projection) };
-	if (!p.a || !p.b || !p.c || !p.d || !p.residual_cos || !p.qkv_scale)
+	if (residual) { p.d = addr_of(skip); p.residual_cos = addr_of(cosine); }
+	if (!p.a || !p.b || !p.c || !p.qkv_scale || (residual && (!p.d || !p.residual_cos)))
 		FAIL("fused feed-forward operand is not a live buffer", 0);
 	VkPipeline pipeline;
 	if (resident_pipeline(5, p.flags, g.rffn, &pipeline)) return -1;
 	vkCmdBindPipeline(g.rcb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
 	vkCmdPushConstants(g.rcb, g.rpl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
-	vkCmdDispatch(g.rcb, M / 16u, 1, 1);
+	vkCmdDispatch(g.rcb, M / 16u, groups, 1);
 	barrier();
 	stamp(PK_GEMM, 31);
 	g.recorded++;

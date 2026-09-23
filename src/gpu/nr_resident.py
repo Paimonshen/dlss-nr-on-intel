@@ -349,12 +349,18 @@ def record_feed_forward(runtime, w, s, source, source_half=False, source16=None)
     if not source_half and source16 is None:
         runtime.to_half(source, s.value16, pixels * channels)
     if w.branched:
-        _ffn_groups(runtime, value16, w.expand, s.hidden16, pixels, 128, channels,
-                    w.groups, leading=(0, 0, s.hidden_width),
-                    strides=(0, channels * 128, 128), epilogue=xmxres.EPI_GATE_E4M3)
-        _ffn_groups(runtime, s.hidden16, w.branch, s.heads16, pixels, 32, 128,
-                    w.groups, leading=(s.hidden_width, 0, channels),
-                    strides=(128, 128 * 32, 32), epilogue=xmxres.EPI_E4M3)
+        if (runtime.fuse_branched_ffn and pixels % 16 == 0 and channels % 16 == 0
+                and channels == w.groups * 32):
+            # every group's expand and projection in one pass, the hidden layer on chip
+            runtime.ffn_fused(value16, w.expand, w.branch, s.heads16, pixels, channels, 128,
+                              groups=w.groups, epilogue=xmxres.EPI_E4M3, narrow=True)
+        else:
+            _ffn_groups(runtime, value16, w.expand, s.hidden16, pixels, 128, channels,
+                        w.groups, leading=(0, 0, s.hidden_width),
+                        strides=(0, channels * 128, 128), epilogue=xmxres.EPI_GATE_E4M3)
+            _ffn_groups(runtime, s.hidden16, w.branch, s.heads16, pixels, 32, 128,
+                        w.groups, leading=(s.hidden_width, 0, channels),
+                        strides=(128, 128 * 32, 32), epilogue=xmxres.EPI_E4M3)
         # the fused multi-head kernels publish the residual before attention reads it,
         # which the residual now does on its way out
         record_project_residual(runtime, s.heads16, w.ffn_out, s.branch, source, w.ffn_cos,
@@ -363,8 +369,9 @@ def record_feed_forward(runtime, w, s, source, source_half=False, source16=None)
     elif (runtime.fuse_ffn and channels == 32 and s.hidden_width % 32 == 0
           and pixels % 16 == 0):
         # both GEMMs in one pass, the hidden layer never written (ffn_fused.comp)
-        runtime.ffn_fused(value16, w.expand, w.branch, s.ffn, source, w.ffn_cos, pixels,
-                          channels, s.hidden_width, skip_half=source_half)
+        runtime.ffn_fused(value16, w.expand, w.branch, s.ffn, pixels, channels,
+                          s.hidden_width, skip=source, cosine=w.ffn_cos,
+                          skip_half=source_half)
     else:
         runtime.gemm(value16, w.expand, s.hidden16, pixels, s.hidden_width, channels,
                      epilogue=xmxres.EPI_GATE_E4M3, narrow=True)

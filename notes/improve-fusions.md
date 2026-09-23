@@ -145,6 +145,23 @@ shared-memory round trips for the same arithmetic. The compiler's spill count is
 worth reading, not a target in itself; the kept version reads its input again per chunk,
 which takes the spills to 31:33 for the same time.
 
+The branched blocks' feed-forward is the same shape of work per group — all C channels
+expanded to 128, gated, projected to the group's 32 — so the kernel takes groups on the
+grid's second axis too (`NR_FUSE_BRANCHED_FFN`, 24 more cases bit-identical). **It stays
+off.** At 720p, per level: 1.19 -> 0.98 ms a block at C=64, 0.83 -> 0.79 at 128, 0.78 ->
+0.71 at 256; the frame moved 2.7 ms paired, 6.8 at 1080p, and at 384x384 it was 2.6 ms
+*slower*. The deeper levels are arithmetic rather than memory, and there one subgroup per
+16 rows is less efficient than the staged GEMM's 64. Live mode runs at the small extents.
+
+## The bottleneck on whole 64-row blocks (2026-09-24)
+
+The eight bottleneck blocks run GEMMs with K up to 4096 on 240 tokens at 720p, which is
+not a whole number of 64-row blocks, so they took the register-tiled kernel. Padded to 256
+they take the staged one: 240.6 -> 235.4 ms on the GPU, three alternating runs each, and
+bit-identical, since pad rows are zero and the softmax excludes them. It pads only when that
+costs at most an eighth more rows; at 384x384 and 1024x576 the counts (64, 192) are whole
+blocks already.
+
 ## Left behind, deliberately
 
 - `window_attention_qkv.comp`: off by default in Codex's tree (`NR_FUSE_QKV_ATTENTION`) and

@@ -79,7 +79,7 @@ def _describe(name, args):
         m, c = args[6], args[7]
         return "gemm+qkv epilogue %dx%dx%d" % (m, 3 * c, c)
     if name == "xmx_rec_ffn":
-        return "ffn fused %dx%dx%d flags %#x" % (args[6], args[7], args[8], args[9])
+        return "ffn fused %dx%dx%d x%d flags %#x" % (args[6], args[7], args[8], args[9], args[10])
     if name == "xmx_rec_gemm_dual":
         return "gemm+half copy %dx%dx%d" % args[4:7]
     if name == "xmx_rec_unary2":

@@ -25,7 +25,7 @@ def main():
     parser.add_argument('--pairs', type=int, default=8)
     parser.add_argument('--optimization',
                         choices=('ffn', 'input', 'head', 'qkv', 'merge', 'qkv-epilogue',
-                                 'glue', 'ffn-fused'),
+                                 'glue', 'ffn-fused', 'branched-ffn'),
                         default='ffn',
                         help='compare FFN batching, FP16 input, compact head, joint QKV '
                              'preparation, the head merge in the fused attention, the '
@@ -53,6 +53,7 @@ def main():
                              'qkv-epilogue': ('qkv_epilogue', 'NR_QKV_EPILOGUE'),
                              'glue': ('fuse_glue', 'NR_FUSE_GLUE'),
                              'ffn-fused': ('fuse_ffn', 'NR_FUSE_FFN'),
+                             'branched-ffn': ('fuse_branched_ffn', 'NR_FUSE_BRANCHED_FFN'),
                              }[args.optimization]
         frame = backend.frame(*features.shape[:2])
         samples = {False: [], True: []}
@@ -79,7 +80,8 @@ def main():
                           for name in ('batch_ffn', 'fuse_qk', 'input_fp16', 'compact_head',
                                        'joint_qkv', 'fuse_residual', 'fuse_window_residual',
                                        'fuse_window_attention', 'fuse_attention_merge',
-                                       'qkv_epilogue', 'fuse_glue', 'fuse_ffn')
+                                       'qkv_epilogue', 'fuse_glue', 'fuse_ffn',
+                                       'fuse_branched_ffn')
                           if name != setting)
         print(f'comparing {variable}; fixed {fixed}; staging={rt.staging}', flush=True)
         for pair in range(args.pairs):

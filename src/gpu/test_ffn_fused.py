@@ -67,9 +67,9 @@ def main():
                             rt.gemm_residual(hidden16, projection, source, cosine, want, rows,
                                              channels, hidden, epilogue=epilogue, narrow=narrow,
                                              skip_half=skip_half)
-                            rt.ffn_fused(a, expand, projection, got, source, cosine, rows,
-                                         channels, hidden, epilogue=epilogue, narrow=narrow,
-                                         skip_half=skip_half)
+                            rt.ffn_fused(a, expand, projection, got, rows, channels, hidden,
+                                         skip=source, cosine=cosine, epilogue=epilogue,
+                                         narrow=narrow, skip_half=skip_half)
                             rt.submit()
                             w, g = X.host_view(want, dtype), X.host_view(got, dtype)
                             if not np.array_equal(w.view(np.uint8), g.view(np.uint8)):
@@ -80,11 +80,11 @@ def main():
                             assert filled(g[rows * channels:], dtype).all(), "guard overwritten"
                             assert not filled(g[:rows * channels], dtype).any(), "left unwritten"
                             cases += 1
-            for args in ((a, expand, projection, a, skip32, cosine, rows, channels, hidden),
-                         (a, expand, projection, skip16, skip32, cosine, rows + 8, channels, hidden),
-                         (a, expand, projection, skip16, skip32, cosine, rows, 64, hidden)):
+            for args in ((a, expand, projection, a, rows, channels, hidden),
+                         (a, expand, projection, skip16, rows + 8, channels, hidden),
+                         (a, expand, projection, skip16, rows, 64, hidden)):
                 try:
-                    rt.ffn_fused(*args)
+                    rt.ffn_fused(*args, skip=skip32, cosine=cosine)
                 except ValueError:
                     pass
                 else:
@@ -92,11 +92,63 @@ def main():
         finally:
             for b in buffers:
                 b.free()
+    branched = branched_cases(rt, rng)
     before = rt.graph_key()
     rt.fuse_ffn = not rt.fuse_ffn
     assert rt.graph_key() != before
-    print(f"fused feed-forward: {cases} bit-exact cases, both projection paths, guards and "
-          f"graph key OK; staging={rt.staging}")
+    print(f"fused feed-forward: {cases} narrow and {branched} branched cases bit-exact, both "
+          f"projection paths, guards and graph key OK; staging={rt.staging}")
+
+
+def branched_cases(rt, rng):
+    """The branched blocks' two grouped GEMMs, called exactly as `_ffn_groups` calls them,
+    against the fused kernel with one group per grid row and no residual."""
+    cases, width = 0, 128
+    for rows, channels in ((64, 64), (48, 128), (64, 256), (1024, 64)):
+        groups = channels // 32
+        buffers = []
+
+        def alloc(n, dtype):
+            b = rt.buffer(n, dtype)
+            buffers.append(b)
+            return b
+        try:
+            a = alloc(rows * channels, np.float16)
+            expand = alloc(groups * channels * width, np.float16)
+            branch = alloc(groups * width * 32, np.float16)
+            hidden16 = alloc(rows * groups * width, np.float16)
+            want = alloc(rows * channels + GUARD, np.float16)
+            got = alloc(rows * channels + GUARD, np.float16)
+            X.host_write(expand, rng.normal(0, 0.2, groups * channels * width).astype(np.float16))
+            X.host_write(branch, rng.normal(0, 0.1, groups * width * 32).astype(np.float16))
+            for spread in (0.05, 1.0, 12.0):
+                X.host_write(a, rng.normal(0, spread, rows * channels).astype(np.float16))
+                for mask in (0, 7):
+                    rt.specialize(mask)
+                    for buf in (want, got):
+                        X.host_write(buf, np.full(rows * channels + GUARD, FILL16, np.float16))
+                    rt.begin()
+                    rt.gemm(a, expand, hidden16, rows, width, channels, batch=groups,
+                            strides=(0, channels * width, width), leading=(0, 0, groups * width),
+                            epilogue=X.EPI_GATE_E4M3, narrow=True)
+                    rt.gemm(hidden16, branch, want, rows, 32, width, batch=groups,
+                            strides=(width, width * 32, 32), leading=(groups * width, 0, channels),
+                            epilogue=X.EPI_E4M3, narrow=True)
+                    rt.ffn_fused(a, expand, branch, got, rows, channels, width, groups=groups,
+                                 epilogue=X.EPI_E4M3, narrow=True)
+                    rt.submit()
+                    w, g = X.host_view(want, np.float16), X.host_view(got, np.float16)
+                    if not np.array_equal(w.view(np.uint16), g.view(np.uint16)):
+                        bad = np.flatnonzero(w.view(np.uint16) != g.view(np.uint16))
+                        raise AssertionError(f"branched {rows}x{channels} spread {spread} mask "
+                                             f"{mask}: {bad.size} of {w.size} differ")
+                    assert filled(g[rows * channels:], np.float16).all(), "guard overwritten"
+                    assert not filled(g[:rows * channels], np.float16).any(), "left unwritten"
+                    cases += 1
+        finally:
+            for b in buffers:
+                b.free()
+    return cases
 
 
 if __name__ == "__main__":

@@ -20,9 +20,16 @@
  * of the output block as float32 for the residual. Workgroup shared memory is allocated in
  * powers of two here, and a byte more would halve how many workgroups fit on a core.
  *
- * Operands, in the resident push block: a input (half, rows x 32), b the expand weight
- * (32 x hidden), c the output, d the residual's skip, residual_cos its per-channel cosine,
- * and the projection weight (hidden x 32) in the last slot. m rows, n channels, k hidden.
+ * The branched blocks' per-group feed-forward is the same shape of work — every group
+ * expands all C input channels to 128, gates, and projects to its own 32 — so it runs here
+ * too, one group per row of the grid, without the residual (the block's C x C projection
+ * adds that afterwards).
+ *
+ * Operands, in the resident push block: a input (half, rows x n), b the expand weights
+ * (groups x n x hidden), c the output (row stride ldc, group g at columns 32g), d the
+ * residual's skip and residual_cos its per-channel cosine (only with flag 0x20000), and the
+ * projection weights (groups x hidden x 32) in the last slot. m rows, n input channels,
+ * k hidden per group, sa and sb the two weights' group strides.
  */
 #extension GL_EXT_buffer_reference : require
 #extension GL_EXT_buffer_reference2 : require
@@ -56,16 +63,18 @@ layout(push_constant, scalar) uniform Push {
 #include "residual_epilogue.glsl"   /* needs operation_flags() from above */
 
 const uint TM = 8, TN = 16, TK = 16;
-const uint ROWS = 16u, CHUNK = 32u, CHANNELS = 32u;
+const uint ROWS = 16u, CHUNK = 32u, OUT = 32u;
 const uint EPI_GATE_E4M3 = 3u;             // the expand GEMM's publish
 
 shared float16_t hidden[ROWS * CHUNK];     // 1 KB: one chunk of the gated hidden layer
 shared float stage[ROWS * TN];             // 1 KB: half the output block, for the residual
 
 void main() {
-    uint row = gl_WorkGroupID.x * ROWS;
+    uint row = gl_WorkGroupID.x * ROWS, group = gl_WorkGroupID.y;
     if (row >= pc.m) return;
-    uint width = pc.k;
+    uint cin = pc.n, width = pc.k;
+    uint ldc = pc.ldc != 0u ? pc.ldc : OUT;
+    uint expand_base = group * pc.sa, project_base = group * pc.sb;
     uint lane = gl_LocalInvocationID.x;
     HalfBuf projection = HalfBuf(pc.projection);
 
@@ -84,14 +93,14 @@ void main() {
          * across all four: that is fewer registers for the same time. Narrower chunks
          * were measured too — 16 columns, no spills at all — and were 9 % slower: twice
          * the barriers and shared-memory round trips for the same arithmetic. */
-        for (uint kk = 0; kk < 2u; kk++) {
+        for (uint kk = 0; kk < cin; kk += TK) {
             coopmat<float16_t, gl_ScopeSubgroup, TM, TK, gl_MatrixUseA> x[2];
             for (uint i = 0; i < 2u; i++)
-                coopMatLoad(x[i], pc.a.v, (row + i * TM) * CHANNELS + kk * TK, CHANNELS,
+                coopMatLoad(x[i], pc.a.v, (row + i * TM) * cin + kk, cin,
                             gl_CooperativeMatrixLayoutRowMajor);
             coopmat<float16_t, gl_ScopeSubgroup, TK, TN, gl_MatrixUseB> w[2];
             for (uint j = 0; j < 2u; j++)
-                coopMatLoad(w[j], pc.b.v, (kk * TK) * width + chunk + j * TN, width,
+                coopMatLoad(w[j], pc.b.v, expand_base + kk * width + chunk + j * TN, width,
                             gl_CooperativeMatrixLayoutRowMajor);
             for (uint i = 0; i < 2u; i++)
                 for (uint j = 0; j < 2u; j++)
@@ -117,8 +126,8 @@ void main() {
                             gl_CooperativeMatrixLayoutRowMajor);
             coopmat<float16_t, gl_ScopeSubgroup, TK, TN, gl_MatrixUseB> p[2];
             for (uint j = 0; j < 2u; j++)
-                coopMatLoad(p[j], projection.v, (chunk + kk * TK) * CHANNELS + j * TN, CHANNELS,
-                            gl_CooperativeMatrixLayoutRowMajor);
+                coopMatLoad(p[j], projection.v, project_base + (chunk + kk * TK) * OUT + j * TN,
+                            OUT, gl_CooperativeMatrixLayoutRowMajor);
             for (uint i = 0; i < 2u; i++)
                 for (uint j = 0; j < 2u; j++)
                     result[i][j] = coopMatMulAdd(g[i], p[j], result[i][j]);
@@ -137,7 +146,7 @@ void main() {
         subgroupMemoryBarrierShared();
         subgroupBarrier();
         for (uint e = lane * 4u; e < ROWS * TN; e += 32u * 4u) {
-            uint at = (row + e / TN) * CHANNELS + j * TN + e % TN;
+            uint at = (row + e / TN) * ldc + group * OUT + j * TN + e % TN;
             vec4 out4;
             for (uint q = 0; q < 4u; q++)
                 out4[q] = publish(epilogue, add_gemm_residual(stage[e + q], at + q));
