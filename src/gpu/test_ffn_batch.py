@@ -29,6 +29,7 @@ class Recorder:
         # likewise the fused narrow feed-forward, one pass where this counts two GEMMs
         self.fuse_ffn = False
         self.fuse_branched_ffn = False
+        self.fuse_partition = False
         self.calls = []
 
     def independent(self):
@@ -89,7 +90,7 @@ def host_checks():
                 for rt.input_fp16 in (False, True):
                     for rt.compact_head in (False, True):
                         for rt.joint_qkv in (False, True):
-                            # the fusions take bits 8-15. ProjectsCodex's own 5-9 would
+                            # the fusions take bits 8-16. ProjectsCodex's own 5-9 would
                             # land on input_fp16, compact_head, joint_qkv and the residuals
                             for rt.fuse_residual in (False, True):
                                 for rt.fuse_window_residual in (False, True):
@@ -99,8 +100,9 @@ def host_checks():
                                                 for rt.fuse_glue in (False, True):
                                                     for rt.fuse_ffn in (False, True):
                                                         for rt.fuse_branched_ffn in (False, True):
-                                                            keys.add(rt.graph_key())
-    assert len(keys) == 65536, f"graph key collides: {len(keys)} of 65536 distinct"
+                                                            for rt.fuse_partition in (False, True):
+                                                                keys.add(rt.graph_key())
+    assert len(keys) == 131072, f"graph key collides: {len(keys)} of 131072 distinct"
     # Exercise the production recorders too, not just the batching helper. Multiplicity
     # is the current 71-block model's grouped FFN inventory; no weights are needed.
     savings = 0

@@ -162,6 +162,21 @@ bit-identical, since pad rows are zero and the softmax excludes them. It pads on
 costs at most an eighth more rows; at 384x384 and 1024x576 the counts (64, 192) are whole
 blocks already.
 
+## The partition, folded into the QKV projection (2026-09-24)
+
+Every window block partitioned its feed-forward output — read the image, wrote it again in
+shifted-window order as half — for the QKV projection to read. `NR_FUSE_PARTITION` has the
+projection gather its own window rows instead: the staged GEMM's A loader maps each token
+row to its pixel, reads float32 or half from the image, writes zero outside it and rounds to
+half on the way into shared memory — the partition's own arithmetic, so 40 kernel cases
+(both origins, extents that are not whole windows, float32 and half images) and three whole
+frames are bit-identical. It takes the staged path at every depth, since that is the kernel
+whose A goes through shared memory.
+
+62 passes fewer. Level 0 at 720p: 4.48 ms for the gathered projection against 3.52 + 2.48 for
+the tiled one and its partition. Paired, whole frame: 1280x720 240.1 -> 231.4 ms, 1920x1080
+524.7 -> 511.8, 320x320 41.7 -> 41.0.
+
 ## Tried and dropped (2026-09-24)
 
 - **Register-prefetch pipelining in the staged GEMM** — the next K block's global loads

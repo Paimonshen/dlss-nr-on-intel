@@ -107,6 +107,7 @@ def _load():
             ("xmx_rec_gemm_window_residual", [ctypes.c_int] * 5 + [ctypes.c_uint] * 8),
             ("xmx_window_init", [ctypes.c_char_p, ctypes.c_uint]),
             ("xmx_rec_gemm_qkv", [ctypes.c_int] * 6 + [ctypes.c_uint] * 4),
+            ("xmx_rec_gemm_qkv_window", [ctypes.c_int] * 6 + [ctypes.c_uint] * 9),
             ("xmx_rec_gemm_dual", [ctypes.c_int] * 4 + [ctypes.c_uint] * 3),
             ("xmx_ffn_init", [ctypes.c_char_p]),
             ("xmx_rec_ffn", [ctypes.c_int] * 6 + [ctypes.c_uint] * 5),
@@ -474,6 +475,8 @@ class Runtime:
         self.fuse_ffn = os.environ.get("NR_FUSE_FFN", "1") != "0"
         # The branched blocks' per-group expand and projection, the same way.
         self.fuse_branched_ffn = os.environ.get("NR_FUSE_BRANCHED_FFN", "0") != "0"
+        # The window partition folded into the QKV projection's own loads.
+        self.fuse_partition = os.environ.get("NR_FUSE_PARTITION", "1") != "0"
 
     def graph_key(self):
         return (self.lib.xmx_specialization() | (int(self.fuse_qk) << 3)
@@ -489,7 +492,8 @@ class Runtime:
                 | (int(self.qkv_epilogue) << 12)
                 | (int(self.fuse_glue) << 13)
                 | (int(self.fuse_ffn) << 14)
-                | (int(self.fuse_branched_ffn) << 15))
+                | (int(self.fuse_branched_ffn) << 15)
+                | (int(self.fuse_partition) << 16))
 
     @property
     def buffer_bytes(self):
@@ -637,12 +641,17 @@ class Runtime:
         self.recorded += 1
         return self
 
-    def gemm_qkv(self, a, weight, q, k, v, scale, rows, channels, heads, tokens):
+    def gemm_qkv(self, a, weight, q, k, v, scale, rows, channels, heads, tokens, *,
+                 window=None, image_half=False):
         """The QKV projection, finished in its own epilogue: Q and K cosine-normalised
         (Q times its head's scale), V published, all three as E4M3 halves in
         (window, head, token, 32) order — what the projection into float32 followed by
         two `cosine_publish` and one `split_heads` would write, bit for bit
         (`src/gpu/test_gemm_qkv.py`). `rows` is windows * tokens.
+
+        With `window=(height, width, origin)`, `a` is the image itself (float32, or half
+        with `image_half`) and the shifted-window partition happens in the projection's
+        own loads: what `partition` into a half buffer then this would write, bit for bit.
         """
         if (min(rows, heads, tokens) <= 0 or channels != heads * 32 or rows % tokens
                 or rows % TM or channels % TK):
@@ -650,6 +659,23 @@ class Runtime:
                              "and tile-aligned extents")
         if len({q.id, k.id, v.id}) != 3 or {q.id, k.id, v.id} & {a.id, weight.id, scale.id}:
             raise ValueError("QKV targets must be distinct from each other and the inputs")
+        if window is not None:
+            height, width, origin = window
+            ph, pw, (top, left) = self.window_extent(height, width, origin, 8)
+            if tokens != 64 or rows != ph * pw or rows % 64 or channels % 32:
+                raise ValueError("a window-gathered QKV projection takes whole 8x8 windows")
+            if a.nbytes < height * width * channels * (2 if image_half else 4):
+                raise ValueError("QKV projection image is too small")
+            for buf in (q, k, v):
+                if buf.nbytes < rows * channels * 2:
+                    raise ValueError("QKV projection buffer is too small")
+            if self.lib.xmx_rec_gemm_qkv_window(a.id, weight.id, q.id, k.id, v.id, scale.id,
+                                                rows, channels, heads, tokens, width, height,
+                                                pw // 8, (top << 16) | left,
+                                                int(image_half)) != 0:
+                raise RuntimeError("xmx_rec_gemm_qkv_window: " + self.lib.xmx_error().decode())
+            self.recorded += 1
+            return self
         for buf, size in ((a, rows * channels * 2), (weight, channels * 3 * channels * 2),
                           (q, rows * channels * 2), (k, rows * channels * 2),
                           (v, rows * channels * 2), (scale, heads * 4)):

@@ -79,12 +79,14 @@ def frames():
                 rt.fuse_qk = False
                 np.testing.assert_array_equal(frame.run(features, execution='replay'), expected)
                 rt.fuse_qk = True
-                # and the epilogue replaces all three of the separate passes at 70 sites
+                # and the epilogue replaces all three of the separate passes at 70 sites —
+                # and, gathering its own window rows, the partition at the 62 window blocks
                 rt.qkv_epilogue = True
                 passes = []
                 np.testing.assert_array_equal(
                     frame.run(features, execution='replay', submits=passes), expected)
-                assert counts[False] - passes[0] == 210, (counts, passes)
+                folded = 62 if rt.fuse_partition else 0
+                assert counts[False] - passes[0] == 210 + folded, (counts, passes)
             changed = features.copy()
             changed[..., 4:7] *= np.float32(.75)
             results = []
@@ -94,7 +96,7 @@ def frames():
                 np.testing.assert_array_equal(result, results[0])
             assert not np.array_equal(results[0], expected)
             print(f'joint QKV: {width}x{height} exact, 140 fewer passes; QKV epilogue exact, '
-                  f'210 fewer; cached toggles and changed input OK')
+                  f'{210 + folded} fewer; cached toggles and changed input OK')
     finally:
         backend.close()
 

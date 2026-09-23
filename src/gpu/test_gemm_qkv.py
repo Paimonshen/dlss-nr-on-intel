@@ -96,12 +96,71 @@ def main():
         finally:
             for buf in buffers:
                 buf.free()
-    before = rt.graph_key()
-    rt.qkv_epilogue = not rt.qkv_epilogue
-    assert rt.graph_key() != before
+    for name in ("qkv_epilogue", "fuse_partition"):
+        before = rt.graph_key()
+        setattr(rt, name, not getattr(rt, name))
+        assert rt.graph_key() != before, name
     assert paths == {"tiled", "staged"}, paths
-    print(f"QKV epilogue: {cases} bit-exact cases on both GEMM paths, guards and graph key "
-          f"OK; staging={rt.staging}")
+    gathered = window_cases(rt, rng)
+    print(f"QKV epilogue: {cases} bit-exact cases on both GEMM paths, {gathered} with the "
+          f"window gather, guards and graph key OK; staging={rt.staging}")
+
+
+def window_cases(rt, rng):
+    """The projection gathering its window rows from the image, against the partition into
+    a half buffer followed by the projection — float32 and half images, both origins, and
+    extents that are not whole windows, so the zero padding is exercised on every side."""
+    cases = 0
+    for height, width, channels in ((16, 24, 32), (20, 20, 64), (13, 21, 32), (24, 40, 128),
+                                    (8, 16, 256)):
+        heads = channels // 32
+        for origin in ((0, 0), (-4, -4)):
+            ph, pw, _ = rt.window_extent(height, width, origin, 8)
+            rows = ph * pw
+            buffers = []
+
+            def alloc(n, dtype):
+                b = rt.buffer(n, dtype)
+                buffers.append(b)
+                return b
+            try:
+                image32 = alloc(height * width * channels, np.float32)
+                image16 = alloc(height * width * channels, np.float16)
+                weight = alloc(channels * 3 * channels, np.float16)
+                scale = alloc(heads, np.float32)
+                win16 = alloc(rows * channels, np.float16)
+                targets = [alloc(rows * channels + GUARD, np.float16) for _ in range(6)]
+                values = rng.normal(0, 1.5, height * width * channels)
+                values[:2] = [0.0, 70000.0]                 # a zero, and one past half's range
+                X.host_write(image32, values.astype(np.float32))
+                X.host_write(image16, values.astype(np.float16))
+                X.host_write(weight, rng.normal(0, .2, channels * 3 * channels).astype(np.float16))
+                X.host_write(scale, rng.uniform(.5, 12, heads).astype(np.float32))
+                for image, half in ((image32, False), (image16, True)):
+                    for mask in (0, 7):
+                        rt.specialize(mask)
+                        for buf in targets:
+                            X.host_write(buf, np.full(rows * channels + GUARD, FILL, np.float16))
+                        rt.begin()
+                        rt.partition(image, win16, height, width, channels, origin=origin,
+                                     narrow=True, a_half=half)
+                        rt.gemm_qkv(win16, weight, *targets[:3], scale, rows, channels, heads, 64)
+                        rt.gemm_qkv(image, weight, *targets[3:], scale, rows, channels, heads, 64,
+                                    window=(height, width, origin), image_half=half)
+                        rt.submit()
+                        for name, want, got in zip("QKV", targets[:3], targets[3:]):
+                            w = X.host_view(want, np.float16).view(np.uint16)
+                            g = X.host_view(got, np.float16).view(np.uint16)
+                            if not np.array_equal(w, g):
+                                raise AssertionError(
+                                    f"window {name} differs at {int((w != g).sum())} of {w.size}: "
+                                    f"{height}x{width} C={channels} origin={origin} half={half} "
+                                    f"mask={mask}")
+                        cases += 1
+            finally:
+                for b in buffers:
+                    b.free()
+    return cases
 
 
 if __name__ == "__main__":

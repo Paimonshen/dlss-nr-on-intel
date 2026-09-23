@@ -78,6 +78,10 @@ def _describe(name, args):
     if name == "xmx_rec_gemm_qkv":
         m, c = args[6], args[7]
         return "gemm+qkv epilogue %dx%dx%d" % (m, 3 * c, c)
+    if name == "xmx_rec_gemm_qkv_window":
+        m, c = args[6], args[7]
+        return "gemm+qkv epilogue %dx%dx%d, window gather%s" % (
+            m, 3 * c, c, " (half image)" if args[14] else "")
     if name == "xmx_rec_ffn":
         return "ffn fused %dx%dx%d x%d flags %#x" % (args[6], args[7], args[8], args[9], args[10])
     if name == "xmx_rec_gemm_dual":

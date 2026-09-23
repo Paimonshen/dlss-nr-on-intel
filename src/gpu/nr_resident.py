@@ -189,7 +189,8 @@ def record_qkv(runtime, w, s, windows, tokens, channels, heads):
                                tokens=tokens, heads=heads, narrow=True, from_half=True)
 
 
-def record_qkv_projection(runtime, a, w, s, windows, tokens, channels, heads):
+def record_qkv_projection(runtime, a, w, s, windows, tokens, channels, heads, *,
+                          window=None, image_half=False):
     """The QKV projection and everything that prepares Q, K and V after it.
 
     Returns the buffer K ended up in. With `qkv_epilogue` it is one GEMM whose epilogue
@@ -197,8 +198,21 @@ def record_qkv_projection(runtime, a, w, s, windows, tokens, channels, heads):
     rather than `s.k16`: k16 shares the arena role of the projection's input, which other
     workgroups are still reading while this one's epilogue writes. Otherwise the
     projection goes to memory in float32 and `record_qkv` reads it back, as it always did.
+
+    With `window=(height, width, origin)` `a` is the image, not its partition: the epilogue
+    GEMM gathers the window rows itself. Without the epilogue that gather has nowhere to
+    live, so the partition is recorded here as it always was.
     """
     rows = windows * tokens
+    if window is not None:
+        if runtime.qkv_epilogue and rows % 64 == 0:
+            runtime.gemm_qkv(a, w.qkv, s.q16, s.key16, s.v16, w.scale, rows, channels, heads,
+                             tokens, window=window, image_half=image_half)
+            return s.key16
+        height, width, origin = window
+        runtime.partition(a, s.win16, height, width, channels, origin=origin, narrow=True,
+                          a_half=image_half)
+        a = s.win16
     if runtime.qkv_epilogue and rows % 16 == 0:
         runtime.gemm_qkv(a, w.qkv, s.q16, s.key16, s.v16, w.scale, rows, channels, heads,
                          tokens)
@@ -430,9 +444,15 @@ def record_window_attention(runtime, w, s, source, target=None, publish=0,
     windows = (padded_height // 8) * (padded_width // 8)
     batch = windows * heads
     windowed = windows * tokens * channels
-    runtime.partition(source, s.win16, s.height, s.width, channels, origin=w.origin,
-                      narrow=True, a_half=source_half)
-    key = record_qkv_projection(runtime, s.win16, w, s, windows, tokens, channels, heads)
+    if runtime.fuse_partition:
+        # the projection gathers its window rows from the image itself
+        key = record_qkv_projection(runtime, source, w, s, windows, tokens, channels, heads,
+                                    window=(s.height, s.width, w.origin),
+                                    image_half=source_half)
+    else:
+        runtime.partition(source, s.win16, s.height, s.width, channels, origin=w.origin,
+                          narrow=True, a_half=source_half)
+        key = record_qkv_projection(runtime, s.win16, w, s, windows, tokens, channels, heads)
     fused = runtime.fuse_window_attention and tokens == 64
     merged = fused and runtime.fuse_attention_merge
     attended = s.context16 if merged else s.merged16

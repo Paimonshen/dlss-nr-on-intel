@@ -776,7 +776,8 @@ def main():
             ("NR_FUSE_WINDOW_ATTENTION", "fuse_window_attention"),
             ("NR_FUSE_ATTENTION_MERGE", "fuse_attention_merge"),
             ("NR_QKV_EPILOGUE", "qkv_epilogue"), ("NR_FUSE_GLUE", "fuse_glue"),
-            ("NR_FUSE_FFN", "fuse_ffn"), ("NR_FUSE_BRANCHED_FFN", "fuse_branched_ffn"))),
+            ("NR_FUSE_FFN", "fuse_ffn"), ("NR_FUSE_BRANCHED_FFN", "fuse_branched_ffn"),
+            ("NR_FUSE_PARTITION", "fuse_partition"))),
           flush=True)
 
     if os.path.lexists(args.socket):
