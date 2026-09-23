@@ -123,8 +123,17 @@ class GlobalScratch:
 
     def __init__(self, runtime, weights, tokens, arena=None):
         channels, heads = weights.channels, weights.heads
-        # the token count is the bottleneck's pixel count and need not be tile-aligned
-        self.tokens, self.padded = tokens, xmxres.align(tokens, 16)
+        # the token count is the bottleneck's pixel count and need not be tile-aligned.
+        # Whole 64-row blocks put its deep-K GEMMs (K up to 4096) on the staged kernel,
+        # which is faster there: 240 -> 256 tokens at 720p took the frame from 240.6 to
+        # 235.4 ms on the GPU, three alternating runs each. Pad rows are zero, are excluded
+        # from the softmax, and leave every real row bit-identical. The eighth is a guard,
+        # not a measurement: at 384x384 (64 tokens) and 1024x576 (192) the question does
+        # not arise, and a large pad would pay for rows nobody needs.
+        padded = xmxres.align(tokens, 16)
+        if xmxres.align(tokens, 64) * 8 <= padded * 9:
+            padded = xmxres.align(tokens, 64)
+        self.tokens, self.padded = tokens, padded
         padded, hidden = self.padded, weights.hidden_width
         make = (arena.buffer if arena is not None else
                 lambda name, count, dtype=np.float32: runtime.buffer(count, dtype))
