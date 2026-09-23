@@ -87,10 +87,14 @@ struct push {
 	 * needs the image it writes back into. Appended, so no earlier offset moves. */
 	uint64_t residual_cos;
 	uint32_t image_h, image_w, window_cols, window_pad;
+	/* The QKV projection's epilogue (`qkv_epilogue.glsl`): the query's per-head scale.
+	 * 128 bytes in all, the push-constant size every Vulkan device must support. */
+	uint64_t qkv_scale;
 };
 _Static_assert(offsetof(struct push, lda) == 80, "attention QKV scale pointer ABI");
 _Static_assert(offsetof(struct push, residual_cos) == 96, "residual epilogue ABI");
-_Static_assert(sizeof(struct push) == 120, "push block matches the GEMM shaders");
+_Static_assert(offsetof(struct push, qkv_scale) == 120, "QKV epilogue ABI");
+_Static_assert(sizeof(struct push) == 128, "push block matches the GEMM shaders");
 
 const char *xmx_error(void) { return g.err; }
 int xmx_device_lost(void) { return g.lost; }
@@ -947,11 +951,16 @@ int xmx_sync(int on)
 	return 0;
 }
 
+/* The QKV epilogue's other operands: K and V targets, the query scale, and the layout
+ * the three targets share, (window, head, token, 32). */
+struct qkv_targets { int k, v, scale; unsigned tokens, heads; };
+
 static int record_gemm(int a, int b, int c, unsigned M, unsigned N, unsigned K,
 		       unsigned batch, unsigned sa, unsigned sb, unsigned sc, unsigned bt,
 		       unsigned lda, unsigned ldb, unsigned ldc,
 		       unsigned oa, unsigned ob, unsigned oc,
-		       int skip, int cosine, const uint32_t *window)
+		       int skip, int cosine, const uint32_t *window,
+		       const struct qkv_targets *qkv)
 {
 	if (!g.recording) FAIL("not recording", 0);
 	struct push p = { .a = addr_of(a), .b = addr_of(b), .c = addr_of(c),
@@ -966,6 +975,14 @@ static int record_gemm(int a, int b, int c, unsigned M, unsigned N, unsigned K,
 	if (window) {
 		p.image_h = window[0]; p.image_w = window[1];
 		p.window_cols = window[2]; p.window_pad = window[3];
+	}
+	if (qkv) {
+		/* c is Q; K, V and the scale ride in slots only the residual modes use */
+		p.d = addr_of(qkv->k); p.residual_cos = addr_of(qkv->v);
+		p.qkv_scale = addr_of(qkv->scale);
+		p.image_h = qkv->tokens; p.image_w = qkv->heads;
+		if (!p.d || !p.residual_cos || !p.qkv_scale)
+			FAIL("QKV epilogue operand is not a live buffer", 0);
 	}
 	/* Element offsets are folded into the addresses, so a sub-matrix needs no shader
 	 * support: A and B are half, and C is float unless the epilogue narrows it. */
@@ -994,6 +1011,11 @@ static int record_gemm(int a, int b, int c, unsigned M, unsigned N, unsigned K,
 			FAIL("compact head requires N=16, ldc=4 and plain FP32 output", 0);
 		staged = tiled = 0;  /* its shared-memory scatter is one 8x16 tile */
 	}
+	/* The QKV epilogue normalises a head inside one workgroup, so the column block must
+	 * be one head exactly: 32 wide, which the staged block always is and the tiled one
+	 * is unless XMX_TILE_N moved it. The 8x16 kernel never qualifies. */
+	if ((bt & 0x100000u) && !(qkv && bt == 0x100000u && (staged || (tiled && g.tilen == 32))))
+		FAIL("QKV epilogue needs its targets, no other flag, and a 32-column block", 0);
 	VkPipeline pipeline;
 	if (resident_pipeline(staged ? 2 : (tiled ? 1 : 0), bt,
 			      staged ? g.rstaged : (tiled ? g.rtiled : g.rgemm), &pipeline)) return -1;
@@ -1017,7 +1039,7 @@ int xmx_rec_gemm(int a, int b, int c, unsigned M, unsigned N, unsigned K, unsign
 		 unsigned oa, unsigned ob, unsigned oc)
 {
 	return record_gemm(a, b, c, M, N, K, batch, sa, sb, sc, bt,
-			   lda, ldb, ldc, oa, ob, oc, -1, -1, NULL);
+			   lda, ldb, ldc, oa, ob, oc, -1, -1, NULL, NULL);
 }
 
 /* A dense projection whose epilogue adds `skip * cosine` before the publish: the
@@ -1030,7 +1052,7 @@ int xmx_rec_gemm_residual(int a, int b, int c, int skip, int cosine,
 {
 	if (skip < 0 || cosine < 0) FAIL("invalid residual buffer", 0);
 	return record_gemm(a, b, c, M, N, K, 1, M * K, K * N, M * N,
-			   flags | 0x20000u, 0, 0, 0, 0, 0, 0, skip, cosine, NULL);
+			   flags | 0x20000u, 0, 0, 0, 0, 0, 0, skip, cosine, NULL, NULL);
 }
 
 /* The same, for a window block's output projection: its rows are in window order,
@@ -1045,7 +1067,23 @@ int xmx_rec_gemm_window_residual(int a, int b, int c, int skip, int cosine,
 		FAIL("invalid window residual", 0);
 	uint32_t window[] = { height, width, across, pad };
 	return record_gemm(a, b, c, M, N, K, 1, M * K, K * N, M * N,
-			   flags | 0xa0000u, 0, 0, 0, 0, 0, 0, skip, cosine, window);
+			   flags | 0xa0000u, 0, 0, 0, 0, 0, 0, skip, cosine, window, NULL);
+}
+
+/* The QKV projection with Q and K normalised and V published in its own epilogue
+ * (`qkv_epilogue.glsl`), so the float32 projection never goes to memory and the two
+ * cosine publishes and the V split that read it back are not recorded at all. `M` rows
+ * of `channels` in, (window, head, token, 32) E4M3 halves out, `tokens` per window. */
+int xmx_rec_gemm_qkv(int a, int weight, int q, int k, int v, int scale,
+		     unsigned M, unsigned channels, unsigned heads, unsigned tokens)
+{
+	if (q < 0 || k < 0 || v < 0 || scale < 0 || !heads || !tokens || channels != heads * 32u
+	    || M % tokens)
+		FAIL("invalid QKV projection", 0);
+	struct qkv_targets targets = { k, v, scale, tokens, heads };
+	unsigned N = 3u * channels;
+	return record_gemm(a, weight, q, M, N, channels, 1, M * channels, channels * N, M * N,
+			   0x100000u, 0, 0, 0, 0, 0, 0, -1, -1, NULL, &targets);
 }
 
 int xmx_rec_unary(unsigned kind, int a, int b, int c, int d, unsigned n, unsigned channels,

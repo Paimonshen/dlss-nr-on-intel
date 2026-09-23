@@ -50,18 +50,22 @@ work/test_settled: src/layer/test_settled.c src/layer/nr_layer.c
 work/test_exchange: src/layer/test_exchange.c src/layer/nr_layer.c
 	$(CC) $(CFLAGS) -o $@ $< -lvulkan -lpthread
 
-work/gemm_resident.spv: src/gpu/gemm_resident.comp src/gpu/publish.glsl src/gpu/specialize.glsl
+GEMM_GLSL := src/gpu/publish.glsl src/gpu/specialize.glsl src/gpu/residual_epilogue.glsl \
+             src/gpu/cosine_tree.glsl src/gpu/qkv_epilogue.glsl
+work/gemm_resident.spv: src/gpu/gemm_resident.comp $(GEMM_GLSL)
 	$(GLSL) -o $@ $<
 # the same source, with a 16x32 block of the output held in one subgroup's registers
-work/gemm_tiled.spv: src/gpu/gemm_resident.comp src/gpu/publish.glsl src/gpu/specialize.glsl Makefile
+work/gemm_tiled.spv: src/gpu/gemm_resident.comp $(GEMM_GLSL) Makefile
 	$(GLSL) -DRM=2 -DRN=2 -o $@ $<
-work/gemm_staged.spv: src/gpu/gemm_staged.comp src/gpu/publish.glsl src/gpu/specialize.glsl
+work/gemm_staged.spv: src/gpu/gemm_staged.comp $(GEMM_GLSL)
 	$(GLSL) -o $@ $<
 work/resident.spv: src/gpu/resident.comp src/gpu/publish.glsl src/gpu/specialize.glsl
 	$(GLSL) -o $@ $<
-work/attention.spv: src/gpu/attention.comp src/gpu/publish.glsl src/gpu/specialize.glsl
+work/attention.spv: src/gpu/attention.comp src/gpu/publish.glsl src/gpu/specialize.glsl \
+                    src/gpu/cosine_tree.glsl
 	$(GLSL) -o $@ $<
-work/attention_ab.spv: src/gpu/attention.comp src/gpu/publish.glsl src/gpu/specialize.glsl
+work/attention_ab.spv: src/gpu/attention.comp src/gpu/publish.glsl src/gpu/specialize.glsl \
+                       src/gpu/cosine_tree.glsl
 	$(GLSL) -DSOFTMAX_AB -o $@ $<
 work/history.spv: src/gpu/history.comp
 	$(GLSL) -o $@ $<
@@ -113,6 +117,7 @@ test: all work/attention_ab.spv work/test_exchange work/test_settled work/test_p
 	python3 src/gpu/test_gemm_residual.py
 	python3 src/gpu/test_window_residual.py
 	python3 src/gpu/test_window_attention.py
+	python3 src/gpu/test_gemm_qkv.py
 	python3 src/gpu/test_epilogue.py
 	python3 src/gpu/test_specialization.py
 	python3 src/gpu/test_softmax_pack.py

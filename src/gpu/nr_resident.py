@@ -136,6 +136,7 @@ class GlobalScratch:
         self.ffn16 = make("ffn16", padded * channels, np.float16)
         self.proj = make("proj", padded * channels * 3)
         self.q16, self.k16, self.v16 = (make(name, padded * channels, np.float16) for name in ("q16", "k16", "v16"))
+        self.key16 = make("key16", padded * channels, np.float16)   # see record_qkv_projection
         self.scores = make("scores", heads * padded * padded)
         self.probs16 = make("probs16", heads * padded * padded, np.float16)
         self.context = make("context", heads * padded * 32)
@@ -179,6 +180,25 @@ def record_qkv(runtime, w, s, windows, tokens, channels, heads):
                                tokens=tokens, heads=heads, narrow=True, from_half=True)
 
 
+def record_qkv_projection(runtime, a, w, s, windows, tokens, channels, heads):
+    """The QKV projection and everything that prepares Q, K and V after it.
+
+    Returns the buffer K ended up in. With `qkv_epilogue` it is one GEMM whose epilogue
+    normalises Q and K and publishes V (`qkv_epilogue.glsl`), and K goes to `s.key16`
+    rather than `s.k16`: k16 shares the arena role of the projection's input, which other
+    workgroups are still reading while this one's epilogue writes. Otherwise the
+    projection goes to memory in float32 and `record_qkv` reads it back, as it always did.
+    """
+    rows = windows * tokens
+    if runtime.qkv_epilogue and rows % 16 == 0:
+        runtime.gemm_qkv(a, w.qkv, s.q16, s.key16, s.v16, w.scale, rows, channels, heads,
+                         tokens)
+        return s.key16
+    runtime.gemm(a, w.qkv, s.proj, rows, 3 * channels, channels)
+    record_qkv(runtime, w, s, windows, tokens, channels, heads)
+    return s.k16
+
+
 def record_project_residual(runtime, a, weight, branch, skip, cosine, target,
                             rows, channels, inner, *, epilogue=0, skip_half=False):
     """A projection and its residual: `target = a @ weight + skip * cosine`.
@@ -209,9 +229,8 @@ def record_global_block(runtime, w, s, source=None, target=None):
                             s.ffn, padded, channels, w.hidden_width)
 
     runtime.to_half(s.ffn, s.ffn16, padded * channels)
-    runtime.gemm(s.ffn16, w.qkv, s.proj, padded, 3 * channels, channels)
-    record_qkv(runtime, w, s, 1, padded, channels, heads)
-    runtime.gemm(s.q16, s.k16, s.scores, padded, padded, 32, batch=heads,
+    key = record_qkv_projection(runtime, s.ffn16, w, s, 1, padded, channels, heads)
+    runtime.gemm(s.q16, key, s.scores, padded, padded, 32, batch=heads,
                  strides=(padded * 32, padded * 32, padded * padded), transpose_b=True)
     # no attention bias here, and the logits are clamped symmetrically
     runtime.softmax(s.scores, s.probs16, heads * padded, s.tokens,
@@ -268,6 +287,7 @@ class BlockScratch:
         self.win16 = make("win16", windowed, np.float16)
         self.proj = make("proj", windowed * 3)
         self.q16, self.k16, self.v16 = (make(name, windowed, np.float16) for name in ("q16", "k16", "v16"))
+        self.key16 = make("key16", windowed, np.float16)   # see record_qkv_projection
         self.scores = make("scores", self.batch * self.tokens * self.tokens)
         self.probs16 = make("probs16", self.batch * self.tokens * self.tokens, np.float16)
         self.context = make("context", self.batch * self.tokens * 32)
@@ -380,8 +400,7 @@ def record_window_attention(runtime, w, s, source, target=None, publish=0,
     windowed = windows * tokens * channels
     runtime.partition(source, s.win16, s.height, s.width, channels, origin=w.origin,
                       narrow=True)
-    runtime.gemm(s.win16, w.qkv, s.proj, windows * tokens, 3 * channels, channels)
-    record_qkv(runtime, w, s, windows, tokens, channels, heads)
+    key = record_qkv_projection(runtime, s.win16, w, s, windows, tokens, channels, heads)
     fused = runtime.fuse_window_attention and tokens == 64
     merged = fused and runtime.fuse_attention_merge
     attended = s.context16 if merged else s.merged16
@@ -391,10 +410,10 @@ def record_window_attention(runtime, w, s, source, target=None, publish=0,
         # reading Q while this one stores. Merged, the same dispatch also does the head
         # merge and writes the published result into `context16`, whose role (the
         # scores') the fused path leaves unused.
-        runtime.window_attention(s.q16, s.k16, s.v16, attended if merged else s.context,
+        runtime.window_attention(s.q16, key, s.v16, attended if merged else s.context,
                                  batch, heads, bias=w.bias, merged=merged)
     else:
-        runtime.gemm(s.q16, s.k16, s.scores, tokens, tokens, 32, batch=batch,
+        runtime.gemm(s.q16, key, s.scores, tokens, tokens, 32, batch=batch,
                      strides=(tokens * 32, tokens * 32, tokens * tokens), transpose_b=True)
         runtime.softmax(s.scores, s.probs16, batch * tokens, tokens, narrow=True,
                         bias=w.bias, heads=heads)

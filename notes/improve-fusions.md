@@ -84,7 +84,8 @@ saving did: 13.6 ms at 720p there too.
 
 - `window_attention_qkv.comp`: off by default in Codex's tree (`NR_FUSE_QKV_ATTENTION`) and
   not measured there as enabled. It reads the FP32 QKV projection inside the attention;
-  normalising in the QKV GEMM's own epilogue removes more traffic, and is next.
+  normalising in the QKV GEMM's own epilogue instead removed that projection altogether,
+  22 % of a frame (`improve-qkv-epilogue.md`), so there is nothing left for it to read.
 - `DIRECT_EPILOGUE`: an experiment there, and `improve` already stores float32 epilogues
   straight from the accumulator.
 - phase37's paired cosine conversions: measured 0.6 % *slower* by Codex and never enabled.

@@ -50,6 +50,7 @@ layout(push_constant, scalar) uniform Push {
     uint lda, ldb, ldc, spare;
     uint64_t residual_cos;                     // per-channel cosine of the skip
     uint image_h, image_w, window_cols, window_pad;   // window residual geometry
+    uint64_t qkv_scale;                        // the QKV epilogue's query scale
 } pc;
 
 #include "specialize.glsl"
@@ -58,6 +59,11 @@ layout(push_constant, scalar) uniform Push {
 shared float16_t buf_a[BM * SA];
 shared float16_t buf_b[BK * SB];
 shared float stage[BM * BN];
+
+void qkv_barrier() { barrier(); }
+#define QKV_STAGE float
+#include "cosine_tree.glsl"
+#include "qkv_epilogue.glsl"
 
 void main() {
     uint row = gl_WorkGroupID.y * BM, col = gl_WorkGroupID.x * BN;
@@ -143,7 +149,7 @@ void main() {
     bool narrow = (operation_flags() & 0x1000u) != 0u;
     /* A fused residual needs the element's address in the skip and the cosine, so it
      * never takes the raw store below; it goes through shared memory like a publish. */
-    if (epilogue == 0u && !narrow && (operation_flags() & 0x20000u) == 0u) {
+    if (epilogue == 0u && !narrow && (operation_flags() & 0x120000u) == 0u) {
         for (uint i = 0; i < RM; i++)
             for (uint j = 0; j < RN; j++)
                 coopMatStore(acc[i][j], pc.c.v,
@@ -163,6 +169,11 @@ void main() {
             coopMatStore(acc[i][j], stage, (warp * WM + i * TM) * BN + j * TN, BN,
                          gl_CooperativeMatrixLayoutRowMajor);
     barrier();
+    /* Bit 0x100000: the QKV projection's epilogue (qkv_epilogue.glsl). */
+    if ((operation_flags() & 0x100000u) != 0u) {
+        qkv_epilogue(row, col, thread, 32u * WARPS);
+        return;
+    }
 
     for (uint e = thread * 4u; e < BM * BN; e += 32u * WARPS * 4u) {
         uint at = co + (row + e / BN) * ldc + col + e % BN;

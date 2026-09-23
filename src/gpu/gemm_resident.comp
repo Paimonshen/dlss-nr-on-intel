@@ -51,7 +51,8 @@ layout(push_constant, scalar) uniform Push {
     float p0, p1, p2, p3;
     uint lda, ldb, ldc, spare;
     uint64_t residual_cos;                     // per-channel cosine of the skip
-    uint image_h, image_w, window_cols, window_pad;   // window residual geometry      // row strides; 0 means the dense default
+    uint image_h, image_w, window_cols, window_pad;   // window residual geometry
+    uint64_t qkv_scale;                        // the QKV epilogue's query scale
 } pc;
 
 #include "specialize.glsl"
@@ -91,6 +92,15 @@ const uint BM = TM * RM, BN = TN * RN;
  * shared memory lets each lane write four consecutive halves as one 64-bit store. That
  * is worth about 20 ms of a 720p frame. */
 shared ACC stage[BM * BN];
+
+/* The QKV projection's epilogue needs a column block of exactly one head, 32 wide, so it
+ * exists in the register-tiled build only; libxmx never routes it anywhere else. */
+#if RN == 2
+void qkv_barrier() { subgroupMemoryBarrierShared(); subgroupBarrier(); }
+#define QKV_STAGE ACC
+#include "cosine_tree.glsl"
+#include "qkv_epilogue.glsl"
+#endif
 
 
 
@@ -155,6 +165,20 @@ void main() {
      * through shared memory and every element is finished on its own. Bits 0x20000
      * (residual), 0x40000 (half skip) and 0x80000 (window layout) are clear of
      * compact_head's 0x10000. */
+#if RN == 2
+    /* Bit 0x100000: Q and K normalised and V published here, straight into the three
+     * (window, head, token, 32) targets (qkv_epilogue.glsl). */
+    if ((operation_flags() & 0x100000u) != 0u) {
+        for (uint i = 0; i < RM; i++)
+            for (uint j = 0; j < RN; j++)
+                coopMatStore(acc[i][j], stage, i * TM * BN + j * TN, BN,
+                             gl_CooperativeMatrixLayoutRowMajor);
+        subgroupMemoryBarrierShared();
+        subgroupBarrier();
+        qkv_epilogue(row, col, gl_LocalInvocationID.x, 32u);
+        return;
+    }
+#endif
     if ((operation_flags() & 0x20000u) != 0u) {
         for (uint i = 0; i < RM; i++)
             for (uint j = 0; j < RN; j++)

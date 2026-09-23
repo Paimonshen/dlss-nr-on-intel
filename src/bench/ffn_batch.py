@@ -23,10 +23,12 @@ def main():
     parser.add_argument('--size', nargs=2, type=int, metavar=('HEIGHT', 'WIDTH'),
                         default=(576, 1024), help='input extent, before model padding')
     parser.add_argument('--pairs', type=int, default=8)
-    parser.add_argument('--optimization', choices=('ffn', 'input', 'head', 'qkv', 'merge'),
+    parser.add_argument('--optimization',
+                        choices=('ffn', 'input', 'head', 'qkv', 'merge', 'qkv-epilogue'),
                         default='ffn',
                         help='compare FFN batching, FP16 input, compact head, joint QKV '
-                             'preparation or the head merge in the fused attention')
+                             'preparation, the head merge in the fused attention or the '
+                             'QKV projection finished in its own epilogue')
     args = parser.parse_args()
     if min(*args.size, args.pairs) <= 0:
         parser.error('size and pairs must be positive')
@@ -46,6 +48,7 @@ def main():
                              'head': ('compact_head', 'NR_COMPACT_HEAD'),
                              'qkv': ('joint_qkv', 'NR_JOINT_QKV'),
                              'merge': ('fuse_attention_merge', 'NR_FUSE_ATTENTION_MERGE'),
+                             'qkv-epilogue': ('qkv_epilogue', 'NR_QKV_EPILOGUE'),
                              }[args.optimization]
         frame = backend.frame(*features.shape[:2])
         samples = {False: [], True: []}
@@ -71,7 +74,8 @@ def main():
         fixed = ', '.join(f'{name}={int(getattr(rt, name))}'
                           for name in ('batch_ffn', 'fuse_qk', 'input_fp16', 'compact_head',
                                        'joint_qkv', 'fuse_residual', 'fuse_window_residual',
-                                       'fuse_window_attention', 'fuse_attention_merge')
+                                       'fuse_window_attention', 'fuse_attention_merge',
+                                       'qkv_epilogue')
                           if name != setting)
         print(f'comparing {variable}; fixed {fixed}; staging={rt.staging}', flush=True)
         for pair in range(args.pairs):

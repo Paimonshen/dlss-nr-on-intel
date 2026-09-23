@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Joint Q/K/V preparation against CPU math and exact full-frame replay."""
+"""Joint Q/K/V preparation against CPU math and exact full-frame replay.
+
+Every way the graph has of preparing Q, K and V is compared on whole frames: the QKV
+epilogue (the default), the joint pass, the fused Q/K pair and the split-first
+reference. The epilogue bypasses the other three, so they are run with it off.
+"""
 import pathlib
 import sys
 import numpy as np
@@ -59,6 +64,7 @@ def frames():
             for mask in (7, 0):
                 rt.specialize(mask)
                 rt.fuse_qk = True
+                rt.qkv_epilogue = False
                 for rt.joint_qkv in (True, False, True):
                     passes = []
                     head = frame.run(features, execution='replay', submits=passes)
@@ -72,15 +78,23 @@ def frames():
                 # The original separate split/normalize path must still be available.
                 rt.fuse_qk = False
                 np.testing.assert_array_equal(frame.run(features, execution='replay'), expected)
-            rt.fuse_qk = True
+                rt.fuse_qk = True
+                # and the epilogue replaces all three of the separate passes at 70 sites
+                rt.qkv_epilogue = True
+                passes = []
+                np.testing.assert_array_equal(
+                    frame.run(features, execution='replay', submits=passes), expected)
+                assert counts[False] - passes[0] == 210, (counts, passes)
             changed = features.copy()
             changed[..., 4:7] *= np.float32(.75)
             results = []
-            for rt.joint_qkv in (False, True):
+            for rt.qkv_epilogue, rt.joint_qkv in ((False, False), (False, True), (True, False)):
                 results.append(frame.run(changed, execution='replay'))
-            np.testing.assert_array_equal(*results)
+            for result in results[1:]:
+                np.testing.assert_array_equal(result, results[0])
             assert not np.array_equal(results[0], expected)
-            print(f'joint QKV: {width}x{height} exact, 140 fewer passes, cached toggles and changed input OK')
+            print(f'joint QKV: {width}x{height} exact, 140 fewer passes; QKV epilogue exact, '
+                  f'210 fewer; cached toggles and changed input OK')
     finally:
         backend.close()
 

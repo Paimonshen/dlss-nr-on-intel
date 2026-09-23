@@ -106,6 +106,7 @@ def _load():
             ("xmx_rec_gemm_residual", [ctypes.c_int] * 5 + [ctypes.c_uint] * 4),
             ("xmx_rec_gemm_window_residual", [ctypes.c_int] * 5 + [ctypes.c_uint] * 8),
             ("xmx_window_init", [ctypes.c_char_p, ctypes.c_uint]),
+            ("xmx_rec_gemm_qkv", [ctypes.c_int] * 6 + [ctypes.c_uint] * 4),
             ("xmx_rec_window_attention", [ctypes.c_int] * 5 + [ctypes.c_uint] * 3),
             ("xmx_rec_unary", [ctypes.c_uint] + [ctypes.c_int] * 4
              + [ctypes.c_uint, ctypes.c_uint, ctypes.c_float] + [ctypes.c_uint] * 5),
@@ -297,7 +298,9 @@ class ScratchArena:
     # runs between blocks and reuses those same allocations. Keep FFN residuals
     # separate: they stay live until the closing attention residual.
     ALIASES = {
-        **dict.fromkeys(("hidden16", "proj", "attended", "attention",
+        # key16 is K when the projection's own epilogue writes it: k16's role is the
+        # projection's input, which other workgroups are still reading at that moment
+        **dict.fromkeys(("hidden16", "proj", "key16", "attended", "attention",
                          "transition.padded", "transition.projected"), "projection"),
         **dict.fromkeys(("branch", "v16"), "branch_value"),
         **dict.fromkeys(("value16", "win16", "ffn16", "k16",
@@ -444,6 +447,9 @@ class Runtime:
         # NR_FUSE_ATTENTION_MERGE, which it left off and unmeasured. Measured here,
         # bit-identical and 3.6-4.4 % of the frame at 720p.
         self.fuse_attention_merge = os.environ.get("NR_FUSE_ATTENTION_MERGE", "1") != "0"
+        # Q/K normalised and V published in the QKV projection's own epilogue, so the
+        # float32 projection never goes to memory (qkv_epilogue.glsl).
+        self.qkv_epilogue = os.environ.get("NR_QKV_EPILOGUE", "1") != "0"
 
     def graph_key(self):
         return (self.lib.xmx_specialization() | (int(self.fuse_qk) << 3)
@@ -455,7 +461,8 @@ class Runtime:
                 # picture would be wrong without an error anywhere.
                 | (int(self.fuse_residual) << 8) | (int(self.fuse_window_residual) << 9)
                 | (int(self.fuse_window_attention) << 10)
-                | (int(self.fuse_attention_merge) << 11))
+                | (int(self.fuse_attention_merge) << 11)
+                | (int(self.qkv_epilogue) << 12))
 
     @property
     def buffer_bytes(self):
@@ -600,6 +607,30 @@ class Runtime:
         if record(a.id, b.id, target.id, skip.id, cosine.id,
                   rows, cols, inner, flags, *window) != 0:
             raise RuntimeError("xmx_rec_gemm_residual: " + self.lib.xmx_error().decode())
+        self.recorded += 1
+        return self
+
+    def gemm_qkv(self, a, weight, q, k, v, scale, rows, channels, heads, tokens):
+        """The QKV projection, finished in its own epilogue: Q and K cosine-normalised
+        (Q times its head's scale), V published, all three as E4M3 halves in
+        (window, head, token, 32) order — what the projection into float32 followed by
+        two `cosine_publish` and one `split_heads` would write, bit for bit
+        (`src/gpu/test_gemm_qkv.py`). `rows` is windows * tokens.
+        """
+        if (min(rows, heads, tokens) <= 0 or channels != heads * 32 or rows % tokens
+                or rows % TM or channels % TK):
+            raise ValueError("QKV projection needs 32 channels per head, whole windows "
+                             "and tile-aligned extents")
+        if len({q.id, k.id, v.id}) != 3 or {q.id, k.id, v.id} & {a.id, weight.id, scale.id}:
+            raise ValueError("QKV targets must be distinct from each other and the inputs")
+        for buf, size in ((a, rows * channels * 2), (weight, channels * 3 * channels * 2),
+                          (q, rows * channels * 2), (k, rows * channels * 2),
+                          (v, rows * channels * 2), (scale, heads * 4)):
+            if buf.nbytes < size:
+                raise ValueError("QKV projection buffer is too small")
+        if self.lib.xmx_rec_gemm_qkv(a.id, weight.id, q.id, k.id, v.id, scale.id,
+                                     rows, channels, heads, tokens) != 0:
+            raise RuntimeError("xmx_rec_gemm_qkv: " + self.lib.xmx_error().decode())
         self.recorded += 1
         return self
 
