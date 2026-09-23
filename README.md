@@ -312,7 +312,7 @@ all of them move between frames. Only `profile` costs a forward pass.
 
 `0.05` to `1`, step `0.05`, default `1`
 
-The only knob that changes the frame rate. The network runs on a frame this much smaller, and what comes back is the *head* — the detail it drew — which is then scaled up and composed against the full-resolution original, so the game's own pixels are never resampled and only the synthesised part is interpolated. Cost follows the extent and nothing else: about 15 ms + 450 ms per megapixel. 0.55 is the measured compromise, but the *sign* of its effect on quality depends on how dark the scene is rather than on the number: on a bright frame 0.55 adds 15 % of local contrast to a kimono, on a dark crowd it takes 21 % away.
+The only knob that changes the frame rate. The network runs on a frame this much smaller, and what comes back is the *head* — the detail it drew — which is then scaled up and composed against the full-resolution original, so the game's own pixels are never resampled and only the synthesised part is interpolated. Cost follows the extent and nothing else: about 9 ms + 280 ms per megapixel of network extent on an Arc 140V. 0.55 is the measured compromise, but the *sign* of its effect on quality depends on how dark the scene is rather than on the number: on a bright frame 0.55 adds 15 % of local contrast to a kimono, on a dark crowd it takes 21 % away.
 
 ### `profile` — which way to trade skin texture against speculars
 
@@ -362,17 +362,19 @@ Mean absolute change between two presents above which the shot is taken to have 
 
 <!-- rates:begin -->
 
-Measured through the socket on 2026-09-18 by `python3 src/bench/live_rates.py` — the whole round trip a game waits for, median of five frames, not graph time alone:
+Measured through the socket on 2026-09-23 by `python3 src/bench/live_rates.py` — the whole round trip a game waits for, median of nine frames, not graph time alone:
 
 | swapchain | render scale | ms | fps |
 | --- | ---: | ---: | ---: |
-| 512x288 | 0.35 | 72 | 13.9 |
-| 512x288 | 0.50 | 72 | 14.0 |
-| 640x360 | 0.35 | 74 | 13.5 |
-| 640x360 | 0.50 | 80 | 12.5 |
-| 854x480 | 0.50 | 105 | 9.5 |
-| 1024x768 | 0.55 | 168 | 6.0 |
-| 1920x1080 | 0.55 | 412 | 2.4 |
+| 512x288 | 0.35 | 54 | 18.3 |
+| 512x288 | 0.50 | 54 | 18.4 |
+| 640x360 | 0.35 | 57 | 17.6 |
+| 640x360 | 0.50 | 61 | 16.5 |
+| 854x480 | 0.50 | 80 | 12.4 |
+| 1024x768 | 0.55 | 122 | 8.2 |
+| 1920x1080 | 0.55 | 452 | 2.2 |
+
+1920x1080 is the median of three runs that ranged from 322 to 463 ms. At that size the round trip meets memory pressure on this 15 GiB machine — the kernel's pressure-stall figures rose during every run, with 5.5 GiB in zram at the time — while the graph inside it is about 190 ms. The smaller rows' three runs agreed within 17 %, four of the six within 7 %.
 
 That is the daemon's own cost with nothing else on the GPU. A game adds its own frame to it: **Tekken 7** measured **10.5 fps at 640x360** in a live fight (`notes/phase59`).
 
@@ -383,11 +385,15 @@ at the *output* resolution regardless of the render scale, so the swapchain size
 as much as the scale does. A game at 512x288 with the compositor stretching to the panel
 is the fastest arrangement there is.
 
-The graph itself is finished as an optimisation target: GEMM is 216 ms of 488 at 720p and
-is register-bound, and every pass that only moves data already runs at the machine's
-memory ceiling. Tiling, operand staging, integer weights, the accumulator format, OpenCL,
-shared-memory bank padding and handing work to the E-cores have all been measured and all
-are closed. `notes/phase45`, `notes/phase46`.
+Inside the graph, the passes themselves are done: GEMM is register-bound, and every pass
+that only moves data runs at the machine's memory ceiling. Tiling, operand staging, integer
+weights, the accumulator format, OpenCL, shared-memory bank padding and handing work to the
+E-cores have all been measured and all are closed (`notes/phase45`, `notes/phase46`). What
+did move the graph was deleting passes: a pass at the memory ceiling that need not exist is
+all waste. Folding the residuals into the projections, attention into one pass with its
+head merge, and Q/K normalisation into the QKV projection's own epilogue took a 1280x720
+frame from 459 to 290 ms, 37 %, with every output bit-identical
+(`notes/improve-fusions.md`, `notes/improve-qkv-epilogue.md`).
 
 ## How it works
 
@@ -442,8 +448,8 @@ library; `make work/libnr_layer32.so` builds it and `prepare_layer.py` writes bo
 manifests.
 
 **It is unbearably slow.** Look at the swapchain size before the render scale. See the
-table above; 1920x1080 is 2.4 fps in the daemon alone and nothing will fix that but a
-smaller window.
+table above; at 1920x1080 the daemon alone stays under 3 fps, and nothing will fix that but
+a smaller window.
 
 **`GPU lost, stopping` in the daemon's log** — or, from a clone older than 2026-09-17,
 `frame rejected/failed ... xmx_graph_run: resident submit (-4)` on every frame. `-4` is

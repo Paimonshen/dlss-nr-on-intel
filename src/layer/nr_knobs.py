@@ -22,7 +22,8 @@ KNOBS = (
         "much smaller, and what comes back is the *head* — the detail it drew — which is "
         "then scaled up and composed against the full-resolution original, so the game's "
         "own pixels are never resampled and only the synthesised part is interpolated. "
-        "Cost follows the extent and nothing else: about 15 ms + 450 ms per megapixel. "
+        "Cost follows the extent and nothing else: about 9 ms + 280 ms per megapixel "
+        "of network extent on an Arc 140V. "
         "0.55 is the measured compromise, but the *sign* of its effect on quality depends "
         "on how dark the scene is rather than on the number: on a bright frame 0.55 adds "
         "15 % of local contrast to a kimono, on a dark crowd it takes 21 % away.",
@@ -104,21 +105,27 @@ DEFAULTS = {knob.name: knob.default for knob in KNOBS}
 # the swapchain size as much as on the scale.
 COST = ((1.00, 490), (0.70, 233), (0.60, 188), (0.50, 146), (0.35, 78))
 
-# The whole round trip, median of five frames each, measured by `src/bench/live_rates.py`
-# on 2026-09-18 — the daemon's own cost, with no game competing for the GPU. `nr-ctl rates`,
+# The whole round trip, median of nine frames each, measured by `src/bench/live_rates.py`
+# on 2026-09-23 — the daemon's own cost, with no game competing for the GPU. `nr-ctl rates`,
 # the panel and the README all read this one table; the README's copy is generated from it
 # by `src/tools/knob_doc.py`, because the hand-written one went two days out of date the
 # moment the host passes moved to C and then stayed wrong for a week.
 RATES = (
-    (512, 288, 0.35, 72.2),
-    (512, 288, 0.50, 71.6),
-    (640, 360, 0.35, 74.3),
-    (640, 360, 0.50, 80.0),
-    (854, 480, 0.50, 105.2),
-    (1024, 768, 0.55, 167.9),
-    (1920, 1080, 0.55, 412.3),
+    (512, 288, 0.35, 54.5),
+    (512, 288, 0.50, 54.3),
+    (640, 360, 0.35, 56.8),
+    (640, 360, 0.50, 60.7),
+    (854, 480, 0.50, 80.5),
+    (1024, 768, 0.55, 121.6),
+    (1920, 1080, 0.55, 452.1),
 )
-RATES_MEASURED = "2026-09-18"
+RATES_MEASURED = "2026-09-23"
+# What a reader of the table needs and the numbers cannot say. Empty when there is nothing.
+RATES_NOTE = ("1920x1080 is the median of three runs that ranged from 322 to 463 ms. At that "
+              "size the round trip meets memory pressure on this 15 GiB machine — the kernel's "
+              "pressure-stall figures rose during every run, with 5.5 GiB in zram at the "
+              "time — while the graph inside it is about 190 ms. The smaller rows' three runs "
+              "agreed within 17 %, four of the six within 7 %.")
 
 
 def expected(scale):

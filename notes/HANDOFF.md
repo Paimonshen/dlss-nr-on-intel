@@ -9,7 +9,44 @@ you need the evidence behind a line in this file, rather than reading them in or
 
 ---
 
-## Latest: the present has a test, and `NR_LAYER_SYNC=semaphore` (2026-09-19, later)
+## Latest: over a third of the frame was passes that need not exist (2026-09-23)
+
+**"Performance inside the graph is finished" was wrong.** Every pass that only moves data is
+at the memory ceiling — `phase45` measured that correctly — but a pass at the ceiling that
+need not exist is all waste, and a per-pass profile never asks whether a pass should be
+there. Five fusions, each bit-identical and each behind its own switch:
+
+- the residual in the projection's epilogue, twice, and attention in one pass (Codex's
+  phases 38, 39 and 42, ported: `notes/improve-fusions.md`);
+- the head merge in the fused attention's store (`NR_FUSE_ATTENTION_MERGE`, 4 %);
+- **Q and K normalised and V published in the QKV projection's own epilogue**
+  (`NR_QKV_EPILOGUE`, 22 %): the float32 projection — 377 MB at block 0 of a 720p frame,
+  written once and read three times — no longer exists. `notes/improve-qkv-epilogue.md`.
+
+All five off against on, paired in one process: **1280x720 459 -> 290 ms, 1920x1080
+1000 -> 622, 384x384 80 -> 53**, dispatches 1128 -> 592. The extent curve is now **8.6 ms +
+280 ms per megapixel**; live, 512x288 at scale 0.35 is 54.5 ms, 18.3 fps. README table and
+`nr_knobs.RATES` re-measured with it.
+
+Three things to carry:
+
+- **Workgroup shared memory comes in powers of two.** A 64-byte array beside a `stage`
+  of exactly 2 KB took every tiled GEMM's workgroup to 4 KB and cost 23 ms of a 720p frame —
+  in every tiled GEMM, used or not, with the compiled code identical to the instruction.
+  Found only by profiling with the new feature *off*. Check the total before adding any.
+- **A fusion moves a write into an earlier dispatch, so it has to re-check the scratch
+  arena.** `k16` shares a role with the QKV projection's own input; the epilogue writes K
+  while other workgroups still read that input, so K goes to `key16` in that mode. The role
+  table was built for passes that finish before the next starts.
+- **`ffn_batch.py`'s host-read column is not to be trusted between modes.** Twice it showed
+  the "on" mode reading the head up to 2x slower; twice a direct probe found 7.49 against
+  7.45 ms. The graph time is the measurement.
+
+Left: window attention (57 ms at 1280x768) is now the largest pass that is not a GEMM;
+`partition` (17) and `to_half` (10) could be second outputs of the epilogues before them; the
+QKV epilogue's reduction runs on half the lanes.
+
+## The present has a test, and `NR_LAYER_SYNC=semaphore` (2026-09-19, later)
 
 The layer's two `vkQueueWaitIdle` calls per present are now optional. `NR_LAYER_SYNC=semaphore`
 waits on the semaphores the present brought, signals one of a ring of four, and redirects the
