@@ -31,7 +31,7 @@ static struct {
 	VkCommandPool cpool; VkCommandBuffer cb; VkFence fence;
 	struct buf A, B, C;
 	/* resident path */
-	VkPipelineLayout rpl; VkPipeline rgemm, rtiled, rstaged, runary, rrow, rhistory;
+	VkPipelineLayout rpl; VkPipeline rgemm, rtiled, rstaged, runary, rrow, rhistory, rwindow;
 	char *rpaths[5];
 	unsigned specialize;
 	unsigned tiling, tilem, tilen;
@@ -1108,6 +1108,40 @@ int xmx_rec_row(unsigned kind, int a, int b, int c, int d, unsigned rows, unsign
 	vkCmdDispatch(g.rcb, (rows + 31) / 32, 1, 1);
 	barrier();
 	stamp(PK_ROW, kind);
+	g.recorded++;
+	return 0;
+}
+
+/* Window attention's QK^T, softmax and PV in one dispatch (ProjectsCodex's phase42,
+ * `window_attention.comp`): one subgroup takes eight query rows against a window's 64
+ * keys, and the scores and probabilities stay in shared memory instead of making two
+ * round trips through device buffers. Built on first use, so a graph that keeps the
+ * three-pass path never compiles it. The bias pointer rides in the residual epilogue's
+ * slot, `residual_cos` at offset 96, which is why that field was appended rather than
+ * inserted. */
+int xmx_window_init(const char *path)
+{
+	if (!g.rready) FAIL("resident runtime not initialised", 0);
+	if (g.rwindow) return 0;
+	return build_pipeline(path, g.rpl, &g.rwindow);
+}
+
+int xmx_rec_window_attention(int q, int k, int v, int bias, int out,
+			     unsigned batches, unsigned heads)
+{
+	if (!g.recording || !g.rwindow) FAIL("window attention not ready for recording", 0);
+	if (!batches || !heads || batches % heads) FAIL("invalid attention batch/head count", 0);
+	struct push p = { .a = addr_of(q), .b = addr_of(k), .c = addr_of(out), .d = addr_of(v),
+			  .n = heads, .batch = batches, .flags = bias >= 0,
+			  .residual_cos = bias >= 0 ? addr_of(bias) : 0 };
+	if (!p.a || !p.b || !p.c || !p.d || (bias >= 0 && !p.residual_cos))
+		FAIL("window attention operand is not a live buffer", 0);
+	vkCmdBindPipeline(g.rcb, VK_PIPELINE_BIND_POINT_COMPUTE, g.rwindow);
+	vkCmdPushConstants(g.rcb, g.rpl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
+	vkCmdDispatch(g.rcb, 8, batches < 65535u ? batches : 65535u,
+		      1u + (batches - 1u) / 65535u);
+	barrier();
+	stamp(PK_ROW, 2);        /* WINDOW_ATTENTION, as window_attention.comp names it */
 	g.recorded++;
 	return 0;
 }

@@ -90,8 +90,9 @@ def host_checks():
                             # which here are input_fp16 and compact_head
                             for rt.fuse_residual in (False, True):
                                 for rt.fuse_window_residual in (False, True):
-                                    keys.add(rt.graph_key())
-    assert len(keys) == 1024, f"graph key collides: {len(keys)} of 1024 distinct"
+                                    for rt.fuse_window_attention in (False, True):
+                                        keys.add(rt.graph_key())
+    assert len(keys) == 2048, f"graph key collides: {len(keys)} of 2048 distinct"
     # Exercise the production recorders too, not just the batching helper. Multiplicity
     # is the current 71-block model's grouped FFN inventory; no weights are needed.
     savings = 0

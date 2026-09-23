@@ -380,12 +380,18 @@ def record_window_attention(runtime, w, s, source, target=None, publish=0,
                       narrow=True)
     runtime.gemm(s.win16, w.qkv, s.proj, windows * tokens, 3 * channels, channels)
     record_qkv(runtime, w, s, windows, tokens, channels, heads)
-    runtime.gemm(s.q16, s.k16, s.scores, tokens, tokens, 32, batch=batch,
-                 strides=(tokens * 32, tokens * 32, tokens * tokens), transpose_b=True)
-    runtime.softmax(s.scores, s.probs16, batch * tokens, tokens, narrow=True,
-                    bias=w.bias, heads=heads)
-    runtime.gemm(s.probs16, s.v16, s.context, tokens, 32, tokens, batch=batch,
-                 strides=(tokens * tokens, tokens * 32, tokens * 32))
+    if runtime.fuse_window_attention and tokens == 64:
+        # One dispatch for QK^T, softmax and PV (ProjectsCodex's phase42). Into
+        # `context`, not `merged16`: merged16 shares q16's arena role, and another
+        # workgroup may still be reading Q while this one stores.
+        runtime.window_attention(s.q16, s.k16, s.v16, s.context, batch, heads, bias=w.bias)
+    else:
+        runtime.gemm(s.q16, s.k16, s.scores, tokens, tokens, 32, batch=batch,
+                     strides=(tokens * 32, tokens * 32, tokens * tokens), transpose_b=True)
+        runtime.softmax(s.scores, s.probs16, batch * tokens, tokens, narrow=True,
+                        bias=w.bias, heads=heads)
+        runtime.gemm(s.probs16, s.v16, s.context, tokens, 32, tokens, batch=batch,
+                     strides=(tokens * tokens, tokens * 32, tokens * 32))
     runtime.merge_heads(s.context, s.merged16, windows, tokens, channels, heads,
                         epilogue=xmxres.EPI_E4M3, narrow=True)
     if target is not None:
