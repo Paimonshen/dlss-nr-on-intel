@@ -34,6 +34,16 @@ import time
 
 import numpy as np
 
+# Allow the embedding layer to point the daemon at the deployment directory without
+# touching argparse: a `--root <dir>` (or `--root=<dir>`) here is written into NR_ROOT
+# before nr_frame is imported, so nr_frame's `work/` lookup follows it. Absent, the
+# in-tree layout (ROOT = two levels up) is unchanged.
+for _i, _a in enumerate(sys.argv):
+    if _a == "--root" and _i + 1 < len(sys.argv):
+        os.environ["NR_ROOT"] = sys.argv[_i + 1]
+    elif _a.startswith("--root="):
+        os.environ["NR_ROOT"] = _a.split("=", 1)[1]
+
 HERE = pathlib.Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 sys.path.insert(0, str(ROOT / "src" / "ref"))

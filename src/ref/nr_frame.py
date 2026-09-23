@@ -22,7 +22,11 @@ import types
 import numpy as np
 
 HERE = pathlib.Path(__file__).resolve().parent
-ROOT = HERE.parent.parent
+# ROOT is where `work/` (weights, MLX-DLSS clone, built shaders) lives. By default it is
+# two levels up (this file is src/ref/nr_frame.py, ROOT is the project root), which keeps
+# the in-tree layout working. A deployed layer spawns the daemon with NR_ROOT pointing at
+# the deployment directory, so the same code finds work/mlxw there without any other change.
+ROOT = pathlib.Path(os.environ.get("NR_ROOT", str(HERE.parent.parent))).resolve()
 sys.path.insert(0, str(HERE))
 
 import nr_model  # noqa: E402

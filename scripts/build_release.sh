@@ -38,8 +38,10 @@ mkdir -p "$DIST/src" "$DIST/work/mlx-dlss" "$DIST/scripts"
 
 # built artifacts
 cp -r "$ROOT/work"/*.so "$ROOT/work"/*.spv "$DIST/work/" 2>/dev/null || true
-mkdir -p "$DIST/work/layer"
-cp -r "$ROOT/work/layer"/* "$DIST/work/layer/" 2>/dev/null || true
+# The layer library goes at the deploy root: it auto-spawns the daemon and searches
+# src/layer/nr_daemon.py relative to itself. The other .so/.spv are runtime deps and
+# stay under work/.
+cp "$ROOT/work/libnr_layer.so" "$DIST/" 2>/dev/null || true
 
 # source (the clean, weights-free inference code only)
 cp -r "$ROOT/src/layer" "$ROOT/src/ref" "$ROOT/src/gpu" "$ROOT/src/bench" "$DIST/src/"
@@ -58,14 +60,17 @@ cat > "$DIST/README-release.txt" <<'EOF'
 DLSS-NR-on-Intel release build.
 
 This package is complete EXCEPT for the model weights, which are NVIDIA's property
-and are not redistributed. To make it run:
+and are not redistributed. The Vulkan layer (nr_layer.so at the root) auto-spawns
+the daemon (src/layer/nr_daemon.py) on load, so you do NOT start the daemon by hand.
+
+To make it run:
 
   1. Obtain your own copy of nvngx_dlssnr.dll (version 310.8.0.0).
   2. python3 scripts/get_weights.py /path/to/nvngx_dlssnr.dll
      -> writes work/mlxw/dlssnr-logical.safetensors (649 logical tensors)
   3. python3 src/ref/nr_frame.py IN.png OUT.png --resident   # sanity check, no game
 
-Then run the daemon (src/layer/nr_daemon.py) and point your client at its endpoint.
+Then launch the game with the layer enabled (VK_LAYER_PATH / the proxy DLL).
 See GET-STARTED.md for the full Linux / Windows walkthrough.
 EOF
 

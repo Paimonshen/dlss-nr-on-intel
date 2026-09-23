@@ -34,9 +34,11 @@ New-Item -ItemType Directory -Force -Path (Join-Path $DIST "work\mlx-dlss\python
 New-Item -ItemType Directory -Force -Path (Join-Path $DIST "scripts")            | Out-Null
 
 # built artifacts
-Copy-Item -Recurse -Force (Join-Path $ROOT "work\*.dll") $DIST\work\  -ErrorAction SilentlyContinue
 Copy-Item -Recurse -Force (Join-Path $ROOT "work\*.so")  $DIST\work\  -ErrorAction SilentlyContinue
 Copy-Item -Recurse -Force (Join-Path $ROOT "work\*.spv") $DIST\work\  -ErrorAction SilentlyContinue
+# The layer DLL goes at the deploy root: it auto-spawns the daemon and searches
+# src/layer/nr_daemon.py relative to itself. Other DLLs are runtime deps under work/.
+Copy-Item -Force (Join-Path $ROOT "work\nr_layer.dll") $DIST\  -ErrorAction SilentlyContinue
 
 # clean inference source (no N-private extraction code: that lives under work/nvidia-private)
 foreach ($d in @("layer","ref","gpu","bench")) {
@@ -59,14 +61,17 @@ $releaseNote = @"
 DLSS-NR-on-Intel release build (Windows).
 
 This package is complete EXCEPT for the model weights, which are NVIDIA's property
-and are not redistributed. To make it run:
+and are not redistributed. The Vulkan layer (nr_layer.dll at the root) auto-spawns
+the daemon (src\layer\nr_daemon.py) on load, so you do NOT start the daemon by hand.
+
+To make it run:
 
   1. Obtain your own copy of nvngx_dlssnr.dll (version 310.8.0.0).
   2. python scripts\get_weights.py \path\to\nvngx_dlssnr.dll
      -> writes work\mlxw\dlssnr-logical.safetensors (649 logical tensors)
   3. python src\ref\nr_frame.py IN.png OUT.png --resident   # sanity check, no game
 
-Then start the daemon (src\layer\nr_daemon.py) and point your client at its pipe.
+Then launch the game with the layer enabled (the proxy DLL / VK_LAYER_PATH).
 See GET-STARTED.md for the full walkthrough.
 "@
 Set-Content -Path (Join-Path $DIST "README-release.txt") -Value $releaseNote

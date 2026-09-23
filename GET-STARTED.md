@@ -155,7 +155,45 @@ copy of nvngx_dlssnr.dll as the README's Build section describes.
 
 ---
 
+## 2b. Pseudo single-DLL layout
+
+The layer now **spawns the daemon itself** when it loads (`ensure_daemon` in
+`src/layer/nr_layer.c`), so the user never starts the daemon by hand. A deployment
+directory therefore holds only the things that have to be there physically:
+
+```
+<deploy>/
+  nr_layer.dll            (or libnr_layer.so — the Vulkan layer, auto-spawns the daemon)
+  src/layer/nr_daemon.py  (the daemon; the layer searches src/layer/ first)
+  src/ref/*.py            (nr_frame, nr_model, nr_temporal, … — daemon deps)
+  src/gpu/*.py *.glsl     (xmx, xmxres, the XMX runtime)
+  work/
+    mlxw/dlssnr-logical.safetensors   (YOU supply — see §2)
+    mlx-dlss/python/mlxdlss/ …        (Apache-2.0, bundled by build_release)
+    *.spv                              (built shaders)
+  python/                (a Python runtime, on PATH at game launch)
+```
+
+The layer searches `src/layer/nr_daemon.py` (then a few flat fallbacks) next to
+itself, and passes `--root <deploy>` (two levels up from the daemon) so both the
+daemon's `work/` and its `src/ref` + `src/gpu` module paths resolve in the deployed
+tree. A fixed socket is used (`\\.\pipe\nr_dlssnr_intel` on Windows,
+`/tmp/nr_layer.sock` on Linux) unless you set `NR_LAYER_SOCKET`. If a daemon is
+already listening on that socket, the layer does **not** spawn a second one.
+Override any of it with `NR_DAEMON`, `NR_PYTHON`, `NR_ROOT`, `NR_LAYER_SOCKET`,
+`NR_SETTINGS`. `scripts/build_release.sh` / `.ps1` assembles exactly this tree.
+
+> Not a true single DLL: Python and the weights still sit beside it. That is the
+> current ceiling — porting the graph to C would remove the Python dependency, but
+> this matches the OptiScaler IntelPreSr `EnsureDaemon` approach.
+
+---
+
 ## 3. Run
+
+The daemon is started for you by the layer. You only launch the game with the
+layer enabled. Everything below is the **manual** equivalent, useful for debugging
+or when you prefer to manage the daemon yourself.
 
 ### Linux — in a Vulkan game (photo mode or live)
 
