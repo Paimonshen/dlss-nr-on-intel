@@ -383,7 +383,9 @@ layer is proven under a second Vulkan client, VKD3D-Proton on a 64-bit D3D12 tit
 2026-09-23: each pass is efficient, but over a third of the frame was passes that need not
 exist. Eight bit-identical fusions, shared memory kept inside 2 KB and a padded bottleneck
 took 1280x720 from 445 to 231 ms and the curve to `10 ms + 230 ms per megapixel`
-(`notes/improve-fusions.md`, `notes/improve-qkv-epilogue.md`, HANDOFF). What follows is the
+(`notes/improve-fusions.md`, `notes/improve-qkv-epilogue.md`, HANDOFF). The staged GEMM
+had been running on half its threads because of how Mesa sizes shared memory; given all of
+them it took the curve to `9 ms + 205` (`notes/improve-shared-memory.md`). What follows is the
 per-pass record, which still stands.
 `xmx_profile()` timestamps every pass (`src/bench/frame_profile.py`): GEMM is 216 ms of
 488 at 720p and is register-bound; of the other 272 ms, every pass that only moves data

@@ -397,11 +397,18 @@ int xmx_init(const char *spv_path)
 
 	VkPhysicalDeviceCooperativeMatrixFeaturesKHR cm = {
 		.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR, .cooperativeMatrix = VK_TRUE };
+	/* Shared-memory blocks that alias: gemm_staged.comp puts its operand tiles and its
+	 * output stage in the same bytes, which is what fits a core's worth of it in the
+	 * partition the driver sizes (notes/improve-shared-memory.md). */
+	VkPhysicalDeviceWorkgroupMemoryExplicitLayoutFeaturesKHR wm = {
+		.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_WORKGROUP_MEMORY_EXPLICIT_LAYOUT_FEATURES_KHR, .pNext = &cm,
+		.workgroupMemoryExplicitLayout = VK_TRUE, .workgroupMemoryExplicitLayoutScalarBlockLayout = VK_TRUE,
+		.workgroupMemoryExplicitLayout16BitAccess = VK_TRUE };
 	/* bufferDeviceAddress lets the resident path pass operands as 64-bit pointers in
 	 * push constants, so a whole block of dispatches records into one command buffer
 	 * without a descriptor pool. scalarBlockLayout matches the shaders' layout. */
 	VkPhysicalDeviceVulkan12Features v12 = {
-		.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES, .pNext = &cm,
+		.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES, .pNext = &wm,
 		.vulkanMemoryModel = VK_TRUE, .vulkanMemoryModelDeviceScope = VK_TRUE, .shaderFloat16 = VK_TRUE,
 		.bufferDeviceAddress = VK_TRUE, .scalarBlockLayout = VK_TRUE };
 	VkPhysicalDeviceVulkan11Features v11 = {
@@ -411,10 +418,12 @@ int xmx_init(const char *spv_path)
 	float prio = 1.0f;
 	VkDeviceQueueCreateInfo qci = { .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
 					.queueFamilyIndex = g.qi, .queueCount = 1, .pQueuePriorities = &prio };
-	const char *ext[] = { VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME };
+	const char *ext[] = { VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME,
+			      VK_KHR_WORKGROUP_MEMORY_EXPLICIT_LAYOUT_EXTENSION_NAME };
 	VkDeviceCreateInfo dci = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &f2,
 				   .queueCreateInfoCount = 1, .pQueueCreateInfos = &qci,
-				   .enabledExtensionCount = 1, .ppEnabledExtensionNames = ext };
+				   .enabledExtensionCount = sizeof ext / sizeof *ext,
+				   .ppEnabledExtensionNames = ext };
 	r = vkCreateDevice(g.pd, &dci, NULL, &g.dev);
 	if (r) FAIL("vkCreateDevice", r);
 	vkGetDeviceQueue(g.dev, g.qi, 0, &g.q);

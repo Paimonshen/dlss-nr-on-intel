@@ -9,7 +9,40 @@ you need the evidence behind a line in this file, rather than reading them in or
 
 ---
 
-## Latest: 48 % of the frame was passes, shared memory and pads (2026-09-24)
+## Latest: the staged GEMM was on half its threads (2026-09-24, later)
+
+The owner asked why window attention has exactly 2 KB of shared memory and what 1 KB or
+512 B would do. The answer is a rule in Mesa, read in its source (26.2.2,
+`src/intel/vulkan/genX_shader.c:1183`) and confirmed at fourteen sizes on the hardware: a
+core's shared-memory partition is sized as *workgroups its threads hold* x **the declared
+bytes**, capped at 128 KB, while each workgroup is given its declaration **rounded up** to an
+allocation size — 1 KB at least, then powers of two to 16 KB. So declaring less can be
+slower: 256 B puts a 32-lane kernel on a quarter of the threads, 512 B on half, and
+1.25-1.5 KB is 29 % slower than 2 KB. **Declare exactly an allocation size, and keep
+(workgroups a core holds) x size <= 128 KB.** `notes/improve-shared-memory.md`.
+
+It had been costing the largest pass in the frame. `gemm_staged.comp` is 128 lanes and
+declared 15.5 KB: eight workgroups a core, half the threads. Its operand tiles and its stage
+are never live at once, so they now alias as two `shared` blocks
+(`VK_KHR_workgroup_memory_explicit_layout`, enabled in libxmx): 8 KB, sixteen workgroups.
+**Staged GEMM 90.5 -> 70.9 ms at 720p, device total 219 -> 198**, bit-identical, `make test`
+green in both memory modes. The one new barrier is load-bearing — without it all three head
+hashes change.
+
+Curve **9 ms + 205 ms per megapixel**. Live, re-measured with it and with scale 0.5's area
+mean out of NumPy's multi-axis reduction (16.5 -> 1.9 ms at 1024x768): 512x288 at 0.35 is
+**42.7 ms**, 1920x1080 at 0.55 **205.5**. At 512x288 every scale up to 0.62 runs the same
+320x320 network, and 0.62 measured 42-43 ms against 41-42 at 0.35 — three times the real
+pixels for a millisecond.
+
+Measured and not kept: the softmax pipeline at 1 KB (0.4 ms), the base GEMM padded to 1 KB
+(nothing), the fused FFN aliased to 1 KB to win the L1 back (1 %, noise). The L1 is real —
+it and shared memory are one array, and at 2 KB x 64 the partition is all of it — but none
+of these kernels lives on it.
+
+Not done: telling Mesa. The fix is one line; reporting it is the owner's call.
+
+## 48 % of the frame was passes, shared memory and pads (2026-09-24)
 
 A second day of the same kind of work, driven by a new profile per call site —
 `python3 src/bench/frame_profile.py --calls N`, each pass labelled by the entry point that

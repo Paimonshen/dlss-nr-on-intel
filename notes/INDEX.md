@@ -66,9 +66,10 @@ disproved.
 | `phase26-the-register-ceiling.md` | every engine busy, each ~90 % idle; the register file is the wall |
 | `phase45-frame-profile.md` | per-pass timings; everything that moves data is at the memory ceiling — which did not make the graph finished |
 | `improve-fusions.md` | residuals, attention and its head merge, the glue, the narrow feed-forward folded into fewer passes; window attention in 2 KB; what was measured and dropped |
+| `improve-shared-memory.md` | how Mesa sizes shared memory — the core's partition from the declared bytes, each workgroup's share rounded up — so under 1 KB and between sizes lose threads; the staged GEMM given all of its, 10 % of a frame |
 | `improve-qkv-epilogue.md` | Q/K normalised in the QKV projection's own epilogue, 22 %; all fusions together 38 %; why joint QKV was slower; shared memory comes in powers of two; measure with empty swap |
 | `phase21`, `phase22`, `phase23`, `phase31`, `phase33` | tiling, staging, integer weights, the accumulator, OpenCL — all measured, all closed |
-| `phase25-the-frame-rate-wall.md` | `17 ms + 488 ms per megapixel`, and what that forbids — `10 + 230` since the fusions |
+| `phase25-the-frame-rate-wall.md` | `17 ms + 488 ms per megapixel`, and what that forbids — `9 + 205` since the fusions and the shared-memory fix |
 | `phase51-output-resolution-costs.md` | what costs the output extent rather than the network's, and a profile that was measuring swap |
 | `phase50-what-the-model-computes-in.md` | 36 % of the shipped model's mma is already FP8; what FP4 would and would not change |
 | `phase37-neural-upstream.md` | half the extent is 3x faster and keeps 62 % of the high band |

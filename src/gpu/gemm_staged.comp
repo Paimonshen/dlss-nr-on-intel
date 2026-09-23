@@ -24,6 +24,7 @@
 #extension GL_KHR_memory_scope_semantics : require
 #extension GL_KHR_cooperative_matrix : require
 #extension GL_KHR_shader_subgroup_basic : require
+#extension GL_EXT_shared_memory_block : require
 
 #include "publish.glsl"
 
@@ -57,9 +58,20 @@ layout(push_constant, scalar) uniform Push {
 #include "specialize.glsl"
 #include "residual_epilogue.glsl"   /* needs operation_flags() from above */
 
-shared float16_t buf_a[BM * SA];
-shared float16_t buf_b[BK * SB];
-shared float stage[BM * BN];
+/* The operand tiles and the output stage are never live at once — the stage is written
+ * only after the last K step has read its fragments — so the two blocks share their bytes:
+ * 8 KB where they took 15.5. That is what sets how many of these workgroups a core holds.
+ * Mesa sizes a core's shared-memory partition as sixteen of them times the bytes declared
+ * here, capped at 128 KB, and gives each its declaration rounded up to an allocation size:
+ * 15.5 KB, rounded to 16, fit eight workgroups — half the core's threads — and 8 KB fits
+ * sixteen. 90 -> 71 ms of a 720p frame, bit-identical. notes/improve-shared-memory.md. */
+layout(scalar) shared Operands {
+    float16_t buf_a[BM * SA];
+    float16_t buf_b[BK * SB];
+};
+layout(scalar) shared Staging {
+    float stage[BM * BN];
+};
 
 void qkv_barrier() { barrier(); }
 #define QKV_STAGE float
@@ -195,7 +207,10 @@ void main() {
      * (notes/phase38-there-was-no-bug.md). The detour stays here for the write pattern —
      * the loop below has each lane write four consecutive elements and the whole
      * workgroup, not one subgroup, covers the tile. `gemm_resident.comp` dropped it for
-     * float32 outputs; this shader has not been re-measured without it. */
+     * float32 outputs; this shader has not been re-measured without it.
+     * The barrier is the price of the shared bytes: another subgroup may still be reading
+     * the operand tiles for its last K step. */
+    barrier();
     for (uint i = 0; i < RM; i++)
         for (uint j = 0; j < RN; j++)
             coopMatStore(acc[i][j], stage, (warp * WM + i * TM) * BN + j * TN, BN,
