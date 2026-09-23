@@ -170,6 +170,10 @@ blocks already.
   320x320, 83.9 -> 110.5 at 1280x768. Phases 21 and 26 found the same for the K loop.
 - **The tiled or base kernel for those GEMMs**, for more workgroups: the frame at 320x320
   went 42.9 -> 53 ms either way. Staged is the best of the three there.
+- **A 64-deep K block in the staged GEMM**, for half the trips round the K loop and its
+  barriers: slower everywhere, the deepest small-M shapes included (64x4096x1024 0.21 ->
+  0.31 ms), and 81 -> 119 ms of staged GEMM at 720p. The barriers are not what those GEMMs
+  wait on.
 
 ## Left behind, deliberately
 
