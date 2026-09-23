@@ -23,7 +23,10 @@ KNOBS = (
         "then scaled up and composed against the full-resolution original, so the game's "
         "own pixels are never resampled and only the synthesised part is interpolated. "
         "Cost follows the extent and nothing else: about 10 ms + 230 ms per megapixel "
-        "of network extent on an Arc 140V. "
+        "of network extent on an Arc 140V. The extent is never below 320 on a side — the "
+        "checkpoint's minimum — so small renders are padded up to it: at 512x288 every "
+        "scale up to 0.62 runs the same 320x320 network as 0.35 does, with three times "
+        "the real pixels in it. "
         "0.55 is the measured compromise, but the *sign* of its effect on quality depends "
         "on how dark the scene is rather than on the number: on a bright frame 0.55 adds "
         "15 % of local contrast to a kimono, on a dark crowd it takes 21 % away.",
