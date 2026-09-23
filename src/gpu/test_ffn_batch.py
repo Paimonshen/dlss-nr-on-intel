@@ -22,6 +22,10 @@ def layouts(groups):
 class Recorder:
     def __init__(self, batch):
         self.batch_ffn = batch
+        # This counts FFN GEMMs to measure batching alone. The fused residual folds the
+        # closing projection's residual into that GEMM and changes nothing it counts,
+        # so it is pinned off here and measured by test_gemm_residual.py instead.
+        self.fuse_residual = False
         self.calls = []
 
     def independent(self):
@@ -82,8 +86,12 @@ def host_checks():
                 for rt.input_fp16 in (False, True):
                     for rt.compact_head in (False, True):
                         for rt.joint_qkv in (False, True):
-                            keys.add(rt.graph_key())
-    assert len(keys) == 256
+                            # the fused residuals take bits 8-9, not ProjectsCodex's 5-6,
+                            # which here are input_fp16 and compact_head
+                            for rt.fuse_residual in (False, True):
+                                for rt.fuse_window_residual in (False, True):
+                                    keys.add(rt.graph_key())
+    assert len(keys) == 1024, f"graph key collides: {len(keys)} of 1024 distinct"
     # Exercise the production recorders too, not just the batching helper. Multiplicity
     # is the current 71-block model's grouped FFN inventory; no weights are needed.
     savings = 0

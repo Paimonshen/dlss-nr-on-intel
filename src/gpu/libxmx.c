@@ -82,8 +82,15 @@ struct push {
 	uint32_t m, n, k, batch, sa, sb, sc, flags;
 	float p0, p1, p2, p3;
 	uint32_t lda, ldb, ldc, spare;
+	/* The fused residual (`gemm_resident.comp`, `residual_epilogue.glsl`): the skip
+	 * travels in `d`, its per-channel cosine here, and a window-layout projection also
+	 * needs the image it writes back into. Appended, so no earlier offset moves. */
+	uint64_t residual_cos;
+	uint32_t image_h, image_w, window_cols, window_pad;
 };
 _Static_assert(offsetof(struct push, lda) == 80, "attention QKV scale pointer ABI");
+_Static_assert(offsetof(struct push, residual_cos) == 96, "residual epilogue ABI");
+_Static_assert(sizeof(struct push) == 120, "push block matches the GEMM shaders");
 
 const char *xmx_error(void) { return g.err; }
 int xmx_device_lost(void) { return g.lost; }
@@ -940,10 +947,11 @@ int xmx_sync(int on)
 	return 0;
 }
 
-int xmx_rec_gemm(int a, int b, int c, unsigned M, unsigned N, unsigned K, unsigned batch,
-		 unsigned sa, unsigned sb, unsigned sc, unsigned bt,
-		 unsigned lda, unsigned ldb, unsigned ldc,
-		 unsigned oa, unsigned ob, unsigned oc)
+static int record_gemm(int a, int b, int c, unsigned M, unsigned N, unsigned K,
+		       unsigned batch, unsigned sa, unsigned sb, unsigned sc, unsigned bt,
+		       unsigned lda, unsigned ldb, unsigned ldc,
+		       unsigned oa, unsigned ob, unsigned oc,
+		       int skip, int cosine, const uint32_t *window)
 {
 	if (!g.recording) FAIL("not recording", 0);
 	struct push p = { .a = addr_of(a), .b = addr_of(b), .c = addr_of(c),
@@ -951,6 +959,14 @@ int xmx_rec_gemm(int a, int b, int c, unsigned M, unsigned N, unsigned K, unsign
 			  .sa = sa, .sb = sb, .sc = sc, .flags = bt,
 			  .lda = lda, .ldb = ldb, .ldc = ldc };
 	if (!p.a || !p.b || !p.c) FAIL("gemm operand is not a live buffer", 0);
+	if (skip >= 0) {
+		p.d = addr_of(skip); p.residual_cos = addr_of(cosine);
+		if (!p.d || !p.residual_cos) FAIL("residual operand is not a live buffer", 0);
+	}
+	if (window) {
+		p.image_h = window[0]; p.image_w = window[1];
+		p.window_cols = window[2]; p.window_pad = window[3];
+	}
 	/* Element offsets are folded into the addresses, so a sub-matrix needs no shader
 	 * support: A and B are half, and C is float unless the epilogue narrows it. */
 	p.a += (uint64_t)oa * 2; p.b += (uint64_t)ob * 2;
@@ -971,6 +987,8 @@ int xmx_rec_gemm(int a, int b, int c, unsigned M, unsigned N, unsigned K, unsign
 	 * are indistinguishable — see notes/phase22-staging-and-storage.md. */
 	int staged = M % 64 == 0 && N % 32 == 0 && K % 32 == 0 && K >= g.staging;
 	int tiled = M % g.tilem == 0 && N % g.tilen == 0 && K >= g.tiling;
+	if ((bt & 0x10000u) && (bt & 0x20000u))
+		FAIL("compact head and fused residual are exclusive", 0);
 	if (bt & 0x10000u) {
 		if (N != 16 || ldc != 4 || (bt & 0x1f00u))
 			FAIL("compact head requires N=16, ldc=4 and plain FP32 output", 0);
@@ -991,6 +1009,43 @@ int xmx_rec_gemm(int a, int b, int c, unsigned M, unsigned N, unsigned K, unsign
 	stamp(staged ? PK_STAGED : (tiled ? PK_TILED : PK_GEMM), bt);
 	g.recorded++;
 	return 0;
+}
+
+int xmx_rec_gemm(int a, int b, int c, unsigned M, unsigned N, unsigned K, unsigned batch,
+		 unsigned sa, unsigned sb, unsigned sc, unsigned bt,
+		 unsigned lda, unsigned ldb, unsigned ldc,
+		 unsigned oa, unsigned ob, unsigned oc)
+{
+	return record_gemm(a, b, c, M, N, K, batch, sa, sb, sc, bt,
+			   lda, ldb, ldc, oa, ob, oc, -1, -1, NULL);
+}
+
+/* A dense projection whose epilogue adds `skip * cosine` before the publish: the
+ * `branch + skip * per_channel_cosine` of the residual, without writing the float32
+ * branch out and reading it back in a pass of its own. Ported from ProjectsCodex's
+ * phase38; bit-identical to the two-pass path (`src/gpu/test_gemm_residual.py`).
+ * A half skip is the caller's to flag with 0x40000. */
+int xmx_rec_gemm_residual(int a, int b, int c, int skip, int cosine,
+			  unsigned M, unsigned N, unsigned K, unsigned flags)
+{
+	if (skip < 0 || cosine < 0) FAIL("invalid residual buffer", 0);
+	return record_gemm(a, b, c, M, N, K, 1, M * K, K * N, M * N,
+			   flags | 0x20000u, 0, 0, 0, 0, 0, 0, skip, cosine, NULL);
+}
+
+/* The same, for a window block's output projection: its rows are in window order,
+ * padded, and the result is written straight back into the unpadded image, which is
+ * where the residual stream lives. `across` is windows per row, `pad` packs the top
+ * and left padding as (top << 16) | left. ProjectsCodex's phase39. */
+int xmx_rec_gemm_window_residual(int a, int b, int c, int skip, int cosine,
+				 unsigned M, unsigned N, unsigned K, unsigned flags,
+				 unsigned height, unsigned width, unsigned across, unsigned pad)
+{
+	if (skip < 0 || cosine < 0 || !height || !width || !across)
+		FAIL("invalid window residual", 0);
+	uint32_t window[] = { height, width, across, pad };
+	return record_gemm(a, b, c, M, N, K, 1, M * K, K * N, M * N,
+			   flags | 0xa0000u, 0, 0, 0, 0, 0, 0, skip, cosine, window);
 }
 
 int xmx_rec_unary(unsigned kind, int a, int b, int c, int d, unsigned n, unsigned channels,

@@ -94,6 +94,8 @@ test: all work/attention_ab.spv work/test_exchange work/test_settled work/test_p
 	python3 src/layer/test_panel.py
 	python3 src/tools/publish_check.py
 	python3 src/tools/claims_check.py
+	python3 src/gpu/test_gemm_residual.py
+	python3 src/gpu/test_window_residual.py
 	python3 src/gpu/test_epilogue.py
 	python3 src/gpu/test_specialization.py
 	python3 src/gpu/test_softmax_pack.py

@@ -103,6 +103,8 @@ def _load():
             ("xmx_rec_copy", [ctypes.c_int] * 2 + [ctypes.c_ulonglong] * 3),
             ("xmx_submit", []),
             ("xmx_rec_gemm", [ctypes.c_int] * 3 + [ctypes.c_uint] * 14),
+            ("xmx_rec_gemm_residual", [ctypes.c_int] * 5 + [ctypes.c_uint] * 4),
+            ("xmx_rec_gemm_window_residual", [ctypes.c_int] * 5 + [ctypes.c_uint] * 8),
             ("xmx_rec_unary", [ctypes.c_uint] + [ctypes.c_int] * 4
              + [ctypes.c_uint, ctypes.c_uint, ctypes.c_float] + [ctypes.c_uint] * 5),
             ("xmx_rec_row", [ctypes.c_uint] + [ctypes.c_int] * 4 + [ctypes.c_uint] * 5
@@ -430,11 +432,20 @@ class Runtime:
         self.input_fp16 = os.environ.get("NR_INPUT_FP16", "0") != "0"
         self.compact_head = os.environ.get("NR_COMPACT_HEAD", "0") != "0"
         self.joint_qkv = os.environ.get("NR_JOINT_QKV", "0") != "0"
+        # ProjectsCodex's fusions (notes/improve-fusions.md). On by default where they
+        # were measured exact; each keeps its two-pass path behind a switch.
+        self.fuse_residual = os.environ.get("NR_FUSE_RESIDUAL", "1") != "0"
+        self.fuse_window_residual = os.environ.get("NR_FUSE_WINDOW_RESIDUAL", "1") != "0"
 
     def graph_key(self):
         return (self.lib.xmx_specialization() | (int(self.fuse_qk) << 3)
                 | (int(self.batch_ffn) << 4) | (int(self.input_fp16) << 5)
-                | (int(self.compact_head) << 6) | (int(self.joint_qkv) << 7))
+                | (int(self.compact_head) << 6) | (int(self.joint_qkv) << 7)
+                # Bits 8 and up. ProjectsCodex keys these at 5-7, which here are
+                # input_fp16, compact_head and joint_qkv: carried over as they were, a
+                # graph captured with one setting would replay for the other, and the
+                # picture would be wrong without an error anywhere.
+                | (int(self.fuse_residual) << 8) | (int(self.fuse_window_residual) << 9))
 
     @property
     def buffer_bytes(self):
@@ -536,6 +547,50 @@ class Runtime:
         """
         if self.lib.xmx_specialize(mask) != 0:
             raise RuntimeError("xmx_specialize: " + self.lib.xmx_error().decode())
+        return self
+
+    def gemm_residual(self, a, b, skip, cosine, target, rows, cols, inner, *,
+                      epilogue=0, narrow=False, skip_half=False, reverse=None):
+        """A @ B + skip * cosine, the residual folded into the GEMM's epilogue.
+
+        The two-pass path writes the float32 branch out and reads it back in a residual
+        pass of its own; this adds `skip * cosine` before the publish instead, so the
+        branch never touches memory and the result is bit-identical
+        (`src/gpu/test_gemm_residual.py`). With `reverse=(height, width, 8, origin)` the
+        rows are a window block's, padded and in window order, and the output lands
+        straight back in the unpadded image. Ported from ProjectsCodex's phases 38-39.
+        """
+        for extent, multiple, name in ((rows, TM, "rows"), (cols, TN, "cols"), (inner, TK, "inner")):
+            if extent <= 0 or extent % multiple:
+                raise ValueError(f"{name}={extent} must be a positive multiple of {multiple}")
+        output_rows = rows
+        window = ()
+        if reverse is not None:
+            height, width, size, origin = reverse
+            if height <= 0 or width <= 0 or size != 8 or any(not -65535 <= v <= 0 for v in origin):
+                raise ValueError("window residual needs positive extents, 8x8 windows "
+                                 "and nonpositive origins")
+            ph, pw, (top, left) = self.window_extent(height, width, origin, size)
+            if rows != ph * pw:
+                raise ValueError("window residual rows must match the padded image")
+            output_rows = height * width
+            window = (height, width, pw // size, (top << 16) | left)
+        if target.id in (a.id, b.id) or target.id == cosine.id:
+            raise ValueError("GEMM residual output must not alias matrix inputs or cosine")
+        if target.id == skip.id and narrow != skip_half:
+            raise ValueError("in-place residual requires matching skip and output widths")
+        for buf, size in ((a, rows * inner * 2), (b, inner * cols * 2),
+                          (skip, output_rows * cols * (2 if skip_half else 4)), (cosine, cols * 4),
+                          (target, output_rows * cols * (2 if narrow else 4))):
+            if buf.nbytes < size:
+                raise ValueError("GEMM residual buffer is too small")
+        flags = _publish(epilogue, narrow) | (0x40000 if skip_half else 0)
+        record = (self.lib.xmx_rec_gemm_window_residual if window
+                  else self.lib.xmx_rec_gemm_residual)
+        if record(a.id, b.id, target.id, skip.id, cosine.id,
+                  rows, cols, inner, flags, *window) != 0:
+            raise RuntimeError("xmx_rec_gemm_residual: " + self.lib.xmx_error().decode())
+        self.recorded += 1
         return self
 
     def gemm(self, a, b, c, rows, cols, inner, *, batch=1, strides=None, transpose_b=False,

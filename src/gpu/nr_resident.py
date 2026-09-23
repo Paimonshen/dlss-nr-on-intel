@@ -179,6 +179,24 @@ def record_qkv(runtime, w, s, windows, tokens, channels, heads):
                                tokens=tokens, heads=heads, narrow=True, from_half=True)
 
 
+def record_project_residual(runtime, a, weight, branch, skip, cosine, target,
+                            rows, channels, inner, *, epilogue=0, skip_half=False):
+    """A projection and its residual: `target = a @ weight + skip * cosine`.
+
+    Fused, the residual is the GEMM's own epilogue and the float32 branch never goes
+    to memory (ProjectsCodex's phase38, `notes/improve-fusions.md`). Unfused it is the
+    two passes this graph always had, kept for paired comparison and as the reference
+    the fused path is bit-identical to. `NR_FUSE_RESIDUAL=0` selects them.
+    """
+    if runtime.fuse_residual:
+        runtime.gemm_residual(a, weight, skip, cosine, target, rows, channels, inner,
+                              epilogue=epilogue, skip_half=skip_half)
+    else:
+        runtime.gemm(a, weight, branch, rows, channels, inner)
+        runtime.residual(branch, skip, cosine, target, rows * channels, channels,
+                         epilogue=epilogue, b_half=skip_half)
+
+
 def record_global_block(runtime, w, s, source=None, target=None):
     """A bottleneck block: the wide feed-forward, then attention over every token."""
     source = source or s.value
@@ -187,8 +205,8 @@ def record_global_block(runtime, w, s, source=None, target=None):
     runtime.to_half(source, s.value16, padded * channels)
     runtime.gemm(s.value16, w.expand, s.hidden16, padded, w.hidden_width, channels,
                  epilogue=xmxres.EPI_GATE_E4M3, narrow=True)
-    runtime.gemm(s.hidden16, w.ffn_proj, s.branch, padded, channels, w.hidden_width)
-    runtime.residual(s.branch, source, w.ffn_cos, s.ffn, padded * channels, channels)
+    record_project_residual(runtime, s.hidden16, w.ffn_proj, s.branch, source, w.ffn_cos,
+                            s.ffn, padded, channels, w.hidden_width)
 
     runtime.to_half(s.ffn, s.ffn16, padded * channels)
     runtime.gemm(s.ffn16, w.qkv, s.proj, padded, 3 * channels, channels)
@@ -202,8 +220,8 @@ def record_global_block(runtime, w, s, source=None, target=None):
                  strides=(padded * padded, padded * 32, padded * 32))
     runtime.merge_heads(s.context, s.merged16, 1, padded, channels, heads,
                         epilogue=xmxres.EPI_E4M3, narrow=True)
-    runtime.gemm(s.merged16, w.out, s.attention, padded, channels, channels)
-    runtime.residual(s.attention, s.ffn, w.attn_cos, target, padded * channels, channels)
+    record_project_residual(runtime, s.merged16, w.out, s.attention, s.ffn, w.attn_cos,
+                            target, padded, channels, channels)
 
 
 def run_global_block(runtime, w, s, value):
@@ -304,17 +322,17 @@ def record_feed_forward(runtime, w, s, source, source_half=False):
         _ffn_groups(runtime, s.hidden16, w.branch, s.heads16, pixels, 32, 128,
                     w.groups, leading=(s.hidden_width, 0, channels),
                     strides=(128, 128 * 32, 32), epilogue=xmxres.EPI_E4M3)
-        runtime.gemm(s.heads16, w.ffn_out, s.branch, pixels, channels, channels)
         # the fused multi-head kernels publish the residual before attention reads it,
         # which the residual now does on its way out
-        runtime.residual(s.branch, source, w.ffn_cos, s.ffn, pixels * channels, channels,
-                         epilogue=xmxres.EPI_E4M3, b_half=source_half)
+        record_project_residual(runtime, s.heads16, w.ffn_out, s.branch, source, w.ffn_cos,
+                                s.ffn, pixels, channels, channels,
+                                epilogue=xmxres.EPI_E4M3, skip_half=source_half)
     else:
         runtime.gemm(value16, w.expand, s.hidden16, pixels, s.hidden_width, channels,
                      epilogue=xmxres.EPI_GATE_E4M3, narrow=True)
-        runtime.gemm(s.hidden16, w.branch, s.branch, pixels, channels, s.hidden_width)
-        runtime.residual(s.branch, source, w.ffn_cos, s.ffn, pixels * channels, channels,
-                         b_half=source_half)
+        record_project_residual(runtime, s.hidden16, w.branch, s.branch, source, w.ffn_cos,
+                                s.ffn, pixels, channels, s.hidden_width,
+                                skip_half=source_half)
 
 
 def record_split_feed_forward(runtime, w, s, source, source_half=False):
@@ -336,13 +354,18 @@ def record_split_feed_forward(runtime, w, s, source, source_half=False):
     _ffn_groups(runtime, s.hidden16, w.project, s.core16, pixels, 64, 256,
                 groups, leading=(wide, 0, channels),
                 strides=(256, 256 * 64, 64), epilogue=xmxres.EPI_E4M3)
-    runtime.gemm(s.core16, w.weight3, s.branch, pixels, channels, channels)
-    runtime.residual(s.branch, source, w.ffn_cos, s.ffn, pixels * channels, channels,
-                     b_half=source_half)
+    record_project_residual(runtime, s.core16, w.weight3, s.branch, source, w.ffn_cos,
+                            s.ffn, pixels, channels, channels, skip_half=source_half)
 
 
-def record_window_attention(runtime, w, s, source):
+def record_window_attention(runtime, w, s, source, target=None, publish=0,
+                            target_half=False):
     """Window attention over `source`, into `s.attended` — in window order.
+
+    With a `target`, the output projection finishes the block instead: it adds
+    `source * attn_cos` and writes straight back into the unpadded image, so neither
+    `s.attended` nor the residual's own window-reversing pass is needed
+    (ProjectsCodex's phase39). `source` is then the residual's skip, as it always was.
 
     The reverse back to image order is the following residual's own gather, so nothing
     is written in image order here. The window count follows this block's own origin,
@@ -365,7 +388,13 @@ def record_window_attention(runtime, w, s, source):
                  strides=(tokens * tokens, tokens * 32, tokens * 32))
     runtime.merge_heads(s.context, s.merged16, windows, tokens, channels, heads,
                         epilogue=xmxres.EPI_E4M3, narrow=True)
-    runtime.gemm(s.merged16, w.out, s.attended, windows * tokens, channels, channels)
+    if target is not None:
+        runtime.gemm_residual(s.merged16, w.out, source, w.attn_cos, target,
+                              windows * tokens, channels, channels,
+                              reverse=(s.height, s.width, 8, w.origin),
+                              epilogue=publish, narrow=target_half)
+    else:
+        runtime.gemm(s.merged16, w.out, s.attended, windows * tokens, channels, channels)
 
 
 def record_block(runtime, w, s, source=None, target=None, publish=0, source_half=False,
@@ -384,6 +413,10 @@ def record_block(runtime, w, s, source=None, target=None, publish=0, source_half
         record_split_feed_forward(runtime, w, s, source, source_half)
     else:
         record_feed_forward(runtime, w, s, source, source_half)
+    if runtime.fuse_window_residual:
+        record_window_attention(runtime, w, s, s.ffn, target=target, publish=publish,
+                                target_half=target_half)
+        return
     record_window_attention(runtime, w, s, s.ffn)
     # the window reverse is the residual's own gather, not a pass of its own
     runtime.residual(s.attended, s.ffn, w.attn_cos, target, pixels * w.channels,
