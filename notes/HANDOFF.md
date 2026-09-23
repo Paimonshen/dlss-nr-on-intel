@@ -23,12 +23,17 @@ there. Five fusions, each bit-identical and each behind its own switch:
   (`NR_QKV_EPILOGUE`, 22 %): the float32 projection — 377 MB at block 0 of a 720p frame,
   written once and read three times — no longer exists. `notes/improve-qkv-epilogue.md`.
 
-All five off against on, paired in one process: **1280x720 459 -> 290 ms, 1920x1080
-1000 -> 622, 384x384 80 -> 53**, dispatches 1128 -> 592. The extent curve is now **8.6 ms +
-280 ms per megapixel**; live, 512x288 at scale 0.35 is 54.5 ms, 18.3 fps. README table and
-`nr_knobs.RATES` re-measured with it.
+All five off against on, paired in one process on a freshly booted machine: **1280x720
+458 -> 284 ms, 1920x1080 980 -> 600, 384x384 80 -> 52**, dispatches 1128 -> 592. The extent
+curve is now **10 ms + 274 ms per megapixel**; live, 512x288 at scale 0.35 is 53.9 ms,
+18.6 fps, and 1920x1080 at 0.55 is 280 ms. README table and `nr_knobs.RATES` re-measured
+with it.
 
-Three things to carry:
+Four things to carry:
+
+- **Measure with empty swap.** Before a reboot, with 5.5 GiB in zram, 1920x1080 live ran
+  322-463 ms from run to run; after it, 278-283. The small extents barely moved. Check
+  `swapon --show` and `/proc/pressure/memory` first; `phase51` was bitten by the same thing.
 
 - **Workgroup shared memory comes in powers of two.** A 64-byte array beside a `stage`
   of exactly 2 KB took every tiled GEMM's workgroup to 4 KB and cost 23 ms of a 720p frame —

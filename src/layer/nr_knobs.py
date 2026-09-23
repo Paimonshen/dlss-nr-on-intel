@@ -22,7 +22,7 @@ KNOBS = (
         "much smaller, and what comes back is the *head* — the detail it drew — which is "
         "then scaled up and composed against the full-resolution original, so the game's "
         "own pixels are never resampled and only the synthesised part is interpolated. "
-        "Cost follows the extent and nothing else: about 9 ms + 280 ms per megapixel "
+        "Cost follows the extent and nothing else: about 10 ms + 275 ms per megapixel "
         "of network extent on an Arc 140V. "
         "0.55 is the measured compromise, but the *sign* of its effect on quality depends "
         "on how dark the scene is rather than on the number: on a bright frame 0.55 adds "
@@ -111,21 +111,20 @@ COST = ((1.00, 490), (0.70, 233), (0.60, 188), (0.50, 146), (0.35, 78))
 # by `src/tools/knob_doc.py`, because the hand-written one went two days out of date the
 # moment the host passes moved to C and then stayed wrong for a week.
 RATES = (
-    (512, 288, 0.35, 54.5),
-    (512, 288, 0.50, 54.3),
-    (640, 360, 0.35, 56.8),
-    (640, 360, 0.50, 60.7),
-    (854, 480, 0.50, 80.5),
-    (1024, 768, 0.55, 121.6),
-    (1920, 1080, 0.55, 452.1),
+    (512, 288, 0.35, 53.9),
+    (512, 288, 0.50, 53.2),
+    (640, 360, 0.35, 55.3),
+    (640, 360, 0.50, 61.0),
+    (854, 480, 0.50, 77.0),
+    (1024, 768, 0.55, 120.7),
+    (1920, 1080, 0.55, 279.7),
 )
 RATES_MEASURED = "2026-09-23"
 # What a reader of the table needs and the numbers cannot say. Empty when there is nothing.
-RATES_NOTE = ("1920x1080 is the median of three runs that ranged from 322 to 463 ms. At that "
-              "size the round trip meets memory pressure on this 15 GiB machine — the kernel's "
-              "pressure-stall figures rose during every run, with 5.5 GiB in zram at the "
-              "time — while the graph inside it is about 190 ms. The smaller rows' three runs "
-              "agreed within 17 %, four of the six within 7 %.")
+RATES_NOTE = ("Medians of three runs on a freshly booted machine, which agreed within 3 %. "
+              "Hours earlier, with 5.5 GiB in zram and the kernel's memory-pressure figures "
+              "rising, the same code ran 1920x1080 in 322 to 463 ms: if that row is much slower "
+              "for you, look at swap before anything else.")
 
 
 def expected(scale):

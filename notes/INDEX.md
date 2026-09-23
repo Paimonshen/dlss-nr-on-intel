@@ -66,9 +66,9 @@ disproved.
 | `phase26-the-register-ceiling.md` | every engine busy, each ~90 % idle; the register file is the wall |
 | `phase45-frame-profile.md` | per-pass timings; everything that moves data is at the memory ceiling — which did not make the graph finished |
 | `improve-fusions.md` | residuals, attention and its head merge folded into the passes that produce their inputs; bit-identical |
-| `improve-qkv-epilogue.md` | Q/K normalised in the QKV projection's own epilogue, 22 %; all fusions together 37 %; why joint QKV was slower; shared memory comes in powers of two |
+| `improve-qkv-epilogue.md` | Q/K normalised in the QKV projection's own epilogue, 22 %; all fusions together 38 %; why joint QKV was slower; shared memory comes in powers of two; measure with empty swap |
 | `phase21`, `phase22`, `phase23`, `phase31`, `phase33` | tiling, staging, integer weights, the accumulator, OpenCL — all measured, all closed |
-| `phase25-the-frame-rate-wall.md` | `17 ms + 488 ms per megapixel`, and what that forbids — `8.6 + 280` since the fusions |
+| `phase25-the-frame-rate-wall.md` | `17 ms + 488 ms per megapixel`, and what that forbids — `10 + 274` since the fusions |
 | `phase51-output-resolution-costs.md` | what costs the output extent rather than the network's, and a profile that was measuring swap |
 | `phase50-what-the-model-computes-in.md` | 36 % of the shipped model's mma is already FP8; what FP4 would and would not change |
 | `phase37-neural-upstream.md` | half the extent is 3x faster and keeps 62 % of the high band |

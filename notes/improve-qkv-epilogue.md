@@ -3,7 +3,7 @@
 2026-09-23. Q and K are cosine-normalised and V published inside the QKV projection's GEMM,
 so the float32 projection never goes to memory and the three passes that read it back are
 gone. With the head merge folded into the fused attention the same day
-(`improve-fusions.md`), all five fusions together take a 1280x720 frame from 459 to 290 ms.
+(`improve-fusions.md`), all five fusions together take a 1280x720 frame from 458 to 284 ms.
 
 ## How it was found
 
@@ -98,20 +98,26 @@ keep theirs), and GEMM barely moved: tiled 85.7 -> 80.8 ms and staged 81.1 -> 89
 3.4 ms more in all, against 104 ms of passes removed. In the tiled path the epilogue costs
 less than the float32 store it replaces.
 
-All five fusions, off against on in one process, paired:
+All five fusions, off against on in one process, paired, on a freshly booted machine (swap
+empty, no memory pressure):
 
 | output | all off | all on | gain | dispatches |
 | --- | ---: | ---: | ---: | --- |
-| 384x384 | 79.9 ms | 52.9 ms | 33.7 % | 1128 -> 592 |
-| 1280x720 | 459.1 ms | 290.1 ms | **36.8 %** | |
-| 1920x1080 | 999.5 ms | 622.1 ms | 37.8 % | |
+| 384x384 | 79.6 ms | 52.2 ms | 34.3 % | 1128 -> 592 |
+| 1280x720 | 458.5 ms | 284.3 ms | **38.0 %** | |
+| 1920x1080 | 980.2 ms | 599.7 ms | 38.8 % | |
 
-The extent curve is now **8.6 ms + 280 ms per megapixel** of network extent — seven extents
-from 320x320 to 1920x1088, worst residual 8.9 ms — against `phase60`'s 15 + 449. The README's
-live table was re-measured with it: 512x288 at scale 0.35 went from 72 to 54.5 ms (18.3 fps),
-1024x768 at 0.55 from 168 to 122. 1920x1080 did not settle: three runs gave 452, 463 and
-322 ms, with the kernel's memory-pressure figures rising in each and 5.5 GiB in zram. The
-table says so.
+The extent curve is now **10.0 ms + 274 ms per megapixel** of network extent — seven extents
+from 320x320 to 1920x1088, worst residual 5.2 ms — against `phase60`'s 15 + 449. The README's
+live table was re-measured with it: 512x288 at scale 0.35 went from 72 to 53.9 ms (18.6 fps),
+1024x768 at 0.55 from 168 to 121, and 1920x1080 at 0.55 from 412 to 280, three runs within
+3 % of each other.
+
+**Measure on a machine with empty swap.** The same code, hours earlier, with 5.5 GiB in zram
+and the kernel's memory-pressure figures rising: 1920x1080 live ran 452, 463 and 322 ms in
+three runs, the extent curve came out 8.6 + 280 with a worst residual of 8.9 ms, and the
+paired frames read 0-4 % slower, the most at 1920x1080. The small extents barely moved; the
+large ones are where the pressure shows. `cat /proc/pressure/memory` and `swapon --show` before a run.
 
 The benchmark showed the head read slower in the "on" mode (1080p 8 -> 18 ms). A direct
 probe, twelve alternating frames at 1080p: 7.49 against 7.45 ms. It belongs to the
@@ -123,7 +129,7 @@ benchmark's own allocations, as it did for the merge; the graph time is what mov
 README concluded that the graph was finished as an optimisation target. Each pass was
 efficient; the graph was not finished. **A pass at the memory ceiling that need not exist is
 all waste**, and a per-pass profile answers whether a pass is efficient, never whether it
-should be there. Removing passes is where more than a third of the frame was.
+should be there. Removing passes is where 38 % of the frame was.
 
 ## What is left
 
