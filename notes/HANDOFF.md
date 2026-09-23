@@ -9,7 +9,7 @@ you need the evidence behind a line in this file, rather than reading them in or
 
 ---
 
-## Latest: 46 % of the frame was passes, shared memory and pads (2026-09-24)
+## Latest: 48 % of the frame was passes, shared memory and pads (2026-09-24)
 
 A second day of the same kind of work, driven by a new profile per call site —
 `python3 src/bench/frame_profile.py --calls N`, each pass labelled by the entry point that
@@ -26,12 +26,18 @@ frames (one a real game frame) and both memory modes:
   the 128-wide hidden layer never leaves the chip; 33.6 -> 21.7 ms of GPU time at 720p;
 - **the bottleneck padded to 64-row blocks** when it costs under an eighth more rows, putting
   its K=4096 GEMMs on the staged kernel: 240.6 -> 235.4 ms at 720p;
-- the branched blocks' published FFN output stored as half (1.3 ms).
+- the branched blocks' published FFN output stored as half (1.3 ms);
+- **the window partition folded into the QKV projection** (`NR_FUSE_PARTITION`): the staged
+  GEMM's A loader gathers the window rows from the image itself, zero outside it, rounding to
+  half on the way in — 62 passes fewer, 8.7 ms at 720p;
+- **still frames composed natively**: `nr_frame.compose` only reached the C `nr_compose`
+  above intensity 1 or with history, so photo mode and every cut paid 3.9 ms of NumPy at
+  512x288 for the same bytes.
 
-All seven switches off against on, paired: **1280x720 446 -> 239 ms, 1920x1080 971 -> 528,
-384x384 79 -> 48.** Graph curve **8.7 ms + 240 ms per megapixel**. Live: 512x288 at 0.35 is
-**50.4 ms (19.8 fps)**, and every live size up to 640x360 runs the network at 320x320, where
-the graph is ~39 ms of a ~51 ms round trip.
+All eight switches off against on, paired: **1280x720 445 -> 231 ms, 1920x1080 968 -> 507,
+320x320 62 -> 41.** Graph curve **10 ms + 230 ms per megapixel**. Live: 512x288 at 0.35 is
+**45.1 ms (22.2 fps)**, and every live size up to 640x360 runs the network at 320x320, where
+the graph is ~39 ms of the round trip.
 
 Measured and **not** kept, so nobody tries them again:
 

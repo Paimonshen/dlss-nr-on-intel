@@ -312,7 +312,7 @@ all of them move between frames. Only `profile` costs a forward pass.
 
 `0.05` to `1`, step `0.05`, default `1`
 
-The only knob that changes the frame rate. The network runs on a frame this much smaller, and what comes back is the *head* — the detail it drew — which is then scaled up and composed against the full-resolution original, so the game's own pixels are never resampled and only the synthesised part is interpolated. Cost follows the extent and nothing else: about 9 ms + 240 ms per megapixel of network extent on an Arc 140V. 0.55 is the measured compromise, but the *sign* of its effect on quality depends on how dark the scene is rather than on the number: on a bright frame 0.55 adds 15 % of local contrast to a kimono, on a dark crowd it takes 21 % away.
+The only knob that changes the frame rate. The network runs on a frame this much smaller, and what comes back is the *head* — the detail it drew — which is then scaled up and composed against the full-resolution original, so the game's own pixels are never resampled and only the synthesised part is interpolated. Cost follows the extent and nothing else: about 10 ms + 230 ms per megapixel of network extent on an Arc 140V. 0.55 is the measured compromise, but the *sign* of its effect on quality depends on how dark the scene is rather than on the number: on a bright frame 0.55 adds 15 % of local contrast to a kimono, on a dark crowd it takes 21 % away.
 
 ### `profile` — which way to trade skin texture against speculars
 
@@ -366,13 +366,13 @@ Measured through the socket on 2026-09-24 by `python3 src/bench/live_rates.py` �
 
 | swapchain | render scale | ms | fps |
 | --- | ---: | ---: | ---: |
-| 512x288 | 0.35 | 50 | 19.8 |
-| 512x288 | 0.50 | 51 | 19.5 |
-| 640x360 | 0.35 | 49 | 20.4 |
-| 640x360 | 0.50 | 53 | 18.8 |
-| 854x480 | 0.50 | 71 | 14.0 |
-| 1024x768 | 0.55 | 107 | 9.3 |
-| 1920x1080 | 0.55 | 249 | 4.0 |
+| 512x288 | 0.35 | 45 | 22.2 |
+| 512x288 | 0.50 | 48 | 20.7 |
+| 640x360 | 0.35 | 46 | 21.5 |
+| 640x360 | 0.50 | 51 | 19.6 |
+| 854x480 | 0.50 | 65 | 15.3 |
+| 1024x768 | 0.55 | 102 | 9.8 |
+| 1920x1080 | 0.55 | 226 | 4.4 |
 
 Medians of three runs with swap empty, which agreed within 3 %. On 2026-09-23, with 5.5 GiB in zram and the kernel's memory-pressure figures rising, 1920x1080 ran anywhere from 322 to 463 ms: if that row is much slower for you, look at swap before anything else.
 
@@ -391,9 +391,10 @@ weights, the accumulator format, OpenCL, shared-memory bank padding and handing 
 E-cores have all been measured and all are closed (`notes/phase45`, `notes/phase46`). What
 did move the graph was deleting passes: a pass at the memory ceiling that need not exist is
 all waste. Folding the residuals into the projections, attention into one pass with its
-head merge, Q/K normalisation into the QKV projection's own epilogue, the narrow blocks'
-feed-forward into one kernel and the full-resolution glue into fewer passes took a 1280x720
-frame from 446 to 239 ms, 46 %, with every output bit-identical
+head merge, Q/K normalisation and the window partition into the QKV projection's own
+epilogue and loads, the narrow blocks' feed-forward into one kernel and the full-resolution
+glue into fewer passes took a 1280x720 frame from 445 to 231 ms, 48 %, with every output
+bit-identical
 (`notes/improve-fusions.md`, `notes/improve-qkv-epilogue.md`). The other thing that moved it
 was shared memory: it is allocated in powers of two here, and window attention at 3104 bytes
 took 4 KB and half the resident workgroups; at exactly 2 KB it is 18 % faster.

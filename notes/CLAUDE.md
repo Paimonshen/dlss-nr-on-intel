@@ -381,8 +381,8 @@ layer is proven under a second Vulkan client, VKD3D-Proton on a 64-bit D3D12 tit
 
 **Performance inside the graph was declared finished here, and that was wrong** — corrected
 2026-09-23: each pass is efficient, but over a third of the frame was passes that need not
-exist. Seven bit-identical fusions, shared memory kept inside 2 KB and a padded bottleneck
-took 1280x720 from 446 to 239 ms and the curve to `8.7 ms + 240 ms per megapixel`
+exist. Eight bit-identical fusions, shared memory kept inside 2 KB and a padded bottleneck
+took 1280x720 from 445 to 231 ms and the curve to `10 ms + 230 ms per megapixel`
 (`notes/improve-fusions.md`, `notes/improve-qkv-epilogue.md`, HANDOFF). What follows is the
 per-pass record, which still stands.
 `xmx_profile()` timestamps every pass (`src/bench/frame_profile.py`): GEMM is 216 ms of

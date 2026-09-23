@@ -22,7 +22,7 @@ KNOBS = (
         "much smaller, and what comes back is the *head* — the detail it drew — which is "
         "then scaled up and composed against the full-resolution original, so the game's "
         "own pixels are never resampled and only the synthesised part is interpolated. "
-        "Cost follows the extent and nothing else: about 9 ms + 240 ms per megapixel "
+        "Cost follows the extent and nothing else: about 10 ms + 230 ms per megapixel "
         "of network extent on an Arc 140V. "
         "0.55 is the measured compromise, but the *sign* of its effect on quality depends "
         "on how dark the scene is rather than on the number: on a bright frame 0.55 adds "
@@ -111,13 +111,13 @@ COST = ((1.00, 490), (0.70, 233), (0.60, 188), (0.50, 146), (0.35, 78))
 # by `src/tools/knob_doc.py`, because the hand-written one went two days out of date the
 # moment the host passes moved to C and then stayed wrong for a week.
 RATES = (
-    (512, 288, 0.35, 50.4),
-    (512, 288, 0.50, 51.3),
-    (640, 360, 0.35, 48.9),
-    (640, 360, 0.50, 53.2),
-    (854, 480, 0.50, 71.3),
-    (1024, 768, 0.55, 107.4),
-    (1920, 1080, 0.55, 249.0),
+    (512, 288, 0.35, 45.1),
+    (512, 288, 0.50, 48.4),
+    (640, 360, 0.35, 46.5),
+    (640, 360, 0.50, 50.9),
+    (854, 480, 0.50, 65.2),
+    (1024, 768, 0.55, 101.6),
+    (1920, 1080, 0.55, 225.5),
 )
 RATES_MEASURED = "2026-09-24"
 # What a reader of the table needs and the numbers cannot say. Empty when there is nothing.
