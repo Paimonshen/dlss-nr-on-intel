@@ -1,4 +1,4 @@
-/*
+﻿/*
  * nr_layer — a Vulkan layer that hands the presented frame to DLSS-NR.
  *
  * Why a Vulkan layer, and not the route everyone else takes.
@@ -23,7 +23,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <pthread.h>
 #include <errno.h>
 #ifdef _WIN32
 #include <io.h>
@@ -33,6 +32,7 @@
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <pthread.h>
 #endif
 #include <vulkan/vulkan.h>
 #include <vulkan/vk_layer.h>
@@ -41,6 +41,20 @@
  * which breaks the VkNegotiateLayerInterface parameter name below. */
 #ifdef _WIN32
 #undef interface
+#endif
+
+/* Cross-platform mutex so this file compiles on both Linux (pthread) and Windows
+ * (SRWLOCK). The single global `lock` guards the device/swapchain tables; it is the
+ * only place the layer needs a lock. A zero-initialised SRWLOCK is ready to use on
+ * Windows, and PTHREAD_MUTEX_INITIALIZER does the same on Linux. */
+#ifdef _WIN32
+typedef SRWLOCK nr_mutex_t;
+#define nr_mutex_lock(m)   AcquireSRWLockExclusive(m)
+#define nr_mutex_unlock(m) ReleaseSRWLockExclusive(m)
+#else
+typedef pthread_mutex_t nr_mutex_t;
+#define nr_mutex_lock(m)   pthread_mutex_lock(m)
+#define nr_mutex_unlock(m) pthread_mutex_unlock(m)
 #endif
 
 #define MAX_SWAPCHAINS 8
@@ -135,7 +149,11 @@ struct swapchain_data {
 static struct device_data devices[8];
 static struct swapchain_data swapchains[MAX_SWAPCHAINS];
 
-static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+#ifdef _WIN32
+static nr_mutex_t lock;                       /* zero-init SRWLOCK is ready */
+#else
+static nr_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+#endif
 static PFN_vkGetInstanceProcAddr next_instance_proc;
 static VkInstance layer_instance;
 static unsigned long frame_counter;
@@ -236,7 +254,11 @@ static void ensure_daemon(void)
 		daemon = NULL;
 		for (size_t i = 0; i < sizeof cands / sizeof *cands; i++) {
 			snprintf(daemon_buf, sizeof daemon_buf, "%s%s", self, cands[i]);
-			if (access(daemon_buf, R_OK) == 0) { daemon = daemon_buf; break; }
+			#ifdef _WIN32
+		if (_access(daemon_buf, 4) == 0) { daemon = daemon_buf; break; }
+#else
+		if (access(daemon_buf, R_OK) == 0) { daemon = daemon_buf; break; }
+#endif
 		}
 	}
 	if (!daemon || !*daemon) {
@@ -407,14 +429,14 @@ static int family_can_capture(struct device_data *data, uint32_t family)
 static void remember_queue(VkDevice device, uint32_t family, VkQueue queue, int capture_ok)
 {
 	if (!queue) return;
-	pthread_mutex_lock(&lock);
+	nr_mutex_lock(&lock);
 	if (!find_queue(queue))
 		for (int i = 0; i < MAX_QUEUES; i++)
 			if (!queues[i].queue) {
 				queues[i] = (struct queue_data){ queue, device, family, capture_ok };
 				break;
 			}
-	pthread_mutex_unlock(&lock);
+	nr_mutex_unlock(&lock);
 }
 
 VKAPI_ATTR void VKAPI_CALL nr_GetDeviceQueue(VkDevice device, uint32_t family,
@@ -556,7 +578,7 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateDevice(VkPhysicalDevice physical,
 	VkResult r = create(physical, info, allocator, device);
 	if (r != VK_SUCCESS) return r;
 
-	pthread_mutex_lock(&lock);
+	nr_mutex_lock(&lock);
 	struct device_data *data = NULL;
 	for (int i = 0; i < 8; i++) if (!devices[i].device) { data = &devices[i]; break; }
 	if (data) {
@@ -580,7 +602,7 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateDevice(VkPhysicalDevice physical,
 		data->queue_family = info->queueCreateInfoCount
 			? info->pQueueCreateInfos[0].queueFamilyIndex : 0;
 	}
-	pthread_mutex_unlock(&lock);
+	nr_mutex_unlock(&lock);
 	return r;
 }
 
@@ -629,7 +651,7 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateSwapchainKHR(VkDevice device,
 			"leaving it alone\n", info->imageFormat);
 		return r;
 	}
-	pthread_mutex_lock(&lock);
+	nr_mutex_lock(&lock);
 	struct swapchain_data *entry = NULL;
 	for (int i = 0; i < MAX_SWAPCHAINS; i++)
 		if (!swapchains[i].swapchain) { entry = &swapchains[i]; break; }
@@ -652,7 +674,7 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateSwapchainKHR(VkDevice device,
 		 * answer; the alternative is an out-of-bounds read every present. */
 		if (got != VK_SUCCESS || !entry->image_count) {
 			memset(entry, 0, sizeof *entry);
-			pthread_mutex_unlock(&lock);
+			nr_mutex_unlock(&lock);
 			fprintf(stderr, "[nr_layer] swapchain has more than %d images or none; "
 				"capture off\n", MAX_IMAGES);
 			return r;
@@ -661,7 +683,7 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateSwapchainKHR(VkDevice device,
 			entry->extent.width, entry->extent.height, entry->format,
 			entry->image_count);
 	}
-	pthread_mutex_unlock(&lock);
+	nr_mutex_unlock(&lock);
 	return r;
 }
 
@@ -705,14 +727,14 @@ VKAPI_ATTR void VKAPI_CALL nr_DestroyDevice(VkDevice device,
 		data->destroy_device = (PFN_vkDestroyDevice)resolve_device(data, "vkDestroyDevice");
 	PFN_vkDestroyDevice next = data ? data->destroy_device : NULL;
 	if (data) {
-		pthread_mutex_lock(&lock);
+		nr_mutex_lock(&lock);
 		for (int i = 0; i < MAX_SWAPCHAINS; i++)
 			if (swapchains[i].device == device)
 				memset(&swapchains[i], 0, sizeof swapchains[i]);
 		for (int i = 0; i < MAX_QUEUES; i++)
 			if (queues[i].device == device)
 				memset(&queues[i], 0, sizeof queues[i]);
-		pthread_mutex_unlock(&lock);
+		nr_mutex_unlock(&lock);
 		release_device(data);
 		memset(data, 0, sizeof *data);
 	}
@@ -727,11 +749,11 @@ VKAPI_ATTR void VKAPI_CALL nr_DestroySwapchainKHR(VkDevice device, VkSwapchainKH
 						  const VkAllocationCallbacks *allocator)
 {
 	struct device_data *data = find_device(device);
-	pthread_mutex_lock(&lock);
+	nr_mutex_lock(&lock);
 	for (int i = 0; i < MAX_SWAPCHAINS; i++)
 		if (swapchains[i].swapchain == swapchain)
 			memset(&swapchains[i], 0, sizeof swapchains[i]);
-	pthread_mutex_unlock(&lock);
+	nr_mutex_unlock(&lock);
 	if (data) {
 		if (!data->destroy_swapchain)
 			data->destroy_swapchain = (PFN_vkDestroySwapchainKHR)resolve_device(data, "vkDestroySwapchainKHR");
