@@ -9,7 +9,46 @@ you need the evidence behind a line in this file, rather than reading them in or
 
 ---
 
-## Latest: over a third of the frame was passes that need not exist (2026-09-23)
+## Latest: 46 % of the frame was passes, shared memory and pads (2026-09-24)
+
+A second day of the same kind of work, driven by a new profile per call site —
+`python3 src/bench/frame_profile.py --calls N`, each pass labelled by the entry point that
+recorded it and its shape. Every change bit-identical, checked on kernel tests, three whole
+frames (one a real game frame) and both memory modes:
+
+- **window attention in exactly 2 KB of shared memory**: 56 -> 46 ms at 1280x768. Padded to
+  8 KB the same shader ran 76 % slower — occupancy is its bound;
+- **block 70 stores half for the head directly**, one `to_half` fewer;
+- **the full-resolution glue** (`NR_FUSE_GLUE`): block 70's input in one pass instead of
+  four, the stem's GEMM storing its own half copy; 8 ms at 720p. The residual pass compiles
+  to FMA — measured on crafted inputs — so the merged pass writes `fma()` explicitly;
+- **the narrow blocks' whole feed-forward in one kernel** (`NR_FUSE_FFN`, `ffn_fused.comp`):
+  the 128-wide hidden layer never leaves the chip; 33.6 -> 21.7 ms of GPU time at 720p;
+- **the bottleneck padded to 64-row blocks** when it costs under an eighth more rows, putting
+  its K=4096 GEMMs on the staged kernel: 240.6 -> 235.4 ms at 720p;
+- the branched blocks' published FFN output stored as half (1.3 ms).
+
+All seven switches off against on, paired: **1280x720 446 -> 239 ms, 1920x1080 971 -> 528,
+384x384 79 -> 48.** Graph curve **8.7 ms + 240 ms per megapixel**. Live: 512x288 at 0.35 is
+**50.4 ms (19.8 fps)**, and every live size up to 640x360 runs the network at 320x320, where
+the graph is ~39 ms of a ~51 ms round trip.
+
+Measured and **not** kept, so nobody tries them again:
+
+- 16-column chunks in the fused FFN: no spills at all, and 9 % slower than 32 columns with
+  some. The spill count is a symptom to read, not a target;
+- the same kernel for the branched blocks (`NR_FUSE_BRANCHED_FFN`, off): −2.7 ms at 720p,
+  +2.6 at 384x384. The deeper levels are arithmetic, where the staged GEMM does better;
+- register-prefetch pipelining in the staged GEMM: 30 % slower (84 -> 111 ms of staged GEMM
+  at 720p), as phases 21 and 26 found for the K loop before;
+- the tiled or base kernel for the small-M, deep-K GEMMs of the deep levels at 320x320: both
+  slower than staged (43 -> 53 ms for the frame).
+
+What is left at the live extent (320x320): GEMMs of the deep levels with M of 64-576 and K up
+to 4096, latency-bound on 32-200 workgroups; split-K would parallelise them and is ruled out
+because it changes the order of summation.
+
+## Over a third of the frame was passes that need not exist (2026-09-23)
 
 **"Performance inside the graph is finished" was wrong.** Every pass that only moves data is
 at the memory ceiling — `phase45` measured that correctly — but a pass at the ceiling that

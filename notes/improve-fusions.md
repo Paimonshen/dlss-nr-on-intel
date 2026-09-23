@@ -162,6 +162,15 @@ bit-identical, since pad rows are zero and the softmax excludes them. It pads on
 costs at most an eighth more rows; at 384x384 and 1024x576 the counts (64, 192) are whole
 blocks already.
 
+## Tried and dropped (2026-09-24)
+
+- **Register-prefetch pipelining in the staged GEMM** — the next K block's global loads
+  issued before this block's multiply-adds, the classic way to hide load latency on the
+  small-M deep-K GEMMs of the deep levels. 30 % slower: 14.1 -> 20.3 ms of staged GEMM at
+  320x320, 83.9 -> 110.5 at 1280x768. Phases 21 and 26 found the same for the K loop.
+- **The tiled or base kernel for those GEMMs**, for more workgroups: the frame at 320x320
+  went 42.9 -> 53 ms either way. Staged is the best of the three there.
+
 ## Left behind, deliberately
 
 - `window_attention_qkv.comp`: off by default in Codex's tree (`NR_FUSE_QKV_ATTENTION`) and

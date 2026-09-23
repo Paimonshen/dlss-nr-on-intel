@@ -312,7 +312,7 @@ all of them move between frames. Only `profile` costs a forward pass.
 
 `0.05` to `1`, step `0.05`, default `1`
 
-The only knob that changes the frame rate. The network runs on a frame this much smaller, and what comes back is the *head* — the detail it drew — which is then scaled up and composed against the full-resolution original, so the game's own pixels are never resampled and only the synthesised part is interpolated. Cost follows the extent and nothing else: about 10 ms + 275 ms per megapixel of network extent on an Arc 140V. 0.55 is the measured compromise, but the *sign* of its effect on quality depends on how dark the scene is rather than on the number: on a bright frame 0.55 adds 15 % of local contrast to a kimono, on a dark crowd it takes 21 % away.
+The only knob that changes the frame rate. The network runs on a frame this much smaller, and what comes back is the *head* — the detail it drew — which is then scaled up and composed against the full-resolution original, so the game's own pixels are never resampled and only the synthesised part is interpolated. Cost follows the extent and nothing else: about 9 ms + 240 ms per megapixel of network extent on an Arc 140V. 0.55 is the measured compromise, but the *sign* of its effect on quality depends on how dark the scene is rather than on the number: on a bright frame 0.55 adds 15 % of local contrast to a kimono, on a dark crowd it takes 21 % away.
 
 ### `profile` — which way to trade skin texture against speculars
 
@@ -362,19 +362,19 @@ Mean absolute change between two presents above which the shot is taken to have 
 
 <!-- rates:begin -->
 
-Measured through the socket on 2026-09-23 by `python3 src/bench/live_rates.py` — the whole round trip a game waits for, median of nine frames, not graph time alone:
+Measured through the socket on 2026-09-24 by `python3 src/bench/live_rates.py` — the whole round trip a game waits for, median of nine frames, not graph time alone:
 
 | swapchain | render scale | ms | fps |
 | --- | ---: | ---: | ---: |
-| 512x288 | 0.35 | 54 | 18.6 |
-| 512x288 | 0.50 | 53 | 18.8 |
-| 640x360 | 0.35 | 55 | 18.1 |
-| 640x360 | 0.50 | 61 | 16.4 |
-| 854x480 | 0.50 | 77 | 13.0 |
-| 1024x768 | 0.55 | 121 | 8.3 |
-| 1920x1080 | 0.55 | 280 | 3.6 |
+| 512x288 | 0.35 | 50 | 19.8 |
+| 512x288 | 0.50 | 51 | 19.5 |
+| 640x360 | 0.35 | 49 | 20.4 |
+| 640x360 | 0.50 | 53 | 18.8 |
+| 854x480 | 0.50 | 71 | 14.0 |
+| 1024x768 | 0.55 | 107 | 9.3 |
+| 1920x1080 | 0.55 | 249 | 4.0 |
 
-Medians of three runs on a freshly booted machine, which agreed within 3 %. Hours earlier, with 5.5 GiB in zram and the kernel's memory-pressure figures rising, the same code ran 1920x1080 in 322 to 463 ms: if that row is much slower for you, look at swap before anything else.
+Medians of three runs with swap empty, which agreed within 3 %. On 2026-09-23, with 5.5 GiB in zram and the kernel's memory-pressure figures rising, 1920x1080 ran anywhere from 322 to 463 ms: if that row is much slower for you, look at swap before anything else.
 
 That is the daemon's own cost with nothing else on the GPU. A game adds its own frame to it: **Tekken 7** measured **10.5 fps at 640x360** in a live fight (`notes/phase59`).
 
@@ -391,9 +391,12 @@ weights, the accumulator format, OpenCL, shared-memory bank padding and handing 
 E-cores have all been measured and all are closed (`notes/phase45`, `notes/phase46`). What
 did move the graph was deleting passes: a pass at the memory ceiling that need not exist is
 all waste. Folding the residuals into the projections, attention into one pass with its
-head merge, and Q/K normalisation into the QKV projection's own epilogue took a 1280x720
-frame from 458 to 284 ms, 38 %, with every output bit-identical
-(`notes/improve-fusions.md`, `notes/improve-qkv-epilogue.md`).
+head merge, Q/K normalisation into the QKV projection's own epilogue, the narrow blocks'
+feed-forward into one kernel and the full-resolution glue into fewer passes took a 1280x720
+frame from 446 to 239 ms, 46 %, with every output bit-identical
+(`notes/improve-fusions.md`, `notes/improve-qkv-epilogue.md`). The other thing that moved it
+was shared memory: it is allocated in powers of two here, and window attention at 3104 bytes
+took 4 KB and half the resident workgroups; at exactly 2 KB it is 18 % faster.
 
 ## How it works
 
@@ -448,8 +451,8 @@ library; `make work/libnr_layer32.so` builds it and `prepare_layer.py` writes bo
 manifests.
 
 **It is unbearably slow.** Look at the swapchain size before the render scale. See the
-table above; at 1920x1080 the daemon alone stays under 4 fps, and nothing will fix that but
-a smaller window.
+table above; at 1920x1080 the daemon alone manages about 4 fps, and nothing will fix that
+but a smaller window.
 
 **`GPU lost, stopping` in the daemon's log** — or, from a clone older than 2026-09-17,
 `frame rejected/failed ... xmx_graph_run: resident submit (-4)` on every frame. `-4` is

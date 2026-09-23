@@ -22,7 +22,7 @@ KNOBS = (
         "much smaller, and what comes back is the *head* — the detail it drew — which is "
         "then scaled up and composed against the full-resolution original, so the game's "
         "own pixels are never resampled and only the synthesised part is interpolated. "
-        "Cost follows the extent and nothing else: about 10 ms + 275 ms per megapixel "
+        "Cost follows the extent and nothing else: about 9 ms + 240 ms per megapixel "
         "of network extent on an Arc 140V. "
         "0.55 is the measured compromise, but the *sign* of its effect on quality depends "
         "on how dark the scene is rather than on the number: on a bright frame 0.55 adds "
@@ -106,24 +106,24 @@ DEFAULTS = {knob.name: knob.default for knob in KNOBS}
 COST = ((1.00, 490), (0.70, 233), (0.60, 188), (0.50, 146), (0.35, 78))
 
 # The whole round trip, median of nine frames each, measured by `src/bench/live_rates.py`
-# on 2026-09-23 — the daemon's own cost, with no game competing for the GPU. `nr-ctl rates`,
+# on 2026-09-24 — the daemon's own cost, with no game competing for the GPU. `nr-ctl rates`,
 # the panel and the README all read this one table; the README's copy is generated from it
 # by `src/tools/knob_doc.py`, because the hand-written one went two days out of date the
 # moment the host passes moved to C and then stayed wrong for a week.
 RATES = (
-    (512, 288, 0.35, 53.9),
-    (512, 288, 0.50, 53.2),
-    (640, 360, 0.35, 55.3),
-    (640, 360, 0.50, 61.0),
-    (854, 480, 0.50, 77.0),
-    (1024, 768, 0.55, 120.7),
-    (1920, 1080, 0.55, 279.7),
+    (512, 288, 0.35, 50.4),
+    (512, 288, 0.50, 51.3),
+    (640, 360, 0.35, 48.9),
+    (640, 360, 0.50, 53.2),
+    (854, 480, 0.50, 71.3),
+    (1024, 768, 0.55, 107.4),
+    (1920, 1080, 0.55, 249.0),
 )
-RATES_MEASURED = "2026-09-23"
+RATES_MEASURED = "2026-09-24"
 # What a reader of the table needs and the numbers cannot say. Empty when there is nothing.
-RATES_NOTE = ("Medians of three runs on a freshly booted machine, which agreed within 3 %. "
-              "Hours earlier, with 5.5 GiB in zram and the kernel's memory-pressure figures "
-              "rising, the same code ran 1920x1080 in 322 to 463 ms: if that row is much slower "
+RATES_NOTE = ("Medians of three runs with swap empty, which agreed within 3 %. On "
+              "2026-09-23, with 5.5 GiB in zram and the kernel's memory-pressure figures "
+              "rising, 1920x1080 ran anywhere from 322 to 463 ms: if that row is much slower "
               "for you, look at swap before anything else.")
 
 
