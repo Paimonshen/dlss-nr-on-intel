@@ -16,6 +16,7 @@ Two things this layer must do that the kernel does not:
   2. **Pad to the tile shape.** The only float configuration is M=8 N=16 K=16.
 """
 import ctypes
+import os
 from pathlib import Path
 
 import numpy as np
@@ -26,12 +27,16 @@ TM, TN, TK = 8, 16, 16
 
 _lib = None
 
+# Windows uses the MSVC-built DLL; Linux keeps the original .so. Platform branch,
+# not a hard replacement, so the Linux path is unchanged.
+_LIBXMX_NAME = "libxmx.dll" if os.name == "nt" else "libxmx.so"
+
 
 def _load(spv="gemm_coopmat.spv"):
     global _lib
     if _lib is not None:
         return _lib
-    lib = ctypes.CDLL(str(ROOT / "work" / "libxmx.so"))
+    lib = ctypes.CDLL(str(ROOT / "work" / _LIBXMX_NAME))
     lib.xmx_init.argtypes = [ctypes.c_char_p]
     lib.xmx_init.restype = ctypes.c_int
     lib.xmx_gemm.argtypes = [ctypes.c_uint] * 3 + [ctypes.c_void_p] * 3 + [ctypes.c_uint]

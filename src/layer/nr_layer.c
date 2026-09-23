@@ -20,19 +20,27 @@
  *
  * Build: cc -O2 -shared -fPIC -o libnr_layer.so nr_layer.c -lvulkan
  */
-#define VK_USE_PLATFORM_XLIB_KHR
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
 #include <errno.h>
+#ifdef _WIN32
+#include <io.h>
+#define access _access
+#define F_OK 0
+#else
 #include <unistd.h>
-#include <sys/socket.h>
 #include <sys/stat.h>
-#include <sys/un.h>
-#include <sys/time.h>
+#endif
 #include <vulkan/vulkan.h>
 #include <vulkan/vk_layer.h>
+#include "nr_transport.h"
+/* windows.h (pulled in by nr_transport.h) defines `interface` as `struct` for COM,
+ * which breaks the VkNegotiateLayerInterface parameter name below. */
+#ifdef _WIN32
+#undef interface
+#endif
 
 #define MAX_SWAPCHAINS 8
 #define MAX_IMAGES 8
@@ -106,6 +114,14 @@ struct device_data {
 	PFN_vkDestroyDevice destroy_device;
 };
 
+/* Resolve a device command through the next layer, on first use. The Windows loader
+ * cannot answer GetDeviceProcAddr until the device dispatch is populated, so nothing
+ * here is resolved inside nr_CreateDevice. */
+static PFN_vkVoidFunction resolve_device(struct device_data *data, const char *name)
+{
+	return data->get_device_proc(data->device, name);
+}
+
 struct swapchain_data {
 	VkSwapchainKHR swapchain;
 	VkDevice device;
@@ -139,42 +155,24 @@ static int ui_mask;
 static int exchange(const void *header, size_t header_size, const void *payload,
 		    size_t payload_size, void *reply, size_t reply_size)
 {
-	int fd = socket(AF_UNIX, SOCK_STREAM, 0);
-	if (fd < 0) return -1;
-	struct timeval timeout = { .tv_sec = 60 };
-	if (setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof timeout) ||
-	    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof timeout)) {
-		close(fd); return -1;
-	}
-	struct sockaddr_un address = { .sun_family = AF_UNIX };
-	snprintf(address.sun_path, sizeof address.sun_path, "%s", socket_path);
-	if (connect(fd, (struct sockaddr *)&address, sizeof address) < 0) {
+	nr_link link;
+	if (nr_link_connect(&link, socket_path) != 0) {
 		fprintf(stderr, "[nr_layer] no daemon at %s\n", socket_path);
-		close(fd);
 		return -1;
 	}
-	const unsigned char *out = header;
-	for (size_t sent = 0; sent < header_size; ) {
-		ssize_t n = send(fd, out + sent, header_size - sent, MSG_NOSIGNAL);
-		if (n < 0 && errno == EINTR) continue;
-		if (n <= 0) { close(fd); return -1; }
-		sent += (size_t)n;
+	if (nr_link_write(&link, header, header_size) != 0) {
+		nr_link_close(&link);
+		return -1;
 	}
-	out = payload;
-	for (size_t sent = 0; sent < payload_size; ) {
-		ssize_t n = send(fd, out + sent, payload_size - sent, MSG_NOSIGNAL);
-		if (n < 0 && errno == EINTR) continue;
-		if (n <= 0) { close(fd); return -1; }
-		sent += (size_t)n;
+	if (nr_link_write(&link, payload, payload_size) != 0) {
+		nr_link_close(&link);
+		return -1;
 	}
-	unsigned char *in = reply;
-	for (size_t got = 0; got < reply_size; ) {
-		ssize_t n = read(fd, in + got, reply_size - got);
-		if (n < 0 && errno == EINTR) continue;
-		if (n <= 0) { close(fd); return -1; }
-		got += (size_t)n;
+	if (nr_link_read(&link, reply, reply_size) != 0) {
+		nr_link_close(&link);
+		return -1;
 	}
-	close(fd);
+	nr_link_close(&link);
 	return 0;
 }
 
@@ -247,7 +245,9 @@ VKAPI_ATTR void VKAPI_CALL nr_GetDeviceQueue(VkDevice device, uint32_t family,
 					     uint32_t index, VkQueue *queue)
 {
 	struct device_data *data = find_device(device);
-	if (!data || !data->get_device_queue) return;
+	if (!data) return;
+	if (!data->get_device_queue)
+		data->get_device_queue = (PFN_vkGetDeviceQueue)resolve_device(data, "vkGetDeviceQueue");
 	data->get_device_queue(device, family, index, queue);
 	remember_queue(device, family, *queue, family_can_capture(data, family));
 }
@@ -256,7 +256,9 @@ VKAPI_ATTR void VKAPI_CALL nr_GetDeviceQueue2(VkDevice device,
 					      const VkDeviceQueueInfo2 *info, VkQueue *queue)
 {
 	struct device_data *data = find_device(device);
-	if (!data || !data->get_device_queue2) return;
+	if (!data) return;
+	if (!data->get_device_queue2)
+		data->get_device_queue2 = (PFN_vkGetDeviceQueue2)resolve_device(data, "vkGetDeviceQueue2");
 	data->get_device_queue2(device, info, queue);
 	/* Protected memory cannot be read back into a host-visible buffer, so a protected
 	 * queue is never a capture source however capable its family is. */
@@ -383,18 +385,19 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateDevice(VkPhysicalDevice physical,
 		data->device = *device;
 		data->physical = physical;
 		data->get_device_proc = next_device;
-		data->present = (PFN_vkQueuePresentKHR)next_device(*device, "vkQueuePresentKHR");
-		data->get_device_queue =
-			(PFN_vkGetDeviceQueue)next_device(*device, "vkGetDeviceQueue");
-		data->get_device_queue2 =
-			(PFN_vkGetDeviceQueue2)next_device(*device, "vkGetDeviceQueue2");
-		data->destroy_swapchain =
-			(PFN_vkDestroySwapchainKHR)next_device(*device, "vkDestroySwapchainKHR");
-		data->create_swapchain =
-			(PFN_vkCreateSwapchainKHR)next_device(*device, "vkCreateSwapchainKHR");
-		data->get_swapchain_images =
-			(PFN_vkGetSwapchainImagesKHR)next_device(*device, "vkGetSwapchainImagesKHR");
-		data->destroy_device = (PFN_vkDestroyDevice)next_device(*device, "vkDestroyDevice");
+		/* Windows note: the loader's GetDeviceProcAddr terminator dereferences the
+		 * loader_device/icd_term out of the device dispatch table, which is not yet
+		 * populated when vkCreateDevice returns. Resolving these here crashes on the
+		 * Windows loader (and works on Mesa). Resolve them lazily instead, the same
+		 * way every other device command in this file is fetched through
+		 * `get_device_proc(data->device, ...)` at first use. */
+		data->present = NULL;
+		data->get_device_queue = NULL;
+		data->get_device_queue2 = NULL;
+		data->destroy_swapchain = NULL;
+		data->create_swapchain = NULL;
+		data->get_swapchain_images = NULL;
+		data->destroy_device = NULL;
 		data->queue_family = info->queueCreateInfoCount
 			? info->pQueueCreateInfos[0].queueFamilyIndex : 0;
 	}
@@ -412,6 +415,8 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateSwapchainKHR(VkDevice device,
 {
 	struct device_data *data = find_device(device);
 	if (!data) return VK_ERROR_INITIALIZATION_FAILED;
+	if (!data->create_swapchain)
+		data->create_swapchain = (PFN_vkCreateSwapchainKHR)resolve_device(data, "vkCreateSwapchainKHR");
 	const VkImageUsageFlags copies = VK_IMAGE_USAGE_TRANSFER_SRC_BIT
 				       | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
 	VkSwapchainCreateInfoKHR patched = *info;
@@ -459,6 +464,8 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateSwapchainKHR(VkDevice device,
 		entry->format = info->imageFormat;
 		entry->extent = info->imageExtent;
 		entry->image_count = MAX_IMAGES;
+		if (!data->get_swapchain_images)
+			data->get_swapchain_images = (PFN_vkGetSwapchainImagesKHR)resolve_device(data, "vkGetSwapchainImagesKHR");
 		VkResult got = data->get_swapchain_images(device, *swapchain,
 							  &entry->image_count, entry->images);
 		/* VK_INCOMPLETE means there are more images than the array holds, and
@@ -515,6 +522,8 @@ VKAPI_ATTR void VKAPI_CALL nr_DestroyDevice(VkDevice device,
 					    const VkAllocationCallbacks *allocator)
 {
 	struct device_data *data = find_device(device);
+	if (!data->destroy_device)
+		data->destroy_device = (PFN_vkDestroyDevice)resolve_device(data, "vkDestroyDevice");
 	PFN_vkDestroyDevice next = data ? data->destroy_device : NULL;
 	if (data) {
 		pthread_mutex_lock(&lock);
@@ -544,8 +553,11 @@ VKAPI_ATTR void VKAPI_CALL nr_DestroySwapchainKHR(VkDevice device, VkSwapchainKH
 		if (swapchains[i].swapchain == swapchain)
 			memset(&swapchains[i], 0, sizeof swapchains[i]);
 	pthread_mutex_unlock(&lock);
-	if (data && data->destroy_swapchain)
+	if (data) {
+		if (!data->destroy_swapchain)
+			data->destroy_swapchain = (PFN_vkDestroySwapchainKHR)resolve_device(data, "vkDestroySwapchainKHR");
 		data->destroy_swapchain(device, swapchain, allocator);
+	}
 }
 
 static uint32_t memory_type(struct device_data *data, uint32_t bits,
@@ -890,6 +902,8 @@ static int process_frame(struct device_data *data, struct swapchain_data *chain,
 static VkResult present_now(struct device_data *data, VkQueue queue,
 			    const VkPresentInfoKHR *info)
 {
+	if (!data->present)
+		data->present = (PFN_vkQueuePresentKHR)resolve_device(data, "vkQueuePresentKHR");
 	if (!sync_semaphores || !data || !data->present_signal)
 		return data->present(queue, info);
 	VkPresentInfoKHR patched = *info;
@@ -1056,9 +1070,25 @@ VKAPI_ATTR VkResult VKAPI_CALL vkNegotiateLoaderLayerInterfaceVersion(
 {
 	if (interface->loaderLayerInterfaceVersion < 2)
 		return VK_ERROR_INITIALIZATION_FAILED;
+	interface->sType = LAYER_NEGOTIATE_INTERFACE_STRUCT;
 	interface->loaderLayerInterfaceVersion = 2;
 	interface->pfnGetInstanceProcAddr = nr_GetInstanceProcAddr;
 	interface->pfnGetDeviceProcAddr = nr_GetDeviceProcAddr;
 	interface->pfnGetPhysicalDeviceProcAddr = NULL;
 	return VK_SUCCESS;
+}
+
+/* The Windows loader looks these up by name from the export table, so the layer
+ * must export them under the standard Vulkan names. The Linux build reaches them
+ * through the negotiate return values instead, so both are thin aliases. */
+VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance instance,
+							       const char *pName)
+{
+	return nr_GetInstanceProcAddr(instance, pName);
+}
+
+VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(VkDevice device,
+							     const char *pName)
+{
+	return nr_GetDeviceProcAddr(device, pName);
 }

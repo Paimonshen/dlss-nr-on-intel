@@ -32,7 +32,7 @@ import xmxres
 # copy silently mislabels every row the moment a kind is added, and this file
 # shipped one such mistake before the tables were generated.
 def _kinds(path, pattern):
-    text = (ROOT / path).read_text()
+    text = (ROOT / path).read_text(encoding="utf-8")
     return {int(v): n.lower().replace("_", " ")
             for n, v in re.findall(pattern, text)}
 

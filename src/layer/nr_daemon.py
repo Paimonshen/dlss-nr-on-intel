@@ -50,6 +50,11 @@ except ImportError:  # pragma: no cover - the NumPy path is the fallback
 MAGIC = 0x304E524E
 MASK_COVERAGE_LIMIT = 0.55   # above this the mask is the scene, not the interface
 MAGIC_MASKED = 0x314E524E     # the same, with a one-byte-per-pixel interface mask after the colour
+# 'NRN1' (0x314E524E is taken by the masked variant, so this one uses 'NRN2'):
+# the colour is followed by the engine's own motion vectors and depth, so the temporal
+# pass can reproject instead of falling back to identity. Sent by an OptiScaler backend
+# that sits on the NGX path (which always carries those guides).
+MAGIC_GUIDES = 0x324E524E   # 'NRN2'
 
 # The swapchain formats a compositor or VKD3D actually hands out. A game writes
 # sRGB-encoded values into a UNORM swapchain just as it does into an SRGB one, so both
@@ -454,6 +459,51 @@ def hold_floor(current, previous, strength):
     return np.clip(floor, 0, strength, out=floor)[..., None]
 
 
+def reproject_history(history, motion, scale_x=1.0, scale_y=1.0, depth=None):
+    """Warp the previous output onto this frame using the engine's motion vectors.
+
+    `motion` is RG16F at the frame's extent: the per-pixel displacement, in render
+    pixels, from where a point *was* to where it *is*. Bilinear sampling is the right
+    filter here — the vendors do the same — and it is why real vectors beat the identity
+    fallback: a moved pixel picks up its own past instead of the neighbour's, which is
+    what `hold_floor` cannot fix because it is deliberately non-ghosting.
+
+    `depth` (when supplied) is accepted but unused today: the reprojection is 2D, and
+    the model's own gate decides how much of the warped history survives. Keeping the
+    argument means adding a depth-aware term later needs no protocol change.
+    """
+    if history is None or motion is None:
+        return history
+    h, w = motion.shape[:2]
+    # The engine may hand vectors at a different extent than the colour (MVLowRes); the
+    # caller resamples first, so here the shapes must already agree.
+    if history.shape[:2] != (h, w):
+        return history
+    ys, xs = np.meshgrid(np.arange(h, dtype=np.float32),
+                         np.arange(w, dtype=np.float32), indexing="ij")
+    mv = motion.astype(np.float32)
+    # Sample the previous frame at "this pixel minus its motion".
+    src_x = xs - mv[..., 0] * np.float32(scale_x)
+    src_y = ys - mv[..., 1] * np.float32(scale_y)
+    x0 = np.floor(src_x).astype(np.int32)
+    y0 = np.floor(src_y).astype(np.int32)
+    fx = (src_x - x0)[..., None]
+    fy = (src_y - y0)[..., None]
+    x1 = np.clip(x0 + 1, 0, w - 1)
+    y1 = np.clip(y0 + 1, 0, h - 1)
+    x0 = np.clip(x0, 0, w - 1)
+    y0 = np.clip(y0, 0, h - 1)
+    hist = history if history.ndim == 3 else history[..., None]
+    c = hist.shape[2]
+    out = np.empty((h, w, c), np.float32)
+    # Bilinear: the four taps weighted by the fractional offsets. One pass per corner
+    # keeps the temporaries small (a full (h,w,c) float64 gather would be 3x this).
+    for y, wy in ((y0, 1.0 - fy), (y1, fy)):
+        for x, wx in ((x0, 1.0 - fx), (x1, fx)):
+            out += hist[y, x] * (wy * wx)
+    return out
+
+
 class Meter:
     """How much the network is inventing, live, over pixels the game did not move.
 
@@ -548,11 +598,32 @@ def process_connection(connection, backend, args):
     if header is None:
         return
     magic, width, height, vk_format = struct.unpack("<4I", header)
+    # 'NRN1' carries the guides: a second 16-byte block of metadata, then optional
+    # motion (RG16F) and depth (R16F) after the colour. The original 'NRN0' protocol
+    # is still accepted so an older layer keeps working.
+    guides = None
+    if magic == MAGIC_GUIDES:
+        meta = receive(connection, 16)
+        gflags, mvscale_x, mvscale_y, inverted = struct.unpack("<IffI", meta)
+        guides = {
+            "motion": bool(gflags & 1),
+            "depth": bool(gflags & 2),
+            "motion_scale_x": mvscale_x,
+            "motion_scale_y": mvscale_y,
+            "depth_inverted": bool(inverted),
+        }
+        magic = MAGIC
     if magic not in (MAGIC, MAGIC_MASKED):
         raise ValueError(f"bad magic {magic:#x}")
     if not width or not height or width * height > args.max_pixels:
         raise ValueError(f"rejected extent {width}x{height}; limit {args.max_pixels} pixels")
     payload = receive(connection, width * height * 4)
+    motion_raw = depth_raw = None
+    if guides is not None:
+        if guides["motion"]:
+            motion_raw = receive(connection, width * height * 4)   # 2x f16 per pixel
+        if guides["depth"]:
+            depth_raw = receive(connection, width * height * 2)    # 1x f16 per pixel
     interface = receive(connection, width * height) if magic == MAGIC_MASKED else None
     if vk_format not in FORMATS:
         print(f"unsupported VkFormat {vk_format}; passing the frame through",
@@ -589,6 +660,22 @@ def process_connection(connection, backend, args):
     shot = (width, height, vk_format, top, bottom, left, right, live.profile)
     history_inner, history_full, history_pixels = args.history.take(
         shot, inner, live.cut_limit if live.temporal > 0 else -1.0)
+    # Real motion vectors, when the caller supplied them, replace the identity
+    # reprojection the present-time layer is stuck with: the past is warped onto this
+    # frame before it reaches channels 7-9, so a moving pixel blends its own history
+    # instead of whatever happened to be under it.
+    if motion_raw is not None and history_inner is not None:
+        try:
+            mv = np.frombuffer(motion_raw, dtype=np.float16).reshape(inner.shape[0], inner.shape[1], 2)
+            gsx = guides["motion_scale_x"] if guides else 1.0
+            gsy = guides["motion_scale_y"] if guides else 1.0
+            history_inner = reproject_history(history_inner, mv, gsx, gsy)
+            if history_full is not None:
+                history_full = reproject_history(history_full, mv, gsx, gsy)
+            args.motion_frames = getattr(args, "motion_frames", 0) + 1
+        except (ValueError, IndexError):
+            # A malformed guide must not kill the frame; identity is a valid answer.
+            pass
     features = nr_frame.build_features(inner, geometry=geometry, history=history_inner,
                                        **nr_frame.PROFILES[live.profile])
     head = geometry.crop(backend.run_features(features))
@@ -686,6 +773,10 @@ def process_connection(connection, backend, args):
     if args.meter is not None:
         args.meter.add(colour, output[top:bottom, left:right] if boxed else output)
     note = "" if held is None else f"  interface {100 * held.mean():.0f}% left alone"
+    if motion_raw is not None:
+        note += "  mv"
+    if depth_raw is not None:
+        note += "+d"
     if live.temporal > 0:
         if history_full is None:
             note += f"  no history, cut {args.history.cut:.4f}"
@@ -765,23 +856,30 @@ def main():
           f" on {xmx.device_name()}", flush=True)
     print(f"buffers in {xmx.memory_note()}", flush=True)
 
-    if os.path.lexists(args.socket):
-        if not stat.S_ISSOCK(os.lstat(args.socket).st_mode):
-            backend.close()
-            raise SystemExit(f"socket path is occupied by a non-socket: {args.socket}")
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
-            probe.settimeout(0.2)
-            try:
-                probe.connect(args.socket)
-            except ConnectionRefusedError:
-                os.unlink(args.socket)
-            else:
+    if os.name == "nt":
+        # Windows: a named pipe. No filesystem object to check or unlink, and a
+        # "someone already listening" probe is a connect that succeeds.
+        import nr_pipe
+        server = nr_pipe.NamedPipeServer(args.socket, backlog=4, timeout=args.timeout)
+        print(f"listening on {args.socket}", flush=True)
+    else:
+        if os.path.lexists(args.socket):
+            if not stat.S_ISSOCK(os.lstat(args.socket).st_mode):
                 backend.close()
-                raise SystemExit(f"a daemon is already listening at {args.socket}")
-    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    server.bind(args.socket)
-    server.listen(4)
-    print(f"listening on {args.socket}", flush=True)
+                raise SystemExit(f"socket path is occupied by a non-socket: {args.socket}")
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+                probe.settimeout(0.2)
+                try:
+                    probe.connect(args.socket)
+                except ConnectionRefusedError:
+                    os.unlink(args.socket)
+                else:
+                    backend.close()
+                    raise SystemExit(f"a daemon is already listening at {args.socket}")
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(args.socket)
+        server.listen(4)
+        print(f"listening on {args.socket}", flush=True)
 
     try:
         serve(server, backend, args)
@@ -790,7 +888,7 @@ def main():
     finally:
         server.close()
         backend.close()
-        if os.path.exists(args.socket):
+        if os.name != "nt" and os.path.exists(args.socket):
             os.unlink(args.socket)
 
 

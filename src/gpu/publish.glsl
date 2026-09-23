@@ -14,7 +14,15 @@
  * float16 over ordinary values, half subnormals and overflow to infinity
  * (`src/bench/half_probe.py`): two instructions and no branches, where doing the
  * exponent and mantissa by hand took ten and two branches. */
+/* B580 Windows driver (101.8993) crashes on packHalf2x16 (VK_ERROR_DEVICE_LOST),
+ * so the default is the float16_t path. It is bit-identical to packHalf2x16 on the
+ * B580 (verified: 0/12020 differences over ordinary values, subnormals, NaN, Inf).
+ * PACKHALF2X16 selects the original pack/unpack spelling for Mesa/other drivers. */
+#ifdef PACKHALF2X16
 float half_round(float x) { return unpackHalf2x16(packHalf2x16(vec2(x, 0.0))).x; }
+#else
+float half_round(float x) { return float(float16_t(x)); }
+#endif
 
 float e4m3(float x) {
     float magnitude = min(abs(x), 448.0);
