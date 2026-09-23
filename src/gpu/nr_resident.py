@@ -209,7 +209,8 @@ def record_qkv_projection(runtime, a, w, s, windows, tokens, channels, heads):
 
 
 def record_project_residual(runtime, a, weight, branch, skip, cosine, target,
-                            rows, channels, inner, *, epilogue=0, skip_half=False):
+                            rows, channels, inner, *, epilogue=0, skip_half=False,
+                            narrow=False):
     """A projection and its residual: `target = a @ weight + skip * cosine`.
 
     Fused, the residual is the GEMM's own epilogue and the float32 branch never goes
@@ -219,11 +220,11 @@ def record_project_residual(runtime, a, weight, branch, skip, cosine, target,
     """
     if runtime.fuse_residual:
         runtime.gemm_residual(a, weight, skip, cosine, target, rows, channels, inner,
-                              epilogue=epilogue, skip_half=skip_half)
+                              epilogue=epilogue, skip_half=skip_half, narrow=narrow)
     else:
         runtime.gemm(a, weight, branch, rows, channels, inner)
         runtime.residual(branch, skip, cosine, target, rows * channels, channels,
-                         epilogue=epilogue, b_half=skip_half)
+                         epilogue=epilogue, b_half=skip_half, narrow=narrow)
 
 
 def record_global_block(runtime, w, s, source=None, target=None):
@@ -343,6 +344,10 @@ def record_feed_forward(runtime, w, s, source, source_half=False, source16=None)
     GEMM is not needed and the residual reads the narrow buffer directly. `source16`
     says a float32 input's half copy has already been written there, by the pass that
     produced the input, so the to_half pass is not needed either.
+
+    Returns whether `s.ffn` was stored as half: the branched blocks publish it as E4M3,
+    which half holds exactly, so they store it narrow and every pass after reads half the
+    bytes; the plain blocks' output is unpublished float32 and stays that.
     """
     pixels, channels = s.height * s.width, w.channels
     value16 = source if source_half else (source16 or s.value16)
@@ -362,22 +367,26 @@ def record_feed_forward(runtime, w, s, source, source_half=False, source16=None)
                         w.groups, leading=(s.hidden_width, 0, channels),
                         strides=(128, 128 * 32, 32), epilogue=xmxres.EPI_E4M3)
         # the fused multi-head kernels publish the residual before attention reads it,
-        # which the residual now does on its way out
+        # which the residual now does on its way out — as half, which holds it exactly
         record_project_residual(runtime, s.heads16, w.ffn_out, s.branch, source, w.ffn_cos,
                                 s.ffn, pixels, channels, channels,
-                                epilogue=xmxres.EPI_E4M3, skip_half=source_half)
+                                epilogue=xmxres.EPI_E4M3, skip_half=source_half,
+                                narrow=True)
+        return True
     elif (runtime.fuse_ffn and channels == 32 and s.hidden_width % 32 == 0
           and pixels % 16 == 0):
         # both GEMMs in one pass, the hidden layer never written (ffn_fused.comp)
         runtime.ffn_fused(value16, w.expand, w.branch, s.ffn, pixels, channels,
                           s.hidden_width, skip=source, cosine=w.ffn_cos,
                           skip_half=source_half)
+        return False
     else:
         runtime.gemm(value16, w.expand, s.hidden16, pixels, s.hidden_width, channels,
                      epilogue=xmxres.EPI_GATE_E4M3, narrow=True)
         record_project_residual(runtime, s.hidden16, w.branch, s.branch, source, w.ffn_cos,
                                 s.ffn, pixels, channels, s.hidden_width,
                                 skip_half=source_half)
+        return False
 
 
 def record_split_feed_forward(runtime, w, s, source, source_half=False):
@@ -404,7 +413,7 @@ def record_split_feed_forward(runtime, w, s, source, source_half=False):
 
 
 def record_window_attention(runtime, w, s, source, target=None, publish=0,
-                            target_half=False):
+                            target_half=False, source_half=False):
     """Window attention over `source`, into `s.attended` — in window order.
 
     With a `target`, the output projection finishes the block instead: it adds
@@ -422,7 +431,7 @@ def record_window_attention(runtime, w, s, source, target=None, publish=0,
     batch = windows * heads
     windowed = windows * tokens * channels
     runtime.partition(source, s.win16, s.height, s.width, channels, origin=w.origin,
-                      narrow=True)
+                      narrow=True, a_half=source_half)
     key = record_qkv_projection(runtime, s.win16, w, s, windows, tokens, channels, heads)
     fused = runtime.fuse_window_attention and tokens == 64
     merged = fused and runtime.fuse_attention_merge
@@ -449,7 +458,7 @@ def record_window_attention(runtime, w, s, source, target=None, publish=0,
         runtime.gemm_residual(attended, w.out, source, w.attn_cos, target,
                               windows * tokens, channels, channels,
                               reverse=(s.height, s.width, 8, w.origin),
-                              epilogue=publish, narrow=target_half)
+                              epilogue=publish, narrow=target_half, skip_half=source_half)
     else:
         runtime.gemm(attended, w.out, s.attended, windows * tokens, channels, channels)
 
@@ -470,17 +479,18 @@ def record_block(runtime, w, s, source=None, target=None, publish=0, source_half
         if source16 is not None:
             raise ValueError("the split feed-forward takes no prepared half copy")
         record_split_feed_forward(runtime, w, s, source, source_half)
+        ffn_half = False
     else:
-        record_feed_forward(runtime, w, s, source, source_half, source16=source16)
+        ffn_half = record_feed_forward(runtime, w, s, source, source_half, source16=source16)
     if runtime.fuse_window_residual:
         record_window_attention(runtime, w, s, s.ffn, target=target, publish=publish,
-                                target_half=target_half)
+                                target_half=target_half, source_half=ffn_half)
         return
-    record_window_attention(runtime, w, s, s.ffn)
+    record_window_attention(runtime, w, s, s.ffn, source_half=ffn_half)
     # the window reverse is the residual's own gather, not a pass of its own
     runtime.residual(s.attended, s.ffn, w.attn_cos, target, pixels * w.channels,
                      w.channels, reverse=(s.height, s.width, 8, w.origin),
-                     epilogue=publish, narrow=target_half)
+                     epilogue=publish, narrow=target_half, b_half=ffn_half)
 
 
 def run_block(runtime, w, s, value):
