@@ -964,7 +964,7 @@ static int record_gemm(int a, int b, int c, unsigned M, unsigned N, unsigned K,
 		       unsigned lda, unsigned ldb, unsigned ldc,
 		       unsigned oa, unsigned ob, unsigned oc,
 		       int skip, int cosine, const uint32_t *window,
-		       const struct qkv_targets *qkv)
+		       const struct qkv_targets *qkv, int half_copy)
 {
 	if (!g.recording) FAIL("not recording", 0);
 	struct push p = { .a = addr_of(a), .b = addr_of(b), .c = addr_of(c),
@@ -980,6 +980,8 @@ static int record_gemm(int a, int b, int c, unsigned M, unsigned N, unsigned K,
 		p.image_h = window[0]; p.image_w = window[1];
 		p.window_cols = window[2]; p.window_pad = window[3];
 	}
+	if (half_copy >= 0 && !(p.d = addr_of(half_copy)))
+		FAIL("GEMM half copy is not a live buffer", 0);
 	if (qkv) {
 		/* c is Q; K, V and the scale ride in slots only the residual modes use */
 		p.d = addr_of(qkv->k); p.residual_cos = addr_of(qkv->v);
@@ -1020,6 +1022,9 @@ static int record_gemm(int a, int b, int c, unsigned M, unsigned N, unsigned K,
 	 * is unless XMX_TILE_N moved it. The 8x16 kernel never qualifies. */
 	if ((bt & 0x100000u) && !(qkv && bt == 0x100000u && (staged || (tiled && g.tilen == 32))))
 		FAIL("QKV epilogue needs its targets, no other flag, and a 32-column block", 0);
+	/* the half copy lives in gemm_resident.comp's plain-store path only */
+	if ((bt & 0x200000u) && !(half_copy >= 0 && bt == 0x200000u && !staged))
+		FAIL("a GEMM half copy needs its target, no other flag, and the resident kernel", 0);
 	VkPipeline pipeline;
 	if (resident_pipeline(staged ? 2 : (tiled ? 1 : 0), bt,
 			      staged ? g.rstaged : (tiled ? g.rtiled : g.rgemm), &pipeline)) return -1;
@@ -1043,7 +1048,7 @@ int xmx_rec_gemm(int a, int b, int c, unsigned M, unsigned N, unsigned K, unsign
 		 unsigned oa, unsigned ob, unsigned oc)
 {
 	return record_gemm(a, b, c, M, N, K, batch, sa, sb, sc, bt,
-			   lda, ldb, ldc, oa, ob, oc, -1, -1, NULL, NULL);
+			   lda, ldb, ldc, oa, ob, oc, -1, -1, NULL, NULL, -1);
 }
 
 /* A dense projection whose epilogue adds `skip * cosine` before the publish: the
@@ -1056,7 +1061,7 @@ int xmx_rec_gemm_residual(int a, int b, int c, int skip, int cosine,
 {
 	if (skip < 0 || cosine < 0) FAIL("invalid residual buffer", 0);
 	return record_gemm(a, b, c, M, N, K, 1, M * K, K * N, M * N,
-			   flags | 0x20000u, 0, 0, 0, 0, 0, 0, skip, cosine, NULL, NULL);
+			   flags | 0x20000u, 0, 0, 0, 0, 0, 0, skip, cosine, NULL, NULL, -1);
 }
 
 /* The same, for a window block's output projection: its rows are in window order,
@@ -1071,7 +1076,7 @@ int xmx_rec_gemm_window_residual(int a, int b, int c, int skip, int cosine,
 		FAIL("invalid window residual", 0);
 	uint32_t window[] = { height, width, across, pad };
 	return record_gemm(a, b, c, M, N, K, 1, M * K, K * N, M * N,
-			   flags | 0xa0000u, 0, 0, 0, 0, 0, 0, skip, cosine, window, NULL);
+			   flags | 0xa0000u, 0, 0, 0, 0, 0, 0, skip, cosine, window, NULL, -1);
 }
 
 /* The QKV projection with Q and K normalised and V published in its own epilogue
@@ -1087,17 +1092,31 @@ int xmx_rec_gemm_qkv(int a, int weight, int q, int k, int v, int scale,
 	struct qkv_targets targets = { k, v, scale, tokens, heads };
 	unsigned N = 3u * channels;
 	return record_gemm(a, weight, q, M, N, channels, 1, M * channels, channels * N, M * N,
-			   0x100000u, 0, 0, 0, 0, 0, 0, -1, -1, NULL, &targets);
+			   0x100000u, 0, 0, 0, 0, 0, 0, -1, -1, NULL, &targets, -1);
 }
 
-int xmx_rec_unary(unsigned kind, int a, int b, int c, int d, unsigned n, unsigned channels,
-		  float p0, unsigned batch, unsigned sa, unsigned sb, unsigned sc, unsigned k)
+/* A plain GEMM whose float32 result is also stored as half into `half_copy`: for a
+ * value the graph needs both ways, as a residual and as the next GEMM's operand. */
+int xmx_rec_gemm_dual(int a, int b, int c, int half_copy, unsigned M, unsigned N, unsigned K)
+{
+	if (half_copy < 0) FAIL("invalid GEMM half copy", 0);
+	return record_gemm(a, b, c, M, N, K, 1, M * K, K * N, M * N,
+			   0x200000u, 0, 0, 0, 0, 0, 0, -1, -1, NULL, NULL, half_copy);
+}
+
+static int record_unary(unsigned kind, int a, int b, int c, int d, int second,
+			unsigned n, unsigned channels, float p0, unsigned batch,
+			unsigned sa, unsigned sb, unsigned sc, unsigned k)
 {
 	if (!g.recording) FAIL("not recording", 0);
 	struct push p = { .a = addr_of(a), .b = addr_of(b), .c = addr_of(c), .d = addr_of(d),
 			  .m = n, .n = channels, .flags = kind, .p0 = p0,
 			  .batch = batch, .sa = sa, .sb = sb, .sc = sc, .k = k };
 	if (!p.a || !p.c) FAIL("unary operand is not a live buffer", 0);
+	/* a pass that writes two outputs finds the second at offset 96, which only the
+	 * GEMMs' residual epilogue uses otherwise */
+	if (second >= 0 && !(p.residual_cos = addr_of(second)))
+		FAIL("second unary output is not a live buffer", 0);
 	VkPipeline pipeline;
 	if (resident_pipeline(3, kind, g.runary, &pipeline)) return -1;
 	vkCmdBindPipeline(g.rcb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
@@ -1107,6 +1126,20 @@ int xmx_rec_unary(unsigned kind, int a, int b, int c, int d, unsigned n, unsigne
 	stamp(PK_UNARY, kind);
 	g.recorded++;
 	return 0;
+}
+
+int xmx_rec_unary(unsigned kind, int a, int b, int c, int d, unsigned n, unsigned channels,
+		  float p0, unsigned batch, unsigned sa, unsigned sb, unsigned sc, unsigned k)
+{
+	return record_unary(kind, a, b, c, d, -1, n, channels, p0, batch, sa, sb, sc, k);
+}
+
+int xmx_rec_unary2(unsigned kind, int a, int b, int c, int d, int second, unsigned n,
+		   unsigned channels, float p0, unsigned batch, unsigned sa, unsigned sb,
+		   unsigned sc, unsigned k)
+{
+	if (second < 0) FAIL("a two-output pass needs its second output", 0);
+	return record_unary(kind, a, b, c, d, second, n, channels, p0, batch, sa, sb, sc, k);
 }
 
 /* Row-wise passes: the cosine publish reduces 32 channels through the kernel's own

@@ -81,6 +81,10 @@ class DeviceWeights:
                                   take("block39.layer0.inp_upsample_sin"))
         self.merge_sin = self.rt.buffer_from(take("block70.layer0.inp_merge_sin"))
         self.merge_cos = self.rt.buffer_from(take("block70.layer0.inp_merge_cos"))
+        # both, one after the other, for the pass that applies them together
+        self.merge_sincos = self.rt.buffer_from(np.concatenate([
+            np.asarray(take("block70.layer0.inp_merge_sin"), np.float32).reshape(-1),
+            np.asarray(take("block70.layer0.inp_merge_cos"), np.float32).reshape(-1)]))
         # the head is 32 -> 4, and the cooperative matrix wants a multiple of 16
         # columns; both halves go into one padded matrix and the first four columns
         # of the product are the head
@@ -119,7 +123,8 @@ class ResidentFrame:
 
     # the six named weight buffers live on `DeviceWeights` now; the body of a frame still
     # says `self.adapter`, because where they are kept is not that code's business
-    WEIGHT_NAMES = ("adapter", "bottleneck", "decoder_input", "merge_sin", "merge_cos", "head")
+    WEIGHT_NAMES = ("adapter", "bottleneck", "decoder_input", "merge_sin", "merge_cos",
+                    "merge_sincos", "head")
 
     def __getattr__(self, name):
         if name in ResidentFrame.WEIGHT_NAMES:
@@ -334,13 +339,18 @@ class ResidentFrame:
         else:
             source16 = self.buffer("features16", pixels * 16, np.float16)
             rt.to_half(source, source16, pixels * 16)
-        rt.gemm(source16, self.adapter, stem, pixels, 32, 16)
+        block0 = self.block(0, 1)
+        scratch0 = self.scratch(block0, height, width)
+        if rt.fuse_glue:
+            # the stem as block 0's residual needs it and as its first GEMM reads it
+            rt.gemm_dual(source16, self.adapter, stem, scratch0.value16, pixels, 32, 16)
+        else:
+            rt.gemm(source16, self.adapter, stem, pixels, 32, 16)
         submit()
 
         # block 0 runs at full resolution; its output is both the skip the post block
         # merges and, pooled, the encoder's input
         stage[0] = "block0 + pool"
-        block0 = self.block(0, 1)
         raw = self.buffer("block0", pixels * 32)
         # Everything the graph publishes is E4M3, which is exact in float16, so every
         # published buffer is stored narrow: half the traffic, and the widening pass in
@@ -349,8 +359,8 @@ class ResidentFrame:
         h, w, channels = self.levels[1]
         value = self.buffer("l1", h * w * 32, np.float16)
         begin()
-        R.record_block(rt, block0, self.scratch(block0, height, width),
-                       source=stem, target=raw)
+        R.record_block(rt, block0, scratch0, source=stem, target=raw,
+                       source16=scratch0.value16 if rt.fuse_glue else None)
         # the post block's skip is block 0 published; the encoder pools the
         # *unpublished* output, so both come from `raw` and neither from the other
         with rt.independent():
@@ -494,19 +504,24 @@ class ResidentFrame:
         # back to full resolution, merged with block 0's output, then the head
         stage[0] = "block70 + head"
         merged = self.buffer("merged", pixels * 32)
-        upsampled = self.buffer("upsampled", pixels * 32)
         block70 = self.block(70, 1)
+        scratch70 = self.scratch(block70, height, width)
         # The head reads block 70's output as half, and nothing reads it as float32, so
         # the block's closing residual stores half itself: the same rounding the separate
         # to_half pass applied, without 126 MB of float32 written at 720p to be read once.
         out16 = self.buffer("out16", pixels * 32, np.float16)
         begin()
-        rt.upsample2(value, upsampled, w, height, width, 32, a_half=True)
-        rt.scale_channel(upsampled, self.merge_sin, merged, pixels * 32, 32)
-        rt.residual(merged, full_skip, self.merge_cos, merged, pixels * 32, 32,
-                    b_half=True)
-        R.record_block(rt, block70, self.scratch(block70, height, width),
-                       source=merged, target=out16, target_half=True)
+        if rt.fuse_glue:
+            rt.upsample_merge(value, full_skip, self.merge_sincos, merged,
+                              scratch70.value16, height, width, w, 32)
+        else:
+            upsampled = self.buffer("upsampled", pixels * 32)
+            rt.upsample2(value, upsampled, w, height, width, 32, a_half=True)
+            rt.scale_channel(upsampled, self.merge_sin, merged, pixels * 32, 32)
+            rt.residual(merged, full_skip, self.merge_cos, merged, pixels * 32, 32,
+                        b_half=True)
+        R.record_block(rt, block70, scratch70, source=merged, target=out16, target_half=True,
+                       source16=scratch70.value16 if rt.fuse_glue else None)
         rt.gemm(out16, self.head, self.head_buffer(), pixels, 16, 32,
                 compact_output=rt.compact_head)
         submit()

@@ -33,7 +33,7 @@ TM, TN, TK = 8, 16, 16
 
 (E4M3, GATE, HALF, TO_HALF, SCALE, RESIDUAL, FROM_HALF, PARTITION, REVERSE, ADD_BIAS,
  SPLIT_HEADS, MERGE_HEADS, POOL2, UPSAMPLE2, SCALE_CHANNEL, ADD, PAD_END,
- GATE_E4M3_HALF, E4M3_HALF, GATE_HALF) = range(20)
+ GATE_E4M3_HALF, E4M3_HALF, GATE_HALF, UPSAMPLE_MERGE) = range(21)
 COSINE_PUBLISH, SOFTMAX = 0, 1
 
 # GEMM epilogues, applied to the accumulator on its way out of the kernel
@@ -107,6 +107,9 @@ def _load():
             ("xmx_rec_gemm_window_residual", [ctypes.c_int] * 5 + [ctypes.c_uint] * 8),
             ("xmx_window_init", [ctypes.c_char_p, ctypes.c_uint]),
             ("xmx_rec_gemm_qkv", [ctypes.c_int] * 6 + [ctypes.c_uint] * 4),
+            ("xmx_rec_gemm_dual", [ctypes.c_int] * 4 + [ctypes.c_uint] * 3),
+            ("xmx_rec_unary2", [ctypes.c_uint] + [ctypes.c_int] * 5
+             + [ctypes.c_uint, ctypes.c_uint, ctypes.c_float] + [ctypes.c_uint] * 5),
             ("xmx_rec_window_attention", [ctypes.c_int] * 5 + [ctypes.c_uint] * 3),
             ("xmx_rec_unary", [ctypes.c_uint] + [ctypes.c_int] * 4
              + [ctypes.c_uint, ctypes.c_uint, ctypes.c_float] + [ctypes.c_uint] * 5),
@@ -461,6 +464,10 @@ class Runtime:
         # Q/K normalised and V published in the QKV projection's own epilogue, so the
         # float32 projection never goes to memory (qkv_epilogue.glsl).
         self.qkv_epilogue = os.environ.get("NR_QKV_EPILOGUE", "1") != "0"
+        # The full-resolution glue around blocks 0 and 70 in fewer passes: the stem's
+        # GEMM also stores the half copy block 0's feed-forward reads, and block 70's
+        # input is upsampled, scaled and merged in one pass that stores both widths.
+        self.fuse_glue = os.environ.get("NR_FUSE_GLUE", "1") != "0"
 
     def graph_key(self):
         return (self.lib.xmx_specialization() | (int(self.fuse_qk) << 3)
@@ -473,7 +480,8 @@ class Runtime:
                 | (int(self.fuse_residual) << 8) | (int(self.fuse_window_residual) << 9)
                 | (int(self.fuse_window_attention) << 10)
                 | (int(self.fuse_attention_merge) << 11)
-                | (int(self.qkv_epilogue) << 12))
+                | (int(self.qkv_epilogue) << 12)
+                | (int(self.fuse_glue) << 13))
 
     @property
     def buffer_bytes(self):
@@ -642,6 +650,48 @@ class Runtime:
         if self.lib.xmx_rec_gemm_qkv(a.id, weight.id, q.id, k.id, v.id, scale.id,
                                      rows, channels, heads, tokens) != 0:
             raise RuntimeError("xmx_rec_gemm_qkv: " + self.lib.xmx_error().decode())
+        self.recorded += 1
+        return self
+
+    def gemm_dual(self, a, b, c, half_copy, rows, cols, inner):
+        """C = A @ B in float32, and the same values as half into `half_copy`: what a
+        GEMM then a `to_half` of its output would write, in one pass."""
+        for extent, multiple, name in ((rows, TM, "rows"), (cols, TN, "cols"), (inner, TK, "inner")):
+            if extent <= 0 or extent % multiple:
+                raise ValueError(f"{name}={extent} must be a positive multiple of {multiple}")
+        if len({a.id, b.id, c.id, half_copy.id}) != 4:
+            raise ValueError("GEMM outputs must not alias each other or the inputs")
+        for buf, size in ((a, rows * inner * 2), (b, inner * cols * 2), (c, rows * cols * 4),
+                          (half_copy, rows * cols * 2)):
+            if buf.nbytes < size:
+                raise ValueError("GEMM buffer is too small")
+        if self.lib.xmx_rec_gemm_dual(a.id, b.id, c.id, half_copy.id, rows, cols, inner) != 0:
+            raise RuntimeError("xmx_rec_gemm_dual: " + self.lib.xmx_error().decode())
+        self.recorded += 1
+        return self
+
+    def upsample_merge(self, source, skip, sincos, merged, merged16, height, width,
+                       source_width, channels):
+        """merged = upsample2(source) * sin + skip * cos, stored float32 and as half.
+
+        `source` (half) is the level above at half the extent, `skip` (half) the
+        full-resolution skip, `sincos` the per-channel sin then cos. The same values the
+        upsample2, scale_channel, residual and to_half passes produce, in one pass
+        (`src/gpu/test_glue.py`).
+        """
+        count = height * width * channels
+        if len({source.id, skip.id, sincos.id, merged.id, merged16.id}) != 5:
+            raise ValueError("upsample merge operands must be distinct")
+        for buf, size in ((skip, count * 2), (sincos, channels * 8), (merged, count * 4),
+                          (merged16, count * 2),
+                          (source, -(-height // 2) * source_width * channels * 2)):
+            if buf.nbytes < size:
+                raise ValueError("upsample merge buffer is too small")
+        if self.lib.xmx_rec_unary2(UPSAMPLE_MERGE | _reads(True, True), source.id, skip.id,
+                                   merged.id, sincos.id, merged16.id, int(count),
+                                   int(channels), 1.0, 0, int(width), int(source_width),
+                                   0, 0) != 0:
+            raise RuntimeError("xmx_rec_unary2: " + self.lib.xmx_error().decode())
         self.recorded += 1
         return self
 

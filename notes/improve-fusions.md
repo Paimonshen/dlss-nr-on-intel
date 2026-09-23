@@ -101,6 +101,27 @@ float32: one `to_half` pass and 126 MB of float32 at 720p gone. Graph time at 12
 same script, same clean machine, morning against evening: **274.3 -> 257.7 ms**; the extent
 curve is 10 ms + 259 ms per megapixel.
 
+## The full-resolution glue (2026-09-24)
+
+Around blocks 0 and 70 the graph did a stack of full-frame elementwise passes, each writing
+float32 for the next to read back. Two of those chains are now one pass each
+(`NR_FUSE_GLUE`, graph-key bit 13):
+
+- the stem's GEMM stores its float32 result — block 0's residual — and, in the same
+  epilogue, the half copy block 0's first GEMM reads, so its `to_half` pass is gone;
+- block 70's input — `upsample2`, `scale_channel`, `residual`, `to_half`, four passes —
+  is one `UPSAMPLE_MERGE` pass that stores both widths.
+
+**The residual pass compiles to a fused multiply-add**, and that is measured, not read off
+the source: on 64 crafted inputs where one rounding and two differ, the GPU matched `fma`
+64 times and multiply-then-add never. So the merged pass writes `fma()` for the residual
+and marks the scale `precise`, which keeps it rounded on its own as `scale_channel` did.
+Writing the same expression in a new shader would have left the choice to the compiler.
+
+`test_glue.py`: 24 merge and 18 GEMM cases, both widths byte for byte, NaN fills to prove
+every element written. Three whole frames bit-identical, in both memory modes. Paired:
+1280x720 **268.1 -> 260.2 ms**, 1920x1080 571.2 -> 555.6, 384x384 unchanged (50.7 -> 50.8).
+
 ## Left behind, deliberately
 
 - `window_attention_qkv.comp`: off by default in Codex's tree (`NR_FUSE_QKV_ATTENTION`) and

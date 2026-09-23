@@ -326,16 +326,18 @@ def _ffn_groups(runtime, a, b, c, rows, cols, inner, groups, *, leading, strides
                              epilogue=epilogue, narrow=True)
 
 
-def record_feed_forward(runtime, w, s, source, source_half=False):
+def record_feed_forward(runtime, w, s, source, source_half=False, source16=None):
     """The block's feed-forward, into `s.ffn`. Branched or plain, as the block is.
 
     `source_half` says the block's input is already float16 — true whenever it is an
     E4M3 publish, which is exact in half — so the widening pass in front of the first
-    GEMM is not needed and the residual reads the narrow buffer directly.
+    GEMM is not needed and the residual reads the narrow buffer directly. `source16`
+    says a float32 input's half copy has already been written there, by the pass that
+    produced the input, so the to_half pass is not needed either.
     """
     pixels, channels = s.height * s.width, w.channels
-    value16 = source if source_half else s.value16
-    if not source_half:
+    value16 = source if source_half else (source16 or s.value16)
+    if not source_half and source16 is None:
         runtime.to_half(source, s.value16, pixels * channels)
     if w.branched:
         _ffn_groups(runtime, value16, w.expand, s.hidden16, pixels, 128, channels,
@@ -432,7 +434,7 @@ def record_window_attention(runtime, w, s, source, target=None, publish=0,
 
 
 def record_block(runtime, w, s, source=None, target=None, publish=0, source_half=False,
-                 target_half=False):
+                 target_half=False, source16=None):
     """A whole window block: feed-forward, attention, both residuals.
 
     `source` and `target` default to the scratch's own buffers; passing them lets one
@@ -444,9 +446,11 @@ def record_block(runtime, w, s, source=None, target=None, publish=0, source_half
     target = target or s.out
     pixels = s.height * s.width
     if getattr(w, "split", False):
+        if source16 is not None:
+            raise ValueError("the split feed-forward takes no prepared half copy")
         record_split_feed_forward(runtime, w, s, source, source_half)
     else:
-        record_feed_forward(runtime, w, s, source, source_half)
+        record_feed_forward(runtime, w, s, source, source_half, source16=source16)
     if runtime.fuse_window_residual:
         record_window_attention(runtime, w, s, s.ffn, target=target, publish=publish,
                                 target_half=target_half)
