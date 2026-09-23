@@ -174,6 +174,13 @@ blocks already.
   barriers: slower everywhere, the deepest small-M shapes included (64x4096x1024 0.21 ->
   0.31 ms), and 81 -> 119 ms of staged GEMM at 720p. The barriers are not what those GEMMs
   wait on.
+- **Weights stored in 32-column slabs**, so a workgroup streams its K x 32 block instead of
+  64 bytes from every 2 KB row: identical results, 14 % on 64x1024x4096 and 10 % on
+  64x4096x1024, nothing on the rest — about 0.6 ms at 320x320 for a layout change at every
+  weight's upload and every GEMM path. Not taken.
+- **The cost of a pass itself** is small: 1.2 us for an empty dependent pass, 4 us for 64k
+  elements. The 577 passes of a frame are under a millisecond of it; at 320x320 the time is
+  the deep levels' GEMMs, latency-bound on 32-200 workgroups.
 
 ## Left behind, deliberately
 
