@@ -34,7 +34,7 @@ def main():
                         out = allocate(rows*cols+16, dtype)
                         reference = allocate(rows*cols+16, dtype)
                         for epilogue in (0, X.EPI_E4M3, X.EPI_GATE, X.EPI_GATE_E4M3, X.EPI_HALF):
-                            for buf in (out, reference): buf.view(dtype)[:] = -11
+                            for buf in (out, reference): X.host_write(buf, np.full(rows*cols+16, -11, dtype))
                             rt.begin()
                             rt.gemm(a, b, branch, rows, cols, inner)
                             rt.residual(branch, skip, cosine, reference, rows*cols, cols,
@@ -42,17 +42,18 @@ def main():
                             rt.gemm_residual(a, b, skip, cosine, out, rows, cols, inner,
                                              epilogue=epilogue, narrow=narrow, skip_half=skip_half)
                             rt.submit()
-                            np.testing.assert_array_equal(out.view(dtype).view(np.uint8),
-                                                          reference.view(dtype).view(np.uint8))
+                            np.testing.assert_array_equal(X.host_view(out, dtype).view(np.uint8),
+                                                          X.host_view(reference, dtype).view(np.uint8))
                             cases += 1
                         if narrow == skip_half:
                             rt.begin()
                             rt.gemm_residual(a, b, skip, cosine, skip, rows, cols, inner,
                                              epilogue=X.EPI_HALF, narrow=narrow, skip_half=skip_half)
                             rt.submit()
-                            np.testing.assert_array_equal(skip.view(dtype).view(np.uint8),
-                                                          reference.view(dtype)[:rows*cols].view(np.uint8))
-                            skip.view(skip_dtype)[:] = values
+                            np.testing.assert_array_equal(
+                                X.host_view(skip, dtype).view(np.uint8),
+                                X.host_view(reference, dtype)[:rows*cols].view(np.uint8))
+                            X.host_write(skip, values)
                 for target, width, expected in ((a, cols, 'alias'),
                                                 (cosine, cols, 'alias'),
                                                 (branch, cols+1, 'multiple')):

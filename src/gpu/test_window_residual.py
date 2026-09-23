@@ -39,7 +39,7 @@ def main():
                         for mask in (0, 7):
                             rt.specialize(mask)
                             for epilogue in (0, X.EPI_E4M3, X.EPI_HALF):
-                                for buf in (out, expected): buf.view(dtype)[:] = -11
+                                for buf in (out, expected): X.host_write(buf, np.full(pixels*channels+16, -11, dtype))
                                 rt.begin()
                                 rt.gemm(a, b, branch, rows, channels, inner)
                                 rt.residual(branch, skip, cosine, expected, pixels*channels, channels,
@@ -49,8 +49,8 @@ def main():
                                                  reverse=reverse, epilogue=epilogue,
                                                  narrow=narrow, skip_half=skip_half)
                                 rt.submit()
-                                np.testing.assert_array_equal(out.view(dtype).view(np.uint8),
-                                                              expected.view(dtype).view(np.uint8))
+                                np.testing.assert_array_equal(X.host_view(out, dtype).view(np.uint8),
+                                                              X.host_view(expected, dtype).view(np.uint8))
                                 cases += 1
                             if narrow == skip_half:
                                 rt.begin()
@@ -58,9 +58,10 @@ def main():
                                                  reverse=reverse, epilogue=X.EPI_HALF,
                                                  narrow=narrow, skip_half=skip_half)
                                 rt.submit()
-                                np.testing.assert_array_equal(skip.view(dtype).view(np.uint8),
-                                                              expected.view(dtype)[:pixels*channels].view(np.uint8))
-                                skip.view(dtype)[:] = values
+                                np.testing.assert_array_equal(
+                                    X.host_view(skip, dtype).view(np.uint8),
+                                    X.host_view(expected, dtype)[:pixels*channels].view(np.uint8))
+                                X.host_write(skip, values)
                 for invalid in ((height, width, 4, origin), (0, width, 8, origin),
                                 (height, width, 8, (1, 0)), (height+64, width, 8, origin)):
                     try:

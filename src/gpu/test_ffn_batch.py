@@ -86,13 +86,14 @@ def host_checks():
                 for rt.input_fp16 in (False, True):
                     for rt.compact_head in (False, True):
                         for rt.joint_qkv in (False, True):
-                            # the fused residuals take bits 8-9, not ProjectsCodex's 5-6,
-                            # which here are input_fp16 and compact_head
+                            # the fusions take bits 8-11. ProjectsCodex's own 5-9 would
+                            # land on input_fp16, compact_head, joint_qkv and the residuals
                             for rt.fuse_residual in (False, True):
                                 for rt.fuse_window_residual in (False, True):
                                     for rt.fuse_window_attention in (False, True):
-                                        keys.add(rt.graph_key())
-    assert len(keys) == 2048, f"graph key collides: {len(keys)} of 2048 distinct"
+                                        for rt.fuse_attention_merge in (False, True):
+                                            keys.add(rt.graph_key())
+    assert len(keys) == 4096, f"graph key collides: {len(keys)} of 4096 distinct"
     # Exercise the production recorders too, not just the batching helper. Multiplicity
     # is the current 71-block model's grouped FFN inventory; no weights are needed.
     savings = 0

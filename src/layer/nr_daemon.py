@@ -771,7 +771,10 @@ def main():
         f"{name}={int(getattr(rt, attr))}" for name, attr in (
             ("NR_BATCH_FFN", "batch_ffn"), ("NR_FUSE_QK", "fuse_qk"),
             ("NR_JOINT_QKV", "joint_qkv"), ("NR_INPUT_FP16", "input_fp16"),
-            ("NR_COMPACT_HEAD", "compact_head"))), flush=True)
+            ("NR_COMPACT_HEAD", "compact_head"), ("NR_FUSE_RESIDUAL", "fuse_residual"),
+            ("NR_FUSE_WINDOW_RESIDUAL", "fuse_window_residual"),
+            ("NR_FUSE_WINDOW_ATTENTION", "fuse_window_attention"),
+            ("NR_FUSE_ATTENTION_MERGE", "fuse_attention_merge"))), flush=True)
 
     if os.path.lexists(args.socket):
         if not stat.S_ISSOCK(os.lstat(args.socket).st_mode):

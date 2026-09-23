@@ -105,8 +105,8 @@ def _load():
             ("xmx_rec_gemm", [ctypes.c_int] * 3 + [ctypes.c_uint] * 14),
             ("xmx_rec_gemm_residual", [ctypes.c_int] * 5 + [ctypes.c_uint] * 4),
             ("xmx_rec_gemm_window_residual", [ctypes.c_int] * 5 + [ctypes.c_uint] * 8),
-            ("xmx_window_init", [ctypes.c_char_p]),
-            ("xmx_rec_window_attention", [ctypes.c_int] * 5 + [ctypes.c_uint] * 2),
+            ("xmx_window_init", [ctypes.c_char_p, ctypes.c_uint]),
+            ("xmx_rec_window_attention", [ctypes.c_int] * 5 + [ctypes.c_uint] * 3),
             ("xmx_rec_unary", [ctypes.c_uint] + [ctypes.c_int] * 4
              + [ctypes.c_uint, ctypes.c_uint, ctypes.c_float] + [ctypes.c_uint] * 5),
             ("xmx_rec_row", [ctypes.c_uint] + [ctypes.c_int] * 4 + [ctypes.c_uint] * 5
@@ -303,7 +303,8 @@ class ScratchArena:
         **dict.fromkeys(("value16", "win16", "ffn16", "k16",
                          "transition.pooled16", "transition.projected16"), "input_key"),
         **dict.fromkeys(("heads16", "core16", "q16", "probs16", "merged16"), "query_probability"),
-        **dict.fromkeys(("scores", "context", "transition.upsampled"), "scores_context"),
+        **dict.fromkeys(("scores", "context", "context16", "transition.upsampled"),
+                        "scores_context"),
         **dict.fromkeys(("ffn", "transition.scaled"), "residual"),
     }
 
@@ -439,6 +440,10 @@ class Runtime:
         self.fuse_residual = os.environ.get("NR_FUSE_RESIDUAL", "1") != "0"
         self.fuse_window_residual = os.environ.get("NR_FUSE_WINDOW_RESIDUAL", "1") != "0"
         self.fuse_window_attention = os.environ.get("NR_FUSE_WINDOW_ATTENTION", "1") != "0"
+        # The head merge folded into the fused attention's store: Codex's
+        # NR_FUSE_ATTENTION_MERGE, which it left off and unmeasured. Measured here,
+        # bit-identical and 3.6-4.4 % of the frame at 720p.
+        self.fuse_attention_merge = os.environ.get("NR_FUSE_ATTENTION_MERGE", "1") != "0"
 
     def graph_key(self):
         return (self.lib.xmx_specialization() | (int(self.fuse_qk) << 3)
@@ -449,7 +454,8 @@ class Runtime:
                 # graph captured with one setting would replay for the other, and the
                 # picture would be wrong without an error anywhere.
                 | (int(self.fuse_residual) << 8) | (int(self.fuse_window_residual) << 9)
-                | (int(self.fuse_window_attention) << 10))
+                | (int(self.fuse_window_attention) << 10)
+                | (int(self.fuse_attention_merge) << 11))
 
     @property
     def buffer_bytes(self):
@@ -597,12 +603,16 @@ class Runtime:
         self.recorded += 1
         return self
 
-    def window_attention(self, q, k, v, target, batches, heads, *, bias=None):
+    def window_attention(self, q, k, v, target, batches, heads, *, bias=None, merged=False):
         """QK^T, softmax and PV for full 8x8 windows, in one dispatch, into `target`.
 
         The scores and probabilities never leave shared memory. The result is the same
         FP32 context the three-pass path writes, bit for bit
         (`src/gpu/test_window_attention.py`). ProjectsCodex's phase42.
+
+        `merged` does the head merge in the same dispatch: `target` then receives what
+        `merge_heads(context, ..., epilogue=EPI_E4M3, narrow=True)` would have written —
+        float16 E4M3 values in (window, token, head, channel) order — also bit for bit.
         """
         if (batches <= 0 or heads <= 0 or batches % heads
                 or batches * 2048 > 0xffffffff or heads * 4096 > 0xffffffff):
@@ -611,17 +621,17 @@ class Runtime:
         if any(target.id == buf.id for buf in operands):
             raise ValueError("window attention output must not alias an input")
         sizes = [(q, batches * 4096), (k, batches * 4096), (v, batches * 4096),
-                 (target, batches * 8192)]
+                 (target, batches * (4096 if merged else 8192))]
         if bias is not None:
             sizes.append((bias, heads * 4096 * 4))
         if any(buf.nbytes < size for buf, size in sizes):
             raise ValueError("window attention buffer is too small")
         path = os.environ.get("XMX_WINDOW_SPV") or str(ROOT / "work" / "window_attention.spv")
-        if self.lib.xmx_window_init(path.encode()) != 0:
+        if self.lib.xmx_window_init(path.encode(), int(merged)) != 0:
             raise RuntimeError("window attention pipeline: " + self.lib.xmx_error().decode())
         if self.lib.xmx_rec_window_attention(q.id, k.id, v.id,
                                              bias.id if bias is not None else -1,
-                                             target.id, batches, heads) != 0:
+                                             target.id, batches, heads, int(merged)) != 0:
             raise RuntimeError("window attention: " + self.lib.xmx_error().decode())
         self.recorded += 1
         return self

@@ -37,8 +37,8 @@ batching; the two compose. Codex measured the same three at about 18 % in its ow
 
 **The graph-cache key.** Codex keys its fusions at bits 5-7. Here those are `input_fp16`,
 `compact_head` and `joint_qkv`. Copied as they were, a graph captured under one setting
-would replay for another — a wrong picture and no error anywhere. They take bits 8-10, and
-`test_ffn_batch.py` now demands 2048 distinct keys across every combination.
+would replay for another — a wrong picture and no error anywhere. They take bits 8-11, and
+`test_ffn_batch.py` now demands 4096 distinct keys across every combination.
 
 **The publish order.** `gemm_resident.comp` here publishes — rounds to E4M3, applies the
 gate — on the accumulator before storing. That is right for everything else and wrong for
@@ -56,20 +56,46 @@ different roles in all six residuals, and the fused attention writes `context`, 
 reading Q. Codex had made that last choice for the same reason; the role table is
 identical in both trees.
 
+## The head merge, added after (2026-09-23)
+
+The merged-output mode of `window_attention.comp` was left behind at first: off in Codex's
+tree and unmeasured there. A per-pass profile put it back on the table — `merge heads`
+was 16.3 ms of a 382 ms frame at 1280x768, a pass that reads the FP32 context only to
+publish it as E4M3 in (window, token, C) order, which the attention's own store can do.
+Paired, alternating, `NR_FUSE_ATTENTION_MERGE` off against on, every head bit-identical:
+
+| output | off | on | gain |
+|---|---|---|---|
+| 384x384 | 69.25 ms | 67.40 ms | 2.7 % |
+| 1280x720 | 386.25 ms | 370.08 ms | **4.2 %** |
+| 1920x1080 | 838.38 ms | 810.21 ms | 3.4 % |
+| 384x384, `XMX_STAGING=1` | 66.90 ms | 65.41 ms | 2.2 % |
+
+A second 720p run gave 384.53 -> 370.87. 62 dispatches fewer, 864 -> 802. The merged store
+goes into `context16`, a new name in the scores' arena role, which the fused path leaves
+unused — not into `merged16`, for the reason above — so it costs no memory.
+
+The benchmark also showed the head read 1.5-2x slower with the merge on (720p 4.2 -> 6-7 ms,
+1080p 8.7 -> 16.7). It did not survive a direct probe: 3.99 against 3.98 ms over twelve
+alternating frames each, with and without the benchmark's per-frame comparison. The graph
+saving did: 13.6 ms at 720p there too.
+
 ## Left behind, deliberately
 
-- `window_attention_qkv.comp` and the merged-output mode of `window_attention.comp`: both
-  off by default in Codex's tree (`NR_FUSE_QKV_ATTENTION`, `NR_FUSE_ATTENTION_MERGE`) and
-  not measured there as enabled.
+- `window_attention_qkv.comp`: off by default in Codex's tree (`NR_FUSE_QKV_ATTENTION`) and
+  not measured there as enabled. It reads the FP32 QKV projection inside the attention;
+  normalising in the QKV GEMM's own epilogue removes more traffic, and is next.
 - `DIRECT_EPILOGUE`: an experiment there, and `improve` already stores float32 epilogues
   straight from the accumulator.
 - phase37's paired cosine conversions: measured 0.6 % *slower* by Codex and never enabled.
 
 ## Switches
 
-`NR_FUSE_RESIDUAL=0`, `NR_FUSE_WINDOW_RESIDUAL=0` and `NR_FUSE_WINDOW_ATTENTION=0` each
-restore their two- or three-pass path, which is also the reference the fused one is
-bit-identical to. The kernel tests are Codex's, unchanged but for the merged mode: 120
-dense residual cases, 192 window cases with padding and shifted windows, and 48 attention
-cases covering zero, negative zero, subnormals, the clamp boundaries and every finite half
-as a bias.
+`NR_FUSE_RESIDUAL=0`, `NR_FUSE_WINDOW_RESIDUAL=0`, `NR_FUSE_WINDOW_ATTENTION=0` and
+`NR_FUSE_ATTENTION_MERGE=0` each restore their separate passes, which are also the
+reference the fused one is bit-identical to. The kernel tests are Codex's: 120 dense
+residual cases, 192 window cases with padding and shifted windows, and 48 attention cases,
+each in both output layouts, covering zero, negative zero, subnormals, the clamp
+boundaries and every finite half as a bias. All of them pass under `XMX_STAGING=1` too —
+they did not until 2026-09-23, because they wrote buffers through `.view()`, which an
+unmapped buffer refuses.

@@ -272,6 +272,8 @@ class BlockScratch:
         self.probs16 = make("probs16", self.batch * self.tokens * self.tokens, np.float16)
         self.context = make("context", self.batch * self.tokens * 32)
         self.merged16 = make("merged16", windowed, np.float16)
+        # the fused attention's merged output: scores' and context's role, unused by then
+        self.context16 = make("context16", windowed, np.float16)
         self.attended = make("attended", windowed)
         self.out = make("out", pixels * channels)
         self.core16 = (make("core16", pixels * channels, np.float16)
@@ -380,11 +382,17 @@ def record_window_attention(runtime, w, s, source, target=None, publish=0,
                       narrow=True)
     runtime.gemm(s.win16, w.qkv, s.proj, windows * tokens, 3 * channels, channels)
     record_qkv(runtime, w, s, windows, tokens, channels, heads)
-    if runtime.fuse_window_attention and tokens == 64:
-        # One dispatch for QK^T, softmax and PV (ProjectsCodex's phase42). Into
-        # `context`, not `merged16`: merged16 shares q16's arena role, and another
-        # workgroup may still be reading Q while this one stores.
-        runtime.window_attention(s.q16, s.k16, s.v16, s.context, batch, heads, bias=w.bias)
+    fused = runtime.fuse_window_attention and tokens == 64
+    merged = fused and runtime.fuse_attention_merge
+    attended = s.context16 if merged else s.merged16
+    if fused:
+        # One dispatch for QK^T, softmax and PV (ProjectsCodex's phase42). Never into
+        # `merged16`: it shares q16's arena role, and another workgroup may still be
+        # reading Q while this one stores. Merged, the same dispatch also does the head
+        # merge and writes the published result into `context16`, whose role (the
+        # scores') the fused path leaves unused.
+        runtime.window_attention(s.q16, s.k16, s.v16, attended if merged else s.context,
+                                 batch, heads, bias=w.bias, merged=merged)
     else:
         runtime.gemm(s.q16, s.k16, s.scores, tokens, tokens, 32, batch=batch,
                      strides=(tokens * 32, tokens * 32, tokens * tokens), transpose_b=True)
@@ -392,15 +400,16 @@ def record_window_attention(runtime, w, s, source, target=None, publish=0,
                         bias=w.bias, heads=heads)
         runtime.gemm(s.probs16, s.v16, s.context, tokens, 32, tokens, batch=batch,
                      strides=(tokens * tokens, tokens * 32, tokens * 32))
-    runtime.merge_heads(s.context, s.merged16, windows, tokens, channels, heads,
-                        epilogue=xmxres.EPI_E4M3, narrow=True)
+    if not merged:
+        runtime.merge_heads(s.context, s.merged16, windows, tokens, channels, heads,
+                            epilogue=xmxres.EPI_E4M3, narrow=True)
     if target is not None:
-        runtime.gemm_residual(s.merged16, w.out, source, w.attn_cos, target,
+        runtime.gemm_residual(attended, w.out, source, w.attn_cos, target,
                               windows * tokens, channels, channels,
                               reverse=(s.height, s.width, 8, w.origin),
                               epilogue=publish, narrow=target_half)
     else:
-        runtime.gemm(s.merged16, w.out, s.attended, windows * tokens, channels, channels)
+        runtime.gemm(attended, w.out, s.attended, windows * tokens, channels, channels)
 
 
 def record_block(runtime, w, s, source=None, target=None, publish=0, source_half=False,

@@ -31,7 +31,7 @@ static struct {
 	VkCommandPool cpool; VkCommandBuffer cb; VkFence fence;
 	struct buf A, B, C;
 	/* resident path */
-	VkPipelineLayout rpl; VkPipeline rgemm, rtiled, rstaged, runary, rrow, rhistory, rwindow;
+	VkPipelineLayout rpl; VkPipeline rgemm, rtiled, rstaged, runary, rrow, rhistory, rwindow[2];
 	char *rpaths[5];
 	unsigned specialize;
 	unsigned tiling, tilem, tilen;
@@ -1118,25 +1118,35 @@ int xmx_rec_row(unsigned kind, int a, int b, int c, int d, unsigned rows, unsign
  * round trips through device buffers. Built on first use, so a graph that keeps the
  * three-pass path never compiles it. The bias pointer rides in the residual epilogue's
  * slot, `residual_cos` at offset 96, which is why that field was appended rather than
- * inserted. */
-int xmx_window_init(const char *path)
+ * inserted.
+ *
+ * `merged` selects the same shader with `MERGED_OUTPUT` specialised on: it also does the
+ * head merge's work, publishing E4M3 in (window, token, C) order, so neither the FP32
+ * context nor the merge_heads pass that read it back is needed. */
+int xmx_window_init(const char *path, unsigned merged)
 {
 	if (!g.rready) FAIL("resident runtime not initialised", 0);
-	if (g.rwindow) return 0;
-	return build_pipeline(path, g.rpl, &g.rwindow);
+	if (merged > 1) FAIL("invalid window attention output mode", 0);
+	if (g.rwindow[merged]) return 0;
+	/* a bool specialization constant is a VkBool32, which is what `merged` already is */
+	VkSpecializationMapEntry entry = { .constantID = 0, .offset = 0, .size = sizeof merged };
+	VkSpecializationInfo info = { .mapEntryCount = 1, .pMapEntries = &entry,
+				      .dataSize = sizeof merged, .pData = &merged };
+	return build_pipeline_spec(path, g.rpl, &g.rwindow[merged], &info);
 }
 
 int xmx_rec_window_attention(int q, int k, int v, int bias, int out,
-			     unsigned batches, unsigned heads)
+			     unsigned batches, unsigned heads, unsigned merged)
 {
-	if (!g.recording || !g.rwindow) FAIL("window attention not ready for recording", 0);
+	if (merged > 1 || !g.recording || !g.rwindow[merged])
+		FAIL("window attention not ready for recording", 0);
 	if (!batches || !heads || batches % heads) FAIL("invalid attention batch/head count", 0);
 	struct push p = { .a = addr_of(q), .b = addr_of(k), .c = addr_of(out), .d = addr_of(v),
 			  .n = heads, .batch = batches, .flags = bias >= 0,
 			  .residual_cos = bias >= 0 ? addr_of(bias) : 0 };
 	if (!p.a || !p.b || !p.c || !p.d || (bias >= 0 && !p.residual_cos))
 		FAIL("window attention operand is not a live buffer", 0);
-	vkCmdBindPipeline(g.rcb, VK_PIPELINE_BIND_POINT_COMPUTE, g.rwindow);
+	vkCmdBindPipeline(g.rcb, VK_PIPELINE_BIND_POINT_COMPUTE, g.rwindow[merged]);
 	vkCmdPushConstants(g.rcb, g.rpl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
 	vkCmdDispatch(g.rcb, 8, batches < 65535u ? batches : 65535u,
 		      1u + (batches - 1u) / 65535u);
