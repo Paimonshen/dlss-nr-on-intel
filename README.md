@@ -396,12 +396,12 @@ epilogue and loads, the narrow blocks' feed-forward into one kernel and the full
 glue into fewer passes took a 1280x720 frame from 445 to 231 ms, 48 %, with every output
 bit-identical
 (`notes/improve-fusions.md`, `notes/improve-qkv-epilogue.md`). The other thing that moved it
-was shared memory. Mesa sizes each core's share from the bytes a shader declares, but hands
-every workgroup its declaration rounded up to an allocation size, so a shader that declares
-anything else runs on fewer threads than the core has: window attention at 3104 bytes was on
-half of them and at exactly 2 KB is 18 % faster, and the staged GEMM at 15.5 KB was on half
-too — with its tiles and its stage sharing 8 KB, the 1280x720 frame went from 228 to 208 ms
-(`notes/improve-shared-memory.md`).
+was shared memory, which decides how many workgroups a core holds: 128 KB between them,
+each share rounded up to 1, 2, 4 ... KB. Window attention at 3104 bytes took 4 KB and so half
+the core's threads, and at exactly 2 KB is 18 % faster; the staged GEMM at 15.5 KB took 16
+and half the threads too — with its tiles and its stage sharing 8 KB, the 1280x720 frame
+went from 228 to 208 ms (`notes/improve-shared-memory.md`, which also has a driver quirk
+that makes some *smaller* declarations slower).
 
 ## How it works
 

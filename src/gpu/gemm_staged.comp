@@ -60,11 +60,10 @@ layout(push_constant, scalar) uniform Push {
 
 /* The operand tiles and the output stage are never live at once — the stage is written
  * only after the last K step has read its fragments — so the two blocks share their bytes:
- * 8 KB where they took 15.5. That is what sets how many of these workgroups a core holds.
- * Mesa sizes a core's shared-memory partition as sixteen of them times the bytes declared
- * here, capped at 128 KB, and gives each its declaration rounded up to an allocation size:
- * 15.5 KB, rounded to 16, fit eight workgroups — half the core's threads — and 8 KB fits
- * sixteen. 90 -> 71 ms of a 720p frame, bit-identical. notes/improve-shared-memory.md. */
+ * 8 KB where they took 15.5. That is what sets how many of these workgroups a core holds:
+ * 128 KB of shared memory between them, each share rounded up to an allocation size. At
+ * 15.5 KB — 16 once rounded — eight fit, half the core's threads; at 8 KB sixteen fit, all
+ * of them. 90 -> 71 ms of a 720p frame, bit-identical. notes/improve-shared-memory.md. */
 layout(scalar) shared Operands {
     float16_t buf_a[BM * SA];
     float16_t buf_b[BK * SB];

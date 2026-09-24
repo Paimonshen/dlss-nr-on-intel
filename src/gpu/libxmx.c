@@ -398,8 +398,8 @@ int xmx_init(const char *spv_path)
 	VkPhysicalDeviceCooperativeMatrixFeaturesKHR cm = {
 		.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR, .cooperativeMatrix = VK_TRUE };
 	/* Shared-memory blocks that alias: gemm_staged.comp puts its operand tiles and its
-	 * output stage in the same bytes, which is what fits a core's worth of it in the
-	 * partition the driver sizes (notes/improve-shared-memory.md). */
+	 * output stage in the same bytes, which is what fits sixteen of its workgroups in a
+	 * core's 128 KB (notes/improve-shared-memory.md). */
 	VkPhysicalDeviceWorkgroupMemoryExplicitLayoutFeaturesKHR wm = {
 		.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_WORKGROUP_MEMORY_EXPLICIT_LAYOUT_FEATURES_KHR, .pNext = &cm,
 		.workgroupMemoryExplicitLayout = VK_TRUE, .workgroupMemoryExplicitLayoutScalarBlockLayout = VK_TRUE,

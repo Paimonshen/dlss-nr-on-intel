@@ -1,9 +1,18 @@
-# Shared memory on Xe2: how the driver sizes it, and what that cost the staged GEMM
+# Shared memory on Xe2: a driver quirk, and a cap that cost the staged GEMM half its threads
 
 2026-09-24. The owner asked why window attention has exactly 2 KB of shared memory and what
-1 KB or 512 B would do. Answering it turned up a rule in Mesa and a 10 % frame.
+1 KB or 512 B would do. Answering it turned up two separate things, and **only the second
+cost this project anything**:
 
-## The rule — verified, in the driver and on the hardware
+- **the quirk** — Mesa sizes a core's shared-memory partition from the bytes a shader
+  declares, not from what each workgroup is given, so some *smaller* declarations run on
+  fewer threads. Real, verified three ways below, and worth nothing measurable in this
+  frame: the one kernel it touches, the base GEMM at 512 B, is no faster padded to 1 KB;
+- **the cap** — 128 KB of shared memory between a core's workgroups, each share rounded up.
+  Ordinary occupancy arithmetic, the same on any driver, and it had the staged GEMM — 41 %
+  of a 720p frame — on half its threads. Fixed: 10 % of the frame.
+
+## The quirk — verified, in the source, in the driver's own output, and on the hardware
 
 Mesa 26.2.2, `src/intel/vulkan/genX_shader.c:1183`, fills two fields for every compute
 pipeline from the same number, `total_shared` — the bytes the shader declares:
@@ -48,17 +57,35 @@ For a pipeline here the rule reads: **declare exactly an allocation size, and ke
 (workgroups a core holds by threads) x size <= 128 KB.** For 32 lanes that is 1 or 2 KB;
 for 128 lanes, up to 8 KB. Anything between two allocation sizes, or under 1 KB, pays.
 
-It is arguably a driver bug — the partition's own comment says it estimates how many
-workgroups run at once and multiplies by their size, which only works with the size they
-are given — and the fix would be one line: pass `intel_compute_slm_calculate_size(GFX_VER,
-total_shared)` instead of `total_shared` (and the same for the task and mesh stages).
-**Not reported upstream**; that is the owner's call.
+**The driver's own output agrees**, which rules out having read the wrong code:
+`INTEL_DEBUG=bat` decodes every dispatch it submits. 256 B, 768 B and 1 KB all go out with
+`Shared Local Memory Size: 1 (Encodes 1K)`, and with `Preferred SLM Allocation Size` 16K,
+64K and 64K; 1.5, 1.75 and 2 KB with 2K and 96K, 128K, 128K. Of the 126 fields of the
+256 B and 1 KB dispatches, the preferred size is the **only** one that differs. Their
+shaders differ in the unrolled initialisation — the 1 KB one stores *more* — and the hot
+loop is the same instruction for instruction. So the hardware is handed the same
+per-workgroup allocation and two partitions, and the timing follows the partition. What a
+driver true to its own comment would program for 256 B is 64 x 1 KB = 64K, which is what
+the 1 KB pipeline gets: 11 ms instead of 41.
 
-## What it cost: the staged GEMM at half its threads
+It is a driver bug by that comment — "it estimates how many workgroups will run
+concurrently per sub-slice and multiply that per each workgroup SLM size" — which only works
+with the size they are given. The fix is one line in `intel_compute_slm.c`: round
+`slm_size_per_workgroup` through `intel_compute_slm_calculate_size()` before multiplying,
+which covers the compute, task and mesh callers at once. It arrived with MR !28910
+(2024-05, "Compute the optimal preferred SLM size per subslice", replacing a partition of
+0 KB that hung Xe2) and the Xe2 tables of !30541, and is unchanged in 26.2.3 and in `main`
+as of 2026-09-24; no issue or MR about it turned up. It bites small workgroups — a 32- or
+64-lane workgroup under 1 KB, a reduction with a few hundred bytes of shared memory, say —
+and can bite any workgroup whose declaration falls between two allocation sizes. The same code serves Xe-HPG (Alchemist, Meteor Lake)
+with its own tables; untested there. **Not reported upstream**; that is the owner's call.
 
-`gemm_staged.comp` is 128 lanes and declared 15.5 KB — the A and B tiles, 7.5 KB with their
-padding, and an 8 KB float stage for the epilogue. Allocation 16 KB; partition 16 x 15.5 KB,
-capped at 128 KB: **eight workgroups a core, 32 threads of 64**.
+## The cap: the staged GEMM at half its threads
+
+`gemm_staged.comp` is 128 lanes, sixteen workgroups a core by threads, and declared 15.5 KB —
+the A and B tiles, 7.5 KB with their padding, and an 8 KB float stage for the epilogue.
+Allocated 16 KB each, sixteen would need 256 KB: **eight fit, 32 threads of 64**. This is the
+cap and not the quirk — declared as exactly 16 KB it would be the same.
 
 The tiles and the stage are never live at once — the stage is written after the last K
 step has read its fragments — so they now share their bytes, as two `shared` blocks

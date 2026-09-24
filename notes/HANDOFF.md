@@ -12,17 +12,22 @@ you need the evidence behind a line in this file, rather than reading them in or
 ## Latest: the staged GEMM was on half its threads (2026-09-24, later)
 
 The owner asked why window attention has exactly 2 KB of shared memory and what 1 KB or
-512 B would do. The answer is a rule in Mesa, read in its source (26.2.2,
-`src/intel/vulkan/genX_shader.c:1183`) and confirmed at fourteen sizes on the hardware: a
-core's shared-memory partition is sized as *workgroups its threads hold* x **the declared
-bytes**, capped at 128 KB, while each workgroup is given its declaration **rounded up** to an
-allocation size — 1 KB at least, then powers of two to 16 KB. So declaring less can be
-slower: 256 B puts a 32-lane kernel on a quarter of the threads, 512 B on half, and
-1.25-1.5 KB is 29 % slower than 2 KB. **Declare exactly an allocation size, and keep
-(workgroups a core holds) x size <= 128 KB.** `notes/improve-shared-memory.md`.
+512 B would do. Two separate answers, and only the second cost anything here.
 
-It had been costing the largest pass in the frame. `gemm_staged.comp` is 128 lanes and
-declared 15.5 KB: eight workgroups a core, half the threads. Its operand tiles and its stage
+**A driver quirk.** Mesa sizes a core's shared-memory partition as *workgroups its threads
+hold* x **the declared bytes**, but gives each workgroup its declaration **rounded up** — 1 KB
+at least, then powers of two to 16 KB. So declaring less can be slower: 256 B puts a 32-lane
+kernel on a quarter of the threads, 512 B on half, 1.25-1.5 KB is 29 % slower than 2 KB.
+Verified in the source (26.2.2, `genX_shader.c:1183`; unchanged in 26.2.3 and `main`), in
+the driver's own decoded dispatches (`INTEL_DEBUG=bat`: the preferred partition is the only
+field that differs between a 256 B and a 1 KB pipeline) and at fourteen sizes on the
+hardware. **It costs this frame nothing measurable** — the base GEMM at 512 B, the one kernel
+it touches, is no faster padded to 1 KB. Not reported upstream; that is the owner's call.
+
+**The cap.** 128 KB between a core's workgroups, on any driver. `gemm_staged.comp` is 128
+lanes and declared 15.5 KB: eight workgroups a core, half the threads. **Declare exactly an
+allocation size, and keep (workgroups a core holds) x size <= 128 KB.**
+`notes/improve-shared-memory.md`. Its operand tiles and its stage
 are never live at once, so they now alias as two `shared` blocks
 (`VK_KHR_workgroup_memory_explicit_layout`, enabled in libxmx): 8 KB, sixteen workgroups.
 **Staged GEMM 90.5 -> 70.9 ms at 720p, device total 219 -> 198**, bit-identical, `make test`
