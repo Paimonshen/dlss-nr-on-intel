@@ -33,6 +33,23 @@
 #include <sys/time.h>
 #include <vulkan/vulkan.h>
 #include <vulkan/vk_layer.h>
+#ifdef _WIN32
+#include <windows.h>
+#include <process.h>
+#ifndef R_OK
+#define R_OK 4
+#endif
+#ifndef W_OK
+#define W_OK 2
+#endif
+#ifndef F_OK
+#define F_OK 0
+#endif
+#else
+#include <spawn.h>
+#include <fcntl.h>
+#endif
+
 
 #define MAX_SWAPCHAINS 8
 #define MAX_IMAGES 8
@@ -308,6 +325,207 @@ static VkLayerDeviceCreateInfo *device_chain(const VkDeviceCreateInfo *info)
 	return item;
 }
 
+static void ensure_daemon(void);
+
+static void ensure_daemon(void)
+{
+	/* Opt-in: only start a daemon when explicitly requested. Defaulting it on would
+	 * make every Vulkan process that loads the layer — vulkaninfo included — try to
+	 * start one, on a machine where a single daemon already costs ~3 GiB. */
+	if (!getenv("NR_LAYER_SPAWN")) {
+		fprintf(stderr, "[nr_layer] daemon auto-start is off (set NR_LAYER_SPAWN=1 to enable)\n");
+		return;
+	}
+	/* Do not re-spawn from inside a daemon we started: it inherits VK_INSTANCE_LAYERS
+	 * and would load this layer again, recursing until the OOM killer arrives. The
+	 * child is marked NR_LAYER_SPAWNED, so its own layer sees this and steps back. */
+	if (getenv("NR_LAYER_SPAWNED")) return;
+
+	const char *sock = socket_path;
+#ifdef _WIN32
+	if (!sock) sock = "\\\\.\\pipe\\nr_dlssnr_intel";
+#else
+	if (!sock) sock = "/tmp/nr_layer.sock";
+#endif
+	/* Already up? Then leave it. This is a one-shot probe, NOT nr_link_connect: the
+	 * latter polls for up to five seconds waiting for a daemon that is still starting,
+	 * which would stall every game load. Here a single attempt is enough to decide
+	 * whether to spawn. */
+	{
+		int alive = 0;
+#ifdef _WIN32
+		HANDLE h = CreateFileA(sock, GENERIC_READ | GENERIC_WRITE, 0, NULL,
+				       OPEN_EXISTING, 0, NULL);
+		if (h != INVALID_HANDLE_VALUE) { CloseHandle(h); alive = 1; }
+		else {
+			DWORD e = GetLastError();
+			/* ERROR_PIPE_BUSY means a daemon exists but is busy — do not double-spawn. */
+			if (e == ERROR_PIPE_BUSY) alive = 1;
+		}
+#else
+		int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+		if (fd >= 0) {
+			struct sockaddr_un a;
+			memset(&a, 0, sizeof a);
+			a.sun_family = AF_UNIX;
+			snprintf(a.sun_path, sizeof a.sun_path, "%s", sock);
+			if (connect(fd, (struct sockaddr *)&a, sizeof a) == 0) alive = 1;
+			close(fd);
+		}
+#endif
+		if (alive) {
+			fprintf(stderr, "[nr_layer] daemon already listening on %s; not spawning\n", sock);
+			return;
+		}
+	}
+
+	const char *py = getenv("NR_PYTHON");
+	if (!py || !*py) py = "python3";
+	const char *daemon = getenv("NR_DAEMON");
+	char daemon_buf[1024];
+	if (!daemon || !*daemon) {
+		/* Resolve this module's directory and try a few conventional layouts:
+		 *   <dir>/nr_daemon.py
+		 *   <dir>/nr/nr_daemon.py
+		 *   <dir>/dlssnr/nr_daemon.py
+		 * The first that exists wins; the layer and the daemon ship together. */
+		char self[1024];
+		self[0] = '\0';
+#ifdef _WIN32
+		HMODULE hmod;
+		if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+				       (LPCWSTR)&ensure_daemon, &hmod)) {
+			WCHAR w[1024];
+			DWORD n = GetModuleFileNameW(hmod, w, 1024);
+			if (n) WideCharToMultiByte(CP_UTF8, 0, w, -1, self, 1024, NULL, NULL);
+		}
+#else
+		{
+			char link[1024];
+			ssize_t n = readlink("/proc/self/exe", link, sizeof link - 1);
+			if (n > 0) { link[n] = '\0'; strncpy(self, link, 1023); self[1023] = '\0'; }
+		}
+#endif
+		/* strip to directory */
+		char *slash = self;
+		for (char *p = self; *p; p++) if (*p == '/' || *p == '\\') slash = p;
+		*slash = '\0';
+		const char *cands[] = { "/src/layer/nr_daemon.py", "/nr_daemon.py",
+					"/nr/nr_daemon.py", "/dlssnr/nr_daemon.py" };
+		daemon = NULL;
+		for (size_t i = 0; i < sizeof cands / sizeof *cands; i++) {
+			snprintf(daemon_buf, sizeof daemon_buf, "%s%s", self, cands[i]);
+			#ifdef _WIN32
+		if (_access(daemon_buf, 4) == 0) { daemon = daemon_buf; break; }
+#else
+		if (access(daemon_buf, R_OK) == 0) { daemon = daemon_buf; break; }
+#endif
+		}
+	}
+	if (!daemon || !*daemon) {
+		fprintf(stderr, "[nr_layer] could not find nr_daemon.py next to the layer; "
+			"set NR_DAEMON to its path\n");
+		return;
+	}
+
+	/* NR_ROOT is the deployment directory the daemon's work/ lives under. The daemon
+	 * itself computes its module search path as <its dir>/../.. (i.e. an in-tree
+	 * mirror: src/layer/nr_daemon.py -> project root), so default NR_ROOT to the same
+	 * two levels up from the daemon script. The user can override with NR_ROOT. */
+	char root_buf[1024];
+	const char *root = getenv("NR_ROOT");
+	if (!root || !*root) {
+		strncpy(root_buf, daemon, 1023); root_buf[1023] = '\0';
+		/* strip to daemon directory */
+		char *slash = root_buf;
+		for (char *p = root_buf; *p; p++) if (*p == '/' || *p == '\\') slash = p;
+		*slash = '\0';
+		/* strip one more level to reach the project root */
+		slash = root_buf;
+		for (char *p = root_buf; *p; p++) if (*p == '/' || *p == '\\') slash = p;
+		*slash = '\0';
+		root = root_buf;
+	}
+
+	const char *settings = getenv("NR_SETTINGS");
+	char settings_buf[1024];
+	if (!settings || !*settings) {
+		snprintf(settings_buf, sizeof settings_buf, "%s/nr_settings.json", root);
+		settings = settings_buf;
+	}
+
+	/* Spawn detached, with the daemon's own log file, so it survives the game's
+	 * lifetime and does not borrow the game's console. */
+	char cmd[4096];
+	snprintf(cmd, sizeof cmd,
+		 "%s \"%s\" --socket \"%s\" --settings \"%s\" --root \"%s\"",
+		 py, daemon, sock, settings, root);
+
+	fprintf(stderr, "[nr_layer] spawning daemon: %s\n", cmd);
+#ifdef _WIN32
+	{
+		STARTUPINFOA si; PROCESS_INFORMATION pi;
+		memset(&si, 0, sizeof si); si.cb = sizeof si;
+		memset(&pi, 0, sizeof pi);
+		si.dwFlags = STARTF_USESTDHANDLES;
+		si.hStdInput = INVALID_HANDLE_VALUE;
+		/* Route stdout/stderr to a log beside the daemon. */
+		char log[1024];
+		snprintf(log, sizeof log, "%s/nr_daemon.log", root);
+		si.hStdOutput = CreateFileA(log, FILE_APPEND_DATA, FILE_SHARE_WRITE, NULL,
+					    OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+		si.hStdError = si.hStdOutput;
+		/* Mark the child so the layer it loads does not spawn another daemon. */
+		SetEnvironmentVariableA("NR_LAYER_SPAWNED", "1");
+		BOOL ok = CreateProcessA(NULL, cmd, NULL, NULL, TRUE,
+					 DETACHED_PROCESS, NULL, NULL, &si, &pi);
+		if (si.hStdOutput != INVALID_HANDLE_VALUE) CloseHandle(si.hStdOutput);
+		if (!ok) {
+			fprintf(stderr, "[nr_layer] daemon spawn failed (%lu); frame stays "
+				"as the game drew it\n", GetLastError());
+			return;
+		}
+		CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
+	}
+#else
+	{
+		/* posix_spawn is async-signal-safe across the fork/exec: a game is
+		 * multithreaded, and calling fopen()/snprintf() between fork and exec (what
+		 * this used to do) is not. The log redirect goes through file actions. */
+		char log[1024];
+		snprintf(log, sizeof log, "%s/nr_daemon.log", root);
+
+		posix_spawn_file_actions_t fa;
+		posix_spawn_file_actions_init(&fa);
+		posix_spawn_file_actions_addopen(&fa, 0, "/dev/null", O_RDONLY, 0);
+		posix_spawn_file_actions_addopen(&fa, 1, log,
+						 O_WRONLY | O_CREAT | O_APPEND, 0644);
+		posix_spawn_file_actions_adddup2(&fa, 1, 2);
+
+		/* An argv array, and --settings only when it is set, so the daemon's parser
+		 * never sees a dangling --settings (what the cut-off execlp list produced). */
+		char *argv[9];
+		int n = 0;
+		argv[n++] = (char *)py;
+		argv[n++] = (char *)daemon;
+		argv[n++] = "--socket"; argv[n++] = (char *)sock;
+		if (settings && *settings) { argv[n++] = "--settings"; argv[n++] = (char *)settings; }
+		argv[n++] = "--root"; argv[n++] = (char *)root;
+		argv[n] = NULL;
+
+		setenv("NR_LAYER_SPAWNED", "1", 1);   /* mark child; its layer will not re-spawn */
+		extern char **environ;
+		pid_t pid;
+		if (posix_spawnp(&pid, py, &fa, NULL, argv, environ) != 0) {
+			fprintf(stderr, "[nr_layer] daemon spawn failed; frame stays "
+				"as the game drew it\n");
+		}
+		posix_spawn_file_actions_destroy(&fa);
+	}
+#endif
+	fprintf(stderr, "[nr_layer] daemon spawn requested on %s\n", sock);
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL nr_CreateInstance(const VkInstanceCreateInfo *info,
 						 const VkAllocationCallbacks *allocator,
 						 VkInstance *instance)
@@ -326,6 +544,7 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateInstance(const VkInstanceCreateInfo *inf
 		layer_instance = *instance;
 		capture_path = getenv("NR_LAYER_CAPTURE");
 		socket_path = getenv("NR_LAYER_SOCKET");
+		ensure_daemon();
 		trigger_path = getenv("NR_LAYER_TRIGGER");
 		const char *mask = getenv("NR_LAYER_UI_MASK");
 		ui_mask = mask && strcmp(mask, "0") != 0;
