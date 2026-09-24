@@ -223,6 +223,8 @@ is now 9.4 ms + 196 ms per megapixel. Live, through the socket: **512x288 at 0.3
   issued before this block's multiply-adds, the classic way to hide load latency on the
   small-M deep-K GEMMs of the deep levels. 30 % slower: 14.1 -> 20.3 ms of staged GEMM at
   320x320, 83.9 -> 110.5 at 1280x768. Phases 21 and 26 found the same for the K loop.
+  Re-measured by mistake on the bottleneck's shapes alone, where it had the best case: twice
+  as slow, 64x1024x4096 0.19 -> 0.38 ms. Read this list before trying a loop change.
 - **The tiled or base kernel for those GEMMs**, for more workgroups: the frame at 320x320
   went 42.9 -> 53 ms either way. Staged is the best of the three there.
 - **A 64-deep K block in the staged GEMM**, for half the trips round the K loop and its
@@ -248,7 +250,19 @@ is now 9.4 ms + 196 ms per megapixel. Live, through the socket: **512x288 at 0.3
   weight's upload and every GEMM path. Not taken.
 - **The cost of a pass itself** is small: 1.2 us for an empty dependent pass, 4 us for 64k
   elements. The 577 passes of a frame are under a millisecond of it; at 320x320 the time is
-  the deep levels' GEMMs, latency-bound on 32-200 workgroups.
+  the deep levels' GEMMs, latency-bound on 32-200 workgroups. (Measured again later with a
+  unary pass of 64 elements and its barrier, replayed: 4-4.6 us, against 0.5 us recorded as
+  independent — about 2 ms over the ~515 passes at 320x320. Small either way.)
+- **Weights stored as their E4M3 bytes**, decoded to half in the loader. It would be exact:
+  every one of the bottleneck's 100.7 M weights is an E4M3 value — half of them E4M3
+  subnormals, which a decoder has to get right — and MLX-DLSS's decode has no scale. A proxy
+  that reads half the bytes and decodes nothing moved the bottleneck's four GEMMs 431 -> 414 us
+  a block: 0.14 ms a frame at 320x320 before paying for a decode. Only 64x3072x1024 moved
+  (96 -> 79 us); the K = 4096 one, the slowest, is not waiting on weight bytes. Not built.
+- **Polling the graph's fence instead of sleeping on it** (below, in HANDOFF: a busy core makes
+  the graph faster). From the waiting thread it bought 0.5-1 ms of the 4.5 a separate busy
+  process buys — whether it paused between polls, did integer work, or polled every 1, 42 or
+  680 us. Not kept.
 
 ## Left behind, deliberately
 

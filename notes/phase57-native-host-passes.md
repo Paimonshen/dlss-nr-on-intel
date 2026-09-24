@@ -45,6 +45,14 @@ one in float32.
 > byte-identical: **1280x720 at scale 0.35, 70-73 -> 60-61 ms**; at 640x360, a quarter of
 > the pixels, within noise.
 
+> **And on every core, 2026-09-24.** Each pass's outer row loop is an OpenMP `parallel for`;
+> no row reads another's result, so the bytes are the same at one thread, three or eight
+> (`test_native_image.py` run at each). At 1920x1080, per pass: the temporal composition
+> 15.5 -> 3.3 ms, the plain one 8.7 -> 1.5, encode 4.8 -> 1.6, decode 1.1 -> 0.5. On the
+> daemon's path, answers byte-identical: **1920x1080 at 0.3, 106-122 -> 77-82 ms; 1280x720
+> at 0.35, 61-63 -> 53**; at the live sizes nothing, because there the graph is the frame.
+> `OMP_WAIT_POLICY` defaults to passive: spinning, the threads took 247 ms of CPU a frame.
+
 ## Measured
 
 Four consecutive DoA5 frames, 1024x768 with a 1024x576 active region, scale 0.55, on

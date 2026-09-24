@@ -9,7 +9,36 @@ you need the evidence behind a line in this file, rather than reading them in or
 
 ---
 
-## Latest: the staged GEMM was on half its threads (2026-09-24, later)
+## Latest: the host passes on every core, and a lead in the CPU's idle state (2026-09-24, evening)
+
+**The passes around the network, at the output's resolution, are cheaper.** The temporal gate
+runs natively after all — its logit is half, so a 65536-entry table of NumPy's own sigmoid is
+exact (`phase57`) — and every native pass is split by rows across the eight cores with OpenMP,
+which cannot change a byte (tested at 1, 3 and 8 threads). The log's change figure is taken on
+every fourth row: over the whole frame it was 5 ms of a 1080p frame. On the daemon's own path,
+answers byte-identical: **1280x720 at 0.35, 70-73 -> 60-61 ms with the gate and -> 53 with the
+cores; 1920x1080 at 0.3, 106-122 -> 77-82 with the cores**; 512x288 and 640x360 unchanged,
+because there the graph is 33 ms of 36-39. README table
+re-measured: 1024x768 at 0.55 84 -> 75 ms, 1920x1080 at 0.55 196 -> 171.
+
+**A lead that needs root.** The 320x320 graph runs **32.1-32.7 ms with every core idle and
+27.3 with any process spinning on a P-core** — a bare `pause` loop does it — and 28.5-29.5 on
+an LP E-core, at the same 1950 MHz GPU clock throughout. So it is the package's idle state, not
+GPU clocks and not work the core does. Polling the fence from the waiting thread gets only
+0.5-1 ms of it, and spinning a core for the length of every graph is not a trade for a laptop,
+so nothing is kept. The next test needs root: hold a PM QoS latency limit open while the graph
+runs, and read the uncore frequency, which is 0400 here —
+
+```
+sudo python3 -c "import os,struct,time; f=os.open('/dev/cpu_dma_latency',os.O_WRONLY); os.write(f,struct.pack('i',50)); time.sleep(600)"
+sudo cat /sys/devices/system/cpu/intel_uncore_frequency/package_00_die_00/current_freq_khz
+```
+
+If a 50 us limit is worth the 15 % without a spinning core, the daemon can hold one when it
+is allowed to. Tried and not kept, in `improve-fusions.md`: weights stored as their E4M3 bytes
+(exact, but a proxy put the prize at 0.14 ms a frame) and, again, register prefetch.
+
+## The staged GEMM was on half its threads (2026-09-24, later)
 
 The owner asked why window attention has exactly 2 KB of shared memory and what 1 KB or
 512 B would do. Two separate answers, and only the second cost anything here.
