@@ -9,7 +9,27 @@ you need the evidence behind a line in this file, rather than reading them in or
 
 ---
 
-## Latest: the host passes on every core, and a lead in the CPU's idle state (2026-09-24, evening)
+## Latest: the frame around the network, taken apart again (2026-09-25, night)
+
+Five small steps on the daemon's own path, each byte-identical and each its own commit, and
+together **640x360 at 0.5 from 39-41 ms yesterday morning to ~35 ms; 1280x720 at 0.35 from
+70-73 to ~48; 1920x1080 at 0.3 from 106-122 to ~71**. README table re-measured with them:
+
+- the staged kernel for every K from 32 (`phase22`'s 128 predated its occupancy fix);
+- the five skip connections are their level buffers — no copies, 28-60 MiB less;
+- scale 0.5's area mean in C (`nr_area_mean`);
+- **the compact head on by default** — the host reads 4 of 16 columns, 4 ms at 1280x720;
+- **the features built as half, in the mapped input itself** (`ResidentFrame.input_view`):
+  no host copy and no GPU `to_half`. Every feature is a half value already, so this cannot
+  move one — `test_native_image.py` checks that before anything else;
+- **the history holds this frame's arrays instead of copies of them** — three fresh
+  multi-megabyte arrays a frame, and their page faults, gone.
+
+Measured and not kept, in `improve-fusions.md`: the bottleneck publishing straight into
+`deep`, the fused FFN's publish from a table (2.7x slower), window attention's bias hoisted or
+paired, and `encode8` returning a view. At 640x360 the graph is now 31 of the 35 ms.
+
+## The host passes on every core, and a lead in the CPU's idle state (2026-09-24, evening)
 
 **The passes around the network, at the output's resolution, are cheaper.** The temporal gate
 runs natively after all — its logit is half, so a 65536-entry table of NumPy's own sigmoid is
