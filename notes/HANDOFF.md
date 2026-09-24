@@ -21,21 +21,14 @@ cores; 1920x1080 at 0.3, 106-122 -> 77-82 with the cores**; 512x288 and 640x360 
 because there the graph is 33 ms of 36-39. README table
 re-measured: 1024x768 at 0.55 84 -> 75 ms, 1920x1080 at 0.55 196 -> 171.
 
-**A lead that needs root.** The 320x320 graph runs **32.1-32.7 ms with every core idle and
-27.3 with any process spinning on a P-core** — a bare `pause` loop does it — and 28.5-29.5 on
-an LP E-core, at the same 1950 MHz GPU clock throughout. So it is the package's idle state, not
-GPU clocks and not work the core does. Polling the fence from the waiting thread gets only
-0.5-1 ms of it, and spinning a core for the length of every graph is not a trade for a laptop,
-so nothing is kept. The next test needs root: hold a PM QoS latency limit open while the graph
-runs, and read the uncore frequency, which is 0400 here —
-
-```
-sudo python3 -c "import os,struct,time; f=os.open('/dev/cpu_dma_latency',os.O_WRONLY); os.write(f,struct.pack('i',50)); time.sleep(600)"
-sudo cat /sys/devices/system/cpu/intel_uncore_frequency/package_00_die_00/current_freq_khz
-```
-
-If a 50 us limit is worth the 15 % without a spinning core, the daemon can hold one when it
-is allowed to. Tried and not kept, in `improve-fusions.md`: weights stored as their E4M3 bytes
+**A lead, tested and closed.** Before a reboot, with zram in heavy use, the 320x320 graph ran
+**32.1-32.7 ms with every core idle and 27.3 with any process spinning on a P-core** — a bare
+`pause` loop did it — at the same 1950 MHz GPU clock. After a fresh boot the same spinner bought
+**5 %** (32.4 -> 30.7 ms), and a 50 us PM QoS latency limit (`/dev/cpu_dma_latency`, held by the
+owner as root) bought **nothing**: 32.3 ms idle, and it damped the spinner's gain to 0.7 ms. So
+it is not the package's deep C-states, it moves with the machine's state, and a core spinning for
+every graph is not worth 5 %. Nothing kept; the uncore frequency (0400 here) was never read.
+Tried and not kept, in `improve-fusions.md`: weights stored as their E4M3 bytes
 (exact, but a proxy put the prize at 0.14 ms a frame) and, again, register prefetch.
 
 ## The staged GEMM was on half its threads (2026-09-24, later)
