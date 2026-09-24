@@ -110,16 +110,18 @@ already have. See [Build](#build).
 
 ## What you need
 
-- An Intel GPU that exposes `VK_KHR_cooperative_matrix` with a `fp16 x fp16 -> fp32`
-  configuration. Developed and measured on **Arc 140V / Xe2, Mesa ANV**; an Arc B580
-  (discrete Battlemage) reports the same six configurations. A Vulkan device alone is not
-  enough, and the probe needs neither weights nor the rest of the build:
+- An Intel **Xe2** GPU: `VK_KHR_cooperative_matrix` with an `fp16 x fp16 -> fp32`
+  configuration of **M=8, N=16, K=16**, which every XMX kernel here is written for.
+  Developed and measured on **Arc 140V (Lunar Lake), Mesa ANV**; an Arc B580 (discrete
+  Battlemage) reports the same six configurations. **Arc A-series (Alchemist, Xe-HPG) does
+  not qualify**: its matrix units report 8x8x16, so these kernels do not run there. A Vulkan
+  device alone is not enough, and the probe needs neither weights nor the rest of the build:
 
   ```sh
   gcc -Iwork/vulkan-headers/include src/probe/coopmat_probe.c -o /tmp/probe -lvulkan
   /tmp/probe      # drop the -I if your distribution installs the Vulkan headers
   ```
-- A **discrete** Arc works too, and does not need resizable BAR: where the card's memory
+- A **discrete** Xe2 card (Battlemage, B570/B580) works too, and does not need resizable BAR: where the card's memory
   cannot be mapped, the graph keeps its operands there anyway and the host reaches them by
   copies. Turn resizable BAR on if you can — it is the faster of the two paths and Arc wants
   it for everything else — but it is no longer the difference between working and crawling.
