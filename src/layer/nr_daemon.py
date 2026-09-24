@@ -666,12 +666,14 @@ def process_connection(connection, backend, args):
             output[held] = colour[held]          # so a --dump shows what was actually sent
     connection.sendall(encoded)
     # After the interface restore, so what is carried forward is what the game was
-    # actually handed. A copy: `output[top:bottom, left:right]` is a view of the frame
-    # buffer that the next decode overwrites.
+    # actually handed.
     if live.temporal > 0:
-        args.history.keep(shot,
-                          np.array(output[top:bottom, left:right] if boxed else output),
-                          np.array(inner), np.array(colour))
+        # Kept as they are, not copied: each is this frame's own — decode, the resample and
+        # the composition all hand back fresh arrays, nothing writes them from here on, and
+        # History only reads what it holds. Three frame copies a frame were 0.4 ms at
+        # 640x360 and 2-3 at 1280x720.
+        args.history.keep(shot, output[top:bottom, left:right] if boxed else output,
+                          inner, colour)
     if args.dump:
         import image_io
         try:

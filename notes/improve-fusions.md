@@ -270,6 +270,12 @@ is now 9.4 ms + 196 ms per megapixel. Live, through the socket: **512x288 at 0.3
   at 320x320 or 1280x720: those passes were 7-10 us each, and a publishing epilogue sends the
   staged kernel through its stage instead of the direct store. Not kept (2026-09-25).
 
+- **The fused FFN's hidden-layer publish from a table.** `e4m3(gate(x))` depends only on
+  `half(x)`, so 65536 halves hold it exactly. Without the publish at all the kernel is 21-35 %
+  faster (983040 rows 5.8 -> 4.56 ms), which is what made it worth a try; looked up from a
+  table in the weights buffer it is 2.7x *slower* (15.9 ms) — sixteen scattered loads a lane
+  a chunk cost far more than the thirty instructions they replace. Not kept (2026-09-25).
+
 ## Left behind, deliberately
 
 - `window_attention_qkv.comp`: off by default in Codex's tree (`NR_FUSE_QKV_ATTENTION`) and
