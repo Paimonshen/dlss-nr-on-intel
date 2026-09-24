@@ -28,6 +28,14 @@ take. One pass now, the same adds in the same order, byte-identical (`test_nativ
 1280x720 at 0.5, 79-84 -> 73.** In the game at 1280x720 and scale 0.35 the threaded passes
 measured +18 % (`phase59`).
 
+**The staged kernel now takes every K from 32 up.** The threshold of 128 was `phase22`'s,
+measured when that kernel ran on half its threads and waited on its loads one at a time; since
+those fixes it wins at every depth it takes: **1 ms of the 320x320 graph (32.2 -> 31.2), 4 ms
+at 1280x720**, same bytes. Only the stem, K = 16, stays tiled. And the five skip connections
+are their level buffers now — the decoder writes `d1`-`d5`, so nothing had to be copied: the
+same bytes, 28-60 MiB less device memory. `frame_profile.py --calls` labels each GEMM with the
+kernel that ran it.
+
 **Deferred: an asynchronous live mode.** Overlapping the game, the layer and the daemon's CPU
 work with the graph, estimated from measured stages: **+7 % at 640x360, +18 % at 1280x720**,
 for one more frame of latency. The history is why it is so little: frame N+1's features need

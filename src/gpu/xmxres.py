@@ -141,6 +141,8 @@ def _load():
     lib.xmx_profile_each_count.restype = ctypes.c_uint
     lib.xmx_profile_each_ms.argtypes = [ctypes.c_uint]
     lib.xmx_profile_each_ms.restype = ctypes.c_double
+    lib.xmx_profile_each_kind.argtypes = [ctypes.c_uint]
+    lib.xmx_profile_each_kind.restype = ctypes.c_uint
     # The shader paths take an environment override so a variant can be measured
     # against the shipped one without editing the tree.
     spv = [os.environ.get(name) or str(ROOT / "work" / default)
@@ -425,6 +427,13 @@ def profile_each():
     device counter wrapped. What `profile_totals` sums away."""
     lib = _load()
     return [lib.xmx_profile_each_ms(i) for i in range(lib.xmx_profile_each_count())]
+
+
+def profile_each_kinds():
+    """The kind of every pass `profile_each` timed, in the same order: which family —
+    GEMM base, tiled or staged, unary, row — actually ran it."""
+    lib = _load()
+    return [lib.xmx_profile_each_kind(i) for i in range(lib.xmx_profile_each_count())]
 
 
 def profile_totals():

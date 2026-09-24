@@ -384,14 +384,10 @@ class ResidentFrame:
                                source_half=True, target_half=True)
                 submit()
             keep(f"l{level}", value, h * w * channels, (1, h, w, channels), np.float16)
-            skips[level] = self.buffer(f"skip{level}", h * w * channels, np.float16)
-            if batched or staged:
-                begin()
-                rt.copy(value, skips[level], h * w * channels * 2)
-                submit()
-            else:
-                skips[level].view(np.float16)[:h * w * channels] = \
-                    value.view(np.float16)[:h * w * channels]
+            # The level's own buffer is its skip. The decoder writes d1-d4 and nothing
+            # writes l1-l4 again in the frame, so the copy it used to read from moved the
+            # same bytes into a second buffer for nothing.
+            skips[level] = value
 
             block = self.block(transition, heads)
             edge = self.edge(transition, "down")
@@ -422,14 +418,9 @@ class ResidentFrame:
                            source_half=True, target_half=True)
             submit()
         keep("l5", value, h * w * channels, (1, h, w, channels), np.float16)
-        split_skip = self.buffer("split_skip", h * w * channels, np.float16)
-        if batched or staged:
-            begin()
-            rt.copy(value, split_skip, h * w * channels * 2)
-            submit()
-        else:
-            split_skip.view(np.float16)[:h * w * channels] = \
-                value.view(np.float16)[:h * w * channels]
+        # l5 itself is the skip, as for the levels above: the decoder input merge below
+        # writes d5 rather than l5, which is what the copy was protecting.
+        split_skip = value
 
         gh, gw, gchannels = self.levels[6]
         deep = self.buffer("l6", gh * gw * gchannels, np.float16)
@@ -462,6 +453,7 @@ class ResidentFrame:
                     scratch.out.view()[:tokens * gchannels]
 
         # the decoder input merge, then the split family again
+        value = self.buffer("d5", h * w * channels, np.float16)
         begin()
         R.record_upsample_merge(rt, self.decoder_input, self.transition_scratch(
             h * w * channels), deep, split_skip, value, gh, gw, h, w, gchannels, channels,
