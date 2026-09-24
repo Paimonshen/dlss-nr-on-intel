@@ -65,7 +65,7 @@ what goes is skin detail or the game's own sharpening has not been measured.
 Across all of them, what the pass adds in one place it takes from another. **Whether any of
 it is better is taste, not measurement** — it is photographic where the games are stylised.
 
-These are stills. Live, Tekken 7 runs at **10.5 fps at 640x360**.
+These are stills. Live, Tekken 7 runs at **25 fps at 640x360**.
 
 <sub>Tekken 7 © Bandai Namco Entertainment. Dead or Alive 5 Last Round © Koei Tecmo Games.
 Mortal Kombat 1 © Warner Bros. Entertainment Inc.; its guest characters belong to their
@@ -378,7 +378,7 @@ Measured through the socket on 2026-09-24 by `python3 src/bench/live_rates.py` �
 
 Medians of three runs with swap empty, which agreed within 7 %. On 2026-09-23, with 5.5 GiB in zram and the kernel's memory-pressure figures rising, 1920x1080 ran anywhere from 322 to 463 ms: if that row is much slower for you, look at swap before anything else.
 
-That is the daemon's own cost with nothing else on the GPU. A game adds its own frame to it: **Tekken 7** measured **10.5 fps at 640x360** in a live fight (`notes/phase59`).
+That is the daemon's own cost with nothing else on the GPU. A game adds its own frame to it: **Tekken 7** ran at **25 fps at 640x360** in a live session on 2026-09-24, against 10.5 fps nine days earlier (`notes/phase59`).
 
 <!-- rates:end -->
 
