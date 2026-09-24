@@ -247,7 +247,11 @@ is now 9.4 ms + 196 ms per megapixel. Live, through the socket: **512x288 at 0.3
 - **Weights stored in 32-column slabs**, so a workgroup streams its K x 32 block instead of
   64 bytes from every 2 KB row: identical results, 14 % on 64x1024x4096 and 10 % on
   64x4096x1024, nothing on the rest — about 0.6 ms at 320x320 for a layout change at every
-  weight's upload and every GEMM path. Not taken.
+  weight's upload and every GEMM path. Not taken. Re-measured 2026-09-25 on the fixed staged
+  kernel: 4096x1024 -17 %, 3072x1024 -14 %, 1024x1024 -3 %, 1024x4096 noise either way — and
+  the QKV projection, one of the two that gain, cannot always take the staged kernel (its
+  epilogue wants whole 64-row blocks; at 384x384 the bottleneck is 144 rows), so its slab
+  weights would need a second, row-major copy. Without it, about 0.2 ms. Still not taken.
 - **The cost of a pass itself** is small: 1.2 us for an empty dependent pass, 4 us for 64k
   elements. The 577 passes of a frame are under a millisecond of it; at 320x320 the time is
   the deep levels' GEMMs, latency-bound on 32-200 workgroups. (Measured again later with a

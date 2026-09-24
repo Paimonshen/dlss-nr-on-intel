@@ -867,8 +867,8 @@ What is *not* claimed:
   a daemon runs the model, and the result goes back into the swapchain. Proven in **Dead
   or Alive 5** (32-bit D3D9 through DXVK) with faces enhanced and measured, and the layer
   proven to attach under **VKD3D-Proton** on a 64-bit D3D12 title. Photo mode is triggered
-  by a file; live mode (`NR_LAYER_LIVE=N`) runs continuously: 36.7 ms a frame at 512x288
-  for the daemon alone (27 fps, `nr_knobs.RATES`, 2026-09-24). In a game it shares the GPU
+  by a file; live mode (`NR_LAYER_LIVE=N`) runs continuously: 35-36 ms a frame at 512x288
+  and 640x360 for the daemon alone (28 fps, `nr_knobs.RATES`, 2026-09-25). In a game it shares the GPU
   with the game's own rendering — Tekken 7 ran 25 fps at 640x360 on 2026-09-24, against 10.5 on 2026-09-16, before the
   fusions (`phase59`). `src/layer/`, `notes/phase34-doa5.md`, `phase41`, `phase47`.
 - **HDR is handled**: `src/ref/nr_display.py`, the recovered display codec — encode a
