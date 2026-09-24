@@ -78,7 +78,28 @@ which covers the compute, task and mesh callers at once. It arrived with MR !289
 as of 2026-09-24; no issue or MR about it turned up. It bites small workgroups — a 32- or
 64-lane workgroup under 1 KB, a reduction with a few hundred bytes of shared memory, say —
 and can bite any workgroup whose declaration falls between two allocation sizes. The same code serves Xe-HPG (Alchemist, Meteor Lake)
-with its own tables; untested there. **Not reported upstream**; that is the owner's call.
+with its own tables; untested there.
+
+**The fix, built and tested** (2026-09-24, after the system update to 26.2.3). Mesa 26.2.3
+from the release tarball — its SHA-256 the one in Arch's PKGBUILD — built for the Intel
+Vulkan driver only, with Arch's `b_ndebug=true`, and loaded from the build tree through
+`VK_DRIVER_FILES`, the system driver untouched. Unpatched, it reproduces the system driver
+at all fourteen sizes within 0.5 %. With the one-line change it programs a 64K partition up
+to 1 KB and 128K from 1.25 KB, and every size up to 2 KB runs at the full rate: 256 B
+41.4 -> 11.0 ms, 512 B 21.0 -> 10.9, 1.5 KB 14.2 -> 11.1; 3 and 4 KB unchanged, being the
+cap. On this project it changes nothing: head hashes identical, frame time within noise,
+`make test` green in both memory modes on the patched driver.
+
+**It has a cost, and a report has to say so.** A larger partition leaves less L1. The
+pointer chase at 256 B ran 2.33 ms against 3.62 patched — exactly what its 1 KB version
+runs anyway: for L1-bound kernels with very little shared memory the undersized partition
+was an accidental win.
+
+`src/probe/slm_occupancy.c` and `.comp` are a standalone reproducer — Vulkan only, the
+shared array sized by specialization constant — that shows the same table on the system
+driver (64-256 B at 3.8-4.0x the 1 KB time) and a flat one on the patched build. An issue
+draft with the patch is kept outside the repository, in `work/mesa-26.2.3/ISSUE.md`;
+**not filed** — that needs the owner's account on gitlab.freedesktop.org.
 
 ## The cap: the staged GEMM at half its threads
 

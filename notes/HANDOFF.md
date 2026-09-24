@@ -22,7 +22,7 @@ Verified in the source (26.2.2, `genX_shader.c:1183`; unchanged in 26.2.3 and `m
 the driver's own decoded dispatches (`INTEL_DEBUG=bat`: the preferred partition is the only
 field that differs between a 256 B and a 1 KB pipeline) and at fourteen sizes on the
 hardware. **It costs this frame nothing measurable** — the base GEMM at 512 B, the one kernel
-it touches, is no faster padded to 1 KB. Not reported upstream; that is the owner's call.
+it touches, is no faster padded to 1 KB.
 
 **The cap.** 128 KB between a core's workgroups, on any driver. `gemm_staged.comp` is 128
 lanes and declared 15.5 KB: eight workgroups a core, half the threads. **Declare exactly an
@@ -45,7 +45,12 @@ Measured and not kept: the softmax pipeline at 1 KB (0.4 ms), the base GEMM padd
 it and shared memory are one array, and at 2 KB x 64 the partition is all of it — but none
 of these kernels lives on it.
 
-Not done: telling Mesa. The fix is one line; reporting it is the owner's call.
+**The fix is built and tested, not filed.** Mesa 26.2.3 rebuilt with the one line
+(`work/mesa-26.2.3/`, loaded through `VK_DRIVER_FILES`, system driver untouched): every size
+up to 2 KB at the full rate, this project unchanged and green, and one cost measured — a
+256 B pointer chase loses the L1 the small partition had left it, 2.33 -> 3.62 ms. The
+issue draft and the standalone reproducer (`src/probe/slm_occupancy.*`) are ready; filing
+needs the owner's account.
 
 ## 48 % of the frame was passes, shared memory and pads (2026-09-24)
 
