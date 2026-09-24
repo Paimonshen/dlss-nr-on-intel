@@ -45,6 +45,12 @@ Measured and not kept: the softmax pipeline at 1 KB (0.4 ms), the base GEMM padd
 it and shared memory are one array, and at 2 KB x 64 the partition is all of it — but none
 of these kernels lives on it.
 
+**And the staged GEMM's loader was waiting on its own loads.** At the live extent the deep
+GEMMs are neither short of blocks (a 64x16 build doubled them: no change) nor of K steps
+(BK = 64: slower): each load sat in its own branch and was waited for before the next. Issuing
+the step's loads together takes the bottleneck's 64x1024x4096 from 0.27 to 0.22 ms and a frame
+1 ms faster at 320x320, 3 ms at 720p, bit-identical. `notes/improve-fusions.md`.
+
 **The fix is built and tested, not filed.** Mesa 26.2.3 rebuilt with the one line
 (`work/mesa-26.2.3/`, loaded through `VK_DRIVER_FILES`, system driver untouched): every size
 up to 2 KB at the full rate, this project unchanged and green, and one cost measured — a

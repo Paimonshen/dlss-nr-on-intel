@@ -65,7 +65,7 @@ disproved.
 | `phase20-machine-limits.md` | 70-91 GB/s of 136.5, the clock ceiling held, 64 XMX engines |
 | `phase26-the-register-ceiling.md` | every engine busy, each ~90 % idle; the register file is the wall |
 | `phase45-frame-profile.md` | per-pass timings; everything that moves data is at the memory ceiling — which did not make the graph finished |
-| `improve-fusions.md` | residuals, attention and its head merge, the glue, the narrow feed-forward folded into fewer passes; window attention in 2 KB; what was measured and dropped |
+| `improve-fusions.md` | residuals, attention and its head merge, the glue, the narrow feed-forward folded into fewer passes; window attention in 2 KB; the staged loader's loads issued together; what was measured and dropped |
 | `improve-shared-memory.md` | a Mesa quirk — the core's shared-memory partition sized from the declared bytes, each workgroup's share rounded up — that makes some smaller declarations slower and costs this frame nothing; and the 128 KB cap that had the staged GEMM on half its threads, 10 % of a frame |
 | `improve-qkv-epilogue.md` | Q/K normalised in the QKV projection's own epilogue, 22 %; all fusions together 38 %; why joint QKV was slower; shared memory comes in powers of two; measure with empty swap |
 | `phase21`, `phase22`, `phase23`, `phase31`, `phase33` | tiling, staging, integer weights, the accumulator, OpenCL — all measured, all closed |

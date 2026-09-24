@@ -177,6 +177,24 @@ whose A goes through shared memory.
 the tiled one and its partition. Paired, whole frame: 1280x720 240.1 -> 231.4 ms, 1920x1080
 524.7 -> 511.8, 320x320 41.7 -> 41.0.
 
+## The staged GEMM's loads, one at a time (2026-09-24, later)
+
+At the live extent the deepest small-M GEMM, the bottleneck's 64x1024x4096, makes 32 blocks of
+64x32 for the machine's 128 places and runs 128 K steps of about 2.1 us each. Two ways to
+shorten it changed nothing, which is what located the cause:
+
+- **twice the blocks** — a 64x16 build of the staged kernel, routed to the GEMMs with few
+  blocks and bit-identical to the 64x32 one on 44 kernel cases: the call stayed at 0.275 ms;
+- **half the steps** — BK = 64: slower, 0.28 -> 0.31 ms, as the entry below already said.
+
+What does move it is the loader. Each of its loads sits in its own `window_a` / `wide_a` branch,
+and the compiler waits for one before issuing the next, so a step costs two or three memory
+latencies in a row; with the machine full that hides behind other workgroups, with 32 blocks
+it is the time. The common case — A read straight, B not transposed, both aligned — now issues
+every load of the step before storing any: 64x1024x4096 0.27 -> 0.22 ms, and paired whole
+frames at 320x320 39.5 -> 38.5 ms over six rounds (faster in five), 1280x720 199.6 -> 196.3
+over four (faster in all). The same values land in the same places: bit-identical.
+
 ## Tried and dropped (2026-09-24)
 
 - **Register-prefetch pipelining in the staged GEMM** — the next K block's global loads
@@ -188,7 +206,14 @@ the tiled one and its partition. Paired, whole frame: 1280x720 240.1 -> 231.4 ms
 - **A 64-deep K block in the staged GEMM**, for half the trips round the K loop and its
   barriers: slower everywhere, the deepest small-M shapes included (64x4096x1024 0.21 ->
   0.31 ms), and 81 -> 119 ms of staged GEMM at 720p. The barriers are not what those GEMMs
-  wait on.
+  wait on. Re-measured by mistake later the same day, with one more thing: as a drop-in it
+  changes the frame, because the window-gathered projections take the staged kernel at any
+  depth and at level 0 their K is 32.
+- **Eight subgroups to a block instead of four**, each 8x32, for twice the threads: slower
+  everywhere — staged GEMM 14.9 -> 16.7 ms at 320x320 and 71.5 -> 87.8 at 720p. Threads were
+  never short; the blocks' serial K loops are what the time is made of.
+- **64x16 blocks** for the GEMMs with too few 64x32 ones: bit-identical, and no faster where it
+  was aimed (above); used everywhere, 10 ms slower at 720p.
 - **Weights stored in 32-column slabs**, so a workgroup streams its K x 32 block instead of
   64 bytes from every 2 KB row: identical results, 14 % on 64x1024x4096 and 10 % on
   64x4096x1024, nothing on the rest — about 0.6 ms at 320x320 for a layout change at every
