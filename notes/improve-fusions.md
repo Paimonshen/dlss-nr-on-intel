@@ -214,6 +214,12 @@ over four (faster in all). The same values land in the same places: bit-identica
   never short; the blocks' serial K loops are what the time is made of.
 - **64x16 blocks** for the GEMMs with too few 64x32 ones: bit-identical, and no faster where it
   was aimed (above); used everywhere, 10 ms slower at 720p.
+- **The window-gathered A's loads issued together too**, as in the section above:
+  bit-identical, and slower — 1.1 ms at 320x320 (all six pairs) and 1.3 ms at 720p. Those
+  projections are at the memory ceiling already: at level 0 of a 720p frame one reads a
+  120 MB float32 image and writes 180 MB of Q, K and V in 4.2 ms, 71 GB/s. A half copy of the
+  image would not help either — the output projection's residual still needs the float32,
+  so writing the copy costs what reading it saves.
 - **Weights stored in 32-column slabs**, so a workgroup streams its K x 32 block instead of
   64 bytes from every 2 KB row: identical results, 14 % on 64x1024x4096 and 10 % on
   64x4096x1024, nothing on the rest — about 0.6 ms at 320x320 for a layout change at every
