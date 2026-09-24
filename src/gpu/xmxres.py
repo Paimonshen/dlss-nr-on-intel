@@ -463,7 +463,10 @@ class Runtime:
         self.fuse_qk = os.environ.get("NR_FUSE_QK", "1") != "0"
         self.batch_ffn = os.environ.get("NR_BATCH_FFN", "1") != "0"
         self.input_fp16 = os.environ.get("NR_INPUT_FP16", "0") != "0"
-        self.compact_head = os.environ.get("NR_COMPACT_HEAD", "0") != "0"
+        # On since 2026-09-25: the last GEMM stores only the four useful head columns, so
+        # the host reads 4 of 16 — 3.6 -> 0.75 ms at 1280x720, 4 ms of the frame, the same
+        # bytes (notes/improve-compact-io.md). NR_COMPACT_HEAD=0 is the old sixteen.
+        self.compact_head = os.environ.get("NR_COMPACT_HEAD", "1") != "0"
         self.joint_qkv = os.environ.get("NR_JOINT_QKV", "0") != "0"
         # ProjectsCodex's fusions (notes/improve-fusions.md). On by default where they
         # were measured exact; each keeps its two-pass path behind a switch.

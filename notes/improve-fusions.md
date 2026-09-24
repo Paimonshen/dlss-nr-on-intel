@@ -264,6 +264,12 @@ is now 9.4 ms + 196 ms per megapixel. Live, through the socket: **512x288 at 0.3
   process buys — whether it paused between polls, did integer work, or polled every 1, 42 or
   680 us. Not kept.
 
+- **The bottleneck blocks publishing straight into `deep`** — the E4M3 pass and the to_half
+  after each global block folded into its closing residual, 16 passes fewer. Bit-identical,
+  a padded bottleneck included (1920x1088, 2040 tokens on 2048 rows), and no measurable change
+  at 320x320 or 1280x720: those passes were 7-10 us each, and a publishing epilogue sends the
+  staged kernel through its stage instead of the direct store. Not kept (2026-09-25).
+
 ## Left behind, deliberately
 
 - `window_attention_qkv.comp`: off by default in Codex's tree (`NR_FUSE_QKV_ATTENTION`) and
