@@ -21,6 +21,19 @@ cores; 1920x1080 at 0.3, 106-122 -> 77-82 with the cores**; 512x288 and 640x360 
 because there the graph is 33 ms of 36-39. README table
 re-measured: 1024x768 at 0.55 84 -> 75 ms, 1920x1080 at 0.55 196 -> 171.
 
+**Scale 0.5's area mean is in C too.** At exactly half, `resample` took NumPy's five strided
+passes — a copy, three adds, a divide — 1.5 ms of a 640x360 frame, and again inside the history
+take. One pass now, the same adds in the same order, byte-identical (`test_native_image.py`, and
+`test_daemon.py`'s check against `mean((1, 3))`): **640x360 at 0.5, 39.3-41.0 -> 36.5-38.1 ms;
+1280x720 at 0.5, 79-84 -> 73.** In the game at 1280x720 and scale 0.35 the threaded passes
+measured +18 % (`phase59`).
+
+**Deferred: an asynchronous live mode.** Overlapping the game, the layer and the daemon's CPU
+work with the graph, estimated from measured stages: **+7 % at 640x360, +18 % at 1280x720**,
+for one more frame of latency. The history is why it is so little: frame N+1's features need
+frame N's composed output, so only the decode, the downscale, the encode and the socket can
+move off the critical path. The owner deferred it until nothing else is left to take.
+
 **A lead, tested and closed.** Before a reboot, with zram in heavy use, the 320x320 graph ran
 **32.1-32.7 ms with every core idle and 27.3 with any process spinning on a P-core** — a bare
 `pause` loop did it — at the same 1950 MHz GPU clock. After a fresh boot the same spinner bought

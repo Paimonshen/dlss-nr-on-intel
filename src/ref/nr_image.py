@@ -49,6 +49,9 @@ def _library():
     lib.nr_resize_axis.argtypes = [ptr, stride, stride, stride, size, size, size,
                                   C.c_int, ptr, ptr, ptr, ptr]
     lib.nr_resize_axis.restype = None
+    lib.nr_area_mean.argtypes = [ptr, stride, stride, stride, size, size, size, size, size,
+                                 ptr]
+    lib.nr_area_mean.restype = None
     lib.nr_compose.argtypes = [ptr, stride, stride, stride, ptr, stride, stride, stride,
                               size, size, C.c_float, ptr]
     lib.nr_compose.restype = None
@@ -200,6 +203,24 @@ def _axis_plan(extent, count):
     for array in (low, high, weight):
         array.flags.writeable = False
     return low, high, weight
+
+
+def area_mean(image, factors):
+    """`nr_daemon.resample`'s area mean for a downscale by whole factors, byte-identical
+    to its NumPy adds; `None` without the library."""
+    lib = library()
+    if lib is None:
+        return None
+    source = np.require(image, dtype=np.float32, requirements=['A'])
+    fy, fx = (int(f) for f in factors)
+    if (source.ndim != 3 or min(source.shape) < 1 or fy < 1 or fx < 1
+            or source.shape[0] % fy or source.shape[1] % fx):
+        raise ValueError('area_mean expects nonempty HWC whose extent the factors divide')
+    height, width = source.shape[0] // fy, source.shape[1] // fx
+    output = np.empty((height, width, source.shape[2]), np.float32)
+    lib.nr_area_mean(source.ctypes.data, *_strides(source), height, width, source.shape[2],
+                     fy, fx, output.ctypes.data)
+    return output
 
 
 def bilinear(image, size):

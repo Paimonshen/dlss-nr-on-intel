@@ -116,6 +116,33 @@ void nr_features(const float *colour, ptrdiff_t sy, ptrdiff_t sx, ptrdiff_t sc,
     }
 }
 
+/* The area mean of a downscale by whole factors — `nr_daemon.resample`'s other branch,
+ * which averages instead of sampling so the network is not handed aliasing to enhance.
+ * The order is that NumPy code's: a block's first sample, each other one added in
+ * row-major order, then one division by the count. */
+void nr_area_mean(const float *source, ptrdiff_t sy, ptrdiff_t sx, ptrdiff_t sc,
+                  size_t height, size_t width, size_t channels, size_t fy, size_t fx,
+                  float *output)
+{
+    float count = (float)(fy * fx);
+    #pragma omp parallel for schedule(static)
+    for (size_t y = 0; y < height; ++y) {
+        for (size_t x = 0; x < width; ++x) {
+            const float *block = source + (ptrdiff_t)(y * fy) * sy + (ptrdiff_t)(x * fx) * sx;
+            float *out = output + (y * width + x) * channels;
+            for (size_t c = 0; c < channels; ++c) {
+                const float *first = block + (ptrdiff_t)c * sc;
+                float total = first[0];
+                for (size_t dy = 0; dy < fy; ++dy)
+                    for (size_t dx = 0; dx < fx; ++dx)
+                        if (dy || dx)
+                            total += first[(ptrdiff_t)dy * sy + (ptrdiff_t)dx * sx];
+                out[c] = total / count;
+            }
+        }
+    }
+}
+
 /* One axis at a time: the intermediate is deliberately rounded to FP32 before
  * the second axis. Coordinates/weights come from the unchanged NumPy formula.
  * Signed strides permit padded crops and reversed views without another copy.

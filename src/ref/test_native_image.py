@@ -86,6 +86,11 @@ def codec_checks(rng):
          np.frombuffer(nr_image.encode8(image, raw, 1), np.uint8), reference)
 
 
+def _numpy_resample(image, size):
+    with numpy_only():
+        return nr_daemon.resample(image, size)
+
+
 def resize_checks(rng):
     source = rng.random((57, 91, 3), dtype=np.float32)
     for size in ((31, 50), (120, 200), (57, 33), (57, 91)):
@@ -107,9 +112,23 @@ def resize_checks(rng):
         reference = nr_daemon.resample(crop, (25, 41))
         averaged = nr_daemon.resample(crop, (24, 44))
     same("resize a padded crop", nr_image.bilinear(crop, (25, 41)), reference)
-    check("the area mean is not bilinear, and stays NumPy's",
+    check("the area mean is not bilinear",
           not np.array_equal(nr_image.bilinear(crop, (24, 44)), averaged),
           "48x88 -> 24x44 divides evenly, so `resample` averages instead of sampling")
+    # The area mean itself, natively, against the NumPy adds it transcribes: the live
+    # extent's 2x2, uneven factors, four channels, tiny and large values, and the same
+    # reversed view and padded crop as above.
+    for shape, factors, scale in (((360, 640, 3), (2, 2), 1.0), ((90, 160, 3), (3, 2), 1e-3),
+                                  ((96, 128, 4), (4, 4), 255.0), ((64, 96, 3), (1, 2), 1.0)):
+        frame = (rng.random(shape, dtype=np.float32) * np.float32(scale))
+        size = (shape[0] // factors[0], shape[1] // factors[1])
+        with numpy_only():
+            reference = nr_daemon.resample(frame, size)
+        same(f"area mean {shape[1]}x{shape[0]} by {factors[1]}x{factors[0]}",
+             nr_image.area_mean(frame, factors), reference)
+    same("area mean of a reversed view", nr_image.area_mean(whole[..., 2::-1], (2, 2)),
+         _numpy_resample(whole[..., 2::-1], (32, 48)))
+    same("area mean of a padded crop", nr_image.area_mean(crop, (2, 2)), averaged)
 
 
 def feature_checks(rng):
