@@ -12,6 +12,7 @@
  */
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 static float half(float value) { return (float)(_Float16)value; }
 
@@ -142,10 +143,13 @@ void nr_resize_axis(const float *source, ptrdiff_t sy, ptrdiff_t sx, ptrdiff_t s
 
 /* The temporal composition, which this tree has and the other does not.
  *
- * `gate` is the model's own history weight, already through its sigmoid in NumPy and
- * already multiplied by the confidence knob. It arrives rather than being computed here
- * because `expf` and NumPy's float32 exponential do not agree in the last bit, and the
- * contract for all of this is byte-identical output, not nearly.
+ * The model's own history weight comes from `table`: NumPy's sigmoid evaluated once on
+ * every half value, indexed here by the half logit's sixteen bits. `expf` and NumPy's
+ * float32 exponential do not agree in the last bit, and the contract for all of this is
+ * byte-identical output, not nearly — but the logit is rounded to half before the
+ * sigmoid, so there are only 65536 inputs and NumPy can own every one of them.
+ * `confidence` then scales it, as NumPy does. With no table, `gate` carries the weight
+ * already computed, confidence and all.
  *
  * `previous` is the game's own frame from the present before, or NULL. Where it is
  * unchanged the history is right for that pixel by construction, so the gate gets a
@@ -157,6 +161,7 @@ void nr_compose_temporal(const float *head, ptrdiff_t hy, ptrdiff_t hx, ptrdiff_
                          const float *history, ptrdiff_t ry, ptrdiff_t rx, ptrdiff_t rc,
                          const float *previous, ptrdiff_t py, ptrdiff_t px, ptrdiff_t pc,
                          const float *gate, ptrdiff_t gy, ptrdiff_t gx,
+                         const float *table, float confidence,
                          const float *mask, ptrdiff_t my, ptrdiff_t mx,
                          size_t height, size_t width, float intensity,
                          float scale, float hold, float slope, float *output)
@@ -166,7 +171,20 @@ void nr_compose_temporal(const float *head, ptrdiff_t hy, ptrdiff_t hx, ptrdiff_
             const float *h = head + (ptrdiff_t)y * hy + (ptrdiff_t)x * hx;
             const float *rgb = colour + (ptrdiff_t)y * sy + (ptrdiff_t)x * sx;
             const float *was = history + (ptrdiff_t)y * ry + (ptrdiff_t)x * rx;
-            float alpha = gate[(ptrdiff_t)y * gy + (ptrdiff_t)x * gx];
+            float alpha;
+            if (table) {
+                /* The model's gate looked up rather than recomputed: `nr_frame.gate_table`
+                 * holds NumPy's own expression evaluated on every half value, so the exp
+                 * that kept the gate in NumPy is inside the table, and the rounding to half
+                 * here is the one `half` does. Then the confidence, as NumPy applies it. */
+                _Float16 logit = (_Float16)h[3 * hc];
+                uint16_t bits;
+                memcpy(&bits, &logit, sizeof bits);
+                alpha = table[bits];
+                if (confidence != 1.0f) alpha *= confidence;
+            } else {
+                alpha = gate[(ptrdiff_t)y * gy + (ptrdiff_t)x * gx];
+            }
             if (previous) {
                 const float *before = previous + (ptrdiff_t)y * py + (ptrdiff_t)x * px;
                 float moved = 0.0f;
@@ -182,6 +200,7 @@ void nr_compose_temporal(const float *head, ptrdiff_t hy, ptrdiff_t hx, ptrdiff_
                 float floored = moved * slope + hold;
                 if (floored < 0.0f) floored = 0.0f;
                 if (floored > hold) floored = hold;
+                if (floored > 1.0f) floored = 1.0f;     /* `compose` clips the floor to [0, 1] */
                 floored *= scale;
                 if (floored > alpha) alpha = floored;
             }

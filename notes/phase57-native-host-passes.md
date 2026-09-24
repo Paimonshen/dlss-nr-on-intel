@@ -34,6 +34,17 @@ passed in rather than recomputed: NumPy evaluates `moved * slope + hold`, and
 `clip(1 - moved * 255 / ramp, 0, 1) * hold` is the same value by algebra and a different
 one in float32.
 
+> **The gate half of that no longer holds, 2026-09-24.** The logit is rounded to half
+> before the sigmoid, so the gate has 65536 possible inputs: `nr_frame.gate_table`
+> evaluates NumPy's own expression on every one of them once, and `nr_compose_temporal`
+> indexes it by the half's sixteen bits. The exponential is still NumPy's, so the
+> contract still holds — `test_nr_model.py` checks the table against the formula on all
+> 65536, `test_native_image.py` the whole native path against NumPy's. The floor went
+> native with it, from the game's previous frame, so the daemon no longer builds it either.
+> Paired on the daemon's own path over 48 frames of a moving sequence with repeats, answers
+> byte-identical: **1280x720 at scale 0.35, 70-73 -> 60-61 ms**; at 640x360, a quarter of
+> the pixels, within noise.
+
 ## Measured
 
 Four consecutive DoA5 frames, 1024x768 with a 1024x576 active region, scale 0.55, on

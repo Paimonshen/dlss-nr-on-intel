@@ -292,10 +292,11 @@ because the graph is 185 ms of it and untouched. `notes/phase57`.
 
 Three things worth carrying forward:
 
-- **The gate and the floor's constant stay in NumPy.** `expf` and NumPy's float32
-  exponential disagree in the last bit, and `clip(1 - moved * 255 / ramp, 0, 1) * hold` is
+- **The floor's constant stays in NumPy**: `clip(1 - moved * 255 / ramp, 0, 1) * hold` is
   the same value as `moved * slope + hold` by algebra and a different one in float32. The
-  contract is byte-identical, not nearly.
+  contract is byte-identical, not nearly. *The gate stayed there too, for `expf`, until
+  2026-09-24: its logit is half, so a 65536-entry table of NumPy's own sigmoid runs it in C
+  bit-exactly (`phase57`).*
 - **`active_region` then became the largest host pass** — 21 ms, reducing the whole frame
   twice to find bars that never move. `Letterbox` finds them once and afterwards checks
   eight lines. 0.2 ms.
