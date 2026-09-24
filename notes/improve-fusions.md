@@ -276,6 +276,13 @@ is now 9.4 ms + 196 ms per megapixel. Live, through the socket: **512x288 at 0.3
   table in the weights buffer it is 2.7x *slower* (15.9 ms) — sixteen scattered loads a lane
   a chunk cost far more than the thirty instructions they replace. Not kept (2026-09-25).
 
+- **Window attention's bias loaded earlier or in pairs.** All sixteen of a lane's bias values
+  loaded before the QK multiply: 5-28 % slower (register pressure). Read as `vec2` pairs,
+  eight loads instead of sixteen: level with the scalar loads, 3 % slower at 1600 batches.
+  The bias loads are not what this kernel waits on. Not kept (2026-09-25).
+- **`encode8` handing back a view instead of `tobytes()`**: a frame's copy fewer, and no
+  measurable change at 640x360, 1280x720 or 1920x1080. Not kept.
+
 ## Left behind, deliberately
 
 - `window_attention_qkv.comp`: off by default in Codex's tree (`NR_FUSE_QKV_ATTENTION`) and
