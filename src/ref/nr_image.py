@@ -40,6 +40,10 @@ def _library():
     lib.nr_features.argtypes = [ptr, stride, stride, stride, ptr, stride, stride, stride,
                                 ptr, ptr, size, size, ptr, ptr, ptr]
     lib.nr_features.restype = None
+    lib.nr_features_half.argtypes = lib.nr_features.argtypes
+    lib.nr_features_half.restype = None
+    lib.nr_to_half.argtypes = [ptr, size, ptr]
+    lib.nr_to_half.restype = None
     lib.nr_compose_temporal.argtypes = [
         ptr, stride, stride, stride, ptr, stride, stride, stride,
         ptr, stride, stride, stride, ptr, stride, stride, stride,
@@ -110,7 +114,7 @@ def compose(head, colour, intensity):
     return output
 
 
-def features(colour, rows, columns, noise, controls, history=None):
+def features(colour, rows, columns, noise, controls, history=None, out=None):
     lib = library()
     if lib is None:
         return None
@@ -131,13 +135,37 @@ def features(colour, rows, columns, noise, controls, history=None):
         history = np.require(history, dtype=np.float32, requirements=['A'])
         if history.shape != colour.shape:
             raise ValueError('history must match the colour it stands beside')
-    output = np.empty((height, width, 16), np.float32)
-    lib.nr_features(colour.ctypes.data, *_strides(colour),
-                    history.ctypes.data if history is not None else None,
-                    *(_strides(history) if history is not None else (0, 0, 0)),
-                    rows.ctypes.data, columns.ctypes.data, height, width,
-                    noise.ctypes.data, controls.ctypes.data, output.ctypes.data)
+    if out is None:
+        output = np.empty((height, width, 16), np.float32)
+    else:
+        # `out` is where the graph reads its input from, float32 or half: built in place,
+        # there is nothing left to copy (`ResidentFrame.input_view`)
+        output = out
+        if (output.shape != (height, width, 16) or not output.flags.c_contiguous
+                or output.dtype not in (np.float32, np.float16)):
+            raise ValueError('out must be a C-contiguous (height, width, 16) float32 or '
+                             'float16 array')
+    build = lib.nr_features_half if output.dtype == np.float16 else lib.nr_features
+    build(colour.ctypes.data, *_strides(colour),
+          history.ctypes.data if history is not None else None,
+          *(_strides(history) if history is not None else (0, 0, 0)),
+          rows.ctypes.data, columns.ctypes.data, height, width,
+          noise.ctypes.data, controls.ctypes.data, output.ctypes.data)
     return output
+
+
+def to_half(source, target):
+    """float32 `source` into the float16 `target`, rounding to nearest even; `None`
+    without the library."""
+    lib = library()
+    if lib is None:
+        return None
+    source = np.require(source, dtype=np.float32, requirements=['C', 'A'])
+    if (target.dtype != np.float16 or not target.flags.c_contiguous
+            or target.size != source.size):
+        raise ValueError('to_half needs a C-contiguous float16 target of the same size')
+    lib.nr_to_half(source.ctypes.data, source.size, target.ctypes.data)
+    return target
 
 
 def compose_temporal(head, colour, history, previous, gate, mask, *, intensity,

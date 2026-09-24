@@ -581,8 +581,13 @@ def process_connection(connection, backend, args):
     shot = (width, height, vk_format, top, bottom, left, right, live.profile)
     history_inner, history_full, history_pixels = args.history.take(
         shot, inner, live.cut_limit if live.temporal > 0 else -1.0)
-    features = nr_frame.build_features(inner, geometry=geometry, history=history_inner,
-                                       **nr_frame.PROFILES[live.profile])
+    # Built in the graph's own mapped input where the backend offers it, so nothing is
+    # copied on the way in.
+    input_view = getattr(backend, "input_view", None)
+    features = nr_frame.build_features(
+        inner, geometry=geometry, history=history_inner,
+        out=input_view(geometry.network_height, geometry.network_width) if input_view else None,
+        **nr_frame.PROFILES[live.profile])
     head = geometry.crop(backend.run_features(features))
     if head.shape[:2] != colour.shape[:2]:
         # The fourth channel is the temporal gate. Without history it reaches nothing —

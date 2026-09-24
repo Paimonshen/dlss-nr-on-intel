@@ -13,6 +13,15 @@ Neither changes the model or removes useful output channels.
 
 ## Input: NR_INPUT_FP16=1
 
+> **On by default since 2026-09-25, and built in place.** What made it slower below was
+> NumPy's float32 -> float16 cast on the host. The native feature assembly now writes half
+> itself, straight into the mapped input (`ResidentFrame.input_view`, the daemon's path), so
+> neither the host copy nor the GPU's to_half pass is left; other callers get a native cast.
+> It cannot change a value: every feature is a half value already (checked in
+> `test_native_image.py`). Paired on the daemon's own path together with the compact head,
+> answers byte-identical: 640x360 at 0.5, 37.0-38.1 -> 34.6-36.3 ms; 1280x720 at 0.35,
+> 50.4-52.4 -> 48.7-51.2.
+
 The existing path writes sixteen float32 features per pixel into a mapped input
 buffer, then runs `to_half` on the GPU. The new path converts directly into a mapped
 half buffer with NumPy, and the first GEMM consumes it. It eliminates one dispatch

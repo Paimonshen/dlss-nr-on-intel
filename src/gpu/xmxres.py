@@ -462,7 +462,10 @@ class Runtime:
         self.recorded = 0
         self.fuse_qk = os.environ.get("NR_FUSE_QK", "1") != "0"
         self.batch_ffn = os.environ.get("NR_BATCH_FFN", "1") != "0"
-        self.input_fp16 = os.environ.get("NR_INPUT_FP16", "0") != "0"
+        # On since 2026-09-25: the features are built as half, in the mapped input itself
+        # (`ResidentFrame.input_view`), so the GPU's to_half pass and the host's copy both
+        # go. The same bytes (test_input_fp16.py); NR_INPUT_FP16=0 is the float32 input.
+        self.input_fp16 = os.environ.get("NR_INPUT_FP16", "1") != "0"
         # On since 2026-09-25: the last GEMM stores only the four useful head columns, so
         # the host reads 4 of 16 — 3.6 -> 0.75 ms at 1280x720, 4 ms of the frame, the same
         # bytes (notes/improve-compact-io.md). NR_COMPACT_HEAD=0 is the old sixteen.

@@ -86,6 +86,24 @@ void nr_compose(const float *head, ptrdiff_t hy, ptrdiff_t hx, ptrdiff_t hc,
  * layer at vkQueuePresentKHR has no motion vectors (notes/phase54). NULL for a still
  * frame, which is then bit-identical to the vendor's own first-frame layout.
  */
+/* The sixteen channels of one pixel, as float. Both stores below are this. */
+static inline void feature_pixel(const float *rgb, ptrdiff_t sc, const float *was,
+                                 ptrdiff_t tc, const float *noise, const float *controls,
+                                 float out[16])
+{
+    for (size_t c = 0; c < 3; ++c) {
+        float scaled = half(half(half(rgb[(ptrdiff_t)c * sc]) - 0.5f) * 0.125f);
+        out[c] = noise[c];
+        out[4 + c] = scaled;
+        out[7 + c] = was
+            ? half(half(half(was[(ptrdiff_t)c * tc]) - 0.5f) * 0.125f)
+            : scaled;
+    }
+    out[3] = 1.0f;
+    for (size_t c = 0; c < 5; ++c) out[10 + c] = controls[c];
+    out[15] = 0.0f;
+}
+
 void nr_features(const float *colour, ptrdiff_t sy, ptrdiff_t sx, ptrdiff_t sc,
                  const float *history, ptrdiff_t ty, ptrdiff_t tx, ptrdiff_t tc,
                  const int32_t *rows, const int32_t *columns,
@@ -98,22 +116,42 @@ void nr_features(const float *colour, ptrdiff_t sy, ptrdiff_t sx, ptrdiff_t sc,
         const float *old = history ? history + rows[y] * ty : 0;
         for (size_t x = 0; x < width; ++x) {
             size_t pixel = y * width + x;
-            const float *rgb = row + columns[x] * sx;
-            const float *was = old ? old + columns[x] * tx : 0;
-            float *out = output + pixel * 16;
-            for (size_t c = 0; c < 3; ++c) {
-                float scaled = half(half(half(rgb[(ptrdiff_t)c * sc]) - 0.5f) * 0.125f);
-                out[c] = noise[pixel * 3 + c];
-                out[4 + c] = scaled;
-                out[7 + c] = was
-                    ? half(half(half(was[(ptrdiff_t)c * tc]) - 0.5f) * 0.125f)
-                    : scaled;
-            }
-            out[3] = 1.0f;
-            for (size_t c = 0; c < 5; ++c) out[10 + c] = controls[c];
-            out[15] = 0.0f;
+            feature_pixel(row + columns[x] * sx, sc, old ? old + columns[x] * tx : 0, tc,
+                          noise + pixel * 3, controls, output + pixel * 16);
         }
     }
+}
+
+/* The same features stored as half, which is what the graph's first GEMM reads: the
+ * to_half pass the GPU ran over them goes, and so do half the bytes written here. Every
+ * rounding is to nearest even, as that pass's, so the half values are its values
+ * (test_native_image.py, test_input_fp16.py). */
+void nr_features_half(const float *colour, ptrdiff_t sy, ptrdiff_t sx, ptrdiff_t sc,
+                      const float *history, ptrdiff_t ty, ptrdiff_t tx, ptrdiff_t tc,
+                      const int32_t *rows, const int32_t *columns,
+                      size_t height, size_t width, const float *noise,
+                      const float *controls, _Float16 *output)
+{
+    #pragma omp parallel for schedule(static)
+    for (size_t y = 0; y < height; ++y) {
+        const float *row = colour + rows[y] * sy;
+        const float *old = history ? history + rows[y] * ty : 0;
+        for (size_t x = 0; x < width; ++x) {
+            size_t pixel = y * width + x;
+            float values[16];
+            feature_pixel(row + columns[x] * sx, sc, old ? old + columns[x] * tx : 0, tc,
+                          noise + pixel * 3, controls, values);
+            _Float16 *out = output + pixel * 16;
+            for (size_t c = 0; c < 16; ++c) out[c] = (_Float16)values[c];
+        }
+    }
+}
+
+/* float32 to half, rounding to nearest even — for features a caller built as float. */
+void nr_to_half(const float *source, size_t count, _Float16 *target)
+{
+    #pragma omp parallel for schedule(static)
+    for (size_t i = 0; i < count; ++i) target[i] = (_Float16)source[i];
 }
 
 /* The area mean of a downscale by whole factors — `nr_daemon.resample`'s other branch,
