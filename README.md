@@ -314,7 +314,7 @@ all of them move between frames. Only `profile` costs a forward pass.
 
 `0.05` to `1`, step `0.05`, default `1`
 
-The only knob that changes the frame rate. The network runs on a frame this much smaller, and what comes back is the *head* — the detail it drew — which is then scaled up and composed against the full-resolution original, so the game's own pixels are never resampled and only the synthesised part is interpolated. Cost follows the extent and nothing else: about 9 ms + 205 ms per megapixel of network extent on an Arc 140V. The extent is never below 320 on a side — the checkpoint's minimum — so small renders are padded up to it: at 512x288 every scale up to 0.62 runs the same 320x320 network as 0.35 does, with three times the real pixels in it. 0.55 is the measured compromise, but the *sign* of its effect on quality depends on how dark the scene is rather than on the number: on a bright frame 0.55 adds 15 % of local contrast to a kimono, on a dark crowd it takes 21 % away.
+The only knob that changes the frame rate. The network runs on a frame this much smaller, and what comes back is the *head* — the detail it drew — which is then scaled up and composed against the full-resolution original, so the game's own pixels are never resampled and only the synthesised part is interpolated. Cost follows the extent and nothing else: about 9 ms + 196 ms per megapixel of network extent on an Arc 140V. The extent is never below 320 on a side — the checkpoint's minimum — so small renders are padded up to it: at 512x288 every scale up to 0.62 runs the same 320x320 network as 0.35 does, with three times the real pixels in it. 0.55 is the measured compromise, but the *sign* of its effect on quality depends on how dark the scene is rather than on the number: on a bright frame 0.55 adds 15 % of local contrast to a kimono, on a dark crowd it takes 21 % away.
 
 ### `profile` — which way to trade skin texture against speculars
 
@@ -368,15 +368,15 @@ Measured through the socket on 2026-09-24 by `python3 src/bench/live_rates.py` �
 
 | swapchain | render scale | ms | fps |
 | --- | ---: | ---: | ---: |
-| 512x288 | 0.35 | 43 | 23.4 |
-| 512x288 | 0.50 | 43 | 23.3 |
-| 640x360 | 0.35 | 44 | 22.7 |
-| 640x360 | 0.50 | 44 | 22.5 |
-| 854x480 | 0.50 | 54 | 18.5 |
-| 1024x768 | 0.55 | 91 | 11.0 |
-| 1920x1080 | 0.55 | 206 | 4.9 |
+| 512x288 | 0.35 | 37 | 27.2 |
+| 512x288 | 0.50 | 37 | 27.0 |
+| 640x360 | 0.35 | 39 | 25.6 |
+| 640x360 | 0.50 | 40 | 25.1 |
+| 854x480 | 0.50 | 54 | 18.6 |
+| 1024x768 | 0.55 | 84 | 11.9 |
+| 1920x1080 | 0.55 | 196 | 5.1 |
 
-Medians of three runs with swap empty, which agreed within 6 %. On 2026-09-23, with 5.5 GiB in zram and the kernel's memory-pressure figures rising, 1920x1080 ran anywhere from 322 to 463 ms: if that row is much slower for you, look at swap before anything else.
+Medians of three runs with swap empty, which agreed within 7 %. On 2026-09-23, with 5.5 GiB in zram and the kernel's memory-pressure figures rising, 1920x1080 ran anywhere from 322 to 463 ms: if that row is much slower for you, look at swap before anything else.
 
 That is the daemon's own cost with nothing else on the GPU. A game adds its own frame to it: **Tekken 7** measured **10.5 fps at 640x360** in a live fight (`notes/phase59`).
 

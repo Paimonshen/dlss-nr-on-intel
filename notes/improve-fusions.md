@@ -195,6 +195,28 @@ every load of the step before storing any: 64x1024x4096 0.27 -> 0.22 ms, and pai
 frames at 320x320 39.5 -> 38.5 ms over six rounds (faster in five), 1280x720 199.6 -> 196.3
 over four (faster in all). The same values land in the same places: bit-identical.
 
+## A partial last block on the staged kernel (2026-09-24, later)
+
+The staged kernel took only M in whole 64-row blocks, so every GEMM over a level whose pixel
+count is not — 144 or 400 rows at the live extent's deeper levels — went to the tiled kernel,
+direct loads and no staging. Timed alone, 32 dependent dispatches each, the staged kernel at
+the row count rounded up to 64 was twice as fast: 144x512x512 published 137 -> 54 us, with the
+residual 99 -> 51, 400x128x256 x8 128 -> 64, and 400x256x256 40.9 -> 39.4.
+
+Rather than pad the levels' buffers, the kernel now takes the partial block itself: rows past
+M read the last real row, so nothing is read out of bounds, and the epilogue never stores
+them; the direct store is kept for whole blocks. The QKV epilogue, which finishes a block's
+rows together, stays on whole blocks. A real row's arithmetic is unchanged, so 34 kernel cases
+match the tiled and 8x16 kernels byte for byte with nothing written past M
+(`test_staged_partial.py`, which also reads the profiler to see the staged kernel run, and
+fails at once with the row guard taken out), and the three reference frames are unchanged.
+
+Paired whole frames: **320x320 38.0 -> 34.2 ms** over six rounds, and a 1280x720 extent
+197.5 -> 189.3 over four, faster in every pair. But which extents gain depends on whether a level's pixel count is whole 64-row blocks. The daemon's extents are multiples of 64, so level 4 is (extent / 16)^2: 400 pixels at 320x320 and 8160 at 1920x1088 are partial, while at 1280x768 every level is whole blocks and nothing changes. The replayed graph
+curve: 320x320 36.5 -> 32.7 ms, 1920x1088 444.6 -> 422.6, 1280x768 196.3 -> 196.6; the fit
+is now 9.4 ms + 196 ms per megapixel. Live, through the socket: **512x288 at 0.35 42.7 ->
+36.7 ms**, 27 fps. On by default; `XMX_STAGED_PARTIAL=0` is the comparison.
+
 ## Tried and dropped (2026-09-24)
 
 - **Register-prefetch pipelining in the staged GEMM** — the next K block's global loads

@@ -51,6 +51,13 @@ GEMMs are neither short of blocks (a 64x16 build doubled them: no change) nor of
 the step's loads together takes the bottleneck's 64x1024x4096 from 0.27 to 0.22 ms and a frame
 1 ms faster at 320x320, 3 ms at 720p, bit-identical. `notes/improve-fusions.md`.
 
+**And the staged kernel now takes a partial last block**, so the deeper levels' GEMMs over 144
+or 400 rows leave the tiled kernel, which ran them at half the speed. Bit-identical
+(`XMX_STAGED_PARTIAL=0` to compare), and it pays where a level is not whole 64-row blocks:
+**live 512x288 at 0.35 42.7 -> 36.7 ms (27 fps)**, the 320x320 graph 36.5 -> 32.7, 1920x1088
+444.6 -> 422.6, and nothing at 1280x768, whose levels all are. Curve **9.4 ms + 196 ms per
+megapixel**; the README table is re-measured with it.
+
 **The fix is built and tested, not filed.** Mesa 26.2.3 rebuilt with the one line
 (`work/mesa-26.2.3/`, loaded through `VK_DRIVER_FILES`, system driver untouched): every size
 up to 2 KB at the full rate, this project unchanged and green, and one cost measured — a
@@ -780,7 +787,7 @@ What is *not* claimed:
 - **The whole graph is resident on the GPU**: phase27 warm medians were **0.114 s** at
   384x384, **0.536–0.550 s** at 720p and **1.179 s** at 1080p; since the fusions and the
   shared-memory fix (2026-09-24) 1280x720 is about **0.2 s** of GPU time, on the curve
-  `9 ms + 205 ms per megapixel`. The optimization is
+  `9.4 ms + 196 ms per megapixel`. The optimization is
   bit-identical to the generic GPU path. Earlier comparisons reported head correlation
   0.9918 with the CPU reference and visually indistinguishable pictures.
   **2.3 GiB** of device buffers at 720p since the scratch arena (`phase32`); the 5.6 GB
@@ -791,8 +798,8 @@ What is *not* claimed:
   a daemon runs the model, and the result goes back into the swapchain. Proven in **Dead
   or Alive 5** (32-bit D3D9 through DXVK) with faces enhanced and measured, and the layer
   proven to attach under **VKD3D-Proton** on a 64-bit D3D12 title. Photo mode is triggered
-  by a file; live mode (`NR_LAYER_LIVE=N`) runs continuously: 42.7 ms a frame at 512x288
-  for the daemon alone (23 fps, `nr_knobs.RATES`, 2026-09-24). In a game it shares the GPU
+  by a file; live mode (`NR_LAYER_LIVE=N`) runs continuously: 36.7 ms a frame at 512x288
+  for the daemon alone (27 fps, `nr_knobs.RATES`, 2026-09-24). In a game it shares the GPU
   with the game's own rendering — Tekken 7 ran 10.5 fps at 640x360 on 2026-09-16, before the
   fusions (`phase59`). `src/layer/`, `notes/phase34-doa5.md`, `phase41`, `phase47`.
 - **HDR is handled**: `src/ref/nr_display.py`, the recovered display codec — encode a

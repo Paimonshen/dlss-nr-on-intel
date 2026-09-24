@@ -125,6 +125,7 @@ test: all work/attention_ab.spv work/test_exchange work/test_settled work/test_p
 	python3 src/gpu/test_gemm_qkv.py
 	python3 src/gpu/test_glue.py
 	python3 src/gpu/test_ffn_fused.py
+	python3 src/gpu/test_staged_partial.py
 	python3 src/gpu/test_epilogue.py
 	python3 src/gpu/test_specialization.py
 	python3 src/gpu/test_softmax_pack.py
