@@ -1,7 +1,8 @@
 # Present waits, private fences, and a real MK1 check
 
 The separate-queue headless harness and queue inventory were taken from the local
-upstream review work (`d927cd8`, `bcdffdd`, following `3fbc233`). That harness exposed
+upstream review work (`d927cd8`, `bcdffdd`, following `3fbc233` — never pushed; their
+findings are `phase68` and `phase69`). That harness exposed
 the old default's read-before-render problem. Its attempted fix drained all device
 queues, which introduces host access to queues the game's other threads may be using.
 This branch instead consumes the present's dependencies and waits only for its own work.

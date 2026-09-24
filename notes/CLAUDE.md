@@ -373,7 +373,8 @@ layer is proven under a second Vulkan client, VKD3D-Proton on a 64-bit D3D12 tit
    the high-frequency band, because the detail is drawn at the wrong scale and no
    interpolator can reconstruct it — that is why the vendor's own arrangement puts DLSS
    after the pass. XeSS is the substitute and is unverified on Linux/Vulkan here.
-   `notes/phase37`.
+   `notes/phase37`. *The owner dropped the DLSS-SR research on 2026-09-22 — a reading of
+   `nvngx_dlss.dll`, kept only on the local branch `upscaler`; do not restart it unasked.*
 3. ~~**A DX12 game that starts.**~~ **Done, 2026-09-16: Mortal Kombat 1**, D3D12 through
    VKD3D-Proton, with a picture — run off the BitLocker Windows partition with the Proton
    prefix kept on Linux. Full render scale does not fit in memory beside it. `notes/phase62`.
@@ -399,8 +400,10 @@ handing work to the four E-cores (**-7 %** for a theoretical +2 %). `notes/phase
 `phase46`.
 
 **Both modes run in a real game.** Photo mode holds a frame while a trigger file exists;
-live mode (`NR_LAYER_LIVE=N`) runs continuously and reaches **10.6 fps at 512x288**, with
-the game set to that extent and the compositor doing the stretch. `src/layer/nr-ctl`
+live mode (`NR_LAYER_LIVE=N`) runs continuously — **42.7 ms a frame at 512x288** for the
+daemon alone (2026-09-24), 10.5 fps in Tekken 7 at 640x360 beside the game's own rendering
+(`phase59`, before the fusions) — with the game set to that extent and the compositor
+doing the stretch. `src/layer/nr-ctl`
 changes profile, intensity, both strengths, the render scale and the temporal knobs
 between frames without reloading the model, and `src/layer/nr-toggle` is the same three
 files on a key, because on Wayland only the compositor sees a key while a fullscreen game
@@ -446,5 +449,5 @@ src/     our code
 
 ---
 
-*Last updated 2026-09-11 (phases 49-57: the parallel tree mined, DOA6LR diagnosed, what the model computes in, the output extent's own costs, live rendering in a game, the flicker found and fixed, a switch on a key, a panel with the manual behind it, and the host passes in C). **Read `notes/HANDOFF.md` first** — it carries the current state and the traps. Owner runs Arch Linux, is comfortable at kernel/driver level,
+*Last updated 2026-09-24 (the fusions, the staged GEMM's shared memory, a Mesa quirk found and a fix measured, and the documents brought back in line with the layer that replaced the queue drains). **Read `notes/HANDOFF.md` first** — it carries the current state and the traps. Owner runs Arch Linux, is comfortable at kernel/driver level,
 prefers C for low-level work, and does not need concepts explained from scratch.*

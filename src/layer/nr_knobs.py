@@ -103,11 +103,6 @@ BY_NAME = {knob.name: knob for knob in KNOBS}
 # is worse than one that shows none.
 DEFAULTS = {knob.name: knob.default for knob in KNOBS}
 
-# Graph time alone against render scale, measured on this machine. Used for the estimate
-# shown when a scale is set; the round trip through the socket is larger and depends on
-# the swapchain size as much as on the scale.
-COST = ((1.00, 490), (0.70, 233), (0.60, 188), (0.50, 146), (0.35, 78))
-
 # The whole round trip, median of nine frames each, measured by `src/bench/live_rates.py`
 # on 2026-09-24 — the daemon's own cost, with no game competing for the GPU. `nr-ctl rates`,
 # the panel and the README all read this one table; the README's copy is generated from it
@@ -128,17 +123,6 @@ RATES_NOTE = ("Medians of three runs with swap empty, which agreed within 6 %. O
               "2026-09-23, with 5.5 GiB in zram and the kernel's memory-pressure figures "
               "rising, 1920x1080 ran anywhere from 322 to 463 ms: if that row is much slower "
               "for you, look at swap before anything else.")
-
-
-def expected(scale):
-    """Rough milliseconds for a render scale, interpolated between measurements."""
-    points = sorted(COST)
-    if scale <= points[0][0]:
-        return points[0][1]
-    for (low, at_low), (high, at_high) in zip(points, points[1:]):
-        if low <= scale <= high:
-            return at_low + (at_high - at_low) * (scale - low) / (high - low)
-    return points[-1][1]
 
 
 def clamp(knob, value):

@@ -1,6 +1,6 @@
 # HANDOFF — read this first
 
-State of the DLSS-NR on Intel Xe2 project as of **2026-09-11**. notes/CLAUDE.md holds the
+State of the DLSS-NR on Intel Xe2 project as of **2026-09-24**. notes/CLAUDE.md holds the
 original brief; **this file overrides it wherever they disagree**, and after
 2026-09-09 they disagree about something foundational.
 
@@ -141,6 +141,11 @@ QKV epilogue's reduction runs on half the lanes.
 
 ## The present has a test, and `NR_LAYER_SYNC=semaphore` (2026-09-19, later)
 
+> **Superseded 2026-09-22** (`d22ed9d`): there is one path now. The layer waits on the
+> present's own semaphores, finishes its copies on private fences and never drains a queue;
+> `NR_LAYER_SYNC` is accepted and ignored. `notes/improve-present-fences.md`; the stand that
+> found the old default reading unfinished images is `phase69`.
+
 The layer's two `vkQueueWaitIdle` calls per present are now optional. `NR_LAYER_SYNC=semaphore`
 waits on the semaphores the present brought, signals one of a ring of four, and redirects the
 present onto it; only the readback stalls, on its own fence. **Default is still `idle`** until
@@ -179,11 +184,10 @@ because on a card the outer two are PCIe and one total cannot tell them apart; a
 weights moved above the frames, so changing the render scale no longer re-uploads 292 MB
 (first frame at a second extent: 335 ms -> 78). `notes/phase65`.
 
-**Still `vkQueueWaitIdle` twice a frame in the layer.** `nr_layer.c:527` has said for weeks
-that the proper route is the present's own semaphores and that it "has to change before the
-pass runs every frame". It runs every frame. On this iGPU the network hides it; on a fast
-card it stalls the game's whole pipeline, and a game that presents from a queue other than
-the one it renders on can hand us an unfinished image.
+~~**Still `vkQueueWaitIdle` twice a frame in the layer.**~~ **Gone since 2026-09-22**
+(`d22ed9d`, `notes/improve-present-fences.md`): no queue is drained; the layer waits on the
+present's semaphores and on its own fences. The cross-queue case this paragraph feared was
+real — `phase69` caught the old default copying an unfinished image.
 
 ## Somebody else ran it, on a discrete GPU (2026-09-18)
 
@@ -691,6 +695,11 @@ followed from the wrong gate form), the leading-region projection, and "1.01x pa
 - **External write-ups are summaries, not sources.** A WebFetch of `weight_spec.json`
   returned plausible-looking shapes with a confabulated label (`block31` as "final
   output stage"). Clone the repo and read the file.
+- **A reset to the remote drops whatever was never pushed.** On 2026-09-23 `master` was
+  reset to `origin/master`, and three commits kept on purpose the day before went with it;
+  `test_present.c` cited two notes that no longer existed until they were restored on
+  09-24. Before resetting a branch to its remote, `git log origin/<branch>..<branch>` — and
+  leave a backup ref.
 
 ---
 
@@ -762,8 +771,10 @@ What is *not* claimed:
 - **No NVIDIA parity gate.** There is still no NVIDIA GPU here, so there are still no
   reference activations. The graph is MLX-DLSS's recovery from vendor captures, and it
   is validated against their spec and against behaviour, not against the DLL.
-- **The whole graph is resident on the GPU**: phase27 warm medians are **0.114 s** at
-  384x384, **0.536–0.550 s** at 720p and **1.179 s** at 1080p. The optimization is
+- **The whole graph is resident on the GPU**: phase27 warm medians were **0.114 s** at
+  384x384, **0.536–0.550 s** at 720p and **1.179 s** at 1080p; since the fusions and the
+  shared-memory fix (2026-09-24) 1280x720 is about **0.2 s** of GPU time, on the curve
+  `9 ms + 205 ms per megapixel`. The optimization is
   bit-identical to the generic GPU path. Earlier comparisons reported head correlation
   0.9918 with the CPU reference and visually indistinguishable pictures.
   **2.3 GiB** of device buffers at 720p since the scratch arena (`phase32`); the 5.6 GB
@@ -774,8 +785,10 @@ What is *not* claimed:
   a daemon runs the model, and the result goes back into the swapchain. Proven in **Dead
   or Alive 5** (32-bit D3D9 through DXVK) with faces enhanced and measured, and the layer
   proven to attach under **VKD3D-Proton** on a 64-bit D3D12 title. Photo mode is triggered
-  by a file; live mode (`NR_LAYER_LIVE=N`) runs continuously and reaches 10.6 fps at
-  512x288. `src/layer/`, `notes/phase34-doa5.md`, `phase41`, `phase47`.
+  by a file; live mode (`NR_LAYER_LIVE=N`) runs continuously: 42.7 ms a frame at 512x288
+  for the daemon alone (23 fps, `nr_knobs.RATES`, 2026-09-24). In a game it shares the GPU
+  with the game's own rendering — Tekken 7 ran 10.5 fps at 640x360 on 2026-09-16, before the
+  fusions (`phase59`). `src/layer/`, `notes/phase34-doa5.md`, `phase41`, `phase47`.
 - **HDR is handled**: `src/ref/nr_display.py`, the recovered display codec — encode a
   linear-HDR frame to an sRGB proxy with a soft knee, run the model, fold it back by
   luminance ratio onto the untouched original. Clamping instead destroys 97 % of the
@@ -795,12 +808,12 @@ What is *not* claimed:
   do not establish the optimized kernel's ceiling. Earlier notes quoted 23 GB/s,
   which was single-threaded numpy and wrong by 3x. Both GEMM and elementwise graph
   operations now run on the GPU.
-- **Temporal processing exists** in `nr_temporal.py`; both game modes use the
-  single-frame path and supply no engine motion or history. Feature channels 7:10 *are*
-  the history slot and the still path fills them with the current colour. Live mode has a
-  previous output but no motion vectors, and `phase12` measured the gate at **0.032 with
-  wrong motion** — un-reprojected history would be rejected, so it is not worth wiring
-  blind. `notes/phase48`.
+- **Temporal processing runs in live mode** since `phase54`: the previous output goes into
+  feature channels 7-9 with identity reprojection — a present-time layer has no motion
+  vectors, and identity is bit-exact — under the model's learned gate and a hold floor
+  where the game handed back the same pixel: 3.7x less flicker. Photo mode stays
+  single-frame, and `nr_temporal.py` keeps the motion-vector path for sequences that have
+  real motion. `notes/phase53`, `phase54`.
 - The graph recovery is **not ours**. Ours is the Xe2 execution path, the numpy
   reference, the independent second extraction that confirms their weight spec, and
   the PTX findings in section 2 that their write-up and ours agree on.
