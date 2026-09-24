@@ -24,10 +24,11 @@ work/libxmx.so: src/gpu/libxmx.c
 # The host passes in C. Built for this machine: `-march=native`, so rebuild it rather
 # than copy it. The FP16 casts and the separate multiply and add are the contract —
 # fused multiply-add or fast maths would change the last bit and the output must be
-# byte-identical to the NumPy it replaces (src/ref/test_native_image.py).
+# byte-identical to the NumPy it replaces (src/ref/test_native_image.py). OpenMP splits
+# each pass by rows; no row reads another's result, so the bytes do not depend on it.
 work/libnr_image.so: src/ref/nr_image.c Makefile | work
 	$(CC) -O3 -march=native -fPIC -Wall -Wextra -ffp-contract=off -fno-fast-math \
-	      -shared -o $@ $<
+	      -fopenmp -shared -o $@ $<
 
 # The Vulkan layer that puts the pass inside a running game.
 work/libnr_layer.so: src/layer/nr_layer.c

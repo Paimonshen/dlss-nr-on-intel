@@ -623,7 +623,10 @@ def process_connection(connection, backend, args):
                               history_previous=previous, history_hold=live.hold)
     # Measure before the write-back: putting the result into `whole` and then differencing
     # against `whole` compares an array with itself, which reported change 0.00000.
-    changed = float(np.abs(output - colour).mean())
+    # On every fourth row, like the log's other figures: the whole frame took 5 ms of a
+    # 1080p frame for a number printed to five places, and a quarter of the rows moves it
+    # by about a part in five hundred.
+    changed = float(np.abs(output[::4] - colour[::4]).mean())
     if boxed:
         # A copy, not a write into `whole`: aliasing the input and the output through one
         # array has now caused two bugs in this function — `change` printed 0.00000, and

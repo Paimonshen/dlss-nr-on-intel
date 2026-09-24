@@ -12,7 +12,9 @@ beside it, and the output is required to be byte-identical: `src/ref/test_native
 runs both and compares.
 
 `make` builds the library for this host, with `-march=native`, so rebuild it rather than
-copying it. `NR_HOST_NATIVE=0` selects the NumPy path for a paired measurement without
+copying it. Every pass is split by rows across OpenMP threads, one per core by default
+(`OMP_NUM_THREADS` to change it); a row's arithmetic does not depend on which thread
+does it, so the output is the same bytes at any thread count. `NR_HOST_NATIVE=0` selects the NumPy path for a paired measurement without
 changing any model or shader setting. With no library at all everything still runs.
 """
 import ctypes as C
@@ -25,6 +27,11 @@ import numpy as np
 
 @lru_cache(maxsize=1)
 def _library():
+    # The passes split their rows across OpenMP threads. Between frames the threads have
+    # nothing to do for the length of a graph, and libgomp's default is to spin first:
+    # on this machine a spinning core takes power the GPU would have used (notes/phase46).
+    # Read once, when the runtime loads, so it has to be set before the library is.
+    os.environ.setdefault('OMP_WAIT_POLICY', 'passive')
     try:
         lib = C.CDLL(str(Path(__file__).resolve().parents[2] / 'work/libnr_image.so'))
     except OSError:
