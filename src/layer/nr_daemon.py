@@ -112,10 +112,19 @@ def encode(image, raw, vk_format):
 
 
 def receive(connection, count, probe_ok=False):
+    # Straight into one buffer where the socket allows it: collecting the chunks and
+    # joining them copied the whole frame once more, 0.3 ms at 1280x720.
+    into = getattr(connection, "recv_into", None)
+    buffer = bytearray(count) if into is not None else None
+    view = memoryview(buffer) if buffer is not None else None
     chunks, got = [], 0
     while got < count:
-        chunk = connection.recv(min(1 << 20, count - got))
-        if not chunk:
+        if into is not None:
+            size = into(view[got:], min(1 << 20, count - got))
+        else:
+            chunk = connection.recv(min(1 << 20, count - got))
+            size = len(chunk)
+        if not size:
             if probe_ok and not got:
                 # Connected and closed without a byte: that is `nr-ctl` or `nr-toggle`
                 # asking whether anything is listening. Every status line and every press
@@ -123,9 +132,10 @@ def receive(connection, count, probe_ok=False):
                 # daemon's own log in noise. A truncated frame still reports.
                 return None
             raise EOFError("the layer closed the connection")
-        chunks.append(chunk)
-        got += len(chunk)
-    return b"".join(chunks)
+        if into is None:
+            chunks.append(chunk)
+        got += size
+    return buffer if buffer is not None else b"".join(chunks)
 
 
 SOLID_RADIUS = 3
@@ -419,6 +429,7 @@ class History:
         self.output = None      # (active_h, active_w, 3), what the game last received
         self.source = None      # (inner_h, inner_w, 3), the game's own last frame
         self.pixels = None      # (active_h, active_w, 3), the game's own last frame, whole
+        self.inner = None       # `output` at the network's input extent, taken ahead
         self.frames = 0
         self.cut = 0.0
 
@@ -428,21 +439,31 @@ class History:
         previous, self.cut = self.output, 0.0
         if key != self.key or previous is None or self.source.shape != source.shape:
             self.key, self.output, self.source, self.pixels, self.frames = key, None, None, None, 0
+            self.inner = None
             return None, None, None
         self.cut = float(np.abs(source - self.source).mean())
         if self.cut > limit:
             # A round transition, a replay cut or a menu. The gate rejects wrong history
             # per pixel, but it was characterised at full scale on a pan (phase12); a
             # whole-frame replacement is the one case worth refusing outright.
-            self.output = self.source = self.pixels = None
+            self.output = self.source = self.pixels = self.inner = None
             self.frames = 0
             return None, None, None
-        inner = previous if previous.shape[:2] == source.shape[:2] else resample(previous, source.shape[:2])
+        if self.inner is not None and self.inner.shape[:2] == source.shape[:2]:
+            inner = self.inner
+        else:
+            inner = previous if previous.shape[:2] == source.shape[:2] else resample(previous, source.shape[:2])
         return inner, previous, self.pixels
 
     def keep(self, key, output, source, pixels):
         self.key, self.output, self.source, self.pixels = key, output, source, pixels
         self.frames += 1
+        # The next frame's history at the network's extent, resampled now — the daemon
+        # calls this after the answer has gone, while the game draws its next frame —
+        # instead of on that frame's own path: the same resample of the same array, so the
+        # same bytes. A different extent next time falls back to resampling then.
+        self.inner = (output if output.shape[:2] == source.shape[:2]
+                      else resample(output, source.shape[:2]))
 
 
 # Over how many levels of 255 the hold lets go. A pixel the game handed back unchanged
@@ -644,12 +665,13 @@ def process_connection(connection, backend, args):
                               history_confidence=live.temporal,
                               history_previous=previous, history_hold=live.hold,
                               history_release=live.release)
-    # Measure before the write-back: putting the result into `whole` and then differencing
-    # against `whole` compares an array with itself, which reported change 0.00000.
-    # On every fourth row, like the log's other figures: the whole frame took 5 ms of a
-    # 1080p frame for a number printed to five places, and a quarter of the rows moves it
-    # by about a part in five hundred.
-    changed = float(np.abs(output[::4] - colour[::4]).mean())
+    # Measure the composition itself, not what the write-back makes of it: putting the
+    # result into `whole` and then differencing against `whole` compares an array with
+    # itself, which reported change 0.00000. On every fourth row, like the log's other
+    # figures: the whole frame took 5 ms of a 1080p frame for a number printed to five
+    # places, and a quarter of the rows moves it by about a part in five hundred. Taken
+    # after the answer has gone where nothing writes into `composed` before then.
+    composed, changed = output, None
     if boxed:
         # A copy, not a write into `whole`: aliasing the input and the output through one
         # array has now caused two bugs in this function — `change` printed 0.00000, and
@@ -660,6 +682,9 @@ def process_connection(connection, backend, args):
         output = full
     encoded = encode(output, payload, vk_format)
     if held is not None:
+        if not boxed:
+            # the restore below writes into the composition itself
+            changed = float(np.abs(composed[::4] - colour[::4]).mean())
         # The control mask reaches `compose_head`, but `compose_detail` runs *after* it
         # and re-weights the whole frame: with either strength away from 1 it moved 89.6%
         # of the masked pixels, so the interface protection silently stopped working the
@@ -678,6 +703,8 @@ def process_connection(connection, backend, args):
         else:
             output[held] = colour[held]          # so a --dump shows what was actually sent
     connection.sendall(encoded)
+    if changed is None:
+        changed = float(np.abs(composed[::4] - colour[::4]).mean())
     # After the interface restore, so what is carried forward is what the game was
     # actually handed.
     if live.temporal > 0:
