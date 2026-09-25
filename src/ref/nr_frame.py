@@ -63,6 +63,24 @@ def load_mlx_numpy_modules(names=MLX_NUMPY_MODULES):
 
 features_mod, composition_mod = load_mlx_numpy_modules(("features", "composition"))
 NetworkGeometry = features_mod.NetworkGeometry
+
+# The network's frame is padded, by mirroring, to at least this on a side and to a multiple
+# of 64. 320 is what NVIDIA's own driver does (`NetworkGeometry.vendor_aligned`); the graph
+# itself runs down to 128 — a window of 8 at a sixteenth of the extent, MLX-DLSS's graph
+# contract. At a small live size most of a 320x320 frame is mirror padding: 44 % of it for a
+# 320x180 frame, 82 % for 179x101.
+VENDOR_MINIMUM_EXTENT = 320
+GRAPH_MINIMUM_EXTENT = 128
+
+
+def network_geometry(width, height, minimum=VENDOR_MINIMUM_EXTENT):
+    """The network extent for a `width` x `height` frame: at least `minimum` a side (never
+    below the graph's 128), rounded up to 64. At 320 it is `NetworkGeometry.vendor_aligned`."""
+    floor = max(GRAPH_MINIMUM_EXTENT, int(minimum))
+
+    def aligned(extent):
+        return -(-max(floor, extent) // 64) * 64
+    return NetworkGeometry(width, height, aligned(width), aligned(height))
 # The three noise channels depend on the extent and the frame index and on nothing else,
 # and both callers copy the result into a slice rather than writing through it. In a live
 # mode the frame index does not move — the daemon never sets one — so the same array was

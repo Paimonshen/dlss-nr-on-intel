@@ -141,7 +141,7 @@ class Settings:
     """
 
     KNOBS = ("profile", "intensity", "detail_strength", "colour_strength", "render_scale",
-             "temporal", "cut_limit", "hold", "release")
+             "temporal", "cut_limit", "hold", "release", "min_extent")
 
     def __init__(self, args):
         self.path = args.settings
@@ -201,6 +201,11 @@ class Settings:
                     # levels of 255; 0 is off
                     if not 0.0 <= value <= 255.0:
                         print("settings: release must be between 0 and 255", flush=True)
+                        continue
+                elif knob == "min_extent":
+                    # the graph's own floor is 128; above 4096 nothing is left to pad
+                    if not 128.0 <= value <= 4096.0:
+                        print("settings: min_extent must be between 128 and 4096", flush=True)
                         continue
                 elif not 0.0 <= value <= 2.0:
                     # the vendor's own panel stops at 2 (notes/phase30-control-atlas.md)
@@ -579,7 +584,8 @@ def process_connection(connection, backend, args):
     if live.render_scale < 1.0:
         inner = resample(colour, (max(64, round(active_height * live.render_scale)),
                                   max(64, round(active_width * live.render_scale))))
-    geometry = nr_frame.NetworkGeometry.vendor_aligned(inner.shape[1], inner.shape[0])
+    geometry = nr_frame.network_geometry(inner.shape[1], inner.shape[0],
+                                         minimum=int(live.min_extent))
     # `inner` is a view of the decoded frame at scale 1; the history keeps it for the next
     # frame's cut test, and aliasing the decode buffer through it has caused two bugs in
     # this function already.
@@ -749,6 +755,9 @@ def main():
     parser.add_argument("--release", type=float, default=24.0,
                         help="levels of 255 of change in the game's own pixel by which none "
                              "of the model's history gate survives there, 0-255; 0 is off")
+    parser.add_argument("--min-extent", type=float, default=320.0,
+                        help="the smallest side the network's frame is padded to, 128-4096; "
+                             "320 is what NVIDIA's own driver does, the graph runs down to 128")
     parser.add_argument("--cut-limit", type=float, default=0.15,
                         help="mean absolute frame-to-frame change above which the shot is "
                              "taken to have cut and the history is dropped")
@@ -770,6 +779,8 @@ def main():
             parser.error(f"--{knob.replace('_', '-')} must be between 0 and 1")
     if not 0.0 <= args.release <= 255.0:
         parser.error("--release must be between 0 and 255")
+    if not 128.0 <= args.min_extent <= 4096.0:
+        parser.error("--min-extent must be between 128 and 4096")
     args.live = Settings(args)
     args.history = History()
     args.letterbox = Letterbox()

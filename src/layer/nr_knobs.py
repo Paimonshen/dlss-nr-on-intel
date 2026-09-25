@@ -31,6 +31,17 @@ KNOBS = (
         "Cost on an Arc 140V: about 9 ms plus 162 ms per megapixel of network frame.",
     ),
     Knob(
+        "min_extent", "min extent", "number", 128.0, 320.0, 64.0, 320.0,
+        "the smallest side the network's frame is padded to",
+        "The network's frame is padded, by mirroring the picture, to at least this many "
+        "pixels on a side. 320 is what NVIDIA's own driver does; the network itself runs "
+        "down to 128. At small live sizes most of a 320 frame is padding, so a lower floor "
+        "is much faster — on an Arc 140V, 512x288 at scale 0.35 takes 29 ms a frame at "
+        "320 and 15 at 128 — and draws a somewhat different picture, since the network no "
+        "longer sees a mirrored copy of the scene around it. Neither is wrong; compare them "
+        "in a game. It changes nothing once the scaled frame is larger than this anyway.",
+    ),
+    Knob(
         "profile", "profile", "choice", None, None, None, "standard",
         "which way to trade skin texture against highlights and colour",
         "The style the network is asked for. The profiles are a trade, not a quality "

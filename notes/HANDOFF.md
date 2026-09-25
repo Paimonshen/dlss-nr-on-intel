@@ -9,7 +9,27 @@ you need the evidence behind a line in this file, rather than reading them in or
 
 ---
 
-## Latest: the async live mode exists, and is off by default for a reason (2026-09-25, night)
+## Latest: the 320 floor is NVIDIA's, not the network's — `min_extent` (2026-09-25, night)
+
+The network's frame is padded by mirroring to at least 320 a side because that is what the
+vendor's driver does (`NetworkGeometry.vendor_aligned`, recovered by MLX-DLSS). The graph
+itself runs down to **128** — MLX-DLSS's own graph contract, a window of 8 at a sixteenth
+of the extent. At live sizes most of a 320x320 frame was mirror padding: 44 % of it at
+640x360 and scale 0.5, 82 % at 512x288 and 0.35. On the daemon's path, one DoA5 frame:
+
+| game size, scale | network at 320 | network at 128 | ms a frame |
+| --- | --- | --- | --- |
+| 640x360, 0.5 | 320x320 | 320x192 | 30.3 -> 22.7 |
+| 640x360, 0.35 | 320x320 | 256x128 | 29.4 -> 16.1 |
+| 512x288, 0.35 | 320x320 | 192x128 | 28.6 -> 14.7 |
+
+**The picture is different, not broken**: the two answers differ by 4-6 levels of 255 on
+average — as much as the pass changes the frame — with no artefacts at 192x128; at 320x192
+the effect came out stronger (7.2 against 4.6 levels of change), at 192x128 slightly softer.
+Which is better is taste, so it is a knob: `min_extent`, 128-320 in steps of 64, **default
+320**, unchanged behaviour. The owner is to compare in a game.
+
+## the async live mode exists, and is off by default for a reason (2026-09-25, night)
 
 `NR_LAYER_ASYNC=1` (with live mode): on each processed present the layer sends this frame
 and shows the answer to the previous one, so the daemon works while the game draws. Correct

@@ -317,6 +317,12 @@ all of them move between frames. Only `profile` costs a forward pass.
 
 The only knob that changes the frame rate. The network draws its detail on a frame this much smaller; the detail is then scaled up and laid over the game's full-resolution frame, so the game's own pixels are never resampled. Lower is faster and draws coarser detail. The network never runs below 320 pixels on a side, so on a small window the low scales all cost the same: at 512x288, everything up to about 0.6 runs the same 320x320 network. For play, 0.35-0.6 is the useful range. For screenshots 0.9 tends to look better than 1.0: at exactly the display size the network is handed the game's raw pixels, jagged edges and all, turns part of them into pixel-level grain, and its effect comes out weaker. Cost on an Arc 140V: about 9 ms plus 162 ms per megapixel of network frame.
 
+### `min_extent` — the smallest side the network's frame is padded to
+
+`128` to `320`, step `64`, default `320`
+
+The network's frame is padded, by mirroring the picture, to at least this many pixels on a side. 320 is what NVIDIA's own driver does; the network itself runs down to 128. At small live sizes most of a 320 frame is padding, so a lower floor is much faster — on an Arc 140V, 512x288 at scale 0.35 takes 29 ms a frame at 320 and 15 at 128 — and draws a somewhat different picture, since the network no longer sees a mirrored copy of the scene around it. Neither is wrong; compare them in a game. It changes nothing once the scaled frame is larger than this anyway.
+
 ### `profile` — which way to trade skin texture against highlights and colour
 
 `standard` / `natural` / `cinematic` / `neutral`
