@@ -22,6 +22,19 @@ choice from 4/8/16/24 in the game; 0 restores the old behaviour. `notes/phase54`
 The knob descriptions were rewritten at the owner's request: general, no scene a user
 cannot see (a kimono, an iris). The measurements they used to quote are in the notes.
 
+**Render scale 0.9 looks better than 1.0, and it is not arithmetic.** The owner saw it in
+DoA5 at 720p (0.9 over 0.95 and 1.0) and it measures (`src/bench/scale_spectrum.py`, three
+DoA5 frames cropped to a native 1280x720, temporal off): at 1.0 the pass's change is
+**1.5-1.7x smaller** (mean |Δ luma| 0.025-0.026 against 0.039-0.043 at 0.9), and **3-4x
+more of it is pixel-level** — 3 % of the added energy above half Nyquist against 0.9 %,
+on two of the frames. At the display size the network is handed the game's raw pixels,
+jagged edges included, and turns part of them into grain; bilinear to 0.9 smooths them
+first, and the upscale of what it draws cannot make pixel-level content. That fits the
+vendor's own arrangement, where the pass runs at the render resolution and DLSS upscales
+after it. Padding is not it: the extents are 1280x768, 1216x704 and 1152x704, and 0.95,
+with the least padding, looked worse than 0.9. The render scale's text now says 0.9 for
+screenshots.
+
 ## Window attention and the feed-forward loaded their operands once per subgroup (2026-09-25, afternoon)
 
 The owner asked for window attention — 19-21 % of the graph at every extent — to be solved.

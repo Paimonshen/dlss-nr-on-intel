@@ -25,8 +25,10 @@ KNOBS = (
         "faster and draws coarser detail. The network never runs below 320 pixels on a "
         "side, so on a small window the low scales all cost the same: at 512x288, "
         "everything up to about 0.6 runs the same 320x320 network. For play, 0.35-0.6 is "
-        "the useful range; 1.0 is for screenshots. Cost on an Arc 140V: about 9 ms plus "
-        "162 ms per megapixel of network frame.",
+        "the useful range. For screenshots 0.9 tends to look better than 1.0: at exactly "
+        "the display size the network is handed the game's raw pixels, jagged edges and "
+        "all, turns part of them into pixel-level grain, and its effect comes out weaker. "
+        "Cost on an Arc 140V: about 9 ms plus 162 ms per megapixel of network frame.",
     ),
     Knob(
         "profile", "profile", "choice", None, None, None, "standard",
