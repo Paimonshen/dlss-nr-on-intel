@@ -33,12 +33,16 @@ static struct {
 	/* resident path */
 	VkPipelineLayout rpl; VkPipeline rgemm, rtiled, rstaged, runary, rrow, rhistory, rwindow[2];
 	VkPipeline rffn;          /* the fused feed-forward, built on first use */
-	char *rpaths[6];
+	/* the staged kernel on 32-row blocks, with a 32- and a 64-deep K step */
+	VkPipeline rstaged32[2];
+	char *rpaths[8];
 	unsigned specialize;
 	unsigned tiling, tilem, tilen;
 	int syncing;
 	unsigned staging;
 	unsigned staged_partial;  /* the staged kernel takes M that is not whole 64-row blocks */
+	unsigned staged32;        /* M of 32 or fewer takes the 32-row staged build */
+	unsigned staged32_calls;  /* how many GEMMs it has recorded: tests check the routing */
 	VkCommandBuffer rcb; VkFence rfence; int recording, recorded, rready;
 	/* transfers have their own command buffer: the weights are created while the
 	 * frame's graph is being recorded, so a staged upload cannot borrow `rcb` */
@@ -305,8 +309,9 @@ static unsigned block_size(const char *name, unsigned fallback)
 static int resident_pipeline(unsigned family, unsigned flags, VkPipeline fallback,
 			     VkPipeline *out)
 {
-	/* family 5, the fused feed-forward, is a GEMM and specialises with them */
-	unsigned mask = (family < 3 || family == 5) ? 1u : (family == 3 ? 2u : 4u);
+	/* families 5-7 — the fused feed-forward and the 32-row staged builds — are GEMMs and
+	 * specialise with them */
+	unsigned mask = (family < 3 || family >= 5) ? 1u : (family == 3 ? 2u : 4u);
 	*out = fallback;
 	if (!(g.specialize & mask)) return 0;
 	for (unsigned i = 0; i < specialized_count; i++) {
@@ -330,6 +335,32 @@ int xmx_staged_partial(unsigned on)
 {
 	if (g.recording) FAIL("cannot change the staged routing during recording", 0);
 	g.staged_partial = on != 0;
+	return 0;
+}
+
+unsigned xmx_staged32_calls(void) { return g.staged32_calls; }
+
+int xmx_staged32(unsigned on)
+{
+	if (g.recording) FAIL("cannot change the staged routing during recording", 0);
+	g.staged32 = on != 0;
+	return 0;
+}
+
+/* The 32-row staged builds, `shallow` with the default 32-deep K step and `deep` with 64. */
+int xmx_staged32_init(const char *shallow, const char *deep)
+{
+	if (!g.rready) FAIL("resident runtime not initialised", 0);
+	if (g.rstaged32[0]) return 0;
+	const char *paths[2] = { shallow, deep };
+	for (unsigned i = 0; i < 2; i++) {
+		free(g.rpaths[6 + i]);
+		if (!(g.rpaths[6 + i] = strdup(paths[i]))) FAIL("pipeline path allocation", 0);
+		if (build_pipeline(paths[i], g.rpl, &g.rstaged32[i])) {
+			g.rstaged32[0] = VK_NULL_HANDLE;
+			return -1;
+		}
+	}
 	return 0;
 }
 
@@ -647,6 +678,9 @@ int xmx_res_init(const char *gemm_spv, const char *unary_spv, const char *row_sp
 	 * 1280x768. 0 is the comparison. */
 	const char *sp = getenv("XMX_STAGED_PARTIAL");
 	g.staged_partial = sp ? (unsigned)atoi(sp) : 1;
+	/* the 32-row staged builds, once `xmx_staged32_init` has them; 0 is the comparison */
+	const char *s32 = getenv("XMX_STAGED32");
+	g.staged32 = s32 ? (unsigned)atoi(s32) : 1;
 	VkCommandBufferAllocateInfo cba = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
 					    .commandPool = g.cpool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
 					    .commandBufferCount = 1 };
@@ -1048,7 +1082,15 @@ static int record_gemm(int a, int b, int c, unsigned M, unsigned N, unsigned K,
 	/* A last, partial 64-row block is the staged kernel's own business (its rows past M are
 	 * neither read out of bounds nor stored), so with `staged_partial` M need not be whole
 	 * blocks — except for the QKV epilogue, which finishes a block's rows together. */
-	int staged = (M % 64 == 0 || (g.staged_partial && !(bt & 0x100000u)))
+	/* A bottleneck of 32 tokens or fewer — 16 at 256x128, 32 at 320x192, network extents
+	 * only `min_extent` below 320 reaches — is padded to 32 rows, not 64, and takes a
+	 * 32-row build of the same kernel: its GEMMs wait on the K loop, so the pad was half of
+	 * every step's work for nothing. Where N is 1024 or less there are 32 blocks or fewer,
+	 * and a 64-deep step halves the trips round the loop. Bit-identical — a row's sums are
+	 * its own — and 0.7-1.2 ms of a 12-20 ms graph (notes/improve-b.md). */
+	int small = g.staged32 && g.rstaged32[0] && M <= 32 && !(bt & 0x400000u)
+		    && (M == 32 || (g.staged_partial && !(bt & 0x100000u)));
+	int staged = (M % 64 == 0 || small || (g.staged_partial && !(bt & 0x100000u)))
 		     && N % 32 == 0 && K % 32 == 0 && K >= g.staging;
 	/* the window gather lives in the staged kernel's A loader, at any depth of K */
 	if (bt & 0x400000u) {
@@ -1073,13 +1115,21 @@ static int record_gemm(int a, int b, int c, unsigned M, unsigned N, unsigned K,
 	/* the half copy lives in gemm_resident.comp's plain-store path only */
 	if ((bt & 0x200000u) && !(half_copy >= 0 && bt == 0x200000u && !staged))
 		FAIL("a GEMM half copy needs its target, no other flag, and the resident kernel", 0);
+	small = small && staged;
+	int deep = small && N <= 1024 && K % 64 == 0;
 	VkPipeline pipeline;
-	if (resident_pipeline(staged ? 2 : (tiled ? 1 : 0), bt,
-			      staged ? g.rstaged : (tiled ? g.rtiled : g.rgemm), &pipeline)) return -1;
+	if (small) {
+		if (resident_pipeline(6 + deep, bt, g.rstaged32[deep], &pipeline)) return -1;
+	} else if (resident_pipeline(staged ? 2 : (tiled ? 1 : 0), bt,
+				     staged ? g.rstaged : (tiled ? g.rtiled : g.rgemm), &pipeline)) {
+		return -1;
+	}
 	vkCmdBindPipeline(g.rcb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
 	vkCmdPushConstants(g.rcb, g.rpl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
+	g.staged32_calls += small;
 	if (staged) {
-		vkCmdDispatch(g.rcb, N / 32, (M + 63) / 64, batch ? batch : 1);
+		unsigned rows = small ? 32u : 64u;
+		vkCmdDispatch(g.rcb, N / 32, (M + rows - 1) / rows, batch ? batch : 1);
 	} else {
 		if (tiled) vkCmdDispatch(g.rcb, N / g.tilen, M / g.tilem, batch ? batch : 1);
 		else       vkCmdDispatch(g.rcb, (N + 15) / 16, (M + 7) / 8, batch ? batch : 1);

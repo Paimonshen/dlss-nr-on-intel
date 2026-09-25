@@ -5,6 +5,7 @@
 GLSL    := glslangValidator --target-env vulkan1.3 -Isrc/gpu
 CFLAGS  := -O2 -fPIC -Wall -Wextra -Wno-unused-parameter -Iwork/vulkan-headers/include
 SHADERS := work/gemm_resident.spv work/gemm_tiled.spv work/gemm_staged.spv \
+           work/gemm_staged32.spv work/gemm_staged32_deep.spv \
            work/resident.spv work/attention.spv \
            work/history.spv work/gemm_coopmat.spv work/gemm_batched.spv \
            work/gemm_f16acc.spv work/gemm_coopmat_int8.spv work/window_attention.spv \
@@ -61,6 +62,11 @@ work/gemm_tiled.spv: src/gpu/gemm_resident.comp $(GEMM_GLSL) Makefile
 	$(GLSL) -DRM=2 -DRN=2 -o $@ $<
 work/gemm_staged.spv: src/gpu/gemm_staged.comp $(GEMM_GLSL)
 	$(GLSL) -o $@ $<
+# 32-row blocks for a bottleneck of 32 tokens or fewer, with a 32- and a 64-deep K step
+work/gemm_staged32.spv: src/gpu/gemm_staged.comp $(GEMM_GLSL) Makefile
+	$(GLSL) -DSTAGED_BM=32 -o $@ $<
+work/gemm_staged32_deep.spv: src/gpu/gemm_staged.comp $(GEMM_GLSL) Makefile
+	$(GLSL) -DSTAGED_BM=32 -DSTAGED_BK=64 -o $@ $<
 work/resident.spv: src/gpu/resident.comp src/gpu/publish.glsl src/gpu/specialize.glsl
 	$(GLSL) -o $@ $<
 work/attention.spv: src/gpu/attention.comp src/gpu/publish.glsl src/gpu/specialize.glsl \
@@ -127,6 +133,7 @@ test: all work/attention_ab.spv work/test_exchange work/test_settled work/test_p
 	python3 src/gpu/test_glue.py
 	python3 src/gpu/test_ffn_fused.py
 	python3 src/gpu/test_staged_partial.py
+	python3 src/gpu/test_staged32.py
 	python3 src/gpu/test_epilogue.py
 	python3 src/gpu/test_specialization.py
 	python3 src/gpu/test_softmax_pack.py

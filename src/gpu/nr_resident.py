@@ -133,9 +133,13 @@ class GlobalScratch:
         # the small network frames `min_extent` allows — the pad is taken outright: those
         # GEMMs wait on their K loop, not on rows, so 64 cost what 16 do, and a whole block
         # lets the QKV projection's epilogue leave the tiled kernel (0.22 -> 0.14 ms a call,
-        # about 0.6 ms of a 192x128 frame).
+        # about 0.6 ms of a 192x128 frame). At 32 tokens or fewer — 16 at 256x128; 320x320
+        # has 64 — a 32-row build of the staged kernel does better still: half of each K
+        # step's work on the 64-row block was the pad (libxmx.c, `small`).
         padded = xmxres.align(tokens, 16)
-        if tokens <= 64 or xmxres.align(tokens, 64) * 8 <= padded * 9:
+        if tokens <= 32:
+            padded = 32
+        elif tokens <= 64 or xmxres.align(tokens, 64) * 8 <= padded * 9:
             padded = xmxres.align(tokens, 64)
         self.tokens, self.padded = tokens, padded
         padded, hidden = self.padded, weights.hidden_width

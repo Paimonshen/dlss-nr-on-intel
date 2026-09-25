@@ -37,7 +37,15 @@ const uint WARPS = 4;
 #ifndef STAGED_BK
 #define STAGED_BK 32
 #endif
-const uint BM = 64, BN = 32, BK = STAGED_BK;   // the block this workgroup computes
+/* STAGED_BM: the rows of the block, 64 by default. The small build takes 32, for the
+ * bottleneck of a small network — 16 tokens at 256x128 — whose GEMMs wait on their K loop:
+ * half the rows is half of every step's A tile and multiply-adds, where a 64-row block
+ * would be mostly pad. Each row's sums are its own, so the rows it shares with a 64-row
+ * block come out the same bit for bit. */
+#ifndef STAGED_BM
+#define STAGED_BM 64
+#endif
+const uint BM = STAGED_BM, BN = 32, BK = STAGED_BK;   // the block this workgroup computes
 const uint KC = BK / 32;                   // 32-column chunks of an A row per K step
 const uint WM = BM / WARPS, WN = BN;       // and the slice one subgroup takes
 const uint RM = WM / TM, RN = WN / TN;
