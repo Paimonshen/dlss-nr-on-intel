@@ -9,7 +9,23 @@ you need the evidence behind a line in this file, rather than reading them in or
 
 ---
 
-## Latest: at 30 fps a trail appeared, and a `release` knob drops it (2026-09-25, evening)
+## Latest: the async live mode exists, and is off by default for a reason (2026-09-25, night)
+
+`NR_LAYER_ASYNC=1` (with live mode): on each processed present the layer sends this frame
+and shows the answer to the previous one, so the daemon works while the game draws. Correct
+and tested — `test_present.py` checks which answer every image holds, n synchronously and
+n-1 async, and the async expectation fails against a synchronous layer.
+
+**In Tekken 7 it did not pay.** 640x360: 29-31 fps against 25-32 synchronous; 1280x720 at
+0.3: 21-22 against 20-22 — and the graph itself **3 ms slower** (28 against 25 ms at
+320x320), because the game's rendering now runs beside it on the same iGPU. What it hides
+is CPU time, and there is little of it left; what it adds is a frame of latency, which the
+owner felt at once and more at larger scales and resolutions. His threshold: under ~15 ms
+of added latency or not at all. So it stays an option, off. On a discrete card, where the
+game and the network would not share one GPU, the trade could come out differently — that
+is the case it is kept for.
+
+## at 30 fps a trail appeared, and a `release` knob drops it (2026-09-25, evening)
 
 In Tekken 7 with the new kernels — **640x360 25-32 fps, 1280x720 20-22, 1920x1080 10-13**,
 the owner playing — the owner saw ghosting behind everything that moved, which 10 fps had
