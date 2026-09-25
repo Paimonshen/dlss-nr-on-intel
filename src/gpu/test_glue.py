@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """The full-resolution glue in fewer passes, against the passes it replaces.
 
-`upsample_merge` against upsample2, scale_channel, residual and to_half; `gemm_dual`
-against a GEMM and a to_half of its output. Both outputs of each must match byte for
+`upsample_merge` against upsample2, scale_channel, residual and to_half; `upsample_add`
+against a decoder transition's upsample2, scale_channel and add; `gemm_dual` against a
+GEMM and a to_half of its output. Both outputs of each must match byte for
 byte, and the guard values past them must survive.
 """
 import numpy as np
@@ -141,16 +142,81 @@ def gemm_cases(rt, rng):
     return cases
 
 
+def transition_cases(rt, rng):
+    """`upsample_add` against the decoder transition's own three passes: upsample2 of the
+    float32 projection, scale_channel of the skip, and add with the publish on its way
+    out — wide and narrow, a half and a float32 skip, odd extents cropped."""
+    cases = 0
+    for channels, height, width in ((64, 16, 24), (32, 13, 21), (128, 10, 10), (512, 6, 4),
+                                    (256, 9, 7)):
+        sh, sw = -(-height // 2), -(-width // 2)
+        count = height * width * channels
+        buffers = []
+
+        def alloc(n, dtype):
+            b = rt.buffer(n, dtype)
+            buffers.append(b)
+            return b
+        try:
+            source = alloc(sh * sw * channels, np.float32)
+            skip16, skip32 = alloc(count, np.float16), alloc(count, np.float32)
+            sine = alloc(channels, np.float32)
+            upsampled, scaled = alloc(count, np.float32), alloc(count, np.float32)
+            for spread in (0.01, 1.0, 300.0):
+                src = rng.normal(0, spread, sh * sw * channels).astype(np.float32)
+                src[:4] = [0, -0.0, 448.0, -448.0]
+                sk = rng.normal(0, spread, count).astype(np.float16)
+                sk[:2] = [-0.0, 2 ** -24]
+                s = rng.uniform(-2, 2, channels).astype(np.float32)
+                s[0] = -0.0
+                X.host_write(source, src)
+                X.host_write(skip16, sk)
+                X.host_write(skip32, sk.astype(np.float32) * np.float32(1.0009765625))
+                X.host_write(sine, s)
+                for narrow, skip_half in ((True, True), (False, True), (True, False)):
+                    dtype = np.float16 if narrow else np.float32
+                    skip = skip16 if skip_half else skip32
+                    reference, fused = alloc(count + GUARD, dtype), alloc(count + GUARD, dtype)
+                    for mask in (0, 7):
+                        rt.specialize(mask)
+                        for b in (reference, fused):
+                            X.host_write(b, np.full(count + GUARD, fill(dtype), dtype))
+                        rt.begin()
+                        rt.upsample2(source, upsampled, sw, height, width, channels)
+                        rt.scale_channel(skip, sine, scaled, count, channels, a_half=skip_half)
+                        rt.add(upsampled, scaled, reference, count, epilogue=X.EPI_E4M3,
+                               narrow=narrow)
+                        rt.upsample_add(source, skip, sine, fused, height, width, sw, channels,
+                                        skip_half=skip_half, epilogue=X.EPI_E4M3,
+                                        narrow=narrow)
+                        rt.submit()
+                        name = (f"transition C={channels} {height}x{width} spread {spread} "
+                                f"{'narrow' if narrow else 'wide'} "
+                                f"{'half' if skip_half else 'float'} skip mask {mask}")
+                        check(name, X.host_view(fused, dtype), X.host_view(reference, dtype))
+                        assert filled(X.host_view(fused, dtype)[count:], dtype).all(), name
+                        assert not filled(X.host_view(fused, dtype)[:count], dtype).any(), name
+                        cases += 1
+        finally:
+            for b in buffers:
+                b.free()
+    return cases
+
+
 def main():
     rt = X.Runtime()
     rng = np.random.default_rng(424242)
     merges = upsample_cases(rt, rng)
+    transitions = transition_cases(rt, rng)
     gemms = gemm_cases(rt, rng)
     before = rt.graph_key()
     rt.fuse_glue = not rt.fuse_glue
     assert rt.graph_key() != before
-    print(f"glue: {merges} upsample-merge and {gemms} GEMM half-copy cases bit-exact, "
-          f"guards and graph key OK; staging={rt.staging}")
+    middle = rt.graph_key()
+    rt.fuse_transition = not rt.fuse_transition
+    assert rt.graph_key() not in (before, middle)
+    print(f"glue: {merges} upsample-merge, {transitions} transition and {gemms} GEMM "
+          f"half-copy cases bit-exact, guards and graph keys OK; staging={rt.staging}")
 
 
 if __name__ == "__main__":

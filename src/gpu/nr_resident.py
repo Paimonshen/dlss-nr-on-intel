@@ -586,6 +586,12 @@ def record_upsample_merge(runtime, transition, scratch, source, skip, target,
         runtime.to_half(source, scratch.projected16, source_pixels * channels)
     runtime.gemm(projected16, transition.weight0, scratch.projected,
                  source_pixels, out_channels, channels)
+    if runtime.fuse_transition:
+        # the upsample, the scaled skip and the add in one pass (resident.comp UPSAMPLE_ADD)
+        runtime.upsample_add(scratch.projected, skip, transition.sine, target, height, width,
+                             source_width, out_channels, skip_half=skip_half,
+                             epilogue=xmxres.EPI_E4M3, narrow=target_half)
+        return
     with runtime.independent():
         runtime.upsample2(scratch.projected, scratch.upsampled, source_width, height,
                           width, out_channels)

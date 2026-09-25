@@ -44,7 +44,7 @@ const uint E4M3 = 0u, GATE = 1u, HALF = 2u, TO_HALF = 3u, SCALE = 4u,
            /* fused: one read of float32 and one write of float16 where the graph
             * otherwise makes three round trips over the same buffer */
            GATE_E4M3_HALF = 17u, E4M3_HALF = 18u, GATE_HALF = 19u,
-           UPSAMPLE_MERGE = 20u;
+           UPSAMPLE_MERGE = 20u, UPSAMPLE_ADD = 21u;
 
 
 
@@ -175,6 +175,22 @@ void main() {
         float merged = fma(load_b(index), pc.d.v[channels + c], scaled);
         pc.c.v[index] = merged;
         HalfBuf(pc.second).v[index] = float16_t(merged);
+        return;
+    }
+    if (kind == UPSAMPLE_ADD) {
+        /* A decoder transition's merge in one pass: the projected level below upsampled 2x
+         * (nearest), plus the skip times the per-channel sine, then the publish. That was
+         * upsample2, scale_channel and add — three passes, two of them writing float32 for
+         * the next to read back. Their roundings are kept: the product is rounded on its
+         * own, as scale_channel stored it, and then added, so neither may become a fused
+         * multiply-add (`precise`). n=channels, sa=target width, sb=source width, d=sine,
+         * b=the skip. */
+        uint channels = pc.n, target = pc.sa, source = pc.sb;
+        uint c = index % channels, rest = index / channels;
+        uint x = rest % target, y = rest / target;
+        precise float scaled = load_b(index) * pc.d.v[c];
+        precise float merged = load_a(((y / 2u) * source + (x / 2u)) * channels + c) + scaled;
+        store(index, merged);
         return;
     }
     if (kind == PAD_END) {

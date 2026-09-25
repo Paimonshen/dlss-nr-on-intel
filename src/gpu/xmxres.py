@@ -33,7 +33,7 @@ TM, TN, TK = 8, 16, 16
 
 (E4M3, GATE, HALF, TO_HALF, SCALE, RESIDUAL, FROM_HALF, PARTITION, REVERSE, ADD_BIAS,
  SPLIT_HEADS, MERGE_HEADS, POOL2, UPSAMPLE2, SCALE_CHANNEL, ADD, PAD_END,
- GATE_E4M3_HALF, E4M3_HALF, GATE_HALF, UPSAMPLE_MERGE) = range(21)
+ GATE_E4M3_HALF, E4M3_HALF, GATE_HALF, UPSAMPLE_MERGE, UPSAMPLE_ADD) = range(22)
 COSINE_PUBLISH, SOFTMAX = 0, 1
 
 # GEMM epilogues, applied to the accumulator on its way out of the kernel
@@ -501,6 +501,8 @@ class Runtime:
         self.fuse_branched_ffn = os.environ.get("NR_FUSE_BRANCHED_FFN", "0") != "0"
         # The window partition folded into the QKV projection's own loads.
         self.fuse_partition = os.environ.get("NR_FUSE_PARTITION", "1") != "0"
+        # A decoder transition's upsample, scaled skip and add in one pass.
+        self.fuse_transition = os.environ.get("NR_FUSE_TRANSITION", "1") != "0"
 
     def graph_key(self):
         return (self.lib.xmx_specialization() | (int(self.fuse_qk) << 3)
@@ -517,7 +519,8 @@ class Runtime:
                 | (int(self.fuse_glue) << 13)
                 | (int(self.fuse_ffn) << 14)
                 | (int(self.fuse_branched_ffn) << 15)
-                | (int(self.fuse_partition) << 16))
+                | (int(self.fuse_partition) << 16)
+                | (int(self.fuse_transition) << 17))
 
     @property
     def buffer_bytes(self):
@@ -989,6 +992,16 @@ class Runtime:
         return self.unary(PAD_END, source, target,
                           padded_height * padded_width * channels, channels=channels,
                           a_half=a_half, narrow=narrow, _dims=(0, height, width, padded_width))
+
+    def upsample_add(self, source, skip, factors, target, height, width, source_width,
+                     channels, *, skip_half=False, epilogue=0, narrow=False):
+        """target = upsample2(source) + skip * factors, published: what upsample2, then
+        scale_channel of the skip, then add with the epilogue write, in one pass
+        (`src/gpu/test_glue.py`). `source` is float32, cropped to (height, width)."""
+        return self.unary(UPSAMPLE_ADD, source, target, height * width * channels,
+                          channels=channels, second=skip, third=factors, epilogue=epilogue,
+                          narrow=narrow, b_half=skip_half,
+                          _dims=(0, width, source_width, 0))
 
     def scale_channel(self, source, factors, target, count, channels, *, a_half=False):
         """target = source * factors, one factor per channel."""
