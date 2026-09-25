@@ -110,8 +110,11 @@ if not exist "%MANIFEST_SRC%" (
   echo ERROR: manifest template not found: %MANIFEST_SRC%
   exit /b 3
 )
-powershell -NoProfile -Command "(Get-Content '%MANIFEST_SRC%') -replace 'LIBRARY_PATH_PLACEHOLDER','%NAME%' | Set-Content '%MANIFEST_DST%'"
-echo   manifest:   %MANIFEST_DST%  library_path = %NAME%
+rem An ABSOLUTE library_path. A bare name makes the loader fail with error 87
+rem (ERROR_INVALID_PARAMETER) when the layer is found through VK_LAYER_PATH: measured
+rem here, the same manifest loads with the full path and not without it.
+powershell -NoProfile -Command "$lib = (Join-Path '%DEPLOY%' '%NAME%'); (Get-Content '%MANIFEST_SRC%') -replace 'LIBRARY_PATH_PLACEHOLDER', $lib.Replace('\','\\') | Set-Content '%MANIFEST_DST%'"
+echo   manifest:   %MANIFEST_DST%  library_path = %DEPLOY%\%NAME%
 
 rem The runtime the daemon imports. Copied because the daemon runs from this tree and
 rem the game folder has to be self-contained. The weights are NOT copied - the launcher
