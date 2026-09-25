@@ -238,7 +238,8 @@ void nr_compose_temporal(const float *head, ptrdiff_t hy, ptrdiff_t hx, ptrdiff_
                          const float *table, float confidence,
                          const float *mask, ptrdiff_t my, ptrdiff_t mx,
                          size_t height, size_t width, float intensity,
-                         float scale, float hold, float slope, float *output)
+                         float scale, float hold, float slope, float release,
+                         float *output)
 {
     #pragma omp parallel for schedule(static)
     for (size_t y = 0; y < height; ++y) {
@@ -246,6 +247,17 @@ void nr_compose_temporal(const float *head, ptrdiff_t hy, ptrdiff_t hx, ptrdiff_
             const float *h = head + (ptrdiff_t)y * hy + (ptrdiff_t)x * hx;
             const float *rgb = colour + (ptrdiff_t)y * sy + (ptrdiff_t)x * sx;
             const float *was = history + (ptrdiff_t)y * ry + (ptrdiff_t)x * rx;
+            /* What the game itself did to this pixel since its previous frame: the
+             * largest step of the three channels. Both the floor and the release read it. */
+            float moved = 0.0f;
+            if (previous) {
+                const float *before = previous + (ptrdiff_t)y * py + (ptrdiff_t)x * px;
+                for (size_t c = 0; c < 3; ++c) {
+                    float step = rgb[(ptrdiff_t)c * sc] - before[(ptrdiff_t)c * pc];
+                    if (step < 0.0f) step = -step;
+                    if (step > moved) moved = step;
+                }
+            }
             float alpha;
             if (table) {
                 /* The model's gate looked up rather than recomputed: `nr_frame.gate_table`
@@ -260,14 +272,18 @@ void nr_compose_temporal(const float *head, ptrdiff_t hy, ptrdiff_t hx, ptrdiff_
             } else {
                 alpha = gate[(ptrdiff_t)y * gy + (ptrdiff_t)x * gx];
             }
+            if (previous && release != 0.0f) {
+                /* The release: where the game's pixel changed, what the previous output
+                 * holds there is something that has since moved, and the gate is not local
+                 * enough to know it — it reads 0.6 over a whole Tekken frame. Its share
+                 * fades from all of it at no change to none by `-1 / release`, folded like
+                 * `slope` and for the same reason. Before the floor, which it never lowers. */
+                float kept = moved * release + 1.0f;
+                if (kept < 0.0f) kept = 0.0f;
+                if (kept > 1.0f) kept = 1.0f;
+                alpha *= kept;
+            }
             if (previous) {
-                const float *before = previous + (ptrdiff_t)y * py + (ptrdiff_t)x * px;
-                float moved = 0.0f;
-                for (size_t c = 0; c < 3; ++c) {
-                    float step = rgb[(ptrdiff_t)c * sc] - before[(ptrdiff_t)c * pc];
-                    if (step < 0.0f) step = -step;
-                    if (step > moved) moved = step;
-                }
                 /* `moved * slope + hold`, clamped to [0, hold], and `slope` arrives
                  * already folded: NumPy multiplies by one constant and adds another,
                  * and `clip(1 - moved * 255 / ramp, 0, 1) * hold` is the same value by

@@ -9,7 +9,20 @@ you need the evidence behind a line in this file, rather than reading them in or
 
 ---
 
-## Latest: window attention and the feed-forward loaded their operands once per subgroup (2026-09-25, afternoon)
+## Latest: at 30 fps a trail appeared, and a `release` knob drops it (2026-09-25, evening)
+
+In Tekken 7 with the new kernels — **640x360 25-32 fps, 1280x720 20-22, 1920x1080 10-13**,
+the owner playing — the owner saw ghosting behind everything that moved, which 10 fps had
+hidden. The cause is the model's history gate, not our hold floor: with identity
+reprojection a moving pixel's history is what used to be there, and the gate read 0.63 over
+the whole session. `release` fades the gate out where the game's own pixel changed — full
+at no change, none by 24 levels of 255 — and leaves the floor alone. 24 is the owner's
+choice from 4/8/16/24 in the game; 0 restores the old behaviour. `notes/phase54`.
+
+The knob descriptions were rewritten at the owner's request: general, no scene a user
+cannot see (a kimono, an iris). The measurements they used to quote are in the notes.
+
+## Window attention and the feed-forward loaded their operands once per subgroup (2026-09-25, afternoon)
 
 The owner asked for window attention — 19-21 % of the graph at every extent — to be solved.
 It ran one 32-lane subgroup to a workgroup with 2 KB of shared memory, and at 64 x 2 KB

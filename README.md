@@ -314,49 +314,55 @@ all of them move between frames. Only `profile` costs a forward pass.
 
 `0.05` to `1`, step `0.05`, default `1`
 
-The only knob that changes the frame rate. The network runs on a frame this much smaller, and what comes back is the *head* — the detail it drew — which is then scaled up and composed against the full-resolution original, so the game's own pixels are never resampled and only the synthesised part is interpolated. Cost follows the extent and nothing else: about 9 ms + 162 ms per megapixel of network extent on an Arc 140V. The extent is never below 320 on a side — the checkpoint's minimum — so small renders are padded up to it: at 512x288 every scale up to 0.62 runs the same 320x320 network as 0.35 does, with three times the real pixels in it. 0.55 is the measured compromise, but the *sign* of its effect on quality depends on how dark the scene is rather than on the number: on a bright frame 0.55 adds 15 % of local contrast to a kimono, on a dark crowd it takes 21 % away.
+The only knob that changes the frame rate. The network draws its detail on a frame this much smaller; the detail is then scaled up and laid over the game's full-resolution frame, so the game's own pixels are never resampled. Lower is faster and draws coarser detail. The network never runs below 320 pixels on a side, so on a small window the low scales all cost the same: at 512x288, everything up to about 0.6 runs the same 320x320 network. For play, 0.35-0.6 is the useful range; 1.0 is for screenshots. Cost on an Arc 140V: about 9 ms plus 162 ms per megapixel of network frame.
 
-### `profile` — which way to trade skin texture against speculars
+### `profile` — which way to trade skin texture against highlights and colour
 
 `standard` / `natural` / `cinematic` / `neutral`
 
-The three conditioning scalars the network is given. They are a clean monotone trade, not a quality ladder: everything the pass adds to skin texture it takes out of speculars and colour, and the profile chooses where on that curve to sit. `standard` is the better default for a game with bright, near-clipping skin. `cinematic` does not merely add less on such a frame — it *removes* detail, smoothing sand grain that `standard` keeps. `neutral` sets tone and structure to zero. Changing this costs a forward pass, unlike everything below it.
+The style the network is asked for. The profiles are a trade, not a quality ladder: what one adds to skin and surface texture it takes from highlights and colour. `standard` is the default and adds the most texture; `natural` and `cinematic` keep more of the highlights and colour, and on very bright scenes `cinematic` can smooth fine detail rather than add it. `neutral` all but switches the effect off. The profile is an input to the network, so it takes effect on the next frame the network draws; the knobs below act after it.
 
 ### `intensity` — how far to go towards the model's picture, or past it
 
 `0` to `2`, step `0.05`, default `1`
 
-Blends the model's answer against the source, per pixel where an interface mask supplies one. At 1 you get the model's picture; below it you get part of the way there; above it the blend extrapolates *past* the model, which the vendor's own panel allows to 2 and ships screenshots at 1.66. Post-network and free: sweeping it does not re-run anything.
+Blends the model's picture with the game's own. 1 is the model's picture, 0 is the game's frame untouched, and values between are part of the way. Above 1 the blend goes past the model and exaggerates what it changed, which can look overdone. Free to change: nothing is re-run.
 
-### `detail_strength` — re-weights the high-frequency half of the change
-
-`0` to `2`, step `0.05`, default `1`
-
-After the blend, the difference the pass made is split into bands and each is re-weighted. This is the fine half — pores, strands, grain. Away from 1 it costs a Gaussian over the whole frame. OpenCV provides a faster blur implementation; the cost depends on the machine and frame size.
-
-### `colour_strength` — the low-frequency half — and it runs backwards from its name
+### `detail_strength` — how strongly to apply the fine detail the pass adds
 
 `0` to `2`, step `0.05`, default `1`
 
-The coarse half of the same split: tone and colour rather than detail. **It does not restore colour.** 1.5 is the most aggressive of the measured settings — iris saturation 16.8 → 8.8, half again below the default — because it scales the strength of the pass's colour term, not the colour that survives. The name invites the opposite reading and this project spent a measurement finding out.
+The change the pass makes is split into fine detail — pores, hair, grain — and broad tone. This scales the fine part: 0 keeps only the tonal change, above 1 sharpens further, and past about 2 it over-sharpens. Away from 1 it costs one blur over the whole frame.
 
-### `temporal` — how much of the model's own history gate to trust
+### `colour_strength` — how strongly to apply the pass's change of tone and colour
+
+`0` to `2`, step `0.05`, default `1`
+
+The broad half of the same split: how much of the pass's change in tone and colour is applied. It does not add colour back. The pass tends to calm bright, saturated areas, and this scales that change — so above 1 colours can look more washed out, not richer, and 0 keeps the game's own tone with the detail on top.
+
+### `temporal` — how much of the previous frame to carry over
 
 `0` to `1`, step `0.05`, default `1`
 
-The previous output is fed back into the network's history channels, and the model's learned gate decides per pixel how much of it survives into this frame. This scales that gate. 0 turns the path off entirely, is bit-identical to drawing each frame alone, and clears the stored frame so switching back on cannot resurrect a stale one. Worth about 4 % of the frame time.
+Each frame, the previous result is fed back to the network, which decides per pixel how much of it to keep; that is what keeps the picture from shimmering. This scales how much it keeps. 0 draws every frame on its own and forgets the stored frame, so turning it back on cannot bring back an old one. Costs a few per cent of the frame time.
 
-### `hold` — how hard to hold pixels the game did not move
+### `hold` — how firmly to keep areas the game did not change
 
 `0` to `1`, step `0.05`, default `1`
 
-A floor under that gate, which the gate needs: the model is global, so on a frame where most things move it reads 0.12 even over pixels that did not move at all. Where the game handed back the same pixel the previous output is right for that pixel by construction, and this says so. It cannot ghost — the frame that changes a pixel is the frame that releases it. Together with `temporal` it takes the invention over still pixels from 3.25 levels of 255 to 0.87.
+Where the game hands back exactly the same pixel as last frame, the previous result is still right for it, so it is kept at least this firmly. This is what stops still areas — backgrounds, a waiting character — from shimmering while something else moves. It cannot leave a trail: the first frame in which the game changes a pixel lets go of it.
 
-### `cut_limit` — the frame-to-frame change that counts as a new shot
+### `release` — change, in levels of 255, that drops the previous frame where something moved
+
+`0` to `64`, step `1`, default `24`
+
+The other side of `hold`. Where the game's own pixel changed by this many levels of 255 or more, something moved there, and the previous result is dropped for that pixel; smaller changes keep a share that falls with the change. It is what prevents trails behind moving objects, since the layer has no motion vectors to follow them with. 16-24 is the useful range: lower drops more and the picture starts to shimmer over moving things, 0 turns it off and trails come back.
+
+### `cut_limit` — how big a change between frames counts as a new scene
 
 `0` to `1`, step `0.01`, default `0.15`
 
-Mean absolute change between two presents above which the shot is taken to have cut and the history is thrown away. The gate rejects wrong history per pixel on its own, but it was characterised on a pan at full scale, so a whole-frame replacement — a round transition, a replay, a menu — is worth refusing outright.
+The average change between two frames above which the scene is taken to have cut — a camera cut, a menu, a replay — and the previous frame is dropped entirely instead of pixel by pixel. Lower cuts more readily; 1 never cuts.
 
 <!-- knobs:end -->
 
