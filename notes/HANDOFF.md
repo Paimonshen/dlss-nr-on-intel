@@ -29,6 +29,21 @@ the effect came out stronger (7.2 against 4.6 levels of change), at 192x128 slig
 Which is better is taste, so it is a knob: `min_extent`, 128-320 in steps of 64, **default
 320**, unchanged behaviour. The owner is to compare in a game.
 
+At those small frames the bottleneck is 6-32 tokens, and it is now padded to 64 rows
+outright: its GEMMs wait on the K loop, not on rows, and a whole block moves the QKV
+projection's epilogue off the tiled kernel (0.22 -> 0.14 ms a call, ~0.6 ms of a 192x128
+frame, bit-identical). What is left there is the staged kernel's K loop itself: even with
+every global load taken out, a 32-deep step costs ~0.93 us of shared-memory stores,
+barriers and fragment loads, and at 16-64 rows nothing hides it. A small-M kernel without
+the shared-memory round trip, with weights stored in the fragment order a B tile loads in,
+is the next idea there — not tried.
+
+And on screenshots: a light blur of the network's *input* at 1.0 ([1 2 1] each way, the
+frame composed over the untouched original) takes the pixel-level share of what the pass
+adds from 2.8 % to 0.9 % — 0.9's figure — but not its strength (change 0.024 against 0.039
+at 0.9). The grain comes from the game's aliasing; the strength comes from the smaller
+frame. 0.9 gives both, so there is no pre-filter knob.
+
 ## the async live mode exists, and is off by default for a reason (2026-09-25, night)
 
 `NR_LAYER_ASYNC=1` (with live mode): on each processed present the layer sends this frame
