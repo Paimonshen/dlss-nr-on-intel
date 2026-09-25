@@ -33,7 +33,7 @@ TM, TN, TK = 8, 16, 16
 
 (E4M3, GATE, HALF, TO_HALF, SCALE, RESIDUAL, FROM_HALF, PARTITION, REVERSE, ADD_BIAS,
  SPLIT_HEADS, MERGE_HEADS, POOL2, UPSAMPLE2, SCALE_CHANNEL, ADD, PAD_END,
- GATE_E4M3_HALF, E4M3_HALF, GATE_HALF, UPSAMPLE_MERGE, UPSAMPLE_ADD) = range(22)
+ GATE_E4M3_HALF, E4M3_HALF, GATE_HALF, UPSAMPLE_MERGE, UPSAMPLE_ADD, POOL2_SKIP) = range(23)
 COSINE_PUBLISH, SOFTMAX = 0, 1
 
 # GEMM epilogues, applied to the accumulator on its way out of the kernel
@@ -975,6 +975,26 @@ class Runtime:
         return self.unary(MERGE_HEADS, source, target, windows * tokens * channels,
                           channels=channels, epilogue=epilogue, narrow=narrow,
                           _dims=(heads, tokens, 0, 0))
+
+    def pool2_skip(self, source, pooled, skip, height, width, channels):
+        """`pool2` with the E4M3 publish into half `pooled`, and `e4m3_half` of the same
+        float32 `source` into `skip`, in one read of it (`src/gpu/test_glue.py`). Even
+        extents only: an odd last row or column would be pooled away and never skipped."""
+        count = (height // 2) * (width // 2) * channels
+        if height % 2 or width % 2:
+            raise ValueError("pool2_skip needs even extents")
+        if len({source.id, pooled.id, skip.id}) != 3:
+            raise ValueError("pool2_skip operands must be distinct")
+        for buf, size in ((source, height * width * channels * 4), (pooled, count * 2),
+                          (skip, height * width * channels * 2)):
+            if buf.nbytes < size:
+                raise ValueError("pool2_skip buffer is too small")
+        if self.lib.xmx_rec_unary2(POOL2_SKIP | _publish(EPI_E4M3, True), source.id,
+                                   source.id, pooled.id, source.id, skip.id, int(count),
+                                   int(channels), 1.0, 0, int(height), int(width), 0, 0) != 0:
+            raise RuntimeError("xmx_rec_unary2: " + self.lib.xmx_error().decode())
+        self.recorded += 1
+        return self
 
     def pool2(self, source, target, height, width, channels, *, epilogue=0, narrow=False,
               a_half=False):

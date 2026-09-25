@@ -391,9 +391,13 @@ class ResidentFrame:
                        source16=scratch0.value16 if rt.fuse_glue else None)
         # the post block's skip is block 0 published; the encoder pools the
         # *unpublished* output, so both come from `raw` and neither from the other
-        with rt.independent():
-            rt.e4m3_half(raw, full_skip, pixels * 32)
-            rt.pool2(raw, value, height, width, 32, epilogue=xmxres.EPI_E4M3, narrow=True)
+        if rt.fuse_glue and height % 2 == 0 and width % 2 == 0:
+            rt.pool2_skip(raw, value, full_skip, height, width, 32)
+        else:
+            with rt.independent():
+                rt.e4m3_half(raw, full_skip, pixels * 32)
+                rt.pool2(raw, value, height, width, 32, epilogue=xmxres.EPI_E4M3,
+                         narrow=True)
         submit()
         keep("stem", stem, pixels * 32, (1, height, width, 32))
         keep("block0", raw, pixels * 32, (1, height, width, 32))

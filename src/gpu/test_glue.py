@@ -2,8 +2,8 @@
 """The full-resolution glue in fewer passes, against the passes it replaces.
 
 `upsample_merge` against upsample2, scale_channel, residual and to_half; `upsample_add`
-against a decoder transition's upsample2, scale_channel and add; `gemm_dual` against a
-GEMM and a to_half of its output. Both outputs of each must match byte for
+against a decoder transition's upsample2, scale_channel and add; `pool2_skip` against
+block 0's e4m3_half and pool2; `gemm_dual` against a GEMM and a to_half of its output. Both outputs of each must match byte for
 byte, and the guard values past them must survive.
 """
 import numpy as np
@@ -203,11 +203,60 @@ def transition_cases(rt, rng):
     return cases
 
 
+def pool_cases(rt, rng):
+    """`pool2_skip` against block 0's own two passes: e4m3_half of the float32 output for
+    the post block's skip, and pool2 of it with the E4M3 publish for the encoder."""
+    cases = 0
+    for channels, height, width in ((32, 8, 8), (32, 16, 24), (32, 64, 40), (16, 6, 10)):
+        count = height * width * channels
+        pooled_count = (height // 2) * (width // 2) * channels
+        buffers = []
+
+        def alloc(n, dtype):
+            b = rt.buffer(n, dtype)
+            buffers.append(b)
+            return b
+        try:
+            source = alloc(count, np.float32)
+            skip_ref, skip = alloc(count + GUARD, np.float16), alloc(count + GUARD, np.float16)
+            pool_ref, pooled = (alloc(pooled_count + GUARD, np.float16),
+                                alloc(pooled_count + GUARD, np.float16))
+            for spread in (0.01, 1.0, 300.0):
+                values = rng.normal(0, spread, count).astype(np.float32)
+                values[:4] = [0, -0.0, 448.0, -500.0]
+                X.host_write(source, values)
+                for mask in (0, 7):
+                    rt.specialize(mask)
+                    for b, n in ((skip_ref, count), (skip, count), (pool_ref, pooled_count),
+                                 (pooled, pooled_count)):
+                        X.host_write(b, np.full(n + GUARD, fill(np.float16), np.float16))
+                    rt.begin()
+                    rt.e4m3_half(source, skip_ref, count)
+                    rt.pool2(source, pool_ref, height, width, channels, epilogue=X.EPI_E4M3,
+                             narrow=True)
+                    rt.pool2_skip(source, pooled, skip, height, width, channels)
+                    rt.submit()
+                    name = f"pool+skip C={channels} {height}x{width} spread {spread} mask {mask}"
+                    check(name + " skip", X.host_view(skip, np.float16),
+                          X.host_view(skip_ref, np.float16))
+                    check(name + " pooled", X.host_view(pooled, np.float16),
+                          X.host_view(pool_ref, np.float16))
+                    assert filled(X.host_view(skip, np.float16)[count:], np.float16).all()
+                    assert filled(X.host_view(pooled, np.float16)[pooled_count:],
+                                  np.float16).all()
+                    cases += 1
+        finally:
+            for b in buffers:
+                b.free()
+    return cases
+
+
 def main():
     rt = X.Runtime()
     rng = np.random.default_rng(424242)
     merges = upsample_cases(rt, rng)
     transitions = transition_cases(rt, rng)
+    pools = pool_cases(rt, rng)
     gemms = gemm_cases(rt, rng)
     before = rt.graph_key()
     rt.fuse_glue = not rt.fuse_glue
@@ -215,8 +264,9 @@ def main():
     middle = rt.graph_key()
     rt.fuse_transition = not rt.fuse_transition
     assert rt.graph_key() not in (before, middle)
-    print(f"glue: {merges} upsample-merge, {transitions} transition and {gemms} GEMM "
-          f"half-copy cases bit-exact, guards and graph keys OK; staging={rt.staging}")
+    print(f"glue: {merges} upsample-merge, {transitions} transition, {pools} pool-and-skip "
+          f"and {gemms} GEMM half-copy cases bit-exact, guards and graph keys OK; "
+          f"staging={rt.staging}")
 
 
 if __name__ == "__main__":
