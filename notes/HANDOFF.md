@@ -1,6 +1,6 @@
 # HANDOFF — read this first
 
-State of the DLSS-NR on Intel Xe2 project as of **2026-09-25**. notes/CLAUDE.md holds the
+State of the DLSS-NR on Intel Xe2 project as of **2026-09-26**. notes/CLAUDE.md holds the
 original brief; **this file overrides it wherever they disagree**, and after
 2026-09-09 they disagree about something foundational.
 
@@ -9,7 +9,41 @@ you need the evidence behind a line in this file, rather than reading them in or
 
 ---
 
-## Latest: the 320 floor is NVIDIA's, not the network's — `min_extent` (2026-09-25, night)
+## Planned, not started
+
+- **Motion vectors from the game's own upscaler.** A layer at `vkQueuePresentKHR` sees the
+  finished frame and nothing else, which is why the temporal path reprojects by identity and
+  needs `release` against trails. Every game with DLSS, FSR 2+ or XeSS hands its upscaler the
+  render-size colour, motion vectors, depth and jitter, and OptiScaler already intercepts
+  exactly those calls under Proton; `Dagherbou/OptiScaler_DLSSNR` runs NVIDIA's own model
+  there, before the interface is drawn, in six one-line call sites. Our version would send
+  those resources to the daemon instead. It would give real reprojection, no interface in the
+  input, and the network at render size before the upscale, as the vendor arranges it.
+  Estimated 2-3 weeks (a Windows build of OptiScaler from here, transport out of Wine, each
+  game's motion-vector convention); deferred by the owner on 2026-09-26. Tekken 7 and DoA5
+  have no upscaler, so it needs a newer game.
+- **A FAQ** in the README, for the questions that keep coming back. Later.
+
+## The frame around the network, faster at 720p and up (2026-09-26)
+
+On the daemon's own path, answers and log lines byte-identical, time to the answer (median of
+three alternating runs): **1280x720 at 0.35 41.6 -> 36.8 ms, 1920x1080 at 0.3 60.8 -> 56.8**;
+640x360 at 0.5 within noise, where the graph is 26.2 of ~29.5 ms. Three changes:
+
+- the head's upscale, the composition and the encoder in **one native pass**
+  (`nr_compose_encode`) wherever `compose_detail` is a no-op — three full-frame passes and
+  ~100 MB of memory traffic at 1280x720 became one and half of it;
+- rows handed to OpenMP threads **four at a time as they come free**: four of the eight cores
+  are low-power ones, and an even split left the others waiting (the fused pass 2.6 -> 2.2 ms);
+- what only the log and the next frame need, done **after the answer is sent**.
+
+Also merged from `improve-b`: a 32-row staged block for a bottleneck of 32 tokens or fewer,
+which only `min_extent` below 320 reaches (0.7-1.2 ms at 192x128-320x192). What was tried on
+the graph and did not pay — a small-M kernel, E4M3 weights, swapped operands, other block
+shapes — is in `notes/improve-b.md`; at 320x320 what is left inside the graph is about a
+percent an item.
+
+## The 320 floor is NVIDIA's, not the network's — `min_extent` (2026-09-25, night)
 
 The network's frame is padded by mirroring to at least 320 a side because that is what the
 vendor's driver does (`NetworkGeometry.vendor_aligned`, recovered by MLX-DLSS). The graph
