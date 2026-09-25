@@ -24,6 +24,31 @@ you need the evidence behind a line in this file, rather than reading them in or
   have no upscaler, so it needs a newer game.
 - **A FAQ** in the README, for the questions that keep coming back. Later.
 
+## Four passes of the graph, faster (2026-09-26, night)
+
+All bit-identical — frame heads, the daemon's answers at three live sizes, `make test` in
+both memory modes — and each its own commit on `improve-b`:
+
+- **a decoder transition's upsample, scaled skip and add in one pass** (`UPSAMPLE_ADD`,
+  `NR_FUSE_TRANSITION`): three passes, two writing float32 for the next to read back;
+- **the global blocks' softmax on whole rows in shared memory, on 256 lanes**
+  (`attention_rows.spv`): one row a lane had read the bottleneck's scores as a gather
+  through L2, twice, on a pass holding a quarter of a core's threads — 0.573 -> 0.223 ms a
+  call at 1280x768, and 1920x1088's graph 344 -> 329.5 ms;
+- **block 0's output pooled and published as the skip in one read** (`POOL2_SKIP`, under
+  `NR_FUSE_GLUE`);
+- **window attention's denominators summed by two subgroups, a lane a row**: each subgroup
+  summing its own eight rows kept 8 of 32 lanes busy on a 64-add chain — a fifth of the
+  pass. The order of every sum is unchanged.
+
+The daemon, time to the answer against `improve-int8` (medians of three): **640x360 at 0.5
+29.1 -> 27.8 ms, 1280x720 at 0.35 37.0 -> 36.1, 1920x1080 at 0.3 56.7 -> 54.75**. Tried and
+not kept, in `notes/improve-b.md`: Q, K and V as E4M3 bytes (half the traffic, both passes
+slower — they were not waiting on it). Measured and left: the narrow blocks' fused
+feed-forward at 1280x768 moves ~315 MB in 3.5 ms, at the ceiling; what would pay there is
+reading its input once instead of as both half and float32, which needs its shared memory
+rearranged (~2 % at 720p).
+
 ## The frame around the network, faster at 720p and up (2026-09-26)
 
 On the daemon's own path, answers and log lines byte-identical, time to the answer (median of
