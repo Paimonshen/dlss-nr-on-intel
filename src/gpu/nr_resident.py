@@ -129,9 +129,13 @@ class GlobalScratch:
         # 235.4 ms on the GPU, three alternating runs each. Pad rows are zero, are excluded
         # from the softmax, and leave every real row bit-identical. The eighth is a guard,
         # not a measurement: at 384x384 (64 tokens) and 1024x576 (192) the question does
-        # not arise, and a large pad would pay for rows nobody needs.
+        # not arise, and a large pad would pay for rows nobody needs. Below 64 tokens —
+        # the small network frames `min_extent` allows — the pad is taken outright: those
+        # GEMMs wait on their K loop, not on rows, so 64 cost what 16 do, and a whole block
+        # lets the QKV projection's epilogue leave the tiled kernel (0.22 -> 0.14 ms a call,
+        # about 0.6 ms of a 192x128 frame).
         padded = xmxres.align(tokens, 16)
-        if xmxres.align(tokens, 64) * 8 <= padded * 9:
+        if tokens <= 64 or xmxres.align(tokens, 64) * 8 <= padded * 9:
             padded = xmxres.align(tokens, 64)
         self.tokens, self.padded = tokens, padded
         padded, hidden = self.padded, weights.hidden_width
