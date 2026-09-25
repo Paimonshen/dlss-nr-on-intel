@@ -21,9 +21,9 @@ n-1 async, and the async expectation fails against a synchronous layer.
 320x320), because the game's rendering now runs beside it on the same iGPU. What it hides
 is CPU time, and there is little of it left; what it adds is a frame of latency, which the
 owner felt at once and more at larger scales and resolutions. His threshold: under ~15 ms
-of added latency or not at all. So it stays an option, off. On a discrete card, where the
-game and the network would not share one GPU, the trade could come out differently — that
-is the case it is kept for.
+of added latency or not at all. So it stays an option, off. It is kept for machines where
+the work around the network is a large share of the frame — the Windows run in PR #3 spent
+0.3 s of 2.3 s on the GPU — since that work is what the overlap hides.
 
 ## at 30 fps a trail appeared, and a `release` knob drops it (2026-09-25, evening)
 
