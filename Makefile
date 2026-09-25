@@ -5,7 +5,7 @@
 GLSL    := glslangValidator --target-env vulkan1.3 -Isrc/gpu
 CFLAGS  := -O2 -fPIC -Wall -Wextra -Wno-unused-parameter -Iwork/vulkan-headers/include
 SHADERS := work/gemm_resident.spv work/gemm_tiled.spv work/gemm_staged.spv \
-           work/gemm_staged32.spv work/gemm_staged32_deep.spv \
+           work/gemm_staged32.spv work/gemm_staged32_deep.spv work/attention_rows.spv \
            work/resident.spv work/attention.spv \
            work/history.spv work/gemm_coopmat.spv work/gemm_batched.spv \
            work/gemm_f16acc.spv work/gemm_coopmat_int8.spv work/window_attention.spv \
@@ -72,6 +72,10 @@ work/resident.spv: src/gpu/resident.comp src/gpu/publish.glsl src/gpu/specialize
 work/attention.spv: src/gpu/attention.comp src/gpu/publish.glsl src/gpu/specialize.glsl \
                     src/gpu/cosine_tree.glsl
 	$(GLSL) -o $@ $<
+# the whole-row softmax on 256 lanes (attention.comp, softmax_rows)
+work/attention_rows.spv: src/gpu/attention.comp src/gpu/publish.glsl src/gpu/specialize.glsl \
+                         src/gpu/cosine_tree.glsl Makefile
+	$(GLSL) -DROW_LANES=256 -o $@ $<
 work/attention_ab.spv: src/gpu/attention.comp src/gpu/publish.glsl src/gpu/specialize.glsl \
                        src/gpu/cosine_tree.glsl
 	$(GLSL) -DSOFTMAX_AB -o $@ $<

@@ -35,7 +35,8 @@ static struct {
 	VkPipeline rffn;          /* the fused feed-forward, built on first use */
 	/* the staged kernel on 32-row blocks, with a 32- and a 64-deep K step */
 	VkPipeline rstaged32[2];
-	char *rpaths[8];
+	VkPipeline rrows;         /* the whole-row softmax on 256 lanes */
+	char *rpaths[9];
 	unsigned specialize;
 	unsigned tiling, tilem, tilen;
 	int syncing;
@@ -310,8 +311,9 @@ static int resident_pipeline(unsigned family, unsigned flags, VkPipeline fallbac
 			     VkPipeline *out)
 {
 	/* families 5-7 — the fused feed-forward and the 32-row staged builds — are GEMMs and
-	 * specialise with them */
-	unsigned mask = (family < 3 || family >= 5) ? 1u : (family == 3 ? 2u : 4u);
+	 * specialise with them; 8, the 256-lane row build, with the row passes */
+	unsigned mask = family == 8 ? 4u
+		      : (family < 3 || family >= 5) ? 1u : (family == 3 ? 2u : 4u);
 	*out = fallback;
 	if (!(g.specialize & mask)) return 0;
 	for (unsigned i = 0; i < specialized_count; i++) {
@@ -345,6 +347,16 @@ int xmx_staged32(unsigned on)
 	if (g.recording) FAIL("cannot change the staged routing during recording", 0);
 	g.staged32 = on != 0;
 	return 0;
+}
+
+/* The row passes' 256-lane build, for the whole-row softmax. */
+int xmx_rows_init(const char *path)
+{
+	if (!g.rready) FAIL("resident runtime not initialised", 0);
+	if (g.rrows) return 0;
+	free(g.rpaths[8]);
+	if (!(g.rpaths[8] = strdup(path))) FAIL("pipeline path allocation", 0);
+	return build_pipeline(path, g.rpl, &g.rrows);
 }
 
 /* The 32-row staged builds, `shallow` with the default 32-deep K step and `deep` with 64. */
@@ -1296,11 +1308,25 @@ int xmx_rec_row(unsigned kind, int a, int b, int c, int d, unsigned rows, unsign
 			  .m = rows, .n = width, .k = scaled, .batch = heads, .flags = kind,
 			  .sa = stride, .p0 = cap };
 	if (!p.a || !p.c) FAIL("row operand is not a live buffer", 0);
+	/* A softmax over rows too wide to stage 32 at a time takes as many whole rows as fit in
+	 * the pass's 8 KB of shared memory, `stride + 1` floats apart below the last 32, on the
+	 * 256-lane build (attention.comp, softmax_rows); anything wider keeps one row a lane. */
+	unsigned row_stride = stride ? stride : width, groups = (rows + 31) / 32;
+	int whole = (kind & 0xFFu) == 1u && (row_stride != width || row_stride > 64u)
+		    && row_stride + 1u <= 2016u;
+	if (whole) {
+		unsigned per = 2016u / (row_stride + 1u);
+		groups = (rows + per - 1u) / per;
+	}
 	VkPipeline pipeline;
-	if (resident_pipeline(4, kind, g.rrow, &pipeline)) return -1;
+	if (whole && g.rrows) {
+		if (resident_pipeline(8, kind, g.rrows, &pipeline)) return -1;
+	} else if (resident_pipeline(4, kind, g.rrow, &pipeline)) {
+		return -1;
+	}
 	vkCmdBindPipeline(g.rcb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
 	vkCmdPushConstants(g.rcb, g.rpl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
-	vkCmdDispatch(g.rcb, (rows + 31) / 32, 1, 1);
+	vkCmdDispatch(g.rcb, groups, 1, 1);
 	barrier();
 	stamp(PK_ROW, kind);
 	g.recorded++;

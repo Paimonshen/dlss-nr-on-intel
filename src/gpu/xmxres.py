@@ -99,6 +99,7 @@ def _load():
             ("xmx_staged32", [ctypes.c_uint]),
             ("xmx_staged32_calls", []),
             ("xmx_staged32_init", [ctypes.c_char_p, ctypes.c_char_p]),
+            ("xmx_rows_init", [ctypes.c_char_p]),
             ("xmx_specialized_count", []),
             ("xmx_specialization", []),
             ("xmx_graph_capture", []),
@@ -162,6 +163,9 @@ def _load():
                                    ("XMX_STAGED32_DEEP_SPV", "gemm_staged32_deep.spv"))]
     if lib.xmx_staged32_init(*[p.encode() for p in small]) != 0:
         raise failure(lib, "xmx_staged32_init")
+    rows = os.environ.get("XMX_ROWS_SPV") or str(ROOT / "work" / "attention_rows.spv")
+    if lib.xmx_rows_init(rows.encode()) != 0:
+        raise failure(lib, "xmx_rows_init")
     _lib = lib
     return lib
 
