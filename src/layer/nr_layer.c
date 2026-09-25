@@ -21,19 +21,59 @@
  *
  * Build: cc -O2 -shared -fPIC -o libnr_layer.so nr_layer.c -lvulkan
  */
-#define VK_USE_PLATFORM_XLIB_KHR
+/* The layer only needs a platform header so vulkan.h stops complaining; it never calls
+ * into the windowing system. Windows has no Xlib, so pick per platform. */
+#ifdef _WIN32
+#  define VK_USE_PLATFORM_WIN32_KHR
+#else
+#  define VK_USE_PLATFORM_XLIB_KHR
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <pthread.h>
 #include <errno.h>
-#include <unistd.h>
-#include <sys/socket.h>
-#include <sys/stat.h>
-#include <sys/un.h>
-#include <sys/time.h>
 #include <vulkan/vulkan.h>
 #include <vulkan/vk_layer.h>
+#include "nr_transport.h"
+
+#ifdef _WIN32
+#  include <io.h>
+#  ifndef R_OK
+#    define R_OK 4
+#  endif
+#  ifndef W_OK
+#    define W_OK 2
+#  endif
+#  ifndef F_OK
+#    define F_OK 0
+#  endif
+#  ifndef access
+#    define access(p, m) _access(p, m)
+#  endif
+#else
+#  include <pthread.h>
+#  include <unistd.h>
+#  include <sys/stat.h>
+#  include <sys/time.h>
+#endif
+
+/* Locking uses the platform's own primitive: an SRWLOCK needs no destroy step and is
+ * what this file used on Windows before, a pthread_mutex is what Linux uses. */
+#ifdef _WIN32
+typedef SRWLOCK nr_mutex_t;
+#define NR_MUTEX_INIT SRWLOCK_INIT
+#define nr_mutex_init(m, ...) InitializeSRWLock(m)
+#define nr_mutex_lock(m)      AcquireSRWLockExclusive(m)
+#define nr_mutex_unlock(m)    ReleaseSRWLockExclusive(m)
+#define nr_mutex_destroy(m)   ((void)(m))
+#else
+typedef pthread_mutex_t nr_mutex_t;
+#define NR_MUTEX_INIT PTHREAD_MUTEX_INITIALIZER
+#define nr_mutex_init(m, ...) pthread_mutex_init(m, NULL)
+#define nr_mutex_lock(m)      pthread_mutex_lock(m)
+#define nr_mutex_unlock(m)    pthread_mutex_unlock(m)
+#define nr_mutex_destroy(m)   pthread_mutex_destroy(m)
+#endif
 #ifdef _WIN32
 #include <windows.h>
 #include <process.h>
@@ -65,7 +105,7 @@ struct device_data {
 	VkPhysicalDevice physical;
 	VkQueue queue;
 	uint32_t queue_family;
-	pthread_mutex_t present_lock;
+	nr_mutex_t present_lock;
 	unsigned long frame_counter;
 	VkResult transfer_error, device_error;
 	VkFence stalled_fence;
@@ -118,7 +158,7 @@ struct swapchain_data {
 static struct device_data devices[8];
 static struct swapchain_data swapchains[MAX_SWAPCHAINS];
 
-static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+static nr_mutex_t lock = NR_MUTEX_INIT;
 static PFN_vkGetInstanceProcAddr next_instance_proc;
 static VkInstance layer_instance;
 static const char *capture_path;
@@ -136,53 +176,37 @@ static int ui_mask;
 /* `reply_size` is deliberately separate from `payload_size`: the interface mask makes
  * the request larger than the answer, and reusing one size meant asking for bytes the
  * daemon never sends — the read hit EOF and every masked frame came back unchanged. */
+/* Sends the request and leaves the connection open: in asynchronous live mode the
+ * answer is read on the next present, so the endpoint has to outlive this call.
+ * Returns the open link, or -1. */
 static int exchange_send(const void *header, size_t header_size, const void *payload,
 			 size_t payload_size)
 {
-	int fd = socket(AF_UNIX, SOCK_STREAM, 0);
-	if (fd < 0) return -1;
-	struct timeval timeout = { .tv_sec = 60 };
-	if (setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof timeout) ||
-	    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof timeout)) {
-		close(fd); return -1;
-	}
-	struct sockaddr_un address = { .sun_family = AF_UNIX };
-	snprintf(address.sun_path, sizeof address.sun_path, "%s", socket_path);
-	if (connect(fd, (struct sockaddr *)&address, sizeof address) < 0) {
+	nr_link link;
+	if (nr_link_connect(&link, socket_path) != 0) {
 		fprintf(stderr, "[nr_layer] no daemon at %s\n", socket_path);
-		close(fd);
 		return -1;
 	}
-	const unsigned char *out = header;
-	for (size_t sent = 0; sent < header_size; ) {
-		ssize_t n = send(fd, out + sent, header_size - sent, MSG_NOSIGNAL);
-		if (n < 0 && errno == EINTR) continue;
-		if (n <= 0) { close(fd); return -1; }
-		sent += (size_t)n;
+	if (nr_link_write(&link, header, header_size) != 0
+	    || nr_link_write(&link, payload, payload_size) != 0) {
+		nr_link_close(&link);
+		return -1;
 	}
-	out = payload;
-	for (size_t sent = 0; sent < payload_size; ) {
-		ssize_t n = send(fd, out + sent, payload_size - sent, MSG_NOSIGNAL);
-		if (n < 0 && errno == EINTR) continue;
-		if (n <= 0) { close(fd); return -1; }
-		sent += (size_t)n;
-	}
-	return fd;
+	return nr_link_handle(link);
 }
 
 /* Reads the whole answer and closes the connection, whichever way it ends. */
 static int exchange_receive(int fd, void *reply, size_t reply_size)
 {
-	unsigned char *in = reply;
-	for (size_t got = 0; got < reply_size; ) {
-		ssize_t n = read(fd, in + got, reply_size - got);
-		if (n < 0 && errno == EINTR) continue;
-		if (n <= 0) { close(fd); return -1; }
-		got += (size_t)n;
+	nr_link link = nr_link_from_handle(fd);
+	if (nr_link_read(&link, reply, reply_size) != 0) {
+		nr_link_close(&link);
+		return -1;
 	}
-	close(fd);
+	nr_link_close(&link);
 	return 0;
 }
+
 
 static int exchange(const void *header, size_t header_size, const void *payload,
 		    size_t payload_size, void *reply, size_t reply_size)
@@ -267,14 +291,14 @@ static void announce_queues(VkDevice device, VkQueue presenting, uint32_t presen
 {
 	uint32_t families[MAX_QUEUES];
 	int count = 0, others = 0;
-	pthread_mutex_lock(&lock);
+	nr_mutex_lock(&lock);
 	for (int i = 0; i < MAX_QUEUES; i++)
 		if (queues[i].queue && queues[i].device == device) {
 			families[count++] = queues[i].family;
 			if (queues[i].queue != presenting && queues[i].family != present_family)
 				others++;
 		}
-	pthread_mutex_unlock(&lock);
+	nr_mutex_unlock(&lock);
 	char list[128] = { 0 };
 	size_t used = 0;
 	for (int i = 0; i < count && used + 8 < sizeof list; i++)
@@ -289,14 +313,14 @@ static void announce_queues(VkDevice device, VkQueue presenting, uint32_t presen
 static void remember_queue(VkDevice device, uint32_t family, VkQueue queue, int capture_ok)
 {
 	if (!queue) return;
-	pthread_mutex_lock(&lock);
+	nr_mutex_lock(&lock);
 	if (!find_queue(queue))
 		for (int i = 0; i < MAX_QUEUES; i++)
 			if (!queues[i].queue) {
 				queues[i] = (struct queue_data){ queue, device, family, capture_ok };
 				break;
 			}
-	pthread_mutex_unlock(&lock);
+	nr_mutex_unlock(&lock);
 }
 
 VKAPI_ATTR void VKAPI_CALL nr_GetDeviceQueue(VkDevice device, uint32_t family,
@@ -637,12 +661,12 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateDevice(VkPhysicalDevice physical,
 	VkResult r = create(physical, info, allocator, device);
 	if (r != VK_SUCCESS) return r;
 
-	pthread_mutex_lock(&lock);
+	nr_mutex_lock(&lock);
 	struct device_data *data = NULL;
 	for (int i = 0; i < 8; i++) if (!devices[i].device) { data = &devices[i]; break; }
 	if (data) {
 		memset(data, 0, sizeof *data);
-		pthread_mutex_init(&data->present_lock, NULL);
+		nr_mutex_init(&data->present_lock, NULL);
 		data->device = *device;
 		data->physical = physical;
 		data->get_device_proc = next_device;
@@ -661,7 +685,7 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateDevice(VkPhysicalDevice physical,
 		data->queue_family = info->queueCreateInfoCount
 			? info->pQueueCreateInfos[0].queueFamilyIndex : 0;
 	}
-	pthread_mutex_unlock(&lock);
+	nr_mutex_unlock(&lock);
 	return r;
 }
 
@@ -708,7 +732,7 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateSwapchainKHR(VkDevice device,
 			"leaving it alone\n", info->imageFormat);
 		return r;
 	}
-	pthread_mutex_lock(&lock);
+	nr_mutex_lock(&lock);
 	struct swapchain_data *entry = NULL;
 	for (int i = 0; i < MAX_SWAPCHAINS; i++)
 		if (!swapchains[i].swapchain) { entry = &swapchains[i]; break; }
@@ -729,7 +753,7 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateSwapchainKHR(VkDevice device,
 		 * answer; the alternative is an out-of-bounds read every present. */
 		if (got != VK_SUCCESS || !entry->image_count) {
 			memset(entry, 0, sizeof *entry);
-			pthread_mutex_unlock(&lock);
+			nr_mutex_unlock(&lock);
 			fprintf(stderr, "[nr_layer] swapchain has more than %d images or none; "
 				"capture off\n", MAX_IMAGES);
 			return r;
@@ -738,7 +762,7 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateSwapchainKHR(VkDevice device,
 			entry->extent.width, entry->extent.height, entry->format,
 			entry->image_count);
 	}
-	pthread_mutex_unlock(&lock);
+	nr_mutex_unlock(&lock);
 	return r;
 }
 
@@ -774,7 +798,7 @@ static void release_device(struct device_data *data)
         PFN_vkDestroyFence destroy = (PFN_vkDestroyFence)data->get_device_proc(data->device, "vkDestroyFence");
         destroy(data->device, data->stalled_fence, NULL);
     }
-	pthread_mutex_destroy(&data->present_lock);
+	nr_mutex_destroy(&data->present_lock);
 	free(data->result);
 	free(data->earlier);
 	free(data->outgoing);
@@ -786,14 +810,14 @@ VKAPI_ATTR void VKAPI_CALL nr_DestroyDevice(VkDevice device,
 	struct device_data *data = find_device(device);
 	PFN_vkDestroyDevice next = data ? data->destroy_device : NULL;
 	if (data) {
-		pthread_mutex_lock(&lock);
+		nr_mutex_lock(&lock);
 		for (int i = 0; i < MAX_SWAPCHAINS; i++)
 			if (swapchains[i].device == device)
 				memset(&swapchains[i], 0, sizeof swapchains[i]);
 		for (int i = 0; i < MAX_QUEUES; i++)
 			if (queues[i].device == device)
 				memset(&queues[i], 0, sizeof queues[i]);
-		pthread_mutex_unlock(&lock);
+		nr_mutex_unlock(&lock);
 		release_device(data);
 		memset(data, 0, sizeof *data);
 	}
@@ -808,19 +832,19 @@ VKAPI_ATTR void VKAPI_CALL nr_DestroySwapchainKHR(VkDevice device, VkSwapchainKH
 						  const VkAllocationCallbacks *allocator)
 {
 	struct device_data *data = find_device(device);
-    if (data) pthread_mutex_lock(&data->present_lock);
+    if (data) nr_mutex_lock(&data->present_lock);
     if (data && data->result_chain == swapchain) {
         data->result_chain = VK_NULL_HANDLE;
         data->holding = data->have_earlier = 0;
     }
-	pthread_mutex_lock(&lock);
+	nr_mutex_lock(&lock);
 	for (int i = 0; i < MAX_SWAPCHAINS; i++)
 		if (swapchains[i].swapchain == swapchain)
 			memset(&swapchains[i], 0, sizeof swapchains[i]);
-	pthread_mutex_unlock(&lock);
+	nr_mutex_unlock(&lock);
 	if (data && data->destroy_swapchain)
 		data->destroy_swapchain(device, swapchain, allocator);
-    if (data) pthread_mutex_unlock(&data->present_lock);
+    if (data) nr_mutex_unlock(&data->present_lock);
 }
 
 static uint32_t memory_type(struct device_data *data, uint32_t bits,
@@ -1315,9 +1339,9 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue, const VkPresent
     struct device_data *data = owner ? find_device(owner->device) : NULL;
     if (!data) for (int i = 0; i < 8; i++) if (devices[i].device) { data = &devices[i]; break; }
     if (!data) return VK_ERROR_INITIALIZATION_FAILED;
-    pthread_mutex_lock(&data->present_lock);
+    nr_mutex_lock(&data->present_lock);
     VkResult result = data->device_error ? data->device_error : present_locked(queue, info);
-    pthread_mutex_unlock(&data->present_lock);
+    nr_mutex_unlock(&data->present_lock);
     return result;
 }
 
@@ -1353,13 +1377,13 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL nr_GetInstanceProcAddr(VkInstance insta
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL vkNegotiateLoaderLayerInterfaceVersion(
-	VkNegotiateLayerInterface *interface)
+	VkNegotiateLayerInterface *pVersion)
 {
-	if (interface->loaderLayerInterfaceVersion < 2)
+	if (pVersion->loaderLayerInterfaceVersion < 2)
 		return VK_ERROR_INITIALIZATION_FAILED;
-	interface->loaderLayerInterfaceVersion = 2;
-	interface->pfnGetInstanceProcAddr = nr_GetInstanceProcAddr;
-	interface->pfnGetDeviceProcAddr = nr_GetDeviceProcAddr;
-	interface->pfnGetPhysicalDeviceProcAddr = NULL;
+	pVersion->loaderLayerInterfaceVersion = 2;
+	pVersion->pfnGetInstanceProcAddr = nr_GetInstanceProcAddr;
+	pVersion->pfnGetDeviceProcAddr = nr_GetDeviceProcAddr;
+	pVersion->pfnGetPhysicalDeviceProcAddr = NULL;
 	return VK_SUCCESS;
 }
