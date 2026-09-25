@@ -156,3 +156,15 @@ What is left inside the graph at the live extent is a long tail of about a perce
 The daemon at 640x360 and scale 0.5 is 29.7 ms a frame, 26.8 of it the graph at 320x320;
 the lever that moves it is the network's extent (`min_extent`), which is the owner's call
 because it changes the picture.
+
+## Q, K and V as their E4M3 bytes (tried, not kept)
+
+Every value the QKV epilogue publishes is E4M3, so the window blocks' Q, K and V fit a byte
+each: the epilogue packed four to a word, window attention decoded them to halves as it
+staged K and V (and Q, into the subgroups' scratch before they need it) — an exact integer
+decode, bit-identical frames. The level-1 projection and attention at 1280x768 each move
+~190 MB of Q/K/V and ran near 80 GB/s, which read as memory-bound. They are not: with half
+the bytes the projection went 3.78 -> 3.93 ms and attention 3.22 -> 3.93, and the graph
+155.5 -> 161 ms (1920x1088 328 -> 343.5). Neither pass waits on those bytes; the encode and
+decode are what it paid for. A pass running at the machine's bandwidth is not thereby
+bandwidth-bound.
