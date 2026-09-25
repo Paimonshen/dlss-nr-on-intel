@@ -132,3 +132,27 @@ So the loop is not bound by its instruction count. By estimate — not measured 
 moves ~290 KB through shared memory and ~100 KB from L2 per K step, against ~0.5 us of
 multiply-adds; traffic and latency set the step. What would cut the traffic per multiply is
 a bigger tile per subgroup, and that spills (`phase26`).
+
+## Other block shapes for the staged kernel (tried, not kept)
+
+All bit-identical — a block's shape changes which workgroup computes an element, never the
+order of its sums.
+
+- **64 columns to a block**, eight subgroups where four took 32, the same threads a core:
+  alone, 3-14 % faster on most shapes (256x1536x512 91 -> 78 us). In a frame nothing:
+  1280x768 102 ms of staged GEMM either way, because the published GEMMs gained 5-13 % and
+  the residual ones lost 10-23 %. The QKV epilogue would also have needed two heads a block.
+- **32-row blocks at the deep levels**, for more workgroups where 64-row ones give 48-64:
+  144x512x512 35 -> 30 us and 144x512x2048 124 -> 111, but 256x512x512, 400x256x256,
+  400x1024x256 and 576x256x256 slower by 12-50 %. A rule that picks the winners is fitting
+  noise for a fraction of a millisecond.
+- **The bottleneck's two N = 1024 GEMMs on 32-row blocks with the 64-deep step** (64
+  tokens, as at 320x320): 184-186 -> 158-165 us and 50 -> 46 — 0.25 ms a frame. Not routed.
+- **More registers for a bigger tile**: none to have. Mesa sizes the register file by
+  generation — 128 registers a thread on Xe2; the larger file is Xe3's
+  (`brw_alloc_reg_sets`, `ver >= 30`).
+
+What is left inside the graph at the live extent is a long tail of about a percent each.
+The daemon at 640x360 and scale 0.5 is 29.7 ms a frame, 26.8 of it the graph at 320x320;
+the lever that moves it is the network's extent (`min_extent`), which is the owner's call
+because it changes the picture.
