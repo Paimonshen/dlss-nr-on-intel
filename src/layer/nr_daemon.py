@@ -36,6 +36,17 @@ import numpy as np
 
 HERE = pathlib.Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
+# --root has to be honoured before nr_frame is imported (it reads NR_ROOT at import
+# time to find work/), so scan argv here and let the parser accept the flag later.
+for _i, _arg in enumerate(sys.argv):
+    if _arg == "--root" and _i + 1 < len(sys.argv):
+        os.environ["NR_ROOT"] = sys.argv[_i + 1]
+        break
+    if _arg.startswith("--root="):
+        os.environ["NR_ROOT"] = _arg.split("=", 1)[1]
+        break
+if os.environ.get("NR_ROOT"):
+    ROOT = pathlib.Path(os.environ["NR_ROOT"])
 sys.path.insert(0, str(ROOT / "src" / "ref"))
 sys.path.insert(0, str(ROOT / "src" / "gpu"))
 
@@ -794,6 +805,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--socket", default="/tmp/nr_layer.sock")
+    parser.add_argument("--root", default=None,
+                        help="deployment root: work/ and src/ are looked for under it "
+                             "(also read from NR_ROOT before this parser runs)")
     parser.add_argument("--profile", default="standard", choices=sorted(nr_frame.PROFILES))
     parser.add_argument("--intensity", type=float, default=1.0)
     parser.add_argument("--detail-strength", type=float, default=1.0)
