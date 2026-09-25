@@ -103,3 +103,32 @@ heads unchanged:
 
 Only `min_extent` below 320 reaches it; at the default the bottleneck is 64 tokens and
 nothing changes. `XMX_STAGED32=0` is the comparison.
+
+## The staged kernel's K loop, read in its disassembly (tried, not kept)
+
+`INTEL_DEBUG=cs` on the specialised staged GEMM: per 32-deep K step, 8 multiply-adds and
+~260 other instructions on the path that runs — and **B's fragments are 16-bit loads**. B
+sits in shared memory by row, while a B fragment takes its K pairs a word at a time, so
+every pair is two 16-bit loads and a move: 32 loads and 32 moves a step.
+
+- **B by column in shared memory** (`(k, n)` at `n * S + k`) makes the pairs words, and
+  spills (7:43). Mesa's lowering reads a lane's words `h + 2i` apart — the two halves of
+  the subgroup take alternate K pairs — and in shared memory, where the alignment is known,
+  the vectorizer merges them across the gap into `d32x3` loads: six registers for four
+  used. Global memory does not merge them (a load may not grow into a new page), which is
+  why the same load is clean there. Dense 16x16 tiles, and a word-typed view of the same
+  bytes, compile the same.
+- **The operands swapped** — C^T = B^T A^T, B by column as the A operand, A's rows as the
+  B operand, the output stored by column — is **bit-identical** (the matrix unit sums k in
+  the same order whichever operand is which; checked on twelve shapes) and gives a clean
+  loop: no spills, 41 moves, 235 lines. And it is **slower**: 256x1536x512 92 -> 108 us,
+  576x768x256 59 -> 76, 6400x128x64 37 -> 73 (the transposed store goes element by element).
+- Timing proxies, values wrong: B's fragment loads out of the loop entirely, 5-18 % on the
+  deep shapes (64x1024x4096 -18 %) and nothing on the shallow ones; A's and B's both,
+  10-25 %. The generic loader, never executed on aligned operands, compiled out: 268 lines
+  of loop instead of 910, the same time.
+
+So the loop is not bound by its instruction count. By estimate — not measured — a core
+moves ~290 KB through shared memory and ~100 KB from L2 per K step, against ~0.5 us of
+multiply-adds; traffic and latency set the step. What would cut the traffic per multiply is
+a bigger tile per subgroup, and that spills (`phase26`).
