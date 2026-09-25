@@ -890,6 +890,22 @@ def main():
             ("NR_FUSE_GLOBAL_ATTENTION", "fuse_global_attention"))),
           flush=True)
 
+    if os.name == "nt":
+        # Windows has no AF_UNIX in CPython, so the layer and the daemon meet on a
+        # named pipe instead. nr_pipe gives the same accept/recv/sendall shape a
+        # socket has, so serve() below does not care which one it got.
+        import nr_pipe
+        server = nr_pipe.NamedPipeServer(args.socket, backlog=4, timeout=None)
+        print(f"listening on {args.socket}", flush=True)
+        try:
+            serve(server, backend, args)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            server.close()
+            backend.close()
+        return
+
     if os.path.lexists(args.socket):
         if not stat.S_ISSOCK(os.lstat(args.socket).st_mode):
             backend.close()
