@@ -1,6 +1,6 @@
 # HANDOFF — read this first
 
-State of the DLSS-NR on Intel Xe2 project as of **2026-09-24**. notes/CLAUDE.md holds the
+State of the DLSS-NR on Intel Xe2 project as of **2026-09-25**. notes/CLAUDE.md holds the
 original brief; **this file overrides it wherever they disagree**, and after
 2026-09-09 they disagree about something foundational.
 
@@ -9,7 +9,28 @@ you need the evidence behind a line in this file, rather than reading them in or
 
 ---
 
-## Latest: the frame around the network, taken apart again (2026-09-25, night)
+## Latest: window attention and the feed-forward loaded their operands once per subgroup (2026-09-25, afternoon)
+
+The owner asked for window attention — 19-21 % of the graph at every extent — to be solved.
+It ran one 32-lane subgroup to a workgroup with 2 KB of shared memory, and at 64 x 2 KB
+shared memory is the whole L1/SLM array: **no L1, so the eight workgroups of a window each
+fetched its K and V from L2, tile by tile**. The narrow blocks' fused feed-forward had the
+same shape of waste — each workgroup fetched both 8 KB weight matrices for its 16 rows,
+sixteen times its activations. Both now load once and share through shared memory, at the
+same threads a core, bit-identical: window attention at 0.48x its time, the feed-forward at
+0.6x. `notes/improve-shared-memory.md`, which also lists what was tried on the way.
+
+On the daemon's path, paired, answers byte-identical: **640x360 at 0.5 34.8 -> 30.6 ms,
+512x288 at 0.35 34.2 -> 29.7, 1280x720 at 0.35 49.1 -> 43.7, 1920x1080 at 0.3 71.6 -> 63.5,
+1920x1080 at full scale 433 -> 370**. Graph curve **8.9 ms + 162 ms per megapixel**; README
+table re-measured (medians of three).
+
+**How it was found matters more than the fix.** Instruction counts pointed the wrong way
+twice — a V load with 17 % fewer instructions was 9 % slower, and deleting 230 instructions of
+row sums changed nothing. Taking each load out in turn, with a constant in its place, found it
+in two runs. Next: the same question for every kernel that runs one subgroup to a workgroup.
+
+## The frame around the network, taken apart again (2026-09-25, night)
 
 Five small steps on the daemon's own path, each byte-identical and each its own commit, and
 together **640x360 at 0.5 from 39-41 ms yesterday morning to ~35 ms; 1280x720 at 0.35 from
@@ -69,6 +90,13 @@ move off the critical path. The owner deferred it until nothing else is left to 
 owner as root) bought **nothing**: 32.3 ms idle, and it damped the spinner's gain to 0.7 ms. So
 it is not the package's deep C-states, it moves with the machine's state, and a core spinning for
 every graph is not worth 5 %. Nothing kept; the uncore frequency (0400 here) was never read.
+*Re-measured 2026-09-25, afternoon, and closed for the daemon:* a spinning thread took the bare
+graph loop from 31 to 26.5 ms again — on a P-core or an LP E-core alike, wherever the waiting
+thread sat — but only when it spun all along; spinning just for the length of each graph bought
+nothing. And on the daemon's own path it bought nothing at all, because the host passes' OpenMP
+threads cancel it: with `OMP_NUM_THREADS=1` the spinner's 4.5 ms came back, with two or more
+threads — on other P-cores or on the LP E-cores — it was gone. A game's own threads will do the
+same. It is also why `upsample merge` measured three times its stand-alone time inside a frame.
 Tried and not kept, in `improve-fusions.md`: weights stored as their E4M3 bytes
 (exact, but a proxy put the prize at 0.14 ms a frame) and, again, register prefetch.
 
