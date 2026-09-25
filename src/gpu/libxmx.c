@@ -1330,11 +1330,13 @@ int xmx_rec_ffn(int a, int expand, int projection, int out, int skip, int cosine
 	if (residual && (groups != 1u || cin != 32u || skip < 0 || cosine < 0))
 		FAIL("the fused residual is for one group of 32 channels, with skip and cosine", 0);
 	if (!residual && (flags & 0x40000u)) FAIL("a half skip without a residual", 0);
+	/* the narrow blocks' shape: both weight matrices fit the workgroup's shared memory */
+	int staged = cin == 32u && hidden == 128u;
 	struct push p = { .a = addr_of(a), .b = addr_of(expand), .c = addr_of(out),
 			  .m = M, .n = cin, .k = hidden, .batch = groups,
 			  .sa = cin * hidden, .sb = hidden * 32u,
 			  .ldc = groups > 1u ? groups * 32u : 0u,
-			  .flags = flags | (residual ? 0x20000u : 0u),
+			  .flags = flags | (residual ? 0x20000u : 0u) | (staged ? 0x800000u : 0u),
 			  .qkv_scale = addr_of(projection) };
 	if (residual) { p.d = addr_of(skip); p.residual_cos = addr_of(cosine); }
 	if (!p.a || !p.b || !p.c || !p.qkv_scale || (residual && (!p.d || !p.residual_cos)))
@@ -1343,7 +1345,8 @@ int xmx_rec_ffn(int a, int expand, int projection, int out, int skip, int cosine
 	if (resident_pipeline(5, p.flags, g.rffn, &pipeline)) return -1;
 	vkCmdBindPipeline(g.rcb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
 	vkCmdPushConstants(g.rcb, g.rpl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
-	vkCmdDispatch(g.rcb, M / 16u, groups, 1);
+	/* sixteen subgroups of 16 rows a workgroup; the last one's surplus subgroups return */
+	vkCmdDispatch(g.rcb, (M + 255u) / 256u, groups, 1);
 	barrier();
 	stamp(PK_GEMM, 31);
 	g.recorded++;
