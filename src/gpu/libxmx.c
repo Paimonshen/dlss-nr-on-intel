@@ -1293,7 +1293,8 @@ int xmx_rec_window_attention(int q, int k, int v, int bias, int out,
 		FAIL("window attention operand is not a live buffer", 0);
 	vkCmdBindPipeline(g.rcb, VK_PIPELINE_BIND_POINT_COMPUTE, g.rwindow[merged]);
 	vkCmdPushConstants(g.rcb, g.rpl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
-	vkCmdDispatch(g.rcb, 8, batches < 65535u ? batches : 65535u,
+	/* one 256-lane workgroup a window and head: its eight subgroups share K and V */
+	vkCmdDispatch(g.rcb, 1, batches < 65535u ? batches : 65535u,
 		      1u + (batches - 1u) / 65535u);
 	barrier();
 	stamp(PK_ROW, 3);        /* WINDOW_ATTENTION, as window_attention.comp names it */
