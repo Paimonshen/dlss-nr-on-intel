@@ -12,7 +12,11 @@
  *
  * Each outer row loop is an OpenMP `parallel for`. No row reads another row's result,
  * so which thread computes a row changes nothing about its bytes; at a 1080p output it
- * changes the composition from 15.5 ms to 3.3 on this machine's eight cores.
+ * changes the composition from 15.5 ms to 3.3 on this machine's eight cores. Rows are
+ * handed out four at a time as threads come free rather than split evenly up front: four
+ * of the eight cores are low-power ones, and an even split left the others waiting on
+ * them — the fused composition 2.6 -> 2.2 ms at 1280x720. The two loops over single
+ * pixels or elements keep the even split, where a chunk of four is all overhead.
  */
 #include <stddef.h>
 #include <stdint.h>
@@ -42,7 +46,7 @@ void nr_encode8(const float *image, ptrdiff_t sy, ptrdiff_t sx, ptrdiff_t sc,
                  const uint8_t *raw, size_t height, size_t width, int bgra,
                  uint8_t *output)
 {
-    #pragma omp parallel for schedule(static)
+    #pragma omp parallel for schedule(dynamic, 4)
     for (size_t y = 0; y < height; ++y) {
         for (size_t x = 0; x < width; ++x) {
             const float *rgb = image + (ptrdiff_t)y * sy + (ptrdiff_t)x * sx;
@@ -67,7 +71,7 @@ void nr_compose(const float *head, ptrdiff_t hy, ptrdiff_t hx, ptrdiff_t hc,
      * prediction would remove an FP32 rounding and can change encoded pixels.
      */
     float blend = intensity > 1.0f ? intensity : unit(intensity);
-    #pragma omp parallel for schedule(static)
+    #pragma omp parallel for schedule(dynamic, 4)
     for (size_t y = 0; y < height; ++y) {
         for (size_t x = 0; x < width; ++x) {
             const float *h = head + (ptrdiff_t)y * hy + (ptrdiff_t)x * hx;
@@ -111,7 +115,7 @@ void nr_features(const float *colour, ptrdiff_t sy, ptrdiff_t sx, ptrdiff_t sc,
                  size_t height, size_t width, const float *noise,
                  const float *controls, float *output)
 {
-    #pragma omp parallel for schedule(static)
+    #pragma omp parallel for schedule(dynamic, 4)
     for (size_t y = 0; y < height; ++y) {
         const float *row = colour + rows[y] * sy;
         const float *old = history ? history + rows[y] * ty : 0;
@@ -133,7 +137,7 @@ void nr_features_half(const float *colour, ptrdiff_t sy, ptrdiff_t sx, ptrdiff_t
                       size_t height, size_t width, const float *noise,
                       const float *controls, _Float16 *output)
 {
-    #pragma omp parallel for schedule(static)
+    #pragma omp parallel for schedule(dynamic, 4)
     for (size_t y = 0; y < height; ++y) {
         const float *row = colour + rows[y] * sy;
         const float *old = history ? history + rows[y] * ty : 0;
@@ -164,7 +168,7 @@ void nr_area_mean(const float *source, ptrdiff_t sy, ptrdiff_t sx, ptrdiff_t sc,
                   float *output)
 {
     float count = (float)(fy * fx);
-    #pragma omp parallel for schedule(static)
+    #pragma omp parallel for schedule(dynamic, 4)
     for (size_t y = 0; y < height; ++y) {
         for (size_t x = 0; x < width; ++x) {
             const float *block = source + (ptrdiff_t)(y * fy) * sy + (ptrdiff_t)(x * fx) * sx;
@@ -191,7 +195,7 @@ void nr_resize_axis(const float *source, ptrdiff_t sy, ptrdiff_t sx, ptrdiff_t s
                     const int32_t *low, const int32_t *high,
                     const float *weight, float *output)
 {
-    #pragma omp parallel for schedule(static)
+    #pragma omp parallel for schedule(dynamic, 4)
     for (size_t y = 0; y < height; ++y) {
         if (axis == 0 && sx == (ptrdiff_t)channels && sc == 1) {
             const float *a = source + low[y] * sy;
@@ -330,7 +334,7 @@ void nr_compose_temporal(const float *head, ptrdiff_t hy, ptrdiff_t hx, ptrdiff_
                          float scale, float hold, float slope, float release,
                          float *output)
 {
-    #pragma omp parallel for schedule(static)
+    #pragma omp parallel for schedule(dynamic, 4)
     for (size_t y = 0; y < height; ++y) {
         for (size_t x = 0; x < width; ++x) {
             temporal_pixel(head + (ptrdiff_t)y * hy + (ptrdiff_t)x * hx, hc,
@@ -383,7 +387,7 @@ void nr_compose_encode(const float *head, ptrdiff_t hy, ptrdiff_t hx, ptrdiff_t 
     #pragma omp parallel
     {
         float *row = low_y ? malloc(head_width * channels * sizeof *row) : NULL;
-        #pragma omp for schedule(static)
+        #pragma omp for schedule(dynamic, 4)
         for (size_t y = 0; y < height; ++y) {
             const float *line;
             ptrdiff_t lx, lc;
