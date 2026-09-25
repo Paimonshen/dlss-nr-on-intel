@@ -16,6 +16,7 @@
  */
 #include <stddef.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 static float half(float value) { return (float)(_Float16)value; }
@@ -230,6 +231,94 @@ void nr_resize_axis(const float *source, ptrdiff_t sy, ptrdiff_t sx, ptrdiff_t s
  * floor: full at no change, gone by four levels of 255, never above `scale`
  * (notes/phase54). `mask` is the interface control mask's red channel, or NULL.
  */
+/* One pixel of the temporal composition, as nr_compose_temporal describes it: `h` the
+ * head's four channels, `gate_at` this pixel's gate where there is no table, `before` the
+ * game's previous pixel or NULL, `mask_at` the control mask's red here or NULL. Shared by
+ * nr_compose_temporal and the fused pass below, so the two are one arithmetic. */
+static inline void temporal_pixel(const float *h, ptrdiff_t hc,
+                                  const float *rgb, ptrdiff_t sc,
+                                  const float *was, ptrdiff_t rc,
+                                  const float *before, ptrdiff_t pc,
+                                  const float *gate_at, const float *table, float confidence,
+                                  const float *mask_at, float intensity,
+                                  float scale, float hold, float slope, float release,
+                                  float *out)
+{
+    /* What the game itself did to this pixel since its previous frame: the
+     * largest step of the three channels. Both the floor and the release read it. */
+    float moved = 0.0f;
+    if (before) {
+        for (size_t c = 0; c < 3; ++c) {
+            float step = rgb[(ptrdiff_t)c * sc] - before[(ptrdiff_t)c * pc];
+            if (step < 0.0f) step = -step;
+            if (step > moved) moved = step;
+        }
+    }
+    float alpha;
+    if (table) {
+        /* The model's gate looked up rather than recomputed: `nr_frame.gate_table`
+         * holds NumPy's own expression evaluated on every half value, so the exp
+         * that kept the gate in NumPy is inside the table, and the rounding to half
+         * here is the one `half` does. Then the confidence, as NumPy applies it. */
+        _Float16 logit = (_Float16)h[3 * hc];
+        uint16_t bits;
+        memcpy(&bits, &logit, sizeof bits);
+        alpha = table[bits];
+        if (confidence != 1.0f) alpha *= confidence;
+    } else {
+        alpha = *gate_at;
+    }
+    if (before && release != 0.0f) {
+        /* The release: where the game's pixel changed, what the previous output
+         * holds there is something that has since moved, and the gate is not local
+         * enough to know it — it reads 0.6 over a whole Tekken frame. Its share
+         * fades from all of it at no change to none by `-1 / release`, folded like
+         * `slope` and for the same reason. Before the floor, which it never lowers. */
+        float kept = moved * release + 1.0f;
+        if (kept < 0.0f) kept = 0.0f;
+        if (kept > 1.0f) kept = 1.0f;
+        alpha *= kept;
+    }
+    if (before) {
+        /* `moved * slope + hold`, clamped to [0, hold], and `slope` arrives
+         * already folded: NumPy multiplies by one constant and adds another,
+         * and `clip(1 - moved * 255 / ramp, 0, 1) * hold` is the same value by
+         * algebra and a different one in float32. */
+        float floored = moved * slope + hold;
+        if (floored < 0.0f) floored = 0.0f;
+        if (floored > hold) floored = hold;
+        if (floored > 1.0f) floored = 1.0f;     /* `compose` clips the floor to [0, 1] */
+        floored *= scale;
+        if (floored > alpha) alpha = floored;
+    }
+    /* No clamp on the blend: the NumPy this transcribes does not clamp it
+     * either, and the vendor's clamp is the one thing our composition
+     * deliberately drops so that intensity above 1 can extrapolate. */
+    float blend = intensity;
+    if (mask_at) blend *= *mask_at;
+    for (size_t c = 0; c < 3; ++c) {
+        float source = rgb[(ptrdiff_t)c * sc];
+        float predicted = unit(source + half(h[(ptrdiff_t)c * hc]) * 0.25f);
+        predicted += alpha * (was[(ptrdiff_t)c * rc] - predicted);
+        out[c] = unit(source + blend * (predicted - source));
+    }
+}
+
+/* The temporal composition, which this tree has and the other does not.
+ *
+ * The model's own history weight comes from `table`: NumPy's sigmoid evaluated once on
+ * every half value, indexed here by the half logit's sixteen bits. `expf` and NumPy's
+ * float32 exponential do not agree in the last bit, and the contract for all of this is
+ * byte-identical output, not nearly — but the logit is rounded to half before the
+ * sigmoid, so there are only 65536 inputs and NumPy can own every one of them.
+ * `confidence` then scales it, as NumPy does. With no table, `gate` carries the weight
+ * already computed, confidence and all.
+ *
+ * `previous` is the game's own frame from the present before, or NULL. Where it is
+ * unchanged the history is right for that pixel by construction, so the gate gets a
+ * floor: full at no change, gone by four levels of 255, never above `scale`
+ * (notes/phase54). `mask` is the interface control mask's red channel, or NULL.
+ */
 void nr_compose_temporal(const float *head, ptrdiff_t hy, ptrdiff_t hx, ptrdiff_t hc,
                          const float *colour, ptrdiff_t sy, ptrdiff_t sx, ptrdiff_t sc,
                          const float *history, ptrdiff_t ry, ptrdiff_t rx, ptrdiff_t rc,
@@ -244,68 +333,117 @@ void nr_compose_temporal(const float *head, ptrdiff_t hy, ptrdiff_t hx, ptrdiff_
     #pragma omp parallel for schedule(static)
     for (size_t y = 0; y < height; ++y) {
         for (size_t x = 0; x < width; ++x) {
-            const float *h = head + (ptrdiff_t)y * hy + (ptrdiff_t)x * hx;
-            const float *rgb = colour + (ptrdiff_t)y * sy + (ptrdiff_t)x * sx;
-            const float *was = history + (ptrdiff_t)y * ry + (ptrdiff_t)x * rx;
-            /* What the game itself did to this pixel since its previous frame: the
-             * largest step of the three channels. Both the floor and the release read it. */
-            float moved = 0.0f;
-            if (previous) {
-                const float *before = previous + (ptrdiff_t)y * py + (ptrdiff_t)x * px;
+            temporal_pixel(head + (ptrdiff_t)y * hy + (ptrdiff_t)x * hx, hc,
+                           colour + (ptrdiff_t)y * sy + (ptrdiff_t)x * sx, sc,
+                           history + (ptrdiff_t)y * ry + (ptrdiff_t)x * rx, rc,
+                           previous ? previous + (ptrdiff_t)y * py + (ptrdiff_t)x * px : NULL, pc,
+                           table ? NULL : gate + (ptrdiff_t)y * gy + (ptrdiff_t)x * gx,
+                           table, confidence,
+                           mask ? mask + (ptrdiff_t)y * my + (ptrdiff_t)x * mx : NULL,
+                           intensity, scale, hold, slope, release,
+                           output + (y * width + x) * 3);
+        }
+    }
+}
+
+/* The head's upscale, the composition and the codec in one pass over the output.
+ *
+ * Separately they are three passes over the full frame — the bilinear resize writes the
+ * head at the output's size through an intermediate, the composition reads it back, and
+ * the encoder reads the composition again — about 100 MB of memory traffic a 1280x720
+ * frame, where this moves about half of it. Each output row takes the resize's first axis
+ * into a row of its own (the same float32 intermediate `nr_resize_axis` stores), then per
+ * pixel the second axis, the composition — `temporal_pixel` with a history, `nr_compose`'s
+ * arithmetic without — and the encoder's rounding into `encoded`, a copy of the request
+ * whose alpha and whose rows and columns outside the active region stay as they came.
+ *
+ * `low_y`/`high_y`/`weight_y` and the `_x` three are `nr_image._axis_plan`'s, NULL for an
+ * axis already at the output's extent; `channels` is the head's, 4 with a history and 3
+ * without. The composition is still written to `output`, for the history and the log, and
+ * the upscaled head itself on every `step`-th row and column into `samples` when given —
+ * the values the log's gate figure reads.
+ */
+void nr_compose_encode(const float *head, ptrdiff_t hy, ptrdiff_t hx, ptrdiff_t hc,
+                       size_t head_width, size_t channels,
+                       const int32_t *low_y, const int32_t *high_y, const float *weight_y,
+                       const int32_t *low_x, const int32_t *high_x, const float *weight_x,
+                       const float *colour, ptrdiff_t sy, ptrdiff_t sx, ptrdiff_t sc,
+                       const float *history, ptrdiff_t ry, ptrdiff_t rx, ptrdiff_t rc,
+                       const float *previous, ptrdiff_t py, ptrdiff_t px, ptrdiff_t pc,
+                       const float *table, float confidence,
+                       const float *mask, ptrdiff_t my, ptrdiff_t mx,
+                       size_t height, size_t width, float intensity,
+                       float scale, float hold, float slope, float release,
+                       float *output, uint8_t *encoded, size_t frame_width,
+                       size_t top, size_t left, int bgra, float *samples, size_t step)
+{
+    size_t sampled = samples && step ? (width + step - 1) / step : 0;
+    /* nr_compose's blend: below 1 clamped to [0, 1], above it extrapolating */
+    float still = intensity > 1.0f ? intensity : unit(intensity);
+    #pragma omp parallel
+    {
+        float *row = low_y ? malloc(head_width * channels * sizeof *row) : NULL;
+        #pragma omp for schedule(static)
+        for (size_t y = 0; y < height; ++y) {
+            const float *line;
+            ptrdiff_t lx, lc;
+            if (low_y) {
+                float w = weight_y[y], other = 1.0f - w;
+                const float *a = head + (ptrdiff_t)low_y[y] * hy;
+                const float *b = head + (ptrdiff_t)high_y[y] * hy;
+                for (size_t i = 0; i < head_width; ++i)
+                    for (size_t c = 0; c < channels; ++c)
+                        row[i * channels + c] = a[(ptrdiff_t)i * hx + (ptrdiff_t)c * hc] * other
+                                              + b[(ptrdiff_t)i * hx + (ptrdiff_t)c * hc] * w;
+                line = row;
+                lx = (ptrdiff_t)channels;
+                lc = 1;
+            } else {
+                line = head + (ptrdiff_t)y * hy;
+                lx = hx;
+                lc = hc;
+            }
+            for (size_t x = 0; x < width; ++x) {
+                float h[4];
+                if (low_x) {
+                    float w = weight_x[x], other = 1.0f - w;
+                    const float *a = line + (ptrdiff_t)low_x[x] * lx;
+                    const float *b = line + (ptrdiff_t)high_x[x] * lx;
+                    for (size_t c = 0; c < channels; ++c)
+                        h[c] = a[(ptrdiff_t)c * lc] * other + b[(ptrdiff_t)c * lc] * w;
+                } else {
+                    const float *a = line + (ptrdiff_t)x * lx;
+                    for (size_t c = 0; c < channels; ++c) h[c] = a[(ptrdiff_t)c * lc];
+                }
+                if (sampled && y % step == 0 && x % step == 0)
+                    memcpy(samples + ((y / step) * sampled + x / step) * channels, h,
+                           channels * sizeof *h);
+                const float *rgb = colour + (ptrdiff_t)y * sy + (ptrdiff_t)x * sx;
+                float *out = output + (y * width + x) * 3;
+                if (history) {
+                    temporal_pixel(h, 1, rgb, sc,
+                                   history + (ptrdiff_t)y * ry + (ptrdiff_t)x * rx, rc,
+                                   previous ? previous + (ptrdiff_t)y * py + (ptrdiff_t)x * px
+                                            : NULL, pc,
+                                   NULL, table, confidence,
+                                   mask ? mask + (ptrdiff_t)y * my + (ptrdiff_t)x * mx : NULL,
+                                   intensity, scale, hold, slope, release, out);
+                } else {
+                    for (size_t c = 0; c < 3; ++c) {
+                        float source = rgb[(ptrdiff_t)c * sc];
+                        float predicted = unit(source + half(h[c]) * 0.25f);
+                        out[c] = unit(source + still * (predicted - source));
+                    }
+                }
+                uint8_t *pixel = encoded + ((top + y) * frame_width + left + x) * 4;
                 for (size_t c = 0; c < 3; ++c) {
-                    float step = rgb[(ptrdiff_t)c * sc] - before[(ptrdiff_t)c * pc];
-                    if (step < 0.0f) step = -step;
-                    if (step > moved) moved = step;
+                    float value = out[c];
+                    /* NumPy's byte cast maps NaN to zero; do not cast NaN in C. */
+                    value = value == value ? unit(value) : 0.0f;
+                    pixel[bgra ? 2 - c : c] = (uint8_t)(value * 255.0f + 0.5f);
                 }
             }
-            float alpha;
-            if (table) {
-                /* The model's gate looked up rather than recomputed: `nr_frame.gate_table`
-                 * holds NumPy's own expression evaluated on every half value, so the exp
-                 * that kept the gate in NumPy is inside the table, and the rounding to half
-                 * here is the one `half` does. Then the confidence, as NumPy applies it. */
-                _Float16 logit = (_Float16)h[3 * hc];
-                uint16_t bits;
-                memcpy(&bits, &logit, sizeof bits);
-                alpha = table[bits];
-                if (confidence != 1.0f) alpha *= confidence;
-            } else {
-                alpha = gate[(ptrdiff_t)y * gy + (ptrdiff_t)x * gx];
-            }
-            if (previous && release != 0.0f) {
-                /* The release: where the game's pixel changed, what the previous output
-                 * holds there is something that has since moved, and the gate is not local
-                 * enough to know it — it reads 0.6 over a whole Tekken frame. Its share
-                 * fades from all of it at no change to none by `-1 / release`, folded like
-                 * `slope` and for the same reason. Before the floor, which it never lowers. */
-                float kept = moved * release + 1.0f;
-                if (kept < 0.0f) kept = 0.0f;
-                if (kept > 1.0f) kept = 1.0f;
-                alpha *= kept;
-            }
-            if (previous) {
-                /* `moved * slope + hold`, clamped to [0, hold], and `slope` arrives
-                 * already folded: NumPy multiplies by one constant and adds another,
-                 * and `clip(1 - moved * 255 / ramp, 0, 1) * hold` is the same value by
-                 * algebra and a different one in float32. */
-                float floored = moved * slope + hold;
-                if (floored < 0.0f) floored = 0.0f;
-                if (floored > hold) floored = hold;
-                if (floored > 1.0f) floored = 1.0f;     /* `compose` clips the floor to [0, 1] */
-                floored *= scale;
-                if (floored > alpha) alpha = floored;
-            }
-            /* No clamp on the blend: the NumPy this transcribes does not clamp it
-             * either, and the vendor's clamp is the one thing our composition
-             * deliberately drops so that intensity above 1 can extrapolate. */
-            float blend = intensity;
-            if (mask) blend *= mask[(ptrdiff_t)y * my + (ptrdiff_t)x * mx];
-            for (size_t c = 0; c < 3; ++c) {
-                float source = rgb[(ptrdiff_t)c * sc];
-                float predicted = unit(source + half(h[(ptrdiff_t)c * hc]) * 0.25f);
-                predicted += alpha * (was[(ptrdiff_t)c * rc] - predicted);
-                output[(y * width + x) * 3 + c] = unit(source + blend * (predicted - source));
-            }
         }
+        free(row);
     }
 }

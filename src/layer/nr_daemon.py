@@ -621,11 +621,10 @@ def process_connection(connection, backend, args):
         out=input_view(geometry.network_height, geometry.network_width) if input_view else None,
         **nr_frame.PROFILES[live.profile])
     head = geometry.crop(backend.run_features(features))
-    if head.shape[:2] != colour.shape[:2]:
-        # The fourth channel is the temporal gate. Without history it reaches nothing —
-        # carrying it through the upscale would be a quarter of that pass for nothing
-        # (notes/phase48) — and with history it is what decides the blend, per pixel.
-        head = resample(head[..., :4 if history_full is not None else 3], colour.shape[:2])
+    # The fourth channel is the temporal gate. Without history it reaches nothing —
+    # carrying it through the upscale would be a quarter of that pass for nothing
+    # (notes/phase48) — and with history it is what decides the blend, per pixel.
+    channels = 4 if history_full is not None else 3
     control = None
     held = None
     if interface is not None:
@@ -658,31 +657,57 @@ def process_connection(connection, backend, args):
     # has there.
     previous = (history_pixels if history_pixels is not None
                 and (live.hold > 0 or live.release > 0) else None)
-    output = nr_frame.compose(head, colour, intensity=live.intensity,
-                              detail_strength=live.detail_strength,
-                              colour_strength=live.colour_strength,
-                              control_mask=control, history=history_full,
-                              history_confidence=live.temporal,
-                              history_previous=previous, history_hold=live.hold,
-                              history_release=live.release)
+    # The head's upscale, the composition and the encoder as one pass where the knobs
+    # leave `compose_detail` a no-op: separately they were three passes over the full
+    # frame, ~100 MB of memory traffic at 1280x720 where this moves half, and the bytes
+    # are the same (`nr_frame.compose_encode`, `test_native_image.py`). The answer is
+    # written into the request's own buffer when nothing needs the request's bytes
+    # afterwards — the interface restore does.
+    kind = FORMATS[vk_format][0]
+    fused = None
+    if (kind in ("bgra8", "rgba8") and live.detail_strength == 1 and live.colour_strength == 1
+            and head.shape[0] <= active_height and head.shape[1] <= active_width):
+        answer = (payload if isinstance(payload, bytearray) and held is None
+                  else bytearray(payload))
+        fused = nr_frame.compose_encode(
+            head[..., :channels], colour,
+            np.frombuffer(answer, np.uint8).reshape(height, width, 4),
+            top=top, left=left, bgra=kind == "bgra8", intensity=live.intensity,
+            control_mask=control, history=history_full, history_confidence=live.temporal,
+            history_previous=previous, history_hold=live.hold,
+            history_release=live.release, samples=8)
+    full = None
+    if fused is not None:
+        composed, samples = fused
+        encoded = answer
+    else:
+        if head.shape[:2] != colour.shape[:2]:
+            head = resample(head[..., :channels], colour.shape[:2])
+        samples = head[::8, ::8]
+        composed = nr_frame.compose(head, colour, intensity=live.intensity,
+                                    detail_strength=live.detail_strength,
+                                    colour_strength=live.colour_strength,
+                                    control_mask=control, history=history_full,
+                                    history_confidence=live.temporal,
+                                    history_previous=previous, history_hold=live.hold,
+                                    history_release=live.release)
+        if boxed:
+            # A copy, not a write into `whole`: aliasing the input and the output through
+            # one array has now caused two bugs in this function — `change` printed
+            # 0.00000, and a `--dump` saved the composed frame as both the before and the
+            # after. One frame copy is a millisecond against the round's 160.
+            full = whole.copy()
+            full[top:bottom, left:right] = composed
+        encoded = encode(full if full is not None else composed, payload, vk_format)
     # Measure the composition itself, not what the write-back makes of it: putting the
     # result into `whole` and then differencing against `whole` compares an array with
     # itself, which reported change 0.00000. On every fourth row, like the log's other
     # figures: the whole frame took 5 ms of a 1080p frame for a number printed to five
     # places, and a quarter of the rows moves it by about a part in five hundred. Taken
     # after the answer has gone where nothing writes into `composed` before then.
-    composed, changed = output, None
-    if boxed:
-        # A copy, not a write into `whole`: aliasing the input and the output through one
-        # array has now caused two bugs in this function — `change` printed 0.00000, and
-        # a `--dump` saved the composed frame as both the before and the after. One frame
-        # copy is a millisecond against the round's 160.
-        full = whole.copy()
-        full[top:bottom, left:right] = output
-        output = full
-    encoded = encode(output, payload, vk_format)
+    changed = None
     if held is not None:
-        if not boxed:
+        if full is None:
             # the restore below writes into the composition itself
             changed = float(np.abs(composed[::4] - colour[::4]).mean())
         # The control mask reaches `compose_head`, but `compose_detail` runs *after* it
@@ -691,29 +716,30 @@ def process_connection(connection, backend, args):
         # moment a knob was touched. Restoring the original wire bytes here is exact by
         # construction — it survives every later stage and does not depend on the codec
         # round-tripping. Taken from the parallel ProjectsCodex tree, which had it.
-        protected = np.frombuffer(encoded, np.uint8).copy().reshape(height, width, 4)
+        in_place = isinstance(encoded, bytearray)
+        protected = np.frombuffer(encoded, np.uint8)
+        protected = (protected if in_place else protected.copy()).reshape(height, width, 4)
         original = np.frombuffer(payload, np.uint8).reshape(height, width, 4)
         if boxed:
             protected[top:bottom, left:right][held] = original[top:bottom, left:right][held]
         else:
             protected[held] = original[held]
-        encoded = protected.tobytes()
-        if boxed:
-            output[top:bottom, left:right][held] = colour[held]
-        else:
-            output[held] = colour[held]          # so a --dump shows what was actually sent
+        if not in_place:
+            encoded = protected.tobytes()
+        # so a --dump shows what was actually sent
+        (full[top:bottom, left:right] if full is not None else composed)[held] = colour[held]
     connection.sendall(encoded)
     if changed is None:
         changed = float(np.abs(composed[::4] - colour[::4]).mean())
-    # After the interface restore, so what is carried forward is what the game was
-    # actually handed.
+    # What the game was handed at the active region: after the interface restore, so what
+    # is carried forward is what the game actually received.
+    active = full[top:bottom, left:right] if full is not None else composed
     if live.temporal > 0:
         # Kept as they are, not copied: each is this frame's own — decode, the resample and
         # the composition all hand back fresh arrays, nothing writes them from here on, and
         # History only reads what it holds. Three frame copies a frame were 0.4 ms at
         # 640x360 and 2-3 at 1280x720.
-        args.history.keep(shot, output[top:bottom, left:right] if boxed else output,
-                          inner, colour)
+        args.history.keep(shot, active, inner, colour)
     if args.dump:
         import image_io
         try:
@@ -723,19 +749,24 @@ def process_connection(connection, backend, args):
             # keeps every shot instead of overwriting the last one.
             index = 1 + max((int(path.stem.split("_")[0]) for path in destination.glob("*_in.png")
                              if path.stem.split("_")[0].isdigit()), default=0)
+            shown = full
+            if shown is None and boxed:
+                shown = whole.copy()
+                shown[top:bottom, left:right] = active
             image_io.save(whole, destination / f"{index:03d}_in.png")
-            image_io.save(output, destination / f"{index:03d}_out.png")
+            image_io.save(shown if shown is not None else active,
+                          destination / f"{index:03d}_out.png")
             print(f"  -> {destination}/{index:03d}_{{in,out}}.png", flush=True)
         except (OSError, subprocess.CalledProcessError, ValueError) as error:
             print(f"frame returned, but dump failed: {error}", flush=True)
     if args.meter is not None:
-        args.meter.add(colour, output[top:bottom, left:right] if boxed else output)
+        args.meter.add(colour, active)
     note = "" if held is None else f"  interface {100 * held.mean():.0f}% left alone"
     if live.temporal > 0:
         if history_full is None:
             note += f"  no history, cut {args.history.cut:.4f}"
         else:
-            gate = float(nr_frame.history_weight(head[::8, ::8]).mean())
+            gate = float(nr_frame.history_weight(samples).mean())
             hold = "" if previous is None else (
                 f", held {100 * float((hold_floor(colour[::8, ::8], previous[::8, ::8], live.hold) > 0).mean()):.0f}%")
             if previous is not None and live.release > 0:

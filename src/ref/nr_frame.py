@@ -501,6 +501,42 @@ def compose(head, color, *, intensity=1.0, detail_strength=1.0, colour_strength=
                           colour_strength=colour_strength, radius=detail_radius)
 
 
+def compose_encode(head, color, encoded, *, top=0, left=0, bgra=True, intensity=1.0,
+                   control_mask=None, history=None, history_confidence=1.0,
+                   history_previous=None, history_hold=0.0, history_release=0.0,
+                   blend_scale=BLEND_SCALE, samples=None):
+    """`compose` of the head brought up to the colour's size, encoded into `encoded` at
+    (`top`, `left`), in one native pass; `None` where that pass does not apply, and then
+    nothing has been written.
+
+    The same composition as `resample` then `compose` then `nr_daemon.encode`, byte for
+    byte (`test_native_image.py`), for the cases the daemon meets live: a history with or
+    without a control mask, or a still frame without one, at detail and colour strength 1
+    — where `compose_detail` hands the composition back untouched. The parameters are
+    derived exactly as `compose`'s native branches derive them. With `samples`, a step,
+    returns `(composition, head samples)` — see `nr_image.compose_encode`.
+    """
+    if nr_image is None or (history is None and control_mask is not None):
+        return None
+    if history is None:
+        return nr_image.compose_encode(head, color, None, None, None, encoded, top=top,
+                                       left=left, bgra=bgra, intensity=intensity,
+                                       samples=samples)
+    previous = (history_previous if history_previous is not None
+                and (history_hold > 0 or history_release > 0) else None)
+    confidence = (float(np.clip(np.float32(history_confidence), 0, 1))
+                  if history_confidence != 1.0 else 1.0)
+    return nr_image.compose_encode(
+        head, color, history, previous, control_mask, encoded, top=top, left=left,
+        bgra=bgra, intensity=intensity, blend_scale=blend_scale,
+        hold=float(history_hold) if previous is not None else 0.0,
+        slope=(float(np.float32(-255.0 * history_hold / HOLD_RAMP))
+               if previous is not None else 0.0),
+        table=gate_table(float(blend_scale)), confidence=confidence,
+        release=release_slope(history_release) if previous is not None else 0.0,
+        samples=samples)
+
+
 def run_frame(model, color, *, intensity=1.0, detail_strength=1.0, colour_strength=1.0,
               detail_radius=4.0, control_mask=None, **head_options):
     """color: (H, W, 3) float32 in [0,1] -> (H, W, 3) float32."""
