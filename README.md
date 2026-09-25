@@ -237,6 +237,7 @@ run it again. Leave out `NR_LIVE=1` for photo mode. For a native Vulkan game,
 | `NR_LAYER_SOCKET` | where the daemon listens. **Required, no default** — without it the layer never contacts the daemon at all. The daemon and the tools use `/tmp/nr_layer.sock` |
 | `NR_LAYER_TRIGGER` | the file that means "do it". **Required for the toggle** — without it, live mode captures every frame whether the effect is on or not. The tools use `/tmp/nr_trigger` |
 | `NR_LAYER_LIVE=N` | live mode: every Nth present goes through the network |
+| `NR_LAYER_ASYNC=1` | with live mode: each processed present shows the answer for the one before it, so the daemon works while the game draws its next frame — more frames a second, one more frame of latency. Off by default; `NR_ASYNC=1 NR_LIVE=1 src/layer/nr-photo --steam <appid>` prints it into the launch option |
 | `NR_LAYER_UI_MASK=1` | mark pixels that held still and leave them as the game drew them |
 | `NR_LAYER_SYNC` | accepted for old launchers and ignored: there is one synchronisation path, described under **Capture synchronization** below |
 
