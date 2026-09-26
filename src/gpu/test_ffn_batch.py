@@ -34,6 +34,7 @@ class Recorder:
         self.fuse_merge_ffn = False
         self.fuse_stem_ffn = False
         self.fuse_pool = False
+        self.fuse_window_block = False
         self.calls = []
 
     def independent(self):
@@ -109,8 +110,9 @@ def host_checks():
                                                                     for rt.fuse_merge_ffn in (False, True):
                                                                         for rt.fuse_stem_ffn in (False, True):
                                                                             for rt.fuse_pool in (False, True):
-                                                                                keys.add(rt.graph_key())
-    assert len(keys) == 2097152, f"graph key collides: {len(keys)} of 2097152 distinct"
+                                                                                for rt.fuse_window_block in (False, True):
+                                                                                    keys.add(rt.graph_key())
+    assert len(keys) == 4194304, f"graph key collides: {len(keys)} of 4194304 distinct"
     # Exercise the production recorders too, not just the batching helper. Multiplicity
     # is the current 71-block model's grouped FFN inventory; no weights are needed.
     savings = 0

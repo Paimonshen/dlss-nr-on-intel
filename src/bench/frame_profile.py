@@ -47,6 +47,11 @@ ROW = _kinds("src/gpu/attention.comp", r"([A-Z][A-Z0-9_]*)\s*=\s*(\d+)u")
 # shaders sharing one kind number is how it hid as "qkv prepare" for a while: both said
 # 2, and only one of them was read. So both are read, and a shared number is an error.
 _WINDOW = _kinds("src/gpu/window_attention.comp", r"(WINDOW_[A-Z0-9_]*)\s*=\s*(\d+)u")
+_BLOCK = _kinds("src/gpu/window_block.comp", r"(WINDOW_BLOCK)\s*=\s*(\d+)u")
+if set(_WINDOW) & set(_BLOCK):
+    raise SystemExit("row profile kinds collide between window_attention.comp and "
+                     "window_block.comp")
+_WINDOW.update(_BLOCK)
 _CLASH = set(ROW) & set(_WINDOW)
 if _CLASH:
     raise SystemExit(f"row profile kinds collide between attention.comp and "
@@ -91,6 +96,8 @@ def _describe(name, args):
             args[7] * args[8], args[7] // 2, args[9])
     if name == "xmx_rec_ffn_stem":
         return "ffn fused %dx32x128, stem made from the features" % args[6]
+    if name == "xmx_rec_window_block":
+        return "window block %d windows%s" % (args[7], ", half image" if args[12] & 0x8000 else "")
     if name == "xmx_rec_gemm_dual":
         return "gemm+half copy %dx%dx%d" % args[4:7]
     if name == "xmx_rec_unary2":

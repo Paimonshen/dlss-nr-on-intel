@@ -119,6 +119,8 @@ def _load():
             ("xmx_rec_ffn_merge", [ctypes.c_int] * 7 + [ctypes.c_uint] * 4),
             ("xmx_rec_ffn_stem", [ctypes.c_int] * 6 + [ctypes.c_uint] * 2),
             ("xmx_rec_gemm_window_residual_pool", [ctypes.c_int] * 6 + [ctypes.c_uint] * 8),
+            ("xmx_window_block_init", [ctypes.c_char_p]),
+            ("xmx_rec_window_block", [ctypes.c_int] * 7 + [ctypes.c_uint] * 6),
             ("xmx_int8_init", [ctypes.c_char_p]),
             ("xmx_rec_gemm_int8", [ctypes.c_int] * 5 + [ctypes.c_uint] * 4),
             ("xmx_rec_unary2", [ctypes.c_uint] + [ctypes.c_int] * 5
@@ -519,6 +521,9 @@ class Runtime:
         self.fuse_stem_ffn = os.environ.get("NR_FUSE_STEM_FFN", "1") != "0"
         # Block 0's output pooled and published in its window residual's own epilogue.
         self.fuse_pool = os.environ.get("NR_FUSE_POOL", "1") != "0"
+        # A 32-channel window block's QKV projection, attention and output projection in
+        # one pass a window, nothing in between leaving the workgroup.
+        self.fuse_window_block = os.environ.get("NR_FUSE_WINDOW_BLOCK", "1") != "0"
 
     def graph_key(self):
         return (self.lib.xmx_specialization() | (int(self.fuse_qk) << 3)
@@ -539,7 +544,8 @@ class Runtime:
                 | (int(self.fuse_transition) << 17)
                 | (int(self.fuse_merge_ffn) << 18)
                 | (int(self.fuse_stem_ffn) << 19)
-                | (int(self.fuse_pool) << 20))
+                | (int(self.fuse_pool) << 20)
+                | (int(self.fuse_window_block) << 21))
 
     @property
     def buffer_bytes(self):
@@ -684,6 +690,39 @@ class Runtime:
         if record(a.id, b.id, target.id, skip.id, cosine.id,
                   rows, cols, inner, flags, *window) != 0:
             raise RuntimeError("xmx_rec_gemm_residual: " + self.lib.xmx_error().decode())
+        self.recorded += 1
+        return self
+
+    def window_block(self, image, qkv, projection, target, bias, cosine, scale, height, width,
+                     origin, *, epilogue=0, narrow=False, image_half=False):
+        """A 32-channel window block's attention half in one pass (window_block.comp).
+
+        What `gemm_qkv(image, qkv, ..., window=(height, width, origin))`, `window_attention(
+        ..., merged=True)` and `gemm_residual(attended, projection, image, cosine, target,
+        ..., reverse=(height, width, 8, origin))` write into `target`, bit for bit, with
+        nothing in between leaving the workgroup (`src/gpu/test_window_block.py`). `image`
+        is the projection's input and the residual's skip, float32 or half; one head.
+        """
+        ph, pw, (top, left) = self.window_extent(height, width, origin, 8)
+        windows = (ph // 8) * (pw // 8)
+        if height <= 0 or width <= 0 or not windows:
+            raise ValueError("a window block needs a positive extent")
+        if target.id in {image.id, qkv.id, projection.id, bias.id, cosine.id, scale.id}:
+            raise ValueError("the window block's target must not alias its inputs")
+        pixels = height * width
+        for buf, needed in ((image, pixels * 32 * (2 if image_half else 4)), (qkv, 32 * 96 * 2),
+                            (projection, 32 * 32 * 2), (bias, 64 * 64 * 4), (cosine, 32 * 4),
+                            (scale, 4), (target, pixels * 32 * (2 if narrow else 4))):
+            if buf.nbytes < needed:
+                raise ValueError("window block buffer is too small")
+        path = os.environ.get("XMX_WINDOW_BLOCK_SPV") or str(ROOT / "work" / "window_block.spv")
+        if self.lib.xmx_window_block_init(path.encode()) != 0:
+            raise RuntimeError("window block pipeline: " + self.lib.xmx_error().decode())
+        flags = _publish(epilogue, narrow) | (0x8000 if image_half else 0)
+        if self.lib.xmx_rec_window_block(image.id, qkv.id, projection.id, target.id, bias.id,
+                                         cosine.id, scale.id, windows, height, width, pw // 8,
+                                         (top << 16) | left, flags) != 0:
+            raise RuntimeError("xmx_rec_window_block: " + self.lib.xmx_error().decode())
         self.recorded += 1
         return self
 

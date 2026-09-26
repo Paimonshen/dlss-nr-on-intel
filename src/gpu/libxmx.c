@@ -37,7 +37,8 @@ static struct {
 	VkPipeline rstaged32[2];
 	VkPipeline rrows;         /* the whole-row softmax on 256 lanes */
 	VkPipeline rint8;         /* the staged GEMM on the integer path, built on first use */
-	char *rpaths[10];
+	VkPipeline rblock;        /* a 32-channel window block's attention half, likewise */
+	char *rpaths[11];
 	unsigned specialize;
 	unsigned tiling, tilem, tilen;
 	int syncing;
@@ -1426,6 +1427,48 @@ int xmx_rec_window_attention(int q, int k, int v, int bias, int out,
  * shared memory instead of written out as half and read back. One subgroup per 16 rows,
  * on the x axis of the grid, whose limit is 2^31-1 rather than y's 65535. Its profile
  * stamp is the base GEMM family's kind 31, which no plain GEMM's flags can reach. */
+int xmx_window_block_init(const char *path)
+{
+	if (!g.rready) FAIL("resident runtime not initialised", 0);
+	if (g.rblock) return 0;
+	free(g.rpaths[10]);
+	if (!(g.rpaths[10] = strdup(path))) FAIL("pipeline path allocation", 0);
+	return build_pipeline(path, g.rpl, &g.rblock);
+}
+
+/* A 32-channel window block's attention half, one 8x8 window a workgroup
+ * (window_block.comp): the QKV projection gathering its rows from `image`, window
+ * attention, and the output projection with the residual into `target`. `image` is also
+ * the residual's skip, as it is in the graph. */
+int xmx_rec_window_block(int image, int qkv, int projection, int target, int bias,
+			 int cosine, int scale, unsigned windows, unsigned height,
+			 unsigned width, unsigned across, unsigned pad, unsigned flags)
+{
+	if (!g.recording || !g.rblock) FAIL("window block not ready for recording", 0);
+	if (!windows || !height || !width || !across || windows % across)
+		FAIL("invalid window block geometry", 0);
+	if (flags & ~0x9f00u) FAIL("the window block takes a publish, a half target and a half image", 0);
+	struct push p = { .a = addr_of(image), .b = addr_of(qkv), .c = addr_of(target),
+			  .d = addr_of(bias), .m = windows, .n = 32u, .k = 32u, .batch = 1u,
+			  .flags = flags, .residual_cos = addr_of(cosine), .image_h = height,
+			  .image_w = width, .window_cols = across, .window_pad = pad,
+			  .qkv_scale = addr_of(scale) };
+	/* the shader reads p0 and p1 as one 64-bit address, the output projection */
+	uint64_t weights = addr_of(projection);
+	memcpy(&p.p0, &weights, sizeof weights);
+	if (!p.a || !p.b || !p.c || !p.d || !weights || !p.residual_cos || !p.qkv_scale)
+		FAIL("window block operand is not a live buffer", 0);
+	VkPipeline pipeline;
+	if (resident_pipeline(10, flags, g.rblock, &pipeline)) return -1;
+	vkCmdBindPipeline(g.rcb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+	vkCmdPushConstants(g.rcb, g.rpl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
+	vkCmdDispatch(g.rcb, windows < 65535u ? windows : 65535u, (windows + 65534u) / 65535u, 1);
+	barrier();
+	stamp(PK_ROW, 4);        /* WINDOW_BLOCK, as window_block.comp names it */
+	g.recorded++;
+	return 0;
+}
+
 int xmx_int8_init(const char *path)
 {
 	if (!g.rready) FAIL("resident runtime not initialised", 0);
