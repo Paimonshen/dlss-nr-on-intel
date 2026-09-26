@@ -382,13 +382,13 @@ Measured through the socket on 2026-09-26 by `python3 src/bench/live_rates.py` â
 
 | swapchain | render scale | ms | fps |
 | --- | ---: | ---: | ---: |
-| 512x288 | 0.35 | 26 | 39.1 |
-| 512x288 | 0.50 | 26 | 39.1 |
-| 640x360 | 0.35 | 26 | 38.0 |
-| 640x360 | 0.50 | 27 | 37.3 |
-| 854x480 | 0.50 | 33 | 30.2 |
-| 1024x768 | 0.55 | 51 | 19.7 |
-| 1920x1080 | 0.55 | 118 | 8.5 |
+| 512x288 | 0.35 | 26 | 39.2 |
+| 512x288 | 0.50 | 26 | 38.5 |
+| 640x360 | 0.35 | 26 | 38.8 |
+| 640x360 | 0.50 | 26 | 37.7 |
+| 854x480 | 0.50 | 32 | 31.0 |
+| 1024x768 | 0.55 | 48 | 20.6 |
+| 1920x1080 | 0.55 | 111 | 9.0 |
 
 Medians of three runs with swap empty, which agreed within 10 %. On 2026-09-23, with 5.5 GiB in zram and the kernel's memory-pressure figures rising, 1920x1080 ran anywhere from 322 to 463 ms: if that row is much slower for you, look at swap before anything else.
 

@@ -72,6 +72,17 @@ output projection stores the real rows only: the pad rows must stay zero, becaus
 token count takes the first pad row's key into the softmax's sum. Small — 0.75-0.9 ms of
 device time at 320x320 with per-pass timestamps, within noise replayed.
 
+**The fused composition vectorised** (`2176f64`, host side): `nr_compose_encode` was all
+arithmetic — 22.7 ms of one core at 1080p, one pixel at a time — because of the runtime
+strides, the `_Float16` conversions (no vector half arithmetic on this CPU) and the clamps,
+which default `-ftrapping-math` will not turn into selects. In the daemon's layout each row
+now runs one constant-stride loop per knob combination, with the half rounding done in
+integer and float arithmetic that matches the hardware on all 2^32 floats: one core 22.7 ->
+12.4 ms, eight 4.4 -> 3.2, bytes unchanged. What is left there is memory: ~110 MB a 1080p
+frame, the colour and the game's previous frame read as float32. Reading them as the bytes
+they arrived as would take ~35 MB off and the decode with it — a refactor of the daemon's
+data flow, not done.
+
 Measured on the way and left: the window block (`window_block.comp`) is not memory-bound. At
 1920x1088 its three phases take 5.8 ms up to K and V in shared memory, 5.5 for the attention
 and 1.6 for the projection and the store, of 12.9; the attention phase has no spills (the 4

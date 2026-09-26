@@ -126,13 +126,13 @@ DEFAULTS = {knob.name: knob.default for knob in KNOBS}
 # by `src/tools/knob_doc.py`, because the hand-written one went two days out of date the
 # moment the host passes moved to C and then stayed wrong for a week.
 RATES = (
-    (512, 288, 0.35, 25.6),
-    (512, 288, 0.50, 25.6),
-    (640, 360, 0.35, 26.3),
-    (640, 360, 0.50, 26.8),
-    (854, 480, 0.50, 33.1),
-    (1024, 768, 0.55, 50.8),
-    (1920, 1080, 0.55, 117.6),
+    (512, 288, 0.35, 25.5),
+    (512, 288, 0.50, 26.0),
+    (640, 360, 0.35, 25.8),
+    (640, 360, 0.50, 26.5),
+    (854, 480, 0.50, 32.3),
+    (1024, 768, 0.55, 48.5),
+    (1920, 1080, 0.55, 110.8),
 )
 RATES_MEASURED = "2026-09-26"
 # What a reader of the table needs and the numbers cannot say. Empty when there is nothing.
