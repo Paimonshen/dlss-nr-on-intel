@@ -119,6 +119,8 @@ def _load():
             ("xmx_rec_ffn_merge", [ctypes.c_int] * 7 + [ctypes.c_uint] * 4),
             ("xmx_rec_ffn_stem", [ctypes.c_int] * 6 + [ctypes.c_uint] * 2),
             ("xmx_rec_gemm_window_residual_pool", [ctypes.c_int] * 6 + [ctypes.c_uint] * 8),
+            ("xmx_int8_init", [ctypes.c_char_p]),
+            ("xmx_rec_gemm_int8", [ctypes.c_int] * 5 + [ctypes.c_uint] * 4),
             ("xmx_rec_unary2", [ctypes.c_uint] + [ctypes.c_int] * 5
              + [ctypes.c_uint, ctypes.c_uint, ctypes.c_float] + [ctypes.c_uint] * 5),
             ("xmx_rec_window_attention", [ctypes.c_int] * 5 + [ctypes.c_uint] * 3),
@@ -682,6 +684,27 @@ class Runtime:
         if record(a.id, b.id, target.id, skip.id, cosine.id,
                   rows, cols, inner, flags, *window) != 0:
             raise RuntimeError("xmx_rec_gemm_residual: " + self.lib.xmx_error().decode())
+        self.recorded += 1
+        return self
+
+    def gemm_int8(self, a, b, c, a_scale, b_scale, rows, cols, inner):
+        """C = (A @ B^T) * a_scale[row] * b_scale[column] on the integer path.
+
+        `a` is int8 rows x inner, `b` the weights transposed, int8 cols x inner, the scales
+        float32 (`int8_quant.quantise`), `c` float32 (gemm_staged_int8.comp).
+        """
+        if rows <= 0 or cols <= 0 or cols % 32 or inner <= 0 or inner % 64:
+            raise ValueError("the integer GEMM needs cols a multiple of 32 and inner of 64")
+        for buf, needed in ((a, rows * inner), (b, cols * inner), (c, rows * cols * 4),
+                            (a_scale, rows * 4), (b_scale, cols * 4)):
+            if buf.nbytes < needed:
+                raise ValueError("integer GEMM buffer is too small")
+        path = os.environ.get("XMX_INT8_SPV") or str(ROOT / "work" / "gemm_staged_int8.spv")
+        if self.lib.xmx_int8_init(path.encode()) != 0:
+            raise RuntimeError("integer GEMM pipeline: " + self.lib.xmx_error().decode())
+        if self.lib.xmx_rec_gemm_int8(a.id, b.id, c.id, a_scale.id, b_scale.id,
+                                      rows, cols, inner, 0) != 0:
+            raise RuntimeError("xmx_rec_gemm_int8: " + self.lib.xmx_error().decode())
         self.recorded += 1
         return self
 

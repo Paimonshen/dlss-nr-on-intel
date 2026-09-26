@@ -8,7 +8,8 @@ SHADERS := work/gemm_resident.spv work/gemm_tiled.spv work/gemm_staged.spv \
            work/gemm_staged32.spv work/gemm_staged32_deep.spv work/attention_rows.spv \
            work/resident.spv work/attention.spv \
            work/history.spv work/gemm_coopmat.spv work/gemm_batched.spv \
-           work/gemm_f16acc.spv work/gemm_coopmat_int8.spv work/window_attention.spv \
+           work/gemm_f16acc.spv work/gemm_coopmat_int8.spv work/gemm_staged_int8.spv \
+           work/window_attention.spv \
            work/ffn_fused.spv
 
 all: work/libxmx.so work/libnr_layer.so work/libnr_image.so work/gemm_runner $(SHADERS)
@@ -85,6 +86,8 @@ work/history.spv: src/gpu/history.comp
 # notes/improve-int8-bottleneck.md measured the trade as worth taking.
 work/gemm_coopmat_int8.spv: src/gpu/gemm_coopmat_int8.comp
 	$(GLSL) -o $@ $<
+work/gemm_staged_int8.spv: src/gpu/gemm_staged_int8.comp
+	$(GLSL) -o $@ $<
 
 # The one-shot runner behind test_gemm.py and test_gemm_int8.py: its own
 # instance and device per call, and the operand width read from the files.
@@ -129,6 +132,7 @@ test: all work/attention_ab.spv work/test_exchange work/test_settled work/test_p
 	python3 src/tools/publish_check.py
 	python3 src/tools/claims_check.py
 	python3 src/gpu/test_gemm_int8.py
+	python3 src/gpu/test_gemm_int8_staged.py
 	python3 src/gpu/test_int8_quant.py
 	python3 src/gpu/test_gemm_residual.py
 	python3 src/gpu/test_window_residual.py

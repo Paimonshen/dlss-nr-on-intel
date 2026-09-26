@@ -36,7 +36,8 @@ static struct {
 	/* the staged kernel on 32-row blocks, with a 32- and a 64-deep K step */
 	VkPipeline rstaged32[2];
 	VkPipeline rrows;         /* the whole-row softmax on 256 lanes */
-	char *rpaths[9];
+	VkPipeline rint8;         /* the staged GEMM on the integer path, built on first use */
+	char *rpaths[10];
 	unsigned specialize;
 	unsigned tiling, tilem, tilen;
 	int syncing;
@@ -456,14 +457,17 @@ int xmx_init(const char *spv_path)
 	VkPhysicalDeviceWorkgroupMemoryExplicitLayoutFeaturesKHR wm = {
 		.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_WORKGROUP_MEMORY_EXPLICIT_LAYOUT_FEATURES_KHR, .pNext = &cm,
 		.workgroupMemoryExplicitLayout = VK_TRUE, .workgroupMemoryExplicitLayoutScalarBlockLayout = VK_TRUE,
-		.workgroupMemoryExplicitLayout16BitAccess = VK_TRUE };
+		.workgroupMemoryExplicitLayout16BitAccess = VK_TRUE,
+		/* the integer path's int8 tiles (gemm_staged_int8.comp) */
+		.workgroupMemoryExplicitLayout8BitAccess = VK_TRUE };
 	/* bufferDeviceAddress lets the resident path pass operands as 64-bit pointers in
 	 * push constants, so a whole block of dispatches records into one command buffer
 	 * without a descriptor pool. scalarBlockLayout matches the shaders' layout. */
 	VkPhysicalDeviceVulkan12Features v12 = {
 		.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES, .pNext = &wm,
 		.vulkanMemoryModel = VK_TRUE, .vulkanMemoryModelDeviceScope = VK_TRUE, .shaderFloat16 = VK_TRUE,
-		.bufferDeviceAddress = VK_TRUE, .scalarBlockLayout = VK_TRUE };
+		.bufferDeviceAddress = VK_TRUE, .scalarBlockLayout = VK_TRUE,
+		.storageBuffer8BitAccess = VK_TRUE, .shaderInt8 = VK_TRUE };
 	VkPhysicalDeviceVulkan11Features v11 = {
 		.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES, .pNext = &v12,
 		.storageBuffer16BitAccess = VK_TRUE };
@@ -1422,6 +1426,38 @@ int xmx_rec_window_attention(int q, int k, int v, int bias, int out,
  * shared memory instead of written out as half and read back. One subgroup per 16 rows,
  * on the x axis of the grid, whose limit is 2^31-1 rather than y's 65535. Its profile
  * stamp is the base GEMM family's kind 31, which no plain GEMM's flags can reach. */
+int xmx_int8_init(const char *path)
+{
+	if (!g.rready) FAIL("resident runtime not initialised", 0);
+	if (g.rint8) return 0;
+	free(g.rpaths[9]);
+	if (!(g.rpaths[9] = strdup(path))) FAIL("pipeline path allocation", 0);
+	return build_pipeline(path, g.rpl, &g.rint8);
+}
+
+/* C = (A @ B^T) * a_scale[row] * b_scale[column] on configuration 4: A int8 M x K, B the
+ * weights stored transposed, int8 N x K, the scales float32 (gemm_staged_int8.comp). */
+int xmx_rec_gemm_int8(int a, int b, int c, int a_scale, int b_scale,
+		      unsigned M, unsigned N, unsigned K, unsigned flags)
+{
+	if (!g.recording || !g.rint8) FAIL("integer GEMM not ready for recording", 0);
+	if (!M || !N || N % 32u || !K || K % 64u)
+		FAIL("the integer GEMM needs N a multiple of 32 and K of 64", 0);
+	if (flags) FAIL("the integer GEMM takes no flags yet", 0);
+	struct push p = { .a = addr_of(a), .b = addr_of(b), .c = addr_of(c), .d = addr_of(a_scale),
+			  .m = M, .n = N, .k = K, .batch = 1u, .flags = flags,
+			  .residual_cos = addr_of(b_scale) };
+	if (!p.a || !p.b || !p.c || !p.d || !p.residual_cos)
+		FAIL("integer GEMM operand is not a live buffer", 0);
+	vkCmdBindPipeline(g.rcb, VK_PIPELINE_BIND_POINT_COMPUTE, g.rint8);
+	vkCmdPushConstants(g.rcb, g.rpl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
+	vkCmdDispatch(g.rcb, N / 32u, (M + 63u) / 64u, 1);
+	barrier();
+	stamp(PK_GEMM, 30);
+	g.recorded++;
+	return 0;
+}
+
 int xmx_ffn_init(const char *path)
 {
 	if (!g.rready) FAIL("resident runtime not initialised", 0);
