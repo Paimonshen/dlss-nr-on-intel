@@ -68,7 +68,17 @@ if not exist "%GLSL%" (
   echo ERROR: glslangValidator not found in the Vulkan SDK
   exit /b 1
 )
-for %%S in (gemm_resident gemm_staged gemm_coopmat gemm_coopmat_batched gemm_coopmat_f16acc gemm_coopmat_int8 gemm_f16acc gemm_tiled gemm_batched attention attention_ab history resident window_attention ffn_fused half_probe) do call :shader %%S
+rem Compile every .comp there is, rather than a list kept here: the Makefile's SHADERS
+rem grows as kernels are added, and a name missing from a hand-kept copy fails at run
+rem time with "cannot open spv", which names the file but not the list.
+for %%C in ("%GPU%\*.comp") do call :shader %%~nC
+
+rem Three of the Makefile's shaders are the same source compiled with different defines,
+rem not files of their own. Without them the daemon stops at start with
+rem "cannot open spv (0)".
+call :shader_def gemm_staged32      gemm_staged "-DSTAGED_BM=32"
+call :shader_def gemm_staged32_deep gemm_staged "-DSTAGED_BM=32" "-DSTAGED_BK=64"
+call :shader_def attention_rows     attention   "-DROW_LANES=256"
 
 rem ---- libxmx.dll ----
 echo [2/3] building libxmx.dll ...
@@ -117,5 +127,16 @@ if not exist "%GPU%\%1.comp" goto :eof
 set "HALF_FLAG=-DHALF_ROUND_FLOAT16"
 if defined NR_PACKHALF2X16 set "HALF_FLAG="
 "%GLSL%" --target-env vulkan1.3 %HALF_FLAG% -I"%GPU%" -o "%WORK%\%1.spv" "%GPU%\%1.comp" >nul 2>&1
+if exist "%WORK%\%1.spv" (echo   %1.spv) else (echo   %1.spv FAILED)
+goto :eof
+
+rem ---- :shader_def <out-name> <source-name> <defines...> ----
+rem For the variants the Makefile builds from one source with -D, e.g. the 32-row
+rem staged GEMM and the 256-lane attention rows.
+:shader_def
+if not exist "%GPU%\%2.comp" goto :eof
+set "HALF_FLAG=-DHALF_ROUND_FLOAT16"
+if defined NR_PACKHALF2X16 set "HALF_FLAG="
+"%GLSL%" --target-env vulkan1.3 %HALF_FLAG% %3 %4 -I"%GPU%" -o "%WORK%\%1.spv" "%GPU%\%2.comp" >nul 2>&1
 if exist "%WORK%\%1.spv" (echo   %1.spv) else (echo   %1.spv FAILED)
 goto :eof

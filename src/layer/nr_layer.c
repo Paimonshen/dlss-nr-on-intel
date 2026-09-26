@@ -223,16 +223,15 @@ static void drop_inflight(struct device_data *data)
 {
 	if (!data->inflight) return;
 	data->inflight = 0;
+	nr_link link = nr_link_from_handle(data->inflight_fd);
 	unsigned char sink[65536];
 	for (VkDeviceSize got = 0; got < data->inflight_size; ) {
 		size_t want = data->inflight_size - got < sizeof sink
 			      ? (size_t)(data->inflight_size - got) : sizeof sink;
-		ssize_t n = read(data->inflight_fd, sink, want);
-		if (n < 0 && errno == EINTR) continue;
-		if (n <= 0) break;
-		got += (VkDeviceSize)n;
+		if (nr_link_read(&link, sink, want) != 0) break;
+		got += want;
 	}
-	close(data->inflight_fd);
+	nr_link_close(&link);
 }
 
 static struct device_data *find_device(VkDevice device)
@@ -460,15 +459,37 @@ static void ensure_daemon(void)
 	char daemon_buf[1024];
 	const char *daemon = getenv("NR_DAEMON");
 	if (!daemon || !*daemon) {
-		/* <dir>/src/layer/nr_daemon.py (in-tree) or <dir>/nr_daemon.py (flat). */
+		/* Where the daemon sits relative to the library, in the layouts this tree and
+		 * its Makefile produce:
+		 *   <dir>/nr_daemon.py              flat deployment
+		 *   <dir>/src/layer/nr_daemon.py    a checkout, library beside the sources
+		 *   ../src/layer/nr_daemon.py       `make` builds the library into work/ and
+		 *                                   prepare_layer.py points the manifest there,
+		 *                                   so work/ is the directory beside it
+		 * The first that exists wins. */
 		char *slash = self;
 		for (char *p = self; *p; p++) if (*p == '/' || *p == '\\') slash = p;
 		*slash = '\0';
-		const char *cands[] = { "/src/layer/nr_daemon.py", "/nr_daemon.py" };
+		const char *cands[] = { "/nr_daemon.py", "/src/layer/nr_daemon.py",
+					"/../src/layer/nr_daemon.py" };
 		daemon = NULL;
 		for (size_t i = 0; i < sizeof cands / sizeof *cands; i++) {
 			snprintf(daemon_buf, sizeof daemon_buf, "%s%s", self, cands[i]);
 			if (access(daemon_buf, R_OK) == 0) { daemon = daemon_buf; break; }
+		}
+		if (daemon) {
+			/* The root is derived by stripping two levels off this path, so it must
+			 * not still contain a ".." when that happens. */
+			char resolved[1024];
+#ifdef _WIN32
+			void *ok = _fullpath(resolved, daemon, sizeof resolved);
+#else
+			void *ok = realpath(daemon, resolved);
+#endif
+			if (ok) {
+				snprintf(daemon_buf, sizeof daemon_buf, "%s", resolved);
+				daemon = daemon_buf;
+			}
 		}
 		if (!daemon) {
 			fprintf(stderr, "[nr_layer] could not find nr_daemon.py next to the "
@@ -520,7 +541,10 @@ static void ensure_daemon(void)
 		si.hStdError = si.hStdOutput;
 		/* The marker goes in the child's environment block, not ours: setting it in
 		 * the game would stop a second instance in the same process from ever
-		 * spawning, and setenv is not safe while other threads read the environment. */
+		 * spawning, and setenv is not safe while other threads read the environment.
+		 * VK_INSTANCE_LAYERS goes too: the daemon builds its own Vulkan instance, and
+		 * with the layer still named there its status lines land in the daemon's log
+		 * where a reader takes them for the layer talking about the game. */
 		char env_block[8192];
 		size_t used = 0;
 		char *env = GetEnvironmentStringsA();
@@ -528,6 +552,7 @@ static void ensure_daemon(void)
 			for (char *e = env; *e && used + strlen(e) + 64 < sizeof env_block;
 			     e += strlen(e) + 1) {
 				if (strncmp(e, "NR_LAYER_SPAWNED=", 17) == 0) continue;
+				if (strncmp(e, "VK_INSTANCE_LAYERS=", 19) == 0) continue;
 				size_t len = strlen(e) + 1;
 				memcpy(env_block + used, e, len);
 				used += len;
@@ -552,7 +577,9 @@ static void ensure_daemon(void)
 #else
 	{
 		/* Copy the environment with the marker added, so the game's own environment is
-		 * untouched (setenv() in a multithreaded process is not safe). */
+		 * untouched (setenv() in a multithreaded process is not safe).
+		 * VK_INSTANCE_LAYERS is dropped for the same reason as on Windows: the daemon
+		 * builds its own Vulkan instance and would otherwise load this layer too. */
 		extern char **environ;
 		char marker[] = "NR_LAYER_SPAWNED=1";
 		size_t count = 0;
@@ -561,7 +588,8 @@ static void ensure_daemon(void)
 		if (!child_env) return;
 		size_t w = 0;
 		for (size_t i = 0; i < count; i++)
-			if (strncmp(environ[i], "NR_LAYER_SPAWNED=", 17) != 0)
+			if (strncmp(environ[i], "NR_LAYER_SPAWNED=", 17) != 0
+			    && strncmp(environ[i], "VK_INSTANCE_LAYERS=", 19) != 0)
 				child_env[w++] = environ[i];
 		child_env[w++] = marker;
 		child_env[w] = NULL;
