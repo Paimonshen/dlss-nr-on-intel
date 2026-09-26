@@ -68,17 +68,24 @@ if not exist "%GLSL%" (
   echo ERROR: glslangValidator not found in the Vulkan SDK
   exit /b 1
 )
-rem Compile every .comp there is, rather than a list kept here: the Makefile's SHADERS
-rem grows as kernels are added, and a name missing from a hand-kept copy fails at run
-rem time with "cannot open spv", which names the file but not the list.
+rem The Makefile's shader table, transplanted. Compiling "every .comp to its own .spv"
+rem missed the three aliases the daemon asks for by a name no source file carries
+rem (gemm_batched.spv from gemm_coopmat_batched.comp, gemm_f16acc.spv from
+rem gemm_coopmat_f16acc.comp, gemm_tiled.spv from gemm_resident.comp), and a missing one
+rem fails at run time with "cannot open spv", which names the file but not the list.
+rem Same includes as the Makefile's GEMM_GLSL; -DHALF_ROUND_FLOAT16 per the note in
+rem :shader below.
 for %%C in ("%GPU%\*.comp") do call :shader %%~nC
-
-rem Three of the Makefile's shaders are the same source compiled with different defines,
-rem not files of their own. Without them the daemon stops at start with
-rem "cannot open spv (0)".
+call :shader gemm_coopmat_batched
+call :shader gemm_coopmat_f16acc
+call :shader_def gemm_batched gemm_coopmat_batched ""
+call :shader_def gemm_f16acc  gemm_coopmat_f16acc  ""
+call :shader_def gemm_tiled   gemm_resident        "-DRM=2 -DRN=2"
 call :shader_def gemm_staged32      gemm_staged "-DSTAGED_BM=32"
 call :shader_def gemm_staged32_deep gemm_staged "-DSTAGED_BM=32" "-DSTAGED_BK=64"
 call :shader_def attention_rows     attention   "-DROW_LANES=256"
+call :shader_def attention_ab       attention   "-DSOFTMAX_AB"
+call :shader half_probe
 
 rem ---- libxmx.dll ----
 echo [2/3] building libxmx.dll ...
@@ -148,12 +155,15 @@ if exist "%WORK%\%1.spv" (echo   %1.spv) else (echo   %1.spv FAILED)
 goto :eof
 
 rem ---- :shader_def <out-name> <source-name> <defines...> ----
-rem For the variants the Makefile builds from one source with -D, e.g. the 32-row
-rem staged GEMM and the 256-lane attention rows.
+rem For the aliases and variants the Makefile builds from one source with -D. The
+rem defines argument may be empty, in which case only the half-rounding flag applies.
 :shader_def
 if not exist "%GPU%\%2.comp" goto :eof
 set "HALF_FLAG=-DHALF_ROUND_FLOAT16"
 if defined NR_PACKHALF2X16 set "HALF_FLAG="
-"%GLSL%" --target-env vulkan1.3 %HALF_FLAG% %3 %4 -I"%GPU%" -o "%WORK%\%1.spv" "%GPU%\%2.comp" >nul 2>&1
+set "DEFARGS="
+if not "%~3"=="" set "DEFARGS=%~3"
+if not "%~4"=="" set "DEFARGS=%DEFARGS% %~4"
+"%GLSL%" --target-env vulkan1.3 %HALF_FLAG% %DEFARGS% -I"%GPU%" -o "%WORK%\%1.spv" "%GPU%\%2.comp" >nul 2>&1
 if exist "%WORK%\%1.spv" (echo   %1.spv) else (echo   %1.spv FAILED)
 goto :eof
