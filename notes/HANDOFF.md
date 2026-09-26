@@ -24,6 +24,31 @@ you need the evidence behind a line in this file, rather than reading them in or
   have no upscaler, so it needs a newer game.
 - **A FAQ** in the README, for the questions that keep coming back. Later.
 
+## The one-head blocks' attention in one pass a window (2026-09-26, afternoon)
+
+Blocks 0 and 70 and the eight at half resolution — 32 channels, one head — ran their
+attention half as three passes, and between them Q, K and V (12 KB a window) and the
+attention's output (4 KB) went to memory and back: 22 % of the graph at 320x320, ~24 % at
+1280x768. `window_block.comp` keeps them in the workgroup: eight subgroups, a window row
+each, project, keep Q in registers and K and V in shared memory, run the attention as
+`window_attention.comp` does and finish with the output projection and the residual — block
+0's with its 2x2 pool (`NR_FUSE_WINDOW_BLOCK`). Bit-identical, 272 cases against the three
+passes; frame heads, the daemon's answers and `make test` in both memory modes unchanged.
+
+**The first version was slower than the three passes (0.85-0.98x)**, and two ablations
+found why. The QKV epilogue's normalisation ran a row a lane — 8 of 32 lanes in every
+subgroup; spread over four lanes a row, the way the vendor's cosine tree is laid out, with
+the butterflies as shuffles and the same operations on the same operands, it went 10.9 ->
+7.1 ms at 1280x768. And the weights' B fragments read from memory by row cost 1.6 ms; staged
+in shared memory — in K's and V's bytes before they are written, in K's after QK^T — 7.1 ->
+6.2. Reading them by column from transposed copies was slower (10.8).
+
+1.44-1.50x the three passes. Replayed graph **320x320 25.2 -> 23.7 ms, 1280x768 146.2 ->
+134.9, 1920x1088 307.1 -> 283.7**; the daemon 640x360 at 0.5 27.7 -> 26.0 ms, 1280x720 at 0.35
+35.4 -> 33.1. README table re-measured (medians of three): **640x360 at 0.5 31.8 -> 26.8 ms,
+1024x768 at 0.55 60.1 -> 50.8, 1920x1080 at 0.55 140.5 -> 117.6**. The wider blocks keep
+three passes: at C = 512 a window's Q, K and V are 192 KB.
+
 ## int8 on the bottleneck: measured again, and kept as a measurement (2026-09-26)
 
 With the activations on int8 too — config 4's real input, per row — blocks 31-38 cost 5.0 %
@@ -1068,8 +1093,8 @@ What is *not* claimed:
   a daemon runs the model, and the result goes back into the swapchain. Proven in **Dead
   or Alive 5** (32-bit D3D9 through DXVK) with faces enhanced and measured, and the layer
   proven to attach under **VKD3D-Proton** on a 64-bit D3D12 title. Photo mode is triggered
-  by a file; live mode (`NR_LAYER_LIVE=N`) runs continuously: 35-36 ms a frame at 512x288
-  and 640x360 for the daemon alone (28 fps, `nr_knobs.RATES`, 2026-09-25). In a game it shares the GPU
+  by a file; live mode (`NR_LAYER_LIVE=N`) runs continuously: 26-27 ms a frame at 512x288
+  and 640x360 for the daemon alone (37-39 fps, `nr_knobs.RATES`, 2026-09-26). In a game it shares the GPU
   with the game's own rendering — Tekken 7 ran 25 fps at 640x360 on 2026-09-24, against 10.5 on 2026-09-16, before the
   fusions (`phase59`). `src/layer/`, `notes/phase34-doa5.md`, `phase41`, `phase47`.
 - **HDR is handled**: `src/ref/nr_display.py`, the recovered display codec — encode a

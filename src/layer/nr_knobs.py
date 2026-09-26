@@ -121,20 +121,20 @@ BY_NAME = {knob.name: knob for knob in KNOBS}
 DEFAULTS = {knob.name: knob.default for knob in KNOBS}
 
 # The whole round trip, median of nine frames each, measured by `src/bench/live_rates.py`
-# on 2026-09-24 — the daemon's own cost, with no game competing for the GPU. `nr-ctl rates`,
+# on 2026-09-26 — the daemon's own cost, with no game competing for the GPU. `nr-ctl rates`,
 # the panel and the README all read this one table; the README's copy is generated from it
 # by `src/tools/knob_doc.py`, because the hand-written one went two days out of date the
 # moment the host passes moved to C and then stayed wrong for a week.
 RATES = (
-    (512, 288, 0.35, 30.2),
-    (512, 288, 0.50, 30.0),
-    (640, 360, 0.35, 31.1),
-    (640, 360, 0.50, 31.8),
-    (854, 480, 0.50, 37.9),
-    (1024, 768, 0.55, 60.1),
-    (1920, 1080, 0.55, 140.5),
+    (512, 288, 0.35, 25.6),
+    (512, 288, 0.50, 25.6),
+    (640, 360, 0.35, 26.3),
+    (640, 360, 0.50, 26.8),
+    (854, 480, 0.50, 33.1),
+    (1024, 768, 0.55, 50.8),
+    (1920, 1080, 0.55, 117.6),
 )
-RATES_MEASURED = "2026-09-25"
+RATES_MEASURED = "2026-09-26"
 # What a reader of the table needs and the numbers cannot say. Empty when there is nothing.
 RATES_NOTE = ("Medians of three runs with swap empty, which agreed within 10 %. On "
               "2026-09-23, with 5.5 GiB in zram and the kernel's memory-pressure figures "

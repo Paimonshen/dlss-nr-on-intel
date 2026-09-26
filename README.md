@@ -377,17 +377,17 @@ The average change between two frames above which the scene is taken to have cut
 
 <!-- rates:begin -->
 
-Measured through the socket on 2026-09-25 by `python3 src/bench/live_rates.py` — the whole round trip a game waits for, median of nine frames, not graph time alone:
+Measured through the socket on 2026-09-26 by `python3 src/bench/live_rates.py` — the whole round trip a game waits for, median of nine frames, not graph time alone:
 
 | swapchain | render scale | ms | fps |
 | --- | ---: | ---: | ---: |
-| 512x288 | 0.35 | 30 | 33.1 |
-| 512x288 | 0.50 | 30 | 33.3 |
-| 640x360 | 0.35 | 31 | 32.2 |
-| 640x360 | 0.50 | 32 | 31.4 |
-| 854x480 | 0.50 | 38 | 26.4 |
-| 1024x768 | 0.55 | 60 | 16.6 |
-| 1920x1080 | 0.55 | 140 | 7.1 |
+| 512x288 | 0.35 | 26 | 39.1 |
+| 512x288 | 0.50 | 26 | 39.1 |
+| 640x360 | 0.35 | 26 | 38.0 |
+| 640x360 | 0.50 | 27 | 37.3 |
+| 854x480 | 0.50 | 33 | 30.2 |
+| 1024x768 | 0.55 | 51 | 19.7 |
+| 1920x1080 | 0.55 | 118 | 8.5 |
 
 Medians of three runs with swap empty, which agreed within 10 %. On 2026-09-23, with 5.5 GiB in zram and the kernel's memory-pressure figures rising, 1920x1080 ran anywhere from 322 to 463 ms: if that row is much slower for you, look at swap before anything else.
 
