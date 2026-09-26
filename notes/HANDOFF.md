@@ -24,6 +24,33 @@ you need the evidence behind a line in this file, rather than reading them in or
   have no upscaler, so it needs a newer game.
 - **A FAQ** in the README, for the questions that keep coming back. Later.
 
+## Three full-resolution intermediates never stored (2026-09-26, morning)
+
+Around the two full-resolution blocks, three values were written out only for the next
+pass to read them back, and in two cases written twice, as float32 and as half. Each is
+now made where it is used; all bit-identical (`test_glue.py`, frame heads, the daemon's
+answers at three live sizes, `make test` in both memory modes), each behind a switch:
+
+- **block 70's input made inside its feed-forward** (`NR_FUSE_MERGE_FFN`): the last
+  upsample merge, 0.78 -> 0.50 ms for the pair at 320x320, 6.67 -> 4.28 at 1280x768;
+- **block 0's stem made inside its feed-forward** (`NR_FUSE_STEM_FFN`): the stem GEMM's one
+  K step, done again in the kernel that read its two outputs — 5.83 -> 3.48 ms at 1280x768,
+  and the feed-forward that makes its stem is no slower than the one that read it;
+- **block 0's output pooled and published in its window residual's epilogue**
+  (`NR_FUSE_POOL`): a staged block is one 8x8 window across all 32 channels, so the pool is
+  summed from the stage — 5.27 -> 2.51 ms at 1280x768;
+- and the 64-token bottleneck's two N = 1024 GEMMs on 32-row blocks (0.18 ms at 320x320).
+
+Graph 1280x768 153.7 -> ~145.5 ms, 1920x1088 321.6 -> ~305. The daemon against
+`improve-int8`, everything since last night included (medians of three): **640x360 at 0.5
+28.8 -> 26.6 ms, 1280x720 at 0.35 36.5 -> 34.8, 1920x1080 at 0.3 57.0 -> 53.4**.
+
+**A trap from the first one.** The residual `branch + skip * cos` compiles to one fused
+multiply-add inside `add_gemm_residual`; written inline in the new epilogue, the same
+expression came out as a multiply and an add, and a sixth of the outputs moved by an ulp.
+`test_glue.py` caught it. The epilogue now writes `fma()` under `precise`, which pins the
+rounding instead of leaving it to the compiler's contraction.
+
 ## Four passes of the graph, faster (2026-09-26, night)
 
 All bit-identical — frame heads, the daemon's answers at three live sizes, `make test` in
