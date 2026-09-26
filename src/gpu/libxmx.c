@@ -38,7 +38,8 @@ static struct {
 	VkPipeline rrows;         /* the whole-row softmax on 256 lanes */
 	VkPipeline rint8;         /* the staged GEMM on the integer path, built on first use */
 	VkPipeline rblock;        /* a 32-channel window block's attention half, likewise */
-	char *rpaths[11];
+	VkPipeline rglobal;       /* a bottleneck block's attention in one pass, likewise */
+	char *rpaths[12];
 	unsigned specialize;
 	unsigned tiling, tilem, tilen;
 	int syncing;
@@ -1482,6 +1483,36 @@ int xmx_rec_window_block(int image, int qkv, int projection, int target, int bia
 	vkCmdDispatch(g.rcb, windows < 65535u ? windows : 65535u, (windows + 65534u) / 65535u, 1);
 	barrier();
 	stamp(PK_ROW, 4);        /* WINDOW_BLOCK, as window_block.comp names it */
+	g.recorded++;
+	return 0;
+}
+
+int xmx_global_attention_init(const char *path)
+{
+	if (!g.rready) FAIL("resident runtime not initialised", 0);
+	if (g.rglobal) return 0;
+	free(g.rpaths[11]);
+	if (!(g.rpaths[11] = strdup(path))) FAIL("pipeline path allocation", 0);
+	return build_pipeline(path, g.rpl, &g.rglobal);
+}
+
+/* A bottleneck block's attention in one pass (global_attention.comp): Q, K and V as the
+ * QKV epilogue leaves them, (heads, rows, 32) half, into the merged (rows, heads * 32)
+ * half — what QK^T, the softmax over `tokens` of `rows` columns, PV and merge_heads write. */
+int xmx_rec_global_attention(int q, int k, int v, int merged, unsigned rows,
+			     unsigned tokens, unsigned heads, float cap)
+{
+	if (!g.recording || !g.rglobal) FAIL("global attention not ready for recording", 0);
+	if (!rows || rows % 16u || !tokens || tokens > rows || !heads)
+		FAIL("global attention needs rows a multiple of 16, at least the tokens", 0);
+	struct push p = { .a = addr_of(q), .b = addr_of(k), .c = addr_of(merged), .d = addr_of(v),
+			  .m = rows, .n = tokens, .batch = heads, .p0 = cap };
+	if (!p.a || !p.b || !p.c || !p.d) FAIL("global attention operand is not a live buffer", 0);
+	vkCmdBindPipeline(g.rcb, VK_PIPELINE_BIND_POINT_COMPUTE, g.rglobal);
+	vkCmdPushConstants(g.rcb, g.rpl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
+	vkCmdDispatch(g.rcb, (rows + 63u) / 64u, heads, 1);
+	barrier();
+	stamp(PK_ROW, 5);        /* GLOBAL_ATTENTION, as global_attention.comp names it */
 	g.recorded++;
 	return 0;
 }

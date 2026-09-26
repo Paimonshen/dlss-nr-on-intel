@@ -121,6 +121,8 @@ def _load():
             ("xmx_rec_gemm_window_residual_pool", [ctypes.c_int] * 6 + [ctypes.c_uint] * 8),
             ("xmx_window_block_init", [ctypes.c_char_p]),
             ("xmx_rec_window_block", [ctypes.c_int] * 8 + [ctypes.c_uint] * 6),
+            ("xmx_global_attention_init", [ctypes.c_char_p]),
+            ("xmx_rec_global_attention", [ctypes.c_int] * 4 + [ctypes.c_uint] * 3 + [ctypes.c_float]),
             ("xmx_int8_init", [ctypes.c_char_p]),
             ("xmx_rec_gemm_int8", [ctypes.c_int] * 5 + [ctypes.c_uint] * 4),
             ("xmx_rec_unary2", [ctypes.c_uint] + [ctypes.c_int] * 5
@@ -526,6 +528,8 @@ class Runtime:
         self.fuse_window_block = os.environ.get("NR_FUSE_WINDOW_BLOCK", "1") != "0"
         # Block 70's output straight into the compact head inside that pass, never stored.
         self.fuse_head = os.environ.get("NR_FUSE_HEAD", "1") != "0"
+        # A bottleneck block's QK^T, softmax, PV and head merge in one pass, no score stored.
+        self.fuse_global_attention = os.environ.get("NR_FUSE_GLOBAL_ATTENTION", "1") != "0"
 
     def graph_key(self):
         return (self.lib.xmx_specialization() | (int(self.fuse_qk) << 3)
@@ -548,7 +552,8 @@ class Runtime:
                 | (int(self.fuse_stem_ffn) << 19)
                 | (int(self.fuse_pool) << 20)
                 | (int(self.fuse_window_block) << 21)
-                | (int(self.fuse_head) << 22))
+                | (int(self.fuse_head) << 22)
+                | (int(self.fuse_global_attention) << 23))
 
     @property
     def buffer_bytes(self):
@@ -755,6 +760,31 @@ class Runtime:
                                          height, width, pw // 8, (top << 16) | left,
                                          flags) != 0:
             raise RuntimeError("xmx_rec_window_block: " + self.lib.xmx_error().decode())
+        self.recorded += 1
+        return self
+
+    def global_attention(self, q, k, v, merged, rows, tokens, heads, cap):
+        """A bottleneck block's attention in one pass (global_attention.comp).
+
+        What `gemm(q, k, scores, rows, rows, 32, batch=heads, transpose_b=True)`, the
+        softmax over `tokens` of `rows` columns clamped at `cap`, `gemm(probs, v, context,
+        ...)` and `merge_heads(context, merged, 1, rows, 32 * heads, heads, EPI_E4M3,
+        narrow)` write into `merged`, bit for bit, with no score stored
+        (`src/gpu/test_global_attention.py`).
+        """
+        if rows <= 0 or rows % 16 or not 0 < tokens <= rows or heads <= 0:
+            raise ValueError("global attention needs rows a multiple of 16, at least the tokens")
+        if merged.id in {q.id, k.id, v.id}:
+            raise ValueError("global attention's output must not alias its inputs")
+        for buf in (q, k, v, merged):
+            if buf.nbytes < heads * rows * 32 * 2:
+                raise ValueError("global attention buffer is too small")
+        path = os.environ.get("XMX_GLOBAL_ATTENTION_SPV") or str(ROOT / "work" / "global_attention.spv")
+        if self.lib.xmx_global_attention_init(path.encode()) != 0:
+            raise RuntimeError("global attention pipeline: " + self.lib.xmx_error().decode())
+        if self.lib.xmx_rec_global_attention(q.id, k.id, v.id, merged.id, rows, tokens, heads,
+                                             float(cap)) != 0:
+            raise RuntimeError("xmx_rec_global_attention: " + self.lib.xmx_error().decode())
         self.recorded += 1
         return self
 

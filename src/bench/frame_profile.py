@@ -48,10 +48,12 @@ ROW = _kinds("src/gpu/attention.comp", r"([A-Z][A-Z0-9_]*)\s*=\s*(\d+)u")
 # 2, and only one of them was read. So both are read, and a shared number is an error.
 _WINDOW = _kinds("src/gpu/window_attention.comp", r"(WINDOW_[A-Z0-9_]*)\s*=\s*(\d+)u")
 _BLOCK = _kinds("src/gpu/window_block.comp", r"(WINDOW_BLOCK)\s*=\s*(\d+)u")
-if set(_WINDOW) & set(_BLOCK):
-    raise SystemExit("row profile kinds collide between window_attention.comp and "
-                     "window_block.comp")
+_GLOBAL = _kinds("src/gpu/global_attention.comp", r"(GLOBAL_ATTENTION)\s*=\s*(\d+)u")
+if set(_WINDOW) & set(_BLOCK) or set(_GLOBAL) & (set(_WINDOW) | set(_BLOCK)):
+    raise SystemExit("row profile kinds collide between window_attention.comp, "
+                     "window_block.comp and global_attention.comp")
 _WINDOW.update(_BLOCK)
+_WINDOW.update(_GLOBAL)
 _CLASH = set(ROW) & set(_WINDOW)
 if _CLASH:
     raise SystemExit(f"row profile kinds collide between attention.comp and "
@@ -109,6 +111,8 @@ def _describe(name, args):
                                        args[5], args[6])
     if name == "xmx_rec_row":
         return "row %s rows=%d" % (ROW.get(args[0] & 0xFF, "kind %d" % (args[0] & 0xFF)), args[5])
+    if name == "xmx_rec_global_attention":
+        return "global attention %d rows, %d tokens, %d heads" % args[4:7]
     if name == "xmx_rec_window_attention":
         return "window attention %d batches, %d heads%s" % (
             args[5], args[6], ", merged" if len(args) > 7 and args[7] else "")

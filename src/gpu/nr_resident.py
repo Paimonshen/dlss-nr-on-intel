@@ -158,6 +158,8 @@ class GlobalScratch:
         self.probs16 = make("probs16", heads * padded * padded, np.float16)
         self.context = make("context", heads * padded * 32)
         self.merged16 = make("merged16", padded * channels, np.float16)
+        # the fused attention's output: merged16 shares q16's role, which it still reads
+        self.context16 = make("context16", padded * channels, np.float16)
         self.attention = make("attention", padded * channels)
         self.out = make("global.out", padded * channels)
 
@@ -262,16 +264,23 @@ def record_global_block(runtime, w, s, source=None, target=None):
 
     runtime.to_half(s.ffn, s.ffn16, padded * channels)
     key = record_qkv_projection(runtime, s.ffn16, w, s, 1, padded, channels, heads)
-    runtime.gemm(s.q16, key, s.scores, padded, padded, 32, batch=heads,
-                 strides=(padded * 32, padded * 32, padded * padded), transpose_b=True)
-    # no attention bias here, and the logits are clamped symmetrically
-    runtime.softmax(s.scores, s.probs16, heads * padded, s.tokens,
-                    stride=padded, cap=w.logit_cap, narrow=True)
-    runtime.gemm(s.probs16, s.v16, s.context, padded, 32, padded, batch=heads,
-                 strides=(padded * padded, padded * 32, padded * 32))
-    runtime.merge_heads(s.context, s.merged16, 1, padded, channels, heads,
-                        epilogue=xmxres.EPI_E4M3, narrow=True)
-    record_project_residual(runtime, s.merged16, w.out, s.attention, s.ffn, w.attn_cos,
+    if runtime.fuse_global_attention:
+        # QK^T, the softmax, PV and the head merge in one pass, and no score stored
+        merged = s.context16
+        runtime.global_attention(s.q16, key, s.v16, merged, padded, s.tokens, heads,
+                                 w.logit_cap)
+    else:
+        merged = s.merged16
+        runtime.gemm(s.q16, key, s.scores, padded, padded, 32, batch=heads,
+                     strides=(padded * 32, padded * 32, padded * padded), transpose_b=True)
+        # no attention bias here, and the logits are clamped symmetrically
+        runtime.softmax(s.scores, s.probs16, heads * padded, s.tokens,
+                        stride=padded, cap=w.logit_cap, narrow=True)
+        runtime.gemm(s.probs16, s.v16, s.context, padded, 32, padded, batch=heads,
+                     strides=(padded * padded, padded * 32, padded * 32))
+        runtime.merge_heads(s.context, merged, 1, padded, channels, heads,
+                            epilogue=xmxres.EPI_E4M3, narrow=True)
+    record_project_residual(runtime, merged, w.out, s.attention, s.ffn, w.attn_cos,
                             target, padded, channels, channels)
 
 
