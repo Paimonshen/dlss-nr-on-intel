@@ -3,7 +3,7 @@
 
 A GEMM of 32 rows or fewer takes a 32-row block (libxmx.c, `small`) — with a 64-deep K
 step where N is 1024 or less and K allows it — where it took a partial 64-row block
-before. Each row's sums are its own and the K steps run in the same order, so on identical
+before, and so does a 64-row one with N <= 1024 and K >= 1024, two blocks of 32. Each row's sums are its own and the K steps run in the same order, so on identical
 inputs the output must match byte for byte: plain and published, a transposed B, a batch,
 the fused residual with a float32 and a half skip. Nothing past M rows may be written, and
 the routing counter must show which build ran.
@@ -31,7 +31,8 @@ def main():
     cases = 0
     # the bottleneck's four shapes at 32 tokens, its attention (a batch of 32 heads), a K
     # the deep step cannot take, and blocks with fewer than 32 rows
-    for rows, cols, inner, batch in ((32, 1024, 4096, 1), (32, 4096, 1024, 1),
+    for rows, cols, inner, batch in ((64, 1024, 4096, 1), (64, 1024, 1024, 1),
+                                     (32, 1024, 4096, 1), (32, 4096, 1024, 1),
                                      (32, 3072, 1024, 1), (32, 1024, 1024, 1),
                                      (32, 32, 32, 32), (32, 96, 96, 1),
                                      (16, 1024, 1024, 1), (24, 64, 128, 4), (8, 32, 64, 1)):
