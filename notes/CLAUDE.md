@@ -155,7 +155,9 @@ Treat all of the above as *reported*, not verified. Verifying it is Phase 1's jo
    *Resolved differently than this expected:* **tiling was never needed.** The whole
    frame runs at once, and a shared scratch arena — blocks execute in sequence, so roles
    with disjoint lifetimes alias — brought 720p to **2.3 GiB** of device buffers and
-   made 1920x1080 fit without swapping. `notes/phase32-scratch-and-qk.md`. Do not
+   made 1920x1080 fit without swapping. `notes/phase32-scratch-and-qk.md`. Sizing each
+   role by the buffers a recording actually touches then took 720p to **0.7 GiB** and
+   1920x1088 from 2.9 to **1.2 GiB**, weights included (2026-09-26, HANDOFF). Do not
    retrofit tiling; there is nothing to retrofit it to.
 2. **No NVIDIA GPU exists on this machine or anywhere accessible.** There is no way to
    produce reference activations from the original binary. Ground truth must come from

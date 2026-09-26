@@ -130,7 +130,8 @@ already have. See [Build](#build).
 - Linux. Python 3 with NumPy. A C compiler, `glslangValidator`, the Vulkan loader.
 - **ImageMagick** for the still-frame tools, which read and write pictures through
   `magick`. The game path does not touch it.
-- About 2.3 GiB of memory for the device buffers at 720p — it shares system RAM.
+- About 0.7 GiB of memory for the device buffers at 720p and 1.2 GiB at 1080p, the weights
+  included — it shares system RAM.
 - OpenCV is optional and worth having: it is the fast path for the blur that moving
   `detail_strength` or `colour_strength` needs — 32 ms against 110 at 854x480
   (`notes/phase48`). Everything else is the same without it.

@@ -52,12 +52,18 @@ answers — and `make test` green in both modes. **1920x1088 281.6 -> 267.7 ms**
 graph (the pass 20.0 -> 6.9 ms), 1280x768 134.0 -> 132.9; nothing at the live sizes, where
 the bottleneck is 64-96 tokens.
 
-What the frame holds that nothing reads, at 1920x1088 (2885 MiB resident, 2192 of it the
-scratch arena): the arena sizes each role by every buffer planned in it, used or not, and
-the window blocks' float32 scores (510 MiB), their half probabilities (255) and the float32
-QKV projection (765) are planned though the fused paths never touch them — about 770 MiB of
-roles larger than their users need. Planning by the switches in force, and planning again
-when they change, is the fix; not done.
+**The scratch sized by what the recording touches** (`3ace454`). The arena sized each role
+by every buffer planned in it, used or not, and with the fused paths on the largest are
+never touched: the window blocks' float32 scores and half probabilities, the float32 QKV
+projection, the attention buffers of the 32-channel levels that run whole in
+`window_block.comp`. `ScratchArena.discover()` records the frame once with a stand-in
+address a role, never runs it, and shrinks each role to what that recording touched.
+**Resident, weights included: 320x320 413 -> 328 MiB, 1280x768 1510 -> 701, 1920x1088 2885
+-> 1164.** Bit-identical, `make test` green in both memory modes. The plan belongs to the
+switches and the capture mode (a capture keeps block 0's stem): changing either plans again
+and drops the graphs made against the old plan; a new specialisation does not. The
+discovery costs 15-45 ms once per extent. Whether Mortal Kombat 1 now fits at full render
+scale (`phase62`: OOM-killed at 1.0) is the owner's to try.
 
 ## The one-head blocks' attention in one pass a window (2026-09-26, afternoon)
 
@@ -926,7 +932,8 @@ value:
    than 8 % just to reach parity.
 
 **Memory is no longer the constraint it was**: the shared scratch arena took 720p from
-5041 to 2303 MiB and 1080p now fits without swapping (phase 32).
+5041 to 2303 MiB and 1080p now fits without swapping (phase 32) — and 701 MiB since the
+scratch is sized by what the recording touches (2026-09-26).
 
 **Real time is still not on the table.** At `17 ms + 488 ms/Mpixel`, 30 fps needs about
 a 243x137 extent and 15 fps about 425x239. On this hardware with this graph, DLSS-NR is
@@ -1133,8 +1140,10 @@ What is *not* claimed:
   `9.4 ms + 196 ms per megapixel`. The optimization is
   bit-identical to the generic GPU path. Earlier comparisons reported head correlation
   0.9918 with the CPU reference and visually indistinguishable pictures.
-  **2.3 GiB** of device buffers at 720p since the scratch arena (`phase32`); the 5.6 GB
-  this used to say predates it, and 1080p did not fit at all before.
+  **0.7 GiB** of device buffers at 720p and 1.2 at 1920x1088, weights included, since the
+  scratch is sized by what the recording touches (2026-09-26); 2.3 GiB with the arena
+  alone (`phase32`), and the 5.6 GB this used to say predates both — 1080p did not fit
+  at all before.
   `src/gpu/nr_frame_resident.py`, `notes/phase15-residency.md`,
   `notes/phase18-fusion.md`, `notes/phase21-fusion-and-tiling.md`.
 - **It runs in a real game, in two modes.** A Vulkan layer captures the presented frame,
