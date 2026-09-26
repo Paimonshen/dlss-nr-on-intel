@@ -116,6 +116,7 @@ def _load():
             ("xmx_rec_gemm_dual", [ctypes.c_int] * 4 + [ctypes.c_uint] * 3),
             ("xmx_ffn_init", [ctypes.c_char_p]),
             ("xmx_rec_ffn", [ctypes.c_int] * 6 + [ctypes.c_uint] * 5),
+            ("xmx_rec_ffn_merge", [ctypes.c_int] * 7 + [ctypes.c_uint] * 4),
             ("xmx_rec_unary2", [ctypes.c_uint] + [ctypes.c_int] * 5
              + [ctypes.c_uint, ctypes.c_uint, ctypes.c_float] + [ctypes.c_uint] * 5),
             ("xmx_rec_window_attention", [ctypes.c_int] * 5 + [ctypes.c_uint] * 3),
@@ -507,6 +508,9 @@ class Runtime:
         self.fuse_partition = os.environ.get("NR_FUSE_PARTITION", "1") != "0"
         # A decoder transition's upsample, scaled skip and add in one pass.
         self.fuse_transition = os.environ.get("NR_FUSE_TRANSITION", "1") != "0"
+        # Block 70's input merged inside its fused feed-forward rather than stored twice
+        # by a pass of its own for the feed-forward to read back.
+        self.fuse_merge_ffn = os.environ.get("NR_FUSE_MERGE_FFN", "1") != "0"
 
     def graph_key(self):
         return (self.lib.xmx_specialization() | (int(self.fuse_qk) << 3)
@@ -524,7 +528,8 @@ class Runtime:
                 | (int(self.fuse_ffn) << 14)
                 | (int(self.fuse_branched_ffn) << 15)
                 | (int(self.fuse_partition) << 16)
-                | (int(self.fuse_transition) << 17))
+                | (int(self.fuse_transition) << 17)
+                | (int(self.fuse_merge_ffn) << 18))
 
     @property
     def buffer_bytes(self):
@@ -772,6 +777,35 @@ class Runtime:
                                 cosine.id if cosine is not None else -1,
                                 rows, channels, hidden, groups, flags) != 0:
             raise RuntimeError("xmx_rec_ffn: " + self.lib.xmx_error().decode())
+        self.recorded += 1
+        return self
+
+    def ffn_fused_merge(self, source, skip, sincos, expand, projection, target, cosine,
+                        height, width, source_width, *, epilogue=0, narrow=False):
+        """Block 70's feed-forward with its input made in the same pass.
+
+        What `upsample_merge(source, skip, sincos, merged, merged16, ...)` followed by
+        `ffn_fused(merged16, ..., skip=merged, cosine=cosine)` write into `target`, bit for
+        bit, without `merged` or `merged16` existing (`src/gpu/test_glue.py`). 32 channels,
+        128 hidden; `source` (half) is the level above at half the extent.
+        """
+        rows = height * width
+        if rows <= 0 or rows % 16 or height % 2 or width % 2 or source_width < width // 2:
+            raise ValueError("the merged feed-forward needs an even extent in 16-row blocks")
+        if target.id in {source.id, skip.id, sincos.id, expand.id, projection.id, cosine.id}:
+            raise ValueError("merged feed-forward output must not alias its inputs")
+        sizes = [(source, (height // 2) * source_width * 32 * 2), (skip, rows * 32 * 2),
+                 (sincos, 64 * 4), (expand, 32 * 128 * 2), (projection, 128 * 32 * 2),
+                 (cosine, 32 * 4), (target, rows * 32 * (2 if narrow else 4))]
+        if any(buf.nbytes < size for buf, size in sizes):
+            raise ValueError("merged feed-forward buffer is too small")
+        path = os.environ.get("XMX_FFN_SPV") or str(ROOT / "work" / "ffn_fused.spv")
+        if self.lib.xmx_ffn_init(path.encode()) != 0:
+            raise RuntimeError("fused feed-forward pipeline: " + self.lib.xmx_error().decode())
+        if self.lib.xmx_rec_ffn_merge(source.id, skip.id, sincos.id, expand.id, projection.id,
+                                      target.id, cosine.id, height, width, source_width,
+                                      _publish(epilogue, narrow)) != 0:
+            raise RuntimeError("xmx_rec_ffn_merge: " + self.lib.xmx_error().decode())
         self.recorded += 1
         return self
 

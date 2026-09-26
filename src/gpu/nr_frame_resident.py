@@ -527,15 +527,22 @@ class ResidentFrame:
 
         # back to full resolution, merged with block 0's output, then the head
         stage[0] = "block70 + head"
-        merged = self.buffer("merged", pixels * 32)
         block70 = self.block(70, 1)
         scratch70 = self.scratch(block70, height, width)
         # The head reads block 70's output as half, and nothing reads it as float32, so
         # the block's closing residual stores half itself: the same rounding the separate
         # to_half pass applied, without 126 MB of float32 written at 720p to be read once.
         out16 = self.buffer("out16", pixels * 32, np.float16)
+        # Block 70's input is read only by its feed-forward, which can make it itself:
+        # then neither width of it is ever stored (`ffn_fused_merge`).
+        merge = None
+        if rt.fuse_glue and R.can_merge_input(rt, block70, scratch70):
+            merge = (value, full_skip, self.merge_sincos, w)
+        merged = None if merge else self.buffer("merged", pixels * 32)
         begin()
-        if rt.fuse_glue:
+        if merge:
+            pass
+        elif rt.fuse_glue:
             rt.upsample_merge(value, full_skip, self.merge_sincos, merged,
                               scratch70.value16, height, width, w, 32)
         else:
@@ -545,7 +552,8 @@ class ResidentFrame:
             rt.residual(merged, full_skip, self.merge_cos, merged, pixels * 32, 32,
                         b_half=True)
         R.record_block(rt, block70, scratch70, source=merged, target=out16, target_half=True,
-                       source16=scratch70.value16 if rt.fuse_glue else None)
+                       source16=scratch70.value16 if rt.fuse_glue and not merge else None,
+                       merge=merge)
         rt.gemm(out16, self.head, self.head_buffer(), pixels, 16, 32,
                 compact_output=rt.compact_head)
         submit()

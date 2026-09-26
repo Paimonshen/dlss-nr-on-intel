@@ -358,7 +358,16 @@ def _ffn_groups(runtime, a, b, c, rows, cols, inner, groups, *, leading, strides
                              epilogue=epilogue, narrow=True)
 
 
-def record_feed_forward(runtime, w, s, source, source_half=False, source16=None):
+def can_merge_input(runtime, w, s):
+    """Whether this block's feed-forward can make block 70's merged input itself."""
+    return (runtime.fuse_merge_ffn and runtime.fuse_ffn and not w.branched
+            and not getattr(w, "split", False) and w.channels == 32
+            and s.hidden_width == 128 and s.height % 2 == 0 and s.width % 2 == 0
+            and (s.height * s.width) % 16 == 0)
+
+
+def record_feed_forward(runtime, w, s, source, source_half=False, source16=None,
+                        merge=None):
     """The block's feed-forward, into `s.ffn`. Branched or plain, as the block is.
 
     `source_half` says the block's input is already float16 — true whenever it is an
@@ -367,11 +376,22 @@ def record_feed_forward(runtime, w, s, source, source_half=False, source16=None)
     says a float32 input's half copy has already been written there, by the pass that
     produced the input, so the to_half pass is not needed either.
 
+    `merge` is block 70's input still unmade — the level above, the skip, the sin-cos
+    table and the level above's width — for the feed-forward to make itself
+    (`can_merge_input`); `source` is then unused.
+
     Returns whether `s.ffn` was stored as half: the branched blocks publish it as E4M3,
     which half holds exactly, so they store it narrow and every pass after reads half the
     bytes; the plain blocks' output is unpublished float32 and stays that.
     """
     pixels, channels = s.height * s.width, w.channels
+    if merge is not None:
+        if not can_merge_input(runtime, w, s):
+            raise ValueError("this block's feed-forward cannot make its own input")
+        above, skip, sincos, above_width = merge
+        runtime.ffn_fused_merge(above, skip, sincos, w.expand, w.branch, s.ffn, w.ffn_cos,
+                                s.height, s.width, above_width)
+        return False
     value16 = source if source_half else (source16 or s.value16)
     if not source_half and source16 is None:
         runtime.to_half(source, s.value16, pixels * channels)
@@ -492,7 +512,7 @@ def record_window_attention(runtime, w, s, source, target=None, publish=0,
 
 
 def record_block(runtime, w, s, source=None, target=None, publish=0, source_half=False,
-                 target_half=False, source16=None):
+                 target_half=False, source16=None, merge=None):
     """A whole window block: feed-forward, attention, both residuals.
 
     `source` and `target` default to the scratch's own buffers; passing them lets one
@@ -509,7 +529,8 @@ def record_block(runtime, w, s, source=None, target=None, publish=0, source_half
         record_split_feed_forward(runtime, w, s, source, source_half)
         ffn_half = False
     else:
-        ffn_half = record_feed_forward(runtime, w, s, source, source_half, source16=source16)
+        ffn_half = record_feed_forward(runtime, w, s, source, source_half, source16=source16,
+                                       merge=merge)
     if runtime.fuse_window_residual:
         record_window_attention(runtime, w, s, s.ffn, target=target, publish=publish,
                                 target_half=target_half, source_half=ffn_half)

@@ -3,8 +3,10 @@
 
 `upsample_merge` against upsample2, scale_channel, residual and to_half; `upsample_add`
 against a decoder transition's upsample2, scale_channel and add; `pool2_skip` against
-block 0's e4m3_half and pool2; `gemm_dual` against a GEMM and a to_half of its output. Both outputs of each must match byte for
-byte, and the guard values past them must survive.
+block 0's e4m3_half and pool2; `gemm_dual` against a GEMM and a to_half of its output; and
+`ffn_fused_merge` against `upsample_merge` and the fused feed-forward reading both of its
+outputs. Every output must match byte for byte, and the guard values past them must
+survive.
 """
 import numpy as np
 import xmxres as X
@@ -251,10 +253,69 @@ def pool_cases(rt, rng):
     return cases
 
 
+def merge_ffn_cases(rt, rng):
+    """Block 70's feed-forward making its own input, against the merge stored and read."""
+    cases = 0
+    for height, width, extra in ((8, 8, 0), (16, 24, 0), (20, 36, 3), (64, 40, 0)):
+        sw = width // 2 + extra              # the level above may be wider than half
+        rows = height * width
+        count = rows * 32
+        buffers = []
+
+        def alloc(n, dtype):
+            b = rt.buffer(n, dtype)
+            buffers.append(b)
+            return b
+        try:
+            source = alloc((height // 2) * sw * 32, np.float16)
+            skip = alloc(count, np.float16)
+            sincos = alloc(64, np.float32)
+            cosine = alloc(32, np.float32)
+            expand = alloc(32 * 128, np.float16)
+            projection = alloc(128 * 32, np.float16)
+            merged, merged16 = alloc(count, np.float32), alloc(count, np.float16)
+            want, got = alloc(count + GUARD, np.float32), alloc(count + GUARD, np.float32)
+            for spread in (0.05, 1.0, 40.0):
+                src = rng.normal(0, spread, (height // 2) * sw * 32).astype(np.float16)
+                src[:2] = [0, -0.0]
+                sk = rng.normal(0, spread, count).astype(np.float16)
+                sk[:2] = [-0.0, 2 ** -24]
+                table = rng.uniform(-2, 2, 64).astype(np.float32)
+                table[0], table[32] = 0.0, -0.0
+                X.host_write(source, src)
+                X.host_write(skip, sk)
+                X.host_write(sincos, table)
+                X.host_write(cosine, rng.uniform(-1.5, 1.5, 32).astype(np.float32))
+                X.host_write(expand, rng.normal(0, 0.25, 32 * 128).astype(np.float16))
+                X.host_write(projection, rng.normal(0, 0.1, 128 * 32).astype(np.float16))
+                for mask in (0, 7):
+                    rt.specialize(mask)
+                    for b in (want, got):
+                        X.host_write(b, np.full(count + GUARD, FILL32, np.float32))
+                    rt.begin()
+                    rt.upsample_merge(source, skip, sincos, merged, merged16, height, width,
+                                      sw, 32)
+                    rt.ffn_fused(merged16, expand, projection, want, rows, 32, 128,
+                                 skip=merged, cosine=cosine)
+                    rt.ffn_fused_merge(source, skip, sincos, expand, projection, got, cosine,
+                                       height, width, sw)
+                    rt.submit()
+                    check(f"merged feed-forward {height}x{width} spread {spread} mask {mask}",
+                          X.host_view(got)[:count], X.host_view(want)[:count])
+                    assert filled(X.host_view(got)[count:], np.float32).all()
+                    assert not filled(X.host_view(got)[:count], np.float32).any()
+                    cases += 1
+        finally:
+            for b in buffers:
+                b.free()
+    return cases
+
+
 def main():
     rt = X.Runtime()
     rng = np.random.default_rng(424242)
     merges = upsample_cases(rt, rng)
+    merge_ffns = merge_ffn_cases(rt, rng)
     transitions = transition_cases(rt, rng)
     pools = pool_cases(rt, rng)
     gemms = gemm_cases(rt, rng)
@@ -264,9 +325,12 @@ def main():
     middle = rt.graph_key()
     rt.fuse_transition = not rt.fuse_transition
     assert rt.graph_key() not in (before, middle)
-    print(f"glue: {merges} upsample-merge, {transitions} transition, {pools} pool-and-skip "
-          f"and {gemms} GEMM half-copy cases bit-exact, guards and graph keys OK; "
-          f"staging={rt.staging}")
+    third = rt.graph_key()
+    rt.fuse_merge_ffn = not rt.fuse_merge_ffn
+    assert rt.graph_key() not in (before, middle, third)
+    print(f"glue: {merges} upsample-merge, {merge_ffns} merged feed-forward, "
+          f"{transitions} transition, {pools} pool-and-skip and {gemms} GEMM half-copy "
+          f"cases bit-exact, guards and graph keys OK; staging={rt.staging}")
 
 
 if __name__ == "__main__":

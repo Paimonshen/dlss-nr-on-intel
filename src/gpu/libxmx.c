@@ -106,6 +106,7 @@ struct push {
 _Static_assert(offsetof(struct push, lda) == 80, "attention QKV scale pointer ABI");
 _Static_assert(offsetof(struct push, residual_cos) == 96, "residual epilogue ABI");
 _Static_assert(offsetof(struct push, qkv_scale) == 120, "QKV epilogue ABI");
+_Static_assert(offsetof(struct push, p0) == 64, "the merged feed-forward reads p0-p1 as an address");
 _Static_assert(sizeof(struct push) == 128, "push block matches the GEMM shaders");
 
 const char *xmx_error(void) { return g.err; }
@@ -1423,6 +1424,42 @@ int xmx_rec_ffn(int a, int expand, int projection, int out, int skip, int cosine
 	vkCmdPushConstants(g.rcb, g.rpl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
 	/* sixteen subgroups of 16 rows a workgroup; the last one's surplus subgroups return */
 	vkCmdDispatch(g.rcb, (M + 255u) / 256u, groups, 1);
+	barrier();
+	stamp(PK_GEMM, 31);
+	g.recorded++;
+	return 0;
+}
+
+/* Block 70's feed-forward with its input made in the same pass (ffn_fused.comp, flag
+ * 0x1000000): `source` is the level above at half the extent (half), `skip` the
+ * full-resolution skip (half), `sincos` the merge's sin then cos, `cosine` the feed-
+ * forward residual's. What `UPSAMPLE_MERGE` followed by `xmx_rec_ffn` with a float32
+ * skip writes, without the merge ever being stored. */
+int xmx_rec_ffn_merge(int source, int skip, int sincos, int expand, int projection, int out,
+		      int cosine, unsigned height, unsigned width, unsigned source_width,
+		      unsigned flags)
+{
+	if (!g.recording || !g.rffn) FAIL("fused feed-forward not ready for recording", 0);
+	unsigned M = height * width;
+	if (!M || M % 16u || height % 2u || width % 2u || source_width < width / 2u)
+		FAIL("the merged feed-forward needs an even extent in 16-row blocks", 0);
+	if (flags & ~0x1f00u)
+		FAIL("the merged feed-forward takes an epilogue and a half output only", 0);
+	struct push p = { .a = addr_of(source), .b = addr_of(expand), .c = addr_of(out),
+			  .d = addr_of(skip), .m = M, .n = 32u, .k = 128u, .batch = 1u,
+			  .sa = 32u * 128u, .sb = 128u * 32u, .lda = width, .ldb = source_width,
+			  .flags = flags | 0x20000u | 0x800000u | 0x1000000u,
+			  .residual_cos = addr_of(cosine), .qkv_scale = addr_of(projection) };
+	/* the shader reads p0 and p1 as one 64-bit address, the merge's sin-cos table */
+	uint64_t table = addr_of(sincos);
+	memcpy(&p.p0, &table, sizeof table);
+	if (!p.a || !p.b || !p.c || !p.d || !table || !p.residual_cos || !p.qkv_scale)
+		FAIL("merged feed-forward operand is not a live buffer", 0);
+	VkPipeline pipeline;
+	if (resident_pipeline(5, p.flags, g.rffn, &pipeline)) return -1;
+	vkCmdBindPipeline(g.rcb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+	vkCmdPushConstants(g.rcb, g.rpl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
+	vkCmdDispatch(g.rcb, (M + 255u) / 256u, 1, 1);
 	barrier();
 	stamp(PK_GEMM, 31);
 	g.recorded++;
