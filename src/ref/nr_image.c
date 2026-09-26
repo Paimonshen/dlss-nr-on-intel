@@ -350,6 +350,170 @@ void nr_compose_temporal(const float *head, ptrdiff_t hy, ptrdiff_t hx, ptrdiff_
     }
 }
 
+/* One row of `nr_compose_encode` in the layout the daemon hands it: RGB float triples for
+ * the colour, the history and the game's previous frame, the head's row already scaled on
+ * the first axis with its channels adjacent, the gate from the table, no control mask.
+ * The strides are constants here and the pixels independent, so the compiler vectorises
+ * across them — eight pixels an instruction where the general loop took one — and each
+ * pixel's arithmetic is `temporal_pixel`'s, or `nr_compose`'s without a history, operation
+ * for operation: the same bytes, `test_native_image.py`. 22.7 ms on one core at 1080p for
+ * the general loop, all of it arithmetic. */
+/* A float rounded to half and back, and the half's sixteen bits, with no `_Float16`: this
+ * CPU has no vector half arithmetic, and a conversion the vectoriser cannot take keeps the
+ * whole loop scalar. Normal halves keep ten mantissa bits, ties to even; subnormal ones are
+ * multiples of 2^-24, which the float adder's own rounding finds at 0.5; past 65520 is
+ * infinity, and a NaN keeps its sign and its top payload bits, quieted — the hardware's
+ * conversion, which both match for every one of the 2^32 floats. */
+static inline float half_value(float x)
+{
+    uint32_t f, sb;
+    memcpy(&f, &x, sizeof f);
+    uint32_t sign = f & 0x80000000u, a = f & 0x7fffffffu;
+    uint32_t normal = (a + 0x0fffu + ((a >> 13) & 1u)) & 0xffffe000u;
+    float magnitude, tiny;
+    memcpy(&magnitude, &a, sizeof a);
+    tiny = (magnitude + 0.5f) - 0.5f;
+    memcpy(&sb, &tiny, sizeof sb);
+    uint32_t bits = a > 0x7f800000u ? 0x7fc00000u | (a & 0x003fe000u)
+                  : a >= 0x477ff000u ? 0x7f800000u
+                  : a >= 0x38800000u ? normal : sb;
+    bits |= sign;
+    float y;
+    memcpy(&y, &bits, sizeof y);
+    return y;
+}
+
+static inline uint32_t half_bits(float x)
+{
+    uint32_t f;
+    memcpy(&f, &x, sizeof f);
+    uint32_t sign = (f >> 16) & 0x8000u, a = f & 0x7fffffffu;
+    uint32_t normal = (a + 0x0fffu + ((a >> 13) & 1u)) & 0xffffe000u;
+    float magnitude;
+    memcpy(&magnitude, &a, sizeof a);
+    float tiny = (magnitude + 0.5f) - 0.5f;
+    uint32_t bits = a > 0x7f800000u ? 0x7e00u | ((a >> 13) & 0x1ffu)
+                  : a >= 0x477ff000u ? 0x7c00u
+                  : a >= 0x38800000u ? (normal >> 13) - 0x1c000u
+                  : (uint32_t)(tiny * 16777216.0f);
+    return bits | sign;
+}
+
+static inline float clamp01(float value)
+{
+    value = value < 0.0f ? 0.0f : value;
+    return value > 1.0f ? 1.0f : value;
+}
+
+/* `nr_compose_encode`'s pixel after the head's upscale, for one layout of the knobs: the
+ * bodies of `temporal_pixel` (or `nr_compose` without a history) and of the encoder,
+ * written as selects rather than branches so the compiler can run eight pixels at once.
+ * `confidence` multiplies unconditionally: at 1 that is exact for every value the table
+ * holds. */
+static inline __attribute__((always_inline)) void
+compose_encode_pixel(const float *restrict hq, const float *restrict rgb, const float *restrict was,
+                     const float *restrict before, const float *restrict table,
+                     float confidence, float intensity, float still, float scale, float hold,
+                     float slope, float release, float *restrict out,
+                     uint8_t *restrict pixel, int x, const int temporal, const int moving,
+                     const int releasing, const int bgra)
+{
+    const float *p = rgb + 3 * x;
+    float h[3] = { hq[4 * x], hq[4 * x + 1], hq[4 * x + 2] };
+    float o[3];
+    if (temporal) {
+        float moved = 0.0f;
+        if (moving) {
+            for (int c = 0; c < 3; ++c) {
+                float step = p[c] - before[3 * x + c];
+                step = step < 0.0f ? -step : step;
+                moved = step > moved ? step : moved;
+            }
+        }
+        float alpha = table[half_bits(hq[4 * x + 3])] * confidence;
+        if (releasing)
+            alpha *= clamp01(moved * release + 1.0f);
+        if (moving) {
+            float floored = moved * slope + hold;
+            floored = floored < 0.0f ? 0.0f : floored;
+            floored = floored > hold ? hold : floored;
+            floored = floored > 1.0f ? 1.0f : floored;
+            floored *= scale;
+            alpha = floored > alpha ? floored : alpha;
+        }
+        for (int c = 0; c < 3; ++c) {
+            float source = p[c];
+            float predicted = clamp01(source + half_value(h[c]) * 0.25f);
+            predicted += alpha * (was[3 * x + c] - predicted);
+            o[c] = clamp01(source + intensity * (predicted - source));
+        }
+    } else {
+        for (int c = 0; c < 3; ++c) {
+            float source = p[c];
+            float predicted = clamp01(source + half_value(h[c]) * 0.25f);
+            o[c] = clamp01(source + still * (predicted - source));
+        }
+    }
+    for (int c = 0; c < 3; ++c) out[3 * x + c] = o[c];
+    for (int c = 0; c < 3; ++c) {
+        /* NumPy's byte cast maps NaN to zero; do not cast NaN in C. */
+        float value = o[c] == o[c] ? clamp01(o[c]) : 0.0f;
+        pixel[4 * x + (bgra ? 2 - c : c)] = (uint8_t)(value * 255.0f + 0.5f);
+    }
+}
+
+/* One row of `nr_compose_encode` in the layout the daemon hands it: RGB float triples for
+ * the colour, the history and the game's previous frame, the head's row already scaled on
+ * the first axis with its channels adjacent, the gate from the table, no control mask.
+ * The head's second axis goes into a row of its own, a pixel's channels side by side; then
+ * each combination of the knobs and the byte order is its own loop, strides constant, so the
+ * compiler vectorises across pixels where the general loop took them one at a time. Each
+ * pixel's arithmetic is the general loop's, operation for operation — `half_value` and
+ * `half_bits` are the conversion itself, checked on every float — so the bytes are the
+ * same (`test_native_image.py`). The general loop spent 22.7 ms of one core on a 1080p
+ * frame, all of it arithmetic. */
+#define COMPOSE_ROW(temporal, moving, releasing, bgra)                                       \
+    _Pragma("GCC ivdep")                                                                     \
+    for (int x = 0; x < width; ++x)                                                          \
+        compose_encode_pixel(rows, rgb, was, before, table, confidence, intensity,           \
+                             still, scale, hold, slope, release, out, pixel, x, temporal,    \
+                             moving, releasing, bgra)
+static void compose_encode_row(const float *restrict line, int lx,
+                               const int32_t *restrict low_x, const int32_t *restrict high_x,
+                               const float *restrict weight_x,
+                               const float *restrict rgb, const float *restrict was,
+                               const float *restrict before, const float *restrict table,
+                               float confidence, float intensity, float still, float scale,
+                               float hold, float slope, float release, int width,
+                               float *restrict rows, float *restrict out,
+                               uint8_t *restrict pixel, int bgra)
+{
+    /* the head's second axis, its channels side by side — one vector a tap with a history,
+     * whose four channels the head row holds; three without, which is all it holds then */
+    if (was)
+        for (int x = 0; x < width; ++x) {
+            float w = weight_x[x], other = 1.0f - w;
+            const float *a = line + low_x[x] * lx, *b = line + high_x[x] * lx;
+            for (int c = 0; c < 4; ++c) rows[4 * x + c] = a[c] * other + b[c] * w;
+        }
+    else
+        for (int x = 0; x < width; ++x) {
+            float w = weight_x[x], other = 1.0f - w;
+            const float *a = line + low_x[x] * lx, *b = line + high_x[x] * lx;
+            for (int c = 0; c < 3; ++c) rows[4 * x + c] = a[c] * other + b[c] * w;
+        }
+    int releasing = before && release != 0.0f;
+    if (!was && bgra) COMPOSE_ROW(0, 0, 0, 1);
+    else if (!was) COMPOSE_ROW(0, 0, 0, 0);
+    else if (!before && bgra) COMPOSE_ROW(1, 0, 0, 1);
+    else if (!before) COMPOSE_ROW(1, 0, 0, 0);
+    else if (!releasing && bgra) COMPOSE_ROW(1, 1, 0, 1);
+    else if (!releasing) COMPOSE_ROW(1, 1, 0, 0);
+    else if (bgra) COMPOSE_ROW(1, 1, 1, 1);
+    else COMPOSE_ROW(1, 1, 1, 0);
+}
+#undef COMPOSE_ROW
+
 /* The head's upscale, the composition and the codec in one pass over the output.
  *
  * Separately they are three passes over the full frame — the bilinear resize writes the
@@ -384,9 +548,15 @@ void nr_compose_encode(const float *head, ptrdiff_t hy, ptrdiff_t hx, ptrdiff_t 
     size_t sampled = samples && step ? (width + step - 1) / step : 0;
     /* nr_compose's blend: below 1 clamped to [0, 1], above it extrapolating */
     float still = intensity > 1.0f ? intensity : unit(intensity);
+    /* the daemon's layout, which `compose_encode_row` takes with its strides fixed */
+    int fast = low_x && sx == 3 && sc == 1 && !mask && channels == (history ? 4u : 3u)
+               && (!history || (rx == 3 && rc == 1 && table))
+               && (!previous || (px == 3 && pc == 1))
+               && width < (1u << 24) && head_width * channels < (1u << 24);
     #pragma omp parallel
     {
         float *row = low_y ? malloc(head_width * channels * sizeof *row) : NULL;
+        float *rows = fast ? malloc(4 * width * sizeof *rows) : NULL;
         #pragma omp for schedule(dynamic, 4)
         for (size_t y = 0; y < height; ++y) {
             const float *line;
@@ -406,6 +576,25 @@ void nr_compose_encode(const float *head, ptrdiff_t hy, ptrdiff_t hx, ptrdiff_t 
                 line = head + (ptrdiff_t)y * hy;
                 lx = hx;
                 lc = hc;
+            }
+            if (fast && lc == 1) {
+                compose_encode_row(line, (int)lx, low_x, high_x, weight_x,
+                                   colour + (ptrdiff_t)y * sy,
+                                   history ? history + (ptrdiff_t)y * ry : NULL,
+                                   previous ? previous + (ptrdiff_t)y * py : NULL,
+                                   table, confidence, intensity, still, scale, hold, slope,
+                                   release, (int)width, rows, output + y * width * 3,
+                                   encoded + ((top + y) * frame_width + left) * 4, bgra);
+                if (sampled && y % step == 0) {
+                    for (size_t x = 0; x < width; x += step) {
+                        float w = weight_x[x], other = 1.0f - w;
+                        const float *a = line + (ptrdiff_t)low_x[x] * lx;
+                        const float *b = line + (ptrdiff_t)high_x[x] * lx;
+                        float *to = samples + ((y / step) * sampled + x / step) * channels;
+                        for (size_t c = 0; c < channels; ++c) to[c] = a[c] * other + b[c] * w;
+                    }
+                }
+                continue;
             }
             for (size_t x = 0; x < width; ++x) {
                 float h[4];
@@ -449,5 +638,6 @@ void nr_compose_encode(const float *head, ptrdiff_t hy, ptrdiff_t hx, ptrdiff_t 
             }
         }
         free(row);
+        free(rows);
     }
 }

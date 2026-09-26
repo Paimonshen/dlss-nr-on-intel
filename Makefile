@@ -28,9 +28,12 @@ work/libxmx.so: src/gpu/libxmx.c
 # fused multiply-add or fast maths would change the last bit and the output must be
 # byte-identical to the NumPy it replaces (src/ref/test_native_image.py). OpenMP splits
 # each pass by rows; no row reads another's result, so the bytes do not depend on it.
+# `-fno-trapping-math` changes no value — only whether a comparison may raise a floating-
+# point exception flag nobody reads — and it is what lets GCC turn the clamps into selects
+# and vectorise the fused composition's pixels (`compose_encode_row`).
 work/libnr_image.so: src/ref/nr_image.c Makefile | work
 	$(CC) -O3 -march=native -fPIC -Wall -Wextra -ffp-contract=off -fno-fast-math \
-	      -fopenmp -shared -o $@ $<
+	      -fno-trapping-math -fopenmp -shared -o $@ $<
 
 # The Vulkan layer that puts the pass inside a running game.
 work/libnr_layer.so: src/layer/nr_layer.c
