@@ -2,40 +2,54 @@
 # ============================================================================
 #  deploy.sh  -  run DLSS-NR on Intel against a game (Linux / macOS)
 #
-#  What this does, and what it deliberately does not:
+#  One script for the whole setup: weights, build, install.
 #
-#    * It does NOT copy the model weights anywhere. The launcher points the daemon
-#      at this checkout with NR_ROOT, so the weights stay in work/mlxw/ and nothing
-#      large can be passed on by accident with the game folder.
+#    1. weights  - runs scripts/get_weights.py against a DLL you supply (--dll), which
+#                  clones MLX-DLSS at its pinned commit and writes
+#                  work/mlxw/dlssnr-logical.safetensors. Skipped with --skip-weights,
+#                  or when the file is already there.
+#    2. build    - make builds libxmx.so, libnr_layer.so, libnr_image.so and the shaders.
+#    3. install  - copies the layer into the game folder next to a manifest whose
+#                  library_path is its name, copies the runtime the daemon needs, and
+#                  writes a launcher.
+#
+#  What it deliberately does not do:
+#
+#    * It does NOT copy the model weights anywhere. The launcher points the daemon at
+#      this checkout with NR_ROOT, so the weights stay in work/mlxw/ and nothing large
+#      can be passed on by accident with the game folder.
 #    * It DOES copy the runtime the daemon needs to start: work/mlx-dlss (the MLX
-#      extractor the daemon imports), work/libxmx.so (the GPU runtime),
-#      work/libnr_image.so and work/*.spv (the shaders). Without them the daemon
-#      stops at start.
-#    * It installs the layer next to a manifest whose library_path is its name.
+#      extractor the daemon imports), work/libxmx.so, work/libnr_image.so and
+#      work/*.spv. Without them the daemon stops at start.
 #
 #  Why the manifest matters: the Vulkan loader finds a layer through its manifest
 #  plus VK_LAYER_PATH, not through the dynamic loader's search order, so the manifest
 #  has to name the file and VK_LAYER_PATH has to point at the folder holding both.
 #
 #  Usage:
-#    ./deploy.sh --game /path/to/Game [--name libnr_layer.so]
-#                [--exe /path/to/Game/game] [--skip-build]
+#    ./deploy.sh --game /path/to/Game --dll /path/to/nvngx_dlssnr.dll
+#                [--name libnr_layer.so] [--exe /path/to/Game/game]
+#                [--skip-weights] [--skip-build]
 # ============================================================================
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORK="$REPO/work"
 GAME=""
+DLL=""
 NAME="libnr_layer.so"
 EXE=""
+SKIP_WEIGHTS=0
 SKIP_BUILD=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --game)       GAME="$2"; shift 2 ;;
-    --name)       NAME="$2"; shift 2 ;;
-    --exe)        EXE="$2";  shift 2 ;;
-    --skip-build) SKIP_BUILD=1; shift ;;
+    --game)         GAME="$2"; shift 2 ;;
+    --dll)          DLL="$2";  shift 2 ;;
+    --name)         NAME="$2"; shift 2 ;;
+    --exe)          EXE="$2";  shift 2 ;;
+    --skip-weights) SKIP_WEIGHTS=1; shift ;;
+    --skip-build)   SKIP_BUILD=1; shift ;;
     *) echo "Unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -43,17 +57,36 @@ done
 [[ -n "$GAME" ]] || { echo "ERROR: --game is required" >&2; exit 2; }
 [[ -d "$GAME" ]] || { echo "ERROR: game directory not found: $GAME" >&2; exit 2; }
 
+# ---- weights, delegated to scripts/get_weights.py ----
+# It clones MLX-DLSS at the pinned commit, runs its extractor against your DLL and
+# checks that 649 tensors came out, so there is one definition of "the weights are
+# present and correct" rather than a second copy of the two commands here.
+if [[ $SKIP_WEIGHTS -eq 1 ]]; then
+  echo "[skip] weights (--skip-weights)"
+elif [[ -f "$WORK/mlxw/dlssnr-logical.safetensors" ]]; then
+  echo "[1/3] weights already at $WORK/mlxw/dlssnr-logical.safetensors"
+else
+  [[ -n "$DLL" ]] || {
+    echo "ERROR: no weights yet and no --dll given." >&2
+    echo "       Pass --dll /path/to/nvngx_dlssnr.dll, or --skip-weights if you have them." >&2
+    exit 2
+  }
+  [[ -f "$DLL" ]] || { echo "ERROR: DLL not found: $DLL" >&2; exit 2; }
+  echo "[1/3] extracting weights with scripts/get_weights.py ..."
+  python3 "$REPO/scripts/get_weights.py" "$DLL"
+fi
+
 # ---- build ----
 if [[ $SKIP_BUILD -eq 1 ]]; then
   echo "[skip] build (--skip-build)"
 else
-  echo "[1/2] building the layer ..."
+  echo "[2/3] building the layer ..."
   ( cd "$REPO" && make )
 fi
 [[ -f "$WORK/libnr_layer.so" ]] || { echo "ERROR: $WORK/libnr_layer.so missing; build it first" >&2; exit 3; }
 
 # ---- install into the game folder ----
-echo "[2/2] installing into $GAME ..."
+echo "[3/3] installing into $GAME ..."
 DEPLOY="$GAME/dlss-nr"
 mkdir -p "$DEPLOY/src" "$DEPLOY/work"
 

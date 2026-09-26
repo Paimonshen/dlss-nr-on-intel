@@ -3,17 +3,26 @@ setlocal
 rem ===========================================================================
 rem  deploy.bat  -  run DLSS-NR on Intel against a game (Windows)
 rem
-rem  What this does, and what it deliberately does not:
+rem  One script for the whole setup: weights, build, install.
 rem
-rem    * It does NOT copy the model weights anywhere. The launcher points the daemon
-rem      at this checkout with NR_ROOT, so the weights stay in work/mlxw/ where
-rem      scripts/get_weights.py put them, and nothing large can be passed on by
-rem      accident with the game folder.
+rem    1. weights  - runs scripts/get_weights.py against a DLL you supply (--dll), which
+rem                  clones MLX-DLSS at its pinned commit and writes
+rem                  work/mlxw/dlssnr-logical.safetensors. Skipped with --skip-weights,
+rem                  or when the file is already there.
+rem    2. build    - tools/build_win.bat builds libxmx.dll, nr_layer.dll and the shaders.
+rem    3. install  - copies the layer into the game folder under a name you choose, writes
+rem                  a manifest whose library_path is that file's absolute path, copies the
+rem                  runtime the daemon needs, and writes a launcher.
+rem
+rem  What it deliberately does not do:
+rem
+rem    * It does NOT copy the model weights anywhere. The launcher points the daemon at
+rem      this checkout with NR_ROOT, so the weights stay in work/mlxw/ and nothing large
+rem      can be passed on by accident with the game folder. Extract them wherever this
+rem      tree is; the game folder only needs to know where to look.
 rem    * It DOES copy the runtime the daemon needs to start: work/mlx-dlss (the MLX
-rem      extractor the daemon imports), work/libxmx.* (the GPU runtime), work/*.spv
-rem      (the shaders). Without them the daemon stops at start.
-rem    * It installs the layer under a name you choose (default nr_layer.dll) next to
-rem      a manifest whose library_path is that name.
+rem      extractor the daemon imports), libxmx.dll, libnr_image.dll and the shaders.
+rem      Without them the daemon stops at start.
 rem
 rem  Why the manifest matters: the Vulkan loader finds a layer through its manifest
 rem  plus VK_LAYER_PATH, not through the DLL search order, so the manifest has to name
@@ -23,23 +32,28 @@ rem  once loaded, is what later imports of version.dll resolve to, so it can sil
 rem  stand in for the system library. The manifest makes the name irrelevant anyway.
 rem
 rem  Usage:
-rem    deploy.bat --game "C:\Games\MyGame" [--name nr_layer.dll]
-rem              [--exe "C:\Games\MyGame\game.exe"] [--skip-build]
+rem    deploy.bat --game "C:\Games\MyGame" --dll X:\path\nvngx_dlssnr.dll
+rem              [--name nr_layer.dll] [--exe "C:\Games\MyGame\game.exe"]
+rem              [--skip-weights] [--skip-build]
 rem ===========================================================================
 
 set "GAME="
+set "DLL="
 set "NAME=nr_layer.dll"
 set "EXE="
+set "SKIP_WEIGHTS=0"
 set "SKIP_BUILD=0"
 rem Capture the script directory BEFORE any shift: shift moves %0 and %~dp0 with it.
 set "TOOLSDIR=%~dp0"
 
 :parse
 if "%~1"=="" goto :done_parse
-if /i "%~1"=="--game"        ( set "GAME=%~2" & shift & shift & goto :parse )
-if /i "%~1"=="--name"        ( set "NAME=%~2" & shift & shift & goto :parse )
-if /i "%~1"=="--exe"         ( set "EXE=%~2"  & shift & shift & goto :parse )
-if /i "%~1"=="--skip-build"  ( set "SKIP_BUILD=1" & shift & goto :parse )
+if /i "%~1"=="--game"         ( set "GAME=%~2" & shift & shift & goto :parse )
+if /i "%~1"=="--dll"          ( set "DLL=%~2"  & shift & shift & goto :parse )
+if /i "%~1"=="--name"         ( set "NAME=%~2" & shift & shift & goto :parse )
+if /i "%~1"=="--exe"          ( set "EXE=%~2"  & shift & shift & goto :parse )
+if /i "%~1"=="--skip-weights" ( set "SKIP_WEIGHTS=1" & shift & goto :parse )
+if /i "%~1"=="--skip-build"   ( set "SKIP_BUILD=1" & shift & goto :parse )
 echo Unknown argument: %~1
 exit /b 2
 :done_parse
@@ -60,11 +74,44 @@ if not exist "%GAME%" (
   exit /b 2
 )
 
+rem ---- weights: delegated to scripts/get_weights.py ----
+rem It clones MLX-DLSS at the pinned commit, runs its extractor against your DLL, and
+rem checks that 649 tensors came out. Reusing it rather than repeating the two commands
+rem here keeps one definition of "the weights are present and correct".
+if "%SKIP_WEIGHTS%"=="1" goto :after_weights
+if exist "%WORK%\mlxw\dlssnr-logical.safetensors" (
+  echo [1/3] weights already at %WORK%\mlxw\dlssnr-logical.safetensors
+  goto :after_weights
+)
+if "%DLL%"=="" (
+  echo ERROR: no weights yet and no --dll given.
+  echo        Pass --dll X:\path\to\nvngx_dlssnr.dll, or --skip-weights if you have them.
+  exit /b 2
+)
+if not exist "%DLL%" (
+  echo ERROR: DLL not found: %DLL%
+  exit /b 2
+)
+echo [1/3] extracting weights with scripts\get_weights.py ...
+set "PY="
+where /q py && set "PY=py"
+if not defined PY ( where /q python3 && set "PY=python3" )
+if not defined PY (
+  echo ERROR: python3 not found on PATH
+  exit /b 3
+)
+"%PY%" "%REPO%\scripts\get_weights.py" "%DLL%"
+if errorlevel 1 (
+  echo ERROR: weight extraction failed
+  exit /b 3
+)
+:after_weights
+
 rem ---- build: delegated to build_win.bat, which also builds libxmx.dll and the shaders ----
 rem Kept in one place on purpose: deploy only has to know that the runtime exists, and
 rem a second copy of the MSVC invocation here is a second thing to get wrong.
 if "%SKIP_BUILD%"=="1" goto :after_build
-echo [1/2] building with build_win.bat ...
+echo [2/3] building with build_win.bat ...
 if not exist "%TOOLSDIR%build_win.bat" (
   echo ERROR: tools\build_win.bat not found
   exit /b 3
@@ -84,7 +131,7 @@ if not exist "%WORK%\libxmx.dll" (
 )
 
 rem ---- install into the game folder ----
-echo [2/2] installing into %GAME% ...
+echo [3/3] installing into %GAME% ...
 set "DEPLOY=%GAME%\dlss-nr"
 if not exist "%DEPLOY%" mkdir "%DEPLOY%"
 
