@@ -1111,7 +1111,9 @@ static int record_gemm(int a, int b, int c, unsigned M, unsigned N, unsigned K,
 	 * 1280x720, the same bytes. What stays tiled is K = 16, the stem. */
 	/* A last, partial 64-row block is the staged kernel's own business (its rows past M are
 	 * neither read out of bounds nor stored), so with `staged_partial` M need not be whole
-	 * blocks — except for the QKV epilogue, which finishes a block's rows together. */
+	 * blocks. The QKV epilogue was the exception until its store learned to skip them too:
+	 * the bottleneck's projection at 96 tokens (a 576x352 network, 1920x1080 at 0.3) ran on
+	 * the tiled kernel at 0.255 ms a call. */
 	/* A bottleneck of 32 tokens or fewer — 16 at 256x128, 32 at 320x192, network extents
 	 * only `min_extent` below 320 reaches — is padded to 32 rows, not 64, and takes a
 	 * 32-row build of the same kernel: its GEMMs wait on the K loop, so the pad was half of
@@ -1119,14 +1121,14 @@ static int record_gemm(int a, int b, int c, unsigned M, unsigned N, unsigned K,
 	 * and a 64-deep step halves the trips round the loop. Bit-identical — a row's sums are
 	 * its own — and 0.7-1.2 ms of a 12-20 ms graph (notes/improve-b.md). */
 	int small = g.staged32 && g.rstaged32[0] && M <= 32 && !(bt & 0x400000u)
-		    && (M == 32 || (g.staged_partial && !(bt & 0x100000u)));
+		    && (M == 32 || g.staged_partial);
 	/* A bottleneck of 64 tokens — 320x320, the vendor's minimum — has two GEMMs with
 	 * N = 1024 and 32 blocks of 64 rows between eight cores; two 32-row blocks with the
 	 * 64-deep step each take them from 184 to 160 us and from 50 to 46 (improve-b.md). */
 	if (g.staged32 && g.rstaged32[1] && M == 64 && N <= 1024 && K % 64 == 0 && K >= 1024
 	    && !(bt & 0x500000u))
 		small = 1;
-	int staged = (M % 64 == 0 || small || (g.staged_partial && !(bt & 0x100000u)))
+	int staged = (M % 64 == 0 || small || g.staged_partial)
 		     && N % 32 == 0 && K % 32 == 0 && K >= g.staging;
 	/* the window gather lives in the staged kernel's A loader, at any depth of K */
 	if (bt & 0x400000u) {
