@@ -24,6 +24,16 @@ you need the evidence behind a line in this file, rather than reading them in or
   have no upscaler, so it needs a newer game.
 - **A FAQ** in the README, for the questions that keep coming back. Later.
 
+## int8 on the bottleneck: measured again, and kept as a measurement (2026-09-26)
+
+With the activations on int8 too — config 4's real input, per row — blocks 31-38 cost 5.0 %
+of the effect at 1080p and 6.7 % at 720p, and **9-13 % at the live extent** (a 320x180
+frame on a 320x320 network), the most where speed matters most. The kernel exists and is
+exact (`gemm_staged_int8.comp`, 1.42-1.51x on the bottleneck's GEMMs): about 5 % of the
+graph at 320x320, 2 % at 1280x768, before quantising the activations. **Not in the graph,
+by the owner's decision**: a twentieth of the speed for a tenth of the effect.
+`notes/improve-int8-bottleneck.md`.
+
 ## Three full-resolution intermediates never stored (2026-09-26, morning)
 
 Around the two full-resolution blocks, three values were written out only for the next
