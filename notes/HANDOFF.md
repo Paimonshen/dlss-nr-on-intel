@@ -65,6 +65,22 @@ and drops the graphs made against the old plan; a new specialisation does not. T
 discovery costs 15-45 ms once per extent. Whether Mortal Kombat 1 now fits at full render
 scale (`phase62`: OOM-killed at 1.0) is the owner's to try.
 
+**The bottleneck chain in half** (`a9ffc8a`, under `NR_FUSE_GLUE`): the eight global blocks
+run in their scratch's own half value, published E4M3 between them, instead of widening it
+to float32 and narrowing it again — 32 conversion passes a frame gone, bit-identical. The
+output projection stores the real rows only: the pad rows must stay zero, because an odd
+token count takes the first pad row's key into the softmax's sum. Small — 0.75-0.9 ms of
+device time at 320x320 with per-pass timestamps, within noise replayed.
+
+Measured on the way and left: the window block (`window_block.comp`) is not memory-bound. At
+1920x1088 its three phases take 5.8 ms up to K and V in shared memory, 5.5 for the attention
+and 1.6 for the projection and the store, of 12.9; the attention phase has no spills (the 4
+the kernel has are in its tail), and the whole runs ~2.7 TFLOP/s of multiply-adds, the rest
+of its time the element-wise work — cosine trees, E4M3 publishes, the weights' transform — a
+window's 256 multiply-adds a subgroup cannot hide. A two-head version for level 2 would move
+its three memory-bound passes (2.4 ms a block at 1080p, at the bandwidth ceiling) onto that
+same ~2.7 TFLOP/s, and win nothing.
+
 ## The one-head blocks' attention in one pass a window (2026-09-26, afternoon)
 
 Blocks 0 and 70 and the eight at half resolution — 32 channels, one head — ran their
