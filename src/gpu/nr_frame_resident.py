@@ -499,19 +499,27 @@ class ResidentFrame:
         split_skip = value
 
         gh, gw, gchannels = self.levels[6]
-        deep = self.buffer("l6", gh * gw * gchannels, np.float16)
+        tokens = gh * gw
+        # With the glue fused the eight blocks run in their scratch's half value itself
+        # (`record_global_block`, `chain`), and the downsample writes it.
+        chain = rt.fuse_glue
+        deep = (self.scratch(self.block(31, 32, "global"), gh, gw, tokens=tokens).io16
+                if chain else self.buffer("l6", gh * gw * gchannels, np.float16))
         begin()
         R.record_plain_downsample(rt, self.bottleneck, self.transition_scratch(
             pad8(h) * pad8(w) * channels), value, deep, h, w, channels, pad_to=8,
             source_half=True, target_half=True)
         submit()
 
-        tokens = gh * gw
         stage[0] = "global blocks 31-38 (C=1024)"
         for index in range(31, 39):
             block = self.block(index, 32, "global")
             scratch = self.scratch(block, gh, gw, tokens=tokens)
             begin()
+            if chain:
+                R.record_global_block(rt, block, scratch, chain=True)
+                submit()
+                continue
             # Published values are exact in both widths. Convert on-device when
             # batching; the block mode retains the original host-copy reference.
             if batched or staged:

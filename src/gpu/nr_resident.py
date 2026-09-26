@@ -146,6 +146,9 @@ class GlobalScratch:
         make = (arena.buffer if arena is not None else
                 lambda name, count, dtype=np.float32: runtime.buffer(count, dtype))
         self.value = make("global.value", padded * channels).zero()
+        # The chain's value as half, between the blocks and through them (`chain` in
+        # record_global_block). Its pad rows are zero from here on and never written.
+        self.io16 = make("global.io16", padded * channels, np.float16).zero()
         self.value16 = make("value16", padded * channels, np.float16)
         self.hidden16 = make("hidden16", padded * hidden, np.float16)
         self.branch = make("branch", padded * channels)
@@ -251,16 +254,28 @@ def record_project_residual(runtime, a, weight, branch, skip, cosine, target,
                          epilogue=epilogue, b_half=skip_half, narrow=narrow)
 
 
-def record_global_block(runtime, w, s, source=None, target=None):
-    """A bottleneck block: the wide feed-forward, then attention over every token."""
-    source = source or s.value
-    target = target or s.out
+def record_global_block(runtime, w, s, source=None, target=None, *, chain=False):
+    """A bottleneck block: the wide feed-forward, then attention over every token.
+
+    With `chain` the block reads and writes `s.io16`, the value as half. Between the
+    blocks it is published E4M3, so the half is exact, and the float32 copy each block
+    went through — widened on the way in, narrowed again for the feed-forward, published
+    and narrowed on the way out, four passes — is not needed: the feed-forward reads the
+    half, its residual widens it, and the output projection publishes into it. Only the
+    real rows are stored, so the pad rows stay the zeros the float32 input's were.
+    """
     channels, heads, padded = w.channels, w.heads, s.padded
-    runtime.to_half(source, s.value16, padded * channels)
-    runtime.gemm(s.value16, w.expand, s.hidden16, padded, w.hidden_width, channels,
+    if chain:
+        source = value16 = s.io16
+    else:
+        source = source or s.value
+        value16 = s.value16
+        runtime.to_half(source, value16, padded * channels)
+    target = s.io16 if chain else (target or s.out)
+    runtime.gemm(value16, w.expand, s.hidden16, padded, w.hidden_width, channels,
                  epilogue=xmxres.EPI_GATE_E4M3, narrow=True)
     record_project_residual(runtime, s.hidden16, w.ffn_proj, s.branch, source, w.ffn_cos,
-                            s.ffn, padded, channels, w.hidden_width)
+                            s.ffn, padded, channels, w.hidden_width, skip_half=chain)
 
     runtime.to_half(s.ffn, s.ffn16, padded * channels)
     key = record_qkv_projection(runtime, s.ffn16, w, s, 1, padded, channels, heads)
@@ -280,8 +295,13 @@ def record_global_block(runtime, w, s, source=None, target=None):
                      strides=(padded * padded, padded * 32, padded * 32))
         runtime.merge_heads(s.context, merged, 1, padded, channels, heads,
                             epilogue=xmxres.EPI_E4M3, narrow=True)
-    record_project_residual(runtime, merged, w.out, s.attention, s.ffn, w.attn_cos,
-                            target, padded, channels, channels)
+    if chain:
+        record_project_residual(runtime, merged, w.out, s.attention, s.ffn, w.attn_cos,
+                                target, s.tokens, channels, channels,
+                                epilogue=xmxres.EPI_E4M3, narrow=True)
+    else:
+        record_project_residual(runtime, merged, w.out, s.attention, s.ffn, w.attn_cos,
+                                target, padded, channels, channels)
 
 
 def run_global_block(runtime, w, s, value):
