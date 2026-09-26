@@ -1,11 +1,13 @@
 // Runs OpenDLSS-NR's WebGPU port on one set of input features, in headless Chromium on this machine's GPU,
 // and writes the head it computes. The half of `opendlss_reference.py` that has to live in a browser.
 //
-//   node opendlss_reference.mjs <port root> <model dir> <io dir> <valid width> <valid height>
+//   node opendlss_reference.mjs <port root> <model dir> <io dir> <valid width> <valid height> [capture]
 //
 // <port root> is ports/browser-webgpu of a clone of maanHimself/OpenDLSS-NR, served as it is: the page below
 // imports its modules and shaders straight from there. <io dir> holds features.bin (f32, [field rows][16])
-// and receives head.bin (f32, [field rows][4]) and result.json. CHROME names the browser (/usr/bin/chromium).
+// and receives head.bin (f32, [field rows][4]) and result.json. With `capture` it also receives every block
+// boundary the port records, boundary-<name>.bin (E4M3 bytes, [rows][channels]), listed with their shapes in
+// boundaries.json. CHROME names the browser (/usr/bin/chromium).
 //
 // Headless Chromium picks SwiftShader, a CPU implementation of WebGPU, unless it is told the GPU is allowed:
 // with --ignore-gpu-blocklist and the Vulkan backend it reports "intel / xe-2lpg". (Adding
@@ -17,7 +19,9 @@ import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { extname, join, normalize, resolve, sep } from 'node:path';
 
-const [portRoot, modelDir, ioDir, width, height] = process.argv.slice(2);
+const [portRoot, modelDir, ioDir, width, height, mode] = process.argv.slice(2);
+const capture = mode === 'capture';
+const boundaries = [];
 if (!height) {
   console.error('usage: opendlss_reference.mjs <port root> <model dir> <io dir> <width> <height>');
   process.exit(2);
@@ -27,7 +31,8 @@ const page = `<!doctype html><meta charset="utf-8"><title>reference</title><scri
 import { Network } from '/src/network.js';
 const done = (body) => fetch('/done', { method: 'POST', body: JSON.stringify(body) });
 try {
-  const network = await Network.create({ weights: '/weights', width: ${Number(width)}, height: ${Number(height)} });
+  const network = await Network.create({ weights: '/weights', width: ${Number(width)}, height: ${Number(height)},
+                                          captureBoundaries: ${capture} });
   const g = network.geometry;
   const features = new Float32Array(await (await fetch('/io/features.bin')).arrayBuffer());
   if (features.length !== g.fullRows * 16)
@@ -42,6 +47,12 @@ try {
   }
   const head = await network.readHead();
   await fetch('/head', { method: 'POST', body: head.buffer });
+  for (const name of network.boundaryNames) {
+    const tensor = network.graph.boundaries.get(name);
+    const bytes = await network.readBoundary(name);
+    await fetch('/boundary?name=' + name + '&rows=' + tensor.rows + '&channels=' + tensor.channels +
+                '&format=' + tensor.format, { method: 'POST', body: bytes });
+  }
   const info = network.adapterInfo ?? {};
   await done({ ok: true, field: [g.fullWidth, g.fullHeight], times,
                adapter: (info.vendor ?? '') + ' / ' + (info.architecture ?? '') });
@@ -68,6 +79,14 @@ const server = createServer(async (request, response) => {
       const body = Buffer.concat(chunks);
       // written before the answer: the page reports done as soon as this returns, and the process exits
       if (url.pathname === '/head') await writeFile(join(ioDir, 'head.bin'), body);
+      if (url.pathname === '/boundary') {
+        const name = url.searchParams.get('name');
+        if (!/^[a-z0-9-]+$/.test(name)) throw new Error('bad boundary name');
+        await writeFile(join(ioDir, `boundary-${name}.bin`), body);
+        boundaries.push({ name, rows: Number(url.searchParams.get('rows')),
+                          channels: Number(url.searchParams.get('channels')),
+                          format: url.searchParams.get('format'), file: `boundary-${name}.bin` });
+      }
       response.writeHead(204).end();
       if (url.pathname === '/done') finish(body.toString());
       return;
@@ -106,6 +125,7 @@ async function finish(body) {
   if (finished) return;
   finished = true;
   clearTimeout(timeout);
+  if (capture) await writeFile(join(ioDir, 'boundaries.json'), JSON.stringify(boundaries, null, 1));
   await writeFile(join(ioDir, 'result.json'), body);
   console.log(body);
   try { browser.kill(); } catch { /* already gone */ }

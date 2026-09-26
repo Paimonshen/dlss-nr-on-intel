@@ -58,6 +58,30 @@ our two arithmetics make of the same graph, and the gate moves most: its spread 
 1.13 theirs, 0.98 our numpy). The pictures look the same side by side; amplified eight times, the
 difference is fine texture and a faint tone on the faces, no window seams, no structure.
 
-Not yet measured: where along the graph the distance comes from — their port can capture every block
-boundary, which would let our blocks be run on their inputs one at a time — and the two field sizes
-that differ, which need both networks run at their own geometry on the same valid frame.
+## Block by block: the encoder skips are one block early
+
+`src/bench/opendlss_blocks.py` runs each of our blocks — the numpy reference — on the boundary the
+reference fed its own copy of that block, and compares the published output byte for byte
+(Cyberpunk, 320x180 on 320x320):
+
+| blocks | bytes equal | mean \|d\| of the value |
+| --- | --- | --- |
+| window blocks, 1-22 and 49-69 | 61-88 % | 0.6-2.3 % |
+| the 512 split blocks, 23-30 and 40-47 | 55-81 % | 1.2-3.2 % |
+| the ViT, 32-38 | 52-56 % | 3.0-3.4 % |
+| block 0, from the features | 57 % | 3.0 % |
+| block 39, the decoder's input merge | 99.3 % | 0.04 % |
+| **decoder blocks 48, 56, 62, 66 with our skips** | **18-25 %** | **11-16 %** |
+| the same with the transition block's output as the skip | 61-69 % | 1.7-2.6 % |
+
+**Our decoder merges the wrong skip.** At every level ours (and MLX-DLSS's `model.py`, which this
+tree ports) takes the skip after the last regular block, before the transition block — blocks 3, 7,
+13, 21 — and the reference takes the transition block's own published output, 4, 8, 14, 22, as its
+graph says and its claimed captures would require. With theirs the first decoder blocks agree like any
+other block; with ours they are the four worst in the graph. Fixed in the numpy reference, the head
+moves towards theirs — RGB corr 0.958/0.958/0.973 -> 0.962/0.960/0.973, the gate 0.892 -> 0.947 —
+less than the per-block distance suggests, because everything else still differs in rounding and the
+graph amplifies it: what remains is spread along the whole graph, most in the ViT.
+
+Not yet measured: the two field sizes that differ, which need both networks run at their own geometry
+on the same valid frame.

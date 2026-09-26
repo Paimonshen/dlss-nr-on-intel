@@ -62,19 +62,52 @@ def their_field(valid_width, valid_height):
     return width, height
 
 
-def reference_head(features, valid_width, valid_height):
-    """Their head for `features` (field rows, 16), f32 (field height, field width, 4)."""
+def e4m3_table():
+    """E4M3 (fn) code -> float32: bias 7, subnormals in 2^-9 steps, 0x7f and 0xff NaN."""
+    codes = np.arange(256)
+    sign = np.where(codes & 0x80, -1.0, 1.0)
+    exponent, mantissa = (codes >> 3) & 15, codes & 7
+    value = np.where(exponent == 0, mantissa / 8 * 2.0 ** -6, (1 + mantissa / 8) * 2.0 ** (exponent - 7))
+    value = (sign * value).astype(np.float32)
+    value[[0x7F, 0xFF]] = np.nan
+    return value
+
+
+E4M3 = e4m3_table()
+
+
+def reference_run(features, valid_width, valid_height, *, capture=False):
+    """Their head for `features` (field rows, 16), f32 (field height, field width, 4), the runner's
+    result, and with `capture` every block boundary it records, as float32 (rows, channels)."""
     height, width = features.shape[:2]
     with tempfile.TemporaryDirectory(prefix="opendlss-io-") as io:
         io = pathlib.Path(io)
         np.ascontiguousarray(features, dtype=np.float32).tofile(io / "features.bin")
         done = subprocess.run(["node", str(RUNNER), str(PORT), str(MODEL), str(io),
-                               str(valid_width), str(valid_height)],
+                               str(valid_width), str(valid_height)] + (["capture"] if capture else []),
                               capture_output=True, text=True)
         result = json.loads((io / "result.json").read_text()) if (io / "result.json").exists() else {}
         if done.returncode != 0 or not result.get("ok"):
             raise RuntimeError(f"the reference failed: {result.get('error') or done.stderr[-2000:]}")
         head = np.fromfile(io / "head.bin", np.float32).reshape(height, width, 4)
+        bounds = {}
+        if capture:
+            for entry in json.loads((io / "boundaries.json").read_text()):
+                raw = (io / entry["file"]).read_bytes()
+                if entry["format"] == "e4":
+                    values = E4M3[np.frombuffer(raw, np.uint8)]
+                elif entry["format"] == "f16":
+                    values = np.frombuffer(raw, np.float16).astype(np.float32)
+                else:
+                    raise ValueError(f"boundary {entry['name']} is {entry['format']}")
+                bounds[entry["name"]] = values[:entry["rows"] * entry["channels"]].reshape(
+                    entry["rows"], entry["channels"])
+    return head, result, bounds
+
+
+def reference_head(features, valid_width, valid_height):
+    """Their head for `features` (field rows, 16), f32 (field height, field width, 4)."""
+    head, result, _ = reference_run(features, valid_width, valid_height)
     return head, result
 
 
