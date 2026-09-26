@@ -49,6 +49,16 @@ in shared memory — in K's and V's bytes before they are written, in K's after 
 1024x768 at 0.55 60.1 -> 50.8, 1920x1080 at 0.55 140.5 -> 117.6**. The wider blocks keep
 three passes: at C = 512 a window's Q, K and V are 192 KB.
 
+Then **block 70's head inside its window block** (`NR_FUSE_HEAD`): its output, read only by
+the head, is never stored — 7.05 -> 6.50 ms for the pair at 1280x768, 63-133 MB less memory
+at 720p-1080p. Measured and not kept, in `notes/improve-b.md`: the staged GEMM's B staged as
+pairs of K (Mesa's fragment layout probed; half the loads and 5-7 % slower), a level-1
+block's feed-forward inside its window block (no faster: each window reloads the 16 KB of
+weights ffn_fused shares among 256 rows), and the fused branched feed-forward re-measured
+(slower at every extent, 1920x1088 +14.5 ms). What is left inside the graph at 320x320:
+GEMM two-thirds of it, at the staged kernel's ~3.5-3.8 TFLOP/s on the large shapes; the
+window blocks 12 %.
+
 ## int8 on the bottleneck: measured again, and kept as a measurement (2026-09-26)
 
 With the activations on int8 too — config 4's real input, per row — blocks 31-38 cost 5.0 %
