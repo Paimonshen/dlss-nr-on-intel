@@ -5,8 +5,8 @@
 against a decoder transition's upsample2, scale_channel and add; `pool2_skip` against
 block 0's e4m3_half and pool2; `gemm_dual` against a GEMM and a to_half of its output; and
 `ffn_fused_merge` against `upsample_merge` and the fused feed-forward reading both of its
-outputs. Every output must match byte for byte, and the guard values past them must
-survive.
+outputs; and `ffn_fused_stem` against `gemm_dual` and the same. Every output must match
+byte for byte, and the guard values past them must survive.
 """
 import numpy as np
 import xmxres as X
@@ -311,11 +311,59 @@ def merge_ffn_cases(rt, rng):
     return cases
 
 
+def stem_ffn_cases(rt, rng):
+    """Block 0's feed-forward making its own stem, against the stem stored and read."""
+    cases = 0
+    for rows in (64, 384, 720, 2560):
+        count = rows * 32
+        buffers = []
+
+        def alloc(n, dtype):
+            b = rt.buffer(n, dtype)
+            buffers.append(b)
+            return b
+        try:
+            features, adapter = alloc(rows * 16, np.float16), alloc(16 * 32, np.float16)
+            cosine = alloc(32, np.float32)
+            expand = alloc(32 * 128, np.float16)
+            projection = alloc(128 * 32, np.float16)
+            stem, stem16 = alloc(count, np.float32), alloc(count, np.float16)
+            want, got = alloc(count + GUARD, np.float32), alloc(count + GUARD, np.float32)
+            for spread in (0.05, 1.0, 40.0):
+                f = rng.normal(0, spread, rows * 16).astype(np.float16)
+                f[:2] = [0, -0.0]
+                X.host_write(features, f)
+                X.host_write(adapter, rng.normal(0, 0.25, 16 * 32).astype(np.float16))
+                X.host_write(cosine, rng.uniform(-1.5, 1.5, 32).astype(np.float32))
+                X.host_write(expand, rng.normal(0, 0.25, 32 * 128).astype(np.float16))
+                X.host_write(projection, rng.normal(0, 0.1, 128 * 32).astype(np.float16))
+                for mask in (0, 7):
+                    rt.specialize(mask)
+                    for b in (want, got):
+                        X.host_write(b, np.full(count + GUARD, FILL32, np.float32))
+                    rt.begin()
+                    rt.gemm_dual(features, adapter, stem, stem16, rows, 32, 16)
+                    rt.ffn_fused(stem16, expand, projection, want, rows, 32, 128,
+                                 skip=stem, cosine=cosine)
+                    rt.ffn_fused_stem(features, adapter, expand, projection, got, cosine, rows)
+                    rt.submit()
+                    check(f"stem feed-forward {rows} rows spread {spread} mask {mask}",
+                          X.host_view(got)[:count], X.host_view(want)[:count])
+                    assert filled(X.host_view(got)[count:], np.float32).all()
+                    assert not filled(X.host_view(got)[:count], np.float32).any()
+                    cases += 1
+        finally:
+            for b in buffers:
+                b.free()
+    return cases
+
+
 def main():
     rt = X.Runtime()
     rng = np.random.default_rng(424242)
     merges = upsample_cases(rt, rng)
     merge_ffns = merge_ffn_cases(rt, rng)
+    stem_ffns = stem_ffn_cases(rt, rng)
     transitions = transition_cases(rt, rng)
     pools = pool_cases(rt, rng)
     gemms = gemm_cases(rt, rng)
@@ -328,9 +376,13 @@ def main():
     third = rt.graph_key()
     rt.fuse_merge_ffn = not rt.fuse_merge_ffn
     assert rt.graph_key() not in (before, middle, third)
+    fourth = rt.graph_key()
+    rt.fuse_stem_ffn = not rt.fuse_stem_ffn
+    assert rt.graph_key() not in (before, middle, third, fourth)
     print(f"glue: {merges} upsample-merge, {merge_ffns} merged feed-forward, "
-          f"{transitions} transition, {pools} pool-and-skip and {gemms} GEMM half-copy "
-          f"cases bit-exact, guards and graph keys OK; staging={rt.staging}")
+          f"{stem_ffns} stem feed-forward, {transitions} transition, {pools} pool-and-skip "
+          f"and {gemms} GEMM half-copy cases bit-exact, guards and graph keys OK; "
+          f"staging={rt.staging}")
 
 
 if __name__ == "__main__":

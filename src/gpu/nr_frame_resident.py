@@ -331,7 +331,6 @@ class ResidentFrame:
                 timing[stage[0]][0] += _time.perf_counter() - started
                 timing[stage[0]][1] += 1
 
-        stem = self.buffer("stem", pixels * 32)
         # Separate names keep captured graphs' addresses valid when switching modes.
         # HOST_WRITE is always mapped, including when graph buffers use staging.
         source = self.input_buffer()
@@ -369,7 +368,14 @@ class ResidentFrame:
             rt.to_half(source, source16, pixels * 16)
         block0 = self.block(0, 1)
         scratch0 = self.scratch(block0, height, width)
-        if rt.fuse_glue:
+        # The stem is read only by block 0's feed-forward, which can make it itself — then
+        # neither width of it is ever stored (`ffn_fused_stem`). A capture keeps the
+        # stored stem, since it wants to look at it.
+        made_stem = rt.fuse_glue and capture is None and R.can_make_stem(rt, block0, scratch0)
+        stem = None if made_stem else self.buffer("stem", pixels * 32)
+        if made_stem:
+            pass
+        elif rt.fuse_glue:
             # the stem as block 0's residual needs it and as its first GEMM reads it
             rt.gemm_dual(source16, self.adapter, stem, scratch0.value16, pixels, 32, 16)
         else:
@@ -388,7 +394,8 @@ class ResidentFrame:
         value = self.buffer("l1", h * w * 32, np.float16)
         begin()
         R.record_block(rt, block0, scratch0, source=stem, target=raw,
-                       source16=scratch0.value16 if rt.fuse_glue else None)
+                       source16=scratch0.value16 if rt.fuse_glue and not made_stem else None,
+                       stem=(source16, self.adapter) if made_stem else None)
         # the post block's skip is block 0 published; the encoder pools the
         # *unpublished* output, so both come from `raw` and neither from the other
         if rt.fuse_glue and height % 2 == 0 and width % 2 == 0:
@@ -399,7 +406,8 @@ class ResidentFrame:
                 rt.pool2(raw, value, height, width, 32, epilogue=xmxres.EPI_E4M3,
                          narrow=True)
         submit()
-        keep("stem", stem, pixels * 32, (1, height, width, 32))
+        if stem is not None:
+            keep("stem", stem, pixels * 32, (1, height, width, 32))
         keep("block0", raw, pixels * 32, (1, height, width, 32))
         keep("full_skip", full_skip, pixels * 32, (1, height, width, 32), np.float16)
         keep("l1_in", value, h * w * 32, (1, h, w, 32), np.float16)

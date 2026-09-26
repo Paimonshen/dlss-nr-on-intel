@@ -87,6 +87,8 @@ def _describe(name, args):
     if name == "xmx_rec_ffn_merge":
         return "ffn fused %dx32x128, input merged from %dx%d" % (
             args[7] * args[8], args[7] // 2, args[9])
+    if name == "xmx_rec_ffn_stem":
+        return "ffn fused %dx32x128, stem made from the features" % args[6]
     if name == "xmx_rec_gemm_dual":
         return "gemm+half copy %dx%dx%d" % args[4:7]
     if name == "xmx_rec_unary2":

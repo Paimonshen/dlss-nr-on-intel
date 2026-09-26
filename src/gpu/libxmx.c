@@ -1466,6 +1466,37 @@ int xmx_rec_ffn_merge(int source, int skip, int sincos, int expand, int projecti
 	return 0;
 }
 
+/* Block 0's feed-forward with its input made in the same pass (ffn_fused.comp, flag
+ * 0x2000000): the stem, `features` (half, rows x 16) times `adapter` (16 x 32), which
+ * `xmx_rec_gemm_dual` wrote as float32 and half for this pass to read back. */
+int xmx_rec_ffn_stem(int features, int adapter, int expand, int projection, int out,
+		     int cosine, unsigned M, unsigned flags)
+{
+	if (!g.recording || !g.rffn) FAIL("fused feed-forward not ready for recording", 0);
+	if (!M || M % 16u) FAIL("the stem feed-forward needs 16-row blocks", 0);
+	if (flags & ~0x1f00u)
+		FAIL("the stem feed-forward takes an epilogue and a half output only", 0);
+	struct push p = { .a = addr_of(features), .b = addr_of(expand), .c = addr_of(out),
+			  .m = M, .n = 32u, .k = 128u, .batch = 1u,
+			  .sa = 32u * 128u, .sb = 128u * 32u,
+			  .flags = flags | 0x20000u | 0x800000u | 0x2000000u,
+			  .residual_cos = addr_of(cosine), .qkv_scale = addr_of(projection) };
+	/* the shader reads p0 and p1 as one 64-bit address, the adapter */
+	uint64_t weights = addr_of(adapter);
+	memcpy(&p.p0, &weights, sizeof weights);
+	if (!p.a || !p.b || !p.c || !weights || !p.residual_cos || !p.qkv_scale)
+		FAIL("stem feed-forward operand is not a live buffer", 0);
+	VkPipeline pipeline;
+	if (resident_pipeline(5, p.flags, g.rffn, &pipeline)) return -1;
+	vkCmdBindPipeline(g.rcb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+	vkCmdPushConstants(g.rcb, g.rpl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
+	vkCmdDispatch(g.rcb, (M + 255u) / 256u, 1, 1);
+	barrier();
+	stamp(PK_GEMM, 31);
+	g.recorded++;
+	return 0;
+}
+
 /* The temporal path's five-tap reprojection: one invocation per pixel. */
 int xmx_rec_history(int history, int motion, int out, unsigned pixels, unsigned channels,
 		    unsigned height, unsigned width, unsigned absolute)

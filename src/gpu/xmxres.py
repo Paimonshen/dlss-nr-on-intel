@@ -117,6 +117,7 @@ def _load():
             ("xmx_ffn_init", [ctypes.c_char_p]),
             ("xmx_rec_ffn", [ctypes.c_int] * 6 + [ctypes.c_uint] * 5),
             ("xmx_rec_ffn_merge", [ctypes.c_int] * 7 + [ctypes.c_uint] * 4),
+            ("xmx_rec_ffn_stem", [ctypes.c_int] * 6 + [ctypes.c_uint] * 2),
             ("xmx_rec_unary2", [ctypes.c_uint] + [ctypes.c_int] * 5
              + [ctypes.c_uint, ctypes.c_uint, ctypes.c_float] + [ctypes.c_uint] * 5),
             ("xmx_rec_window_attention", [ctypes.c_int] * 5 + [ctypes.c_uint] * 3),
@@ -511,6 +512,8 @@ class Runtime:
         # Block 70's input merged inside its fused feed-forward rather than stored twice
         # by a pass of its own for the feed-forward to read back.
         self.fuse_merge_ffn = os.environ.get("NR_FUSE_MERGE_FFN", "1") != "0"
+        # Block 0's stem made inside its fused feed-forward, the same way.
+        self.fuse_stem_ffn = os.environ.get("NR_FUSE_STEM_FFN", "1") != "0"
 
     def graph_key(self):
         return (self.lib.xmx_specialization() | (int(self.fuse_qk) << 3)
@@ -529,7 +532,8 @@ class Runtime:
                 | (int(self.fuse_branched_ffn) << 15)
                 | (int(self.fuse_partition) << 16)
                 | (int(self.fuse_transition) << 17)
-                | (int(self.fuse_merge_ffn) << 18))
+                | (int(self.fuse_merge_ffn) << 18)
+                | (int(self.fuse_stem_ffn) << 19))
 
     @property
     def buffer_bytes(self):
@@ -806,6 +810,34 @@ class Runtime:
                                       target.id, cosine.id, height, width, source_width,
                                       _publish(epilogue, narrow)) != 0:
             raise RuntimeError("xmx_rec_ffn_merge: " + self.lib.xmx_error().decode())
+        self.recorded += 1
+        return self
+
+    def ffn_fused_stem(self, features, adapter, expand, projection, target, cosine, rows, *,
+                       epilogue=0, narrow=False):
+        """Block 0's feed-forward with its input, the stem, made in the same pass.
+
+        What `gemm_dual(features, adapter, stem, stem16, rows, 32, 16)` followed by
+        `ffn_fused(stem16, ..., skip=stem, cosine=cosine)` write into `target`, bit for bit,
+        without `stem` or `stem16` existing (`src/gpu/test_glue.py`). `features` is half,
+        rows x 16; 32 channels, 128 hidden.
+        """
+        if rows <= 0 or rows % 16:
+            raise ValueError("the stem feed-forward needs 16-row blocks")
+        if target.id in {features.id, adapter.id, expand.id, projection.id, cosine.id}:
+            raise ValueError("stem feed-forward output must not alias its inputs")
+        sizes = [(features, rows * 16 * 2), (adapter, 16 * 32 * 2), (expand, 32 * 128 * 2),
+                 (projection, 128 * 32 * 2), (cosine, 32 * 4),
+                 (target, rows * 32 * (2 if narrow else 4))]
+        if any(buf.nbytes < size for buf, size in sizes):
+            raise ValueError("stem feed-forward buffer is too small")
+        path = os.environ.get("XMX_FFN_SPV") or str(ROOT / "work" / "ffn_fused.spv")
+        if self.lib.xmx_ffn_init(path.encode()) != 0:
+            raise RuntimeError("fused feed-forward pipeline: " + self.lib.xmx_error().decode())
+        if self.lib.xmx_rec_ffn_stem(features.id, adapter.id, expand.id, projection.id,
+                                     target.id, cosine.id, rows,
+                                     _publish(epilogue, narrow)) != 0:
+            raise RuntimeError("xmx_rec_ffn_stem: " + self.lib.xmx_error().decode())
         self.recorded += 1
         return self
 
