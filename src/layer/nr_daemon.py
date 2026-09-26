@@ -870,7 +870,8 @@ def main():
             ("NR_FUSE_FFN", "fuse_ffn"), ("NR_FUSE_BRANCHED_FFN", "fuse_branched_ffn"),
             ("NR_FUSE_PARTITION", "fuse_partition"),
             ("NR_FUSE_TRANSITION", "fuse_transition"),
-            ("NR_FUSE_MERGE_FFN", "fuse_merge_ffn"), ("NR_FUSE_STEM_FFN", "fuse_stem_ffn"))),
+            ("NR_FUSE_MERGE_FFN", "fuse_merge_ffn"), ("NR_FUSE_STEM_FFN", "fuse_stem_ffn"),
+            ("NR_FUSE_POOL", "fuse_pool"))),
           flush=True)
 
     if os.path.lexists(args.socket):

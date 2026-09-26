@@ -471,7 +471,7 @@ def record_split_feed_forward(runtime, w, s, source, source_half=False):
 
 
 def record_window_attention(runtime, w, s, source, target=None, publish=0,
-                            target_half=False, source_half=False):
+                            target_half=False, source_half=False, pool=None):
     """Window attention over `source`, into `s.attended` — in window order.
 
     With a `target`, the output projection finishes the block instead: it adds
@@ -518,7 +518,13 @@ def record_window_attention(runtime, w, s, source, target=None, publish=0,
     if not merged:
         runtime.merge_heads(s.context, s.merged16, windows, tokens, channels, heads,
                             epilogue=xmxres.EPI_E4M3, narrow=True)
-    if target is not None:
+    if pool is not None:
+        # block 0: the output only ever read pooled or published, both made here
+        pooled, published = pool
+        runtime.gemm_residual_pool(attended, w.out, source, w.attn_cos, published, pooled,
+                                   windows * tokens, channels,
+                                   (s.height, s.width, 8, w.origin), skip_half=source_half)
+    elif target is not None:
         runtime.gemm_residual(attended, w.out, source, w.attn_cos, target,
                               windows * tokens, channels, channels,
                               reverse=(s.height, s.width, 8, w.origin),
@@ -527,14 +533,24 @@ def record_window_attention(runtime, w, s, source, target=None, publish=0,
         runtime.gemm(attended, w.out, s.attended, windows * tokens, channels, channels)
 
 
+def can_pool_output(runtime, w, s):
+    """Whether this block's window residual can pool and publish its own output."""
+    _, _, (top, left) = runtime.window_extent(s.height, s.width, w.origin)
+    return (runtime.fuse_pool and runtime.fuse_window_residual and w.channels == 32
+            and not getattr(w, "split", False) and s.tokens == 64
+            and s.height % 2 == 0 and s.width % 2 == 0 and top % 2 == 0 and left % 2 == 0)
+
+
 def record_block(runtime, w, s, source=None, target=None, publish=0, source_half=False,
-                 target_half=False, source16=None, merge=None, stem=None):
+                 target_half=False, source16=None, merge=None, stem=None, pool=None):
     """A whole window block: feed-forward, attention, both residuals.
 
     `source` and `target` default to the scratch's own buffers; passing them lets one
     level's blocks chain into the next without a copy. `publish` is the epilogue the
     closing residual applies, which is how a block's output is published without a
-    second pass over it.
+    second pass over it. `pool=(pooled, published)` is block 0's: its output is written
+    only pooled and published, both by the closing residual (`can_pool_output`), and
+    `target` is unused.
     """
     source = source or s.value
     target = target or s.out
@@ -547,9 +563,11 @@ def record_block(runtime, w, s, source=None, target=None, publish=0, source_half
     else:
         ffn_half = record_feed_forward(runtime, w, s, source, source_half, source16=source16,
                                        merge=merge, stem=stem)
+    if pool is not None and not can_pool_output(runtime, w, s):
+        raise ValueError("this block's window residual cannot pool its own output")
     if runtime.fuse_window_residual:
         record_window_attention(runtime, w, s, s.ffn, target=target, publish=publish,
-                                target_half=target_half, source_half=ffn_half)
+                                target_half=target_half, source_half=ffn_half, pool=pool)
         return
     record_window_attention(runtime, w, s, s.ffn, source_half=ffn_half)
     # the window reverse is the residual's own gather, not a pass of its own

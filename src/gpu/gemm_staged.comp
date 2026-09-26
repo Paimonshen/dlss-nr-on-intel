@@ -283,6 +283,13 @@ void main() {
         return;
     }
 
+    /* Bit 0x800000: block 0's output, which is only ever read pooled 2x2 and published
+     * (the encoder's input) or published as it is (the last block's skip). A block here is
+     * one window across all 32 channels, so each value goes out published as half, back
+     * into the stage as it is, and after a barrier the window's sixteen pooled pixels are
+     * summed from the stage — `POOL2_SKIP`'s two outputs, without the float32 output
+     * being stored for that pass to read (`src/gpu/test_glue.py`). */
+    bool pooling = (operation_flags() & 0x800000u) != 0u;
     for (uint e = thread * 4u; e < BM * BN; e += 32u * WARPS * 4u) {
         if (row + e / BN > last) continue;          // a partial block's rows past M
         uint at = co + (row + e / BN) * ldc + col + e % BN;
@@ -293,6 +300,15 @@ void main() {
          * before rounding — which is what keeps the fused head bit-identical. */
         for (uint i = 0; i < 4u; ++i)
             out4[i] = publish(epilogue, add_gemm_residual(stage[e + i], at + i));
+        if (pooling) {
+            f16vec4 published;
+            for (uint i = 0; i < 4u; ++i) {
+                published[i] = float16_t(e4m3(out4[i]));
+                stage[e + i] = out4[i];
+            }
+            Half4Buf(uint64_t(pc.c)).v4[at >> 2] = published;
+            continue;
+        }
         if (!narrow) {
             for (uint i = 0; i < 4u; ++i) pc.c.v[at + i] = out4[i];
         } else if ((at & 3u) == 0u && (uint(uint64_t(pc.c)) & 7u) == 0u) {
@@ -300,5 +316,29 @@ void main() {
         } else {
             for (uint i = 0; i < 4u; ++i) HalfBuf(uint64_t(pc.c)).v[at + i] = float16_t(out4[i]);
         }
+    }
+    if (!pooling) return;
+    barrier();
+    /* The pool, four channels a thread: taps (y, x), (y + 1, x), (y, x + 1), (y + 1, x + 1)
+     * summed in that order, as `POOL2_SKIP` sums them. The geometry is the window
+     * residual's; the host checks the pads and the extent are even, so a 2x2 block is
+     * all in the image or all out of it. */
+    uint window = row / 64u;
+    uint top = pc.window_pad >> 16, left = pc.window_pad & 0xffffu;
+    for (uint e = thread * 4u; e < 16u * BN; e += 32u * WARPS * 4u) {
+        uint pixel = e / BN, c = e % BN;
+        uint token = (pixel / 4u) * 16u + (pixel % 4u) * 2u;
+        uint y = (window / pc.window_cols) * 8u + token / 8u;
+        uint x = (window % pc.window_cols) * 8u + token % 8u;
+        if (y < top || x < left || y - top >= pc.image_h || x - left >= pc.image_w) continue;
+        uint at = (((y - top) / 2u) * (pc.image_w / 2u) + (x - left) / 2u) * BN + c;
+        vec4 pooled;
+        for (uint i = 0; i < 4u; ++i) {
+            precise float total = stage[token * BN + c + i] + stage[(token + 8u) * BN + c + i];
+            total += stage[(token + 1u) * BN + c + i];
+            total += stage[(token + 9u) * BN + c + i];
+            pooled[i] = e4m3(total * 0.25);
+        }
+        Half4Buf(pc.qkv_scale).v4[at >> 2] = f16vec4(pooled);
     }
 }

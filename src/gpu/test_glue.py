@@ -5,7 +5,8 @@
 against a decoder transition's upsample2, scale_channel and add; `pool2_skip` against
 block 0's e4m3_half and pool2; `gemm_dual` against a GEMM and a to_half of its output; and
 `ffn_fused_merge` against `upsample_merge` and the fused feed-forward reading both of its
-outputs; and `ffn_fused_stem` against `gemm_dual` and the same. Every output must match
+outputs; `ffn_fused_stem` against `gemm_dual` and the same; and `gemm_residual_pool`
+against a window residual into float32 and `pool2_skip` of it. Every output must match
 byte for byte, and the guard values past them must survive.
 """
 import numpy as np
@@ -358,9 +359,64 @@ def stem_ffn_cases(rt, rng):
     return cases
 
 
+def pool_epilogue_cases(rt, rng):
+    """Block 0's window residual pooling and publishing its own output, against the output
+    stored as float32 and `pool2_skip` of it — whole and cropped windows, both origins."""
+    cases = 0
+    for height, width in ((8, 8), (16, 24), (20, 36), (40, 56)):
+        for origin in ((0, 0), (-4, -4)):
+            ph, pw, _ = rt.window_extent(height, width, origin)
+            rows, pixels = ph * pw, height * width
+            buffers = []
+
+            def alloc(n, dtype):
+                b = rt.buffer(n, dtype)
+                buffers.append(b)
+                return b
+            try:
+                attended = alloc(rows * 32, np.float16)
+                weight = alloc(32 * 32, np.float16)
+                skip, cosine = alloc(pixels * 32, np.float32), alloc(32, np.float32)
+                raw = alloc(pixels * 32, np.float32)
+                pooled_ref = alloc(pixels // 4 * 32 + GUARD, np.float16)
+                pooled = alloc(pixels // 4 * 32 + GUARD, np.float16)
+                published_ref = alloc(pixels * 32 + GUARD, np.float16)
+                published = alloc(pixels * 32 + GUARD, np.float16)
+                for spread in (0.05, 1.0, 30.0):
+                    X.host_write(attended, rng.normal(0, spread, rows * 32).astype(np.float16))
+                    X.host_write(weight, rng.normal(0, 0.3, 32 * 32).astype(np.float16))
+                    X.host_write(skip, rng.normal(0, spread, pixels * 32).astype(np.float32))
+                    X.host_write(cosine, rng.uniform(-1.5, 1.5, 32).astype(np.float32))
+                    for mask in (0, 7):
+                        rt.specialize(mask)
+                        for b, n in ((pooled_ref, pixels // 4 * 32), (pooled, pixels // 4 * 32),
+                                     (published_ref, pixels * 32), (published, pixels * 32)):
+                            X.host_write(b, np.full(n + GUARD, FILL16, np.float16))
+                        rt.begin()
+                        rt.gemm_residual(attended, weight, skip, cosine, raw, rows, 32, 32,
+                                         reverse=(height, width, 8, origin))
+                        rt.pool2_skip(raw, pooled_ref, published_ref, height, width, 32)
+                        rt.gemm_residual_pool(attended, weight, skip, cosine, published, pooled,
+                                              rows, 32, (height, width, 8, origin))
+                        rt.submit()
+                        name = f"pooled residual {height}x{width} origin {origin} spread {spread} mask {mask}"
+                        for got, want, n in ((pooled, pooled_ref, pixels // 4 * 32),
+                                             (published, published_ref, pixels * 32)):
+                            check(name, X.host_view(got, np.float16)[:n],
+                                  X.host_view(want, np.float16)[:n])
+                            assert filled(X.host_view(got, np.float16)[n:], np.float16).all(), name
+                            assert not filled(X.host_view(got, np.float16)[:n], np.float16).any(), name
+                        cases += 1
+            finally:
+                for b in buffers:
+                    b.free()
+    return cases
+
+
 def main():
     rt = X.Runtime()
     rng = np.random.default_rng(424242)
+    pooled_residuals = pool_epilogue_cases(rt, rng)
     merges = upsample_cases(rt, rng)
     merge_ffns = merge_ffn_cases(rt, rng)
     stem_ffns = stem_ffn_cases(rt, rng)
@@ -379,10 +435,13 @@ def main():
     fourth = rt.graph_key()
     rt.fuse_stem_ffn = not rt.fuse_stem_ffn
     assert rt.graph_key() not in (before, middle, third, fourth)
+    fifth = rt.graph_key()
+    rt.fuse_pool = not rt.fuse_pool
+    assert rt.graph_key() not in (before, middle, third, fourth, fifth)
     print(f"glue: {merges} upsample-merge, {merge_ffns} merged feed-forward, "
-          f"{stem_ffns} stem feed-forward, {transitions} transition, {pools} pool-and-skip "
-          f"and {gemms} GEMM half-copy cases bit-exact, guards and graph keys OK; "
-          f"staging={rt.staging}")
+          f"{stem_ffns} stem feed-forward, {pooled_residuals} pooled residual, "
+          f"{transitions} transition, {pools} pool-and-skip and {gemms} GEMM half-copy "
+          f"cases bit-exact, guards and graph keys OK; staging={rt.staging}")
 
 
 if __name__ == "__main__":

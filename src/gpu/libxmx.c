@@ -1038,7 +1038,8 @@ static int record_gemm(int a, int b, int c, unsigned M, unsigned N, unsigned K,
 		       unsigned lda, unsigned ldb, unsigned ldc,
 		       unsigned oa, unsigned ob, unsigned oc,
 		       int skip, int cosine, const uint32_t *window,
-		       const struct qkv_targets *qkv, int half_copy, const uint32_t *window_a)
+		       const struct qkv_targets *qkv, int half_copy, const uint32_t *window_a,
+		       int pooled)
 {
 	if (!g.recording) FAIL("not recording", 0);
 	struct push p = { .a = addr_of(a), .b = addr_of(b), .c = addr_of(c),
@@ -1061,6 +1062,17 @@ static int record_gemm(int a, int b, int c, unsigned M, unsigned N, unsigned K,
 		 * the batch strides have no use with one batch, so they carry the geometry */
 		p.sa = window_a[0]; p.sb = window_a[1]; p.sc = window_a[2];
 		p.window_pad = window_a[3];
+	}
+	/* Bit 0x800000 (gemm_staged.comp): block 0's window residual pooled and published in
+	 * its own epilogue — `c` takes the published skip as half, and the pool rides in the
+	 * slot only the QKV epilogue uses. A block is one window across all its channels. */
+	if (bt & 0x800000u) {
+		if (!window || N != 32u || (bt & ~0x8e0000u) || pooled < 0
+		    || window[0] % 2u || window[1] % 2u || (window[3] >> 16) % 2u
+		    || (window[3] & 0xffffu) % 2u)
+			FAIL("a pooled window residual needs even geometry, 32 channels, no publish", 0);
+		if (!(p.qkv_scale = addr_of(pooled)))
+			FAIL("pooled output is not a live buffer", 0);
 	}
 	if (qkv) {
 		/* c is Q; K, V and the scale ride in slots only the residual modes use */
@@ -1128,6 +1140,8 @@ static int record_gemm(int a, int b, int c, unsigned M, unsigned N, unsigned K,
 	/* the half copy lives in gemm_resident.comp's plain-store path only */
 	if ((bt & 0x200000u) && !(half_copy >= 0 && bt == 0x200000u && !staged))
 		FAIL("a GEMM half copy needs its target, no other flag, and the resident kernel", 0);
+	if ((bt & 0x800000u) && (!staged || small))
+		FAIL("a pooled window residual runs on the 64-row staged kernel", 0);
 	small = small && staged;
 	int deep = small && N <= 1024 && K % 64 == 0;
 	VkPipeline pipeline;
@@ -1159,7 +1173,7 @@ int xmx_rec_gemm(int a, int b, int c, unsigned M, unsigned N, unsigned K, unsign
 		 unsigned oa, unsigned ob, unsigned oc)
 {
 	return record_gemm(a, b, c, M, N, K, batch, sa, sb, sc, bt,
-			   lda, ldb, ldc, oa, ob, oc, -1, -1, NULL, NULL, -1, NULL);
+			   lda, ldb, ldc, oa, ob, oc, -1, -1, NULL, NULL, -1, NULL, -1);
 }
 
 /* A dense projection whose epilogue adds `skip * cosine` before the publish: the
@@ -1172,7 +1186,7 @@ int xmx_rec_gemm_residual(int a, int b, int c, int skip, int cosine,
 {
 	if (skip < 0 || cosine < 0) FAIL("invalid residual buffer", 0);
 	return record_gemm(a, b, c, M, N, K, 1, M * K, K * N, M * N,
-			   flags | 0x20000u, 0, 0, 0, 0, 0, 0, skip, cosine, NULL, NULL, -1, NULL);
+			   flags | 0x20000u, 0, 0, 0, 0, 0, 0, skip, cosine, NULL, NULL, -1, NULL, -1);
 }
 
 /* The same, for a window block's output projection: its rows are in window order,
@@ -1187,7 +1201,25 @@ int xmx_rec_gemm_window_residual(int a, int b, int c, int skip, int cosine,
 		FAIL("invalid window residual", 0);
 	uint32_t window[] = { height, width, across, pad };
 	return record_gemm(a, b, c, M, N, K, 1, M * K, K * N, M * N,
-			   flags | 0xa0000u, 0, 0, 0, 0, 0, 0, skip, cosine, window, NULL, -1, NULL);
+			   flags | 0xa0000u, 0, 0, 0, 0, 0, 0, skip, cosine, window, NULL, -1, NULL, -1);
+}
+
+/* The same for block 0, whose output has exactly two readers: the encoder, which pools
+ * it 2x2 and publishes the pool, and the last block, which reads it published. Both come
+ * out of this epilogue (gemm_staged.comp, 0x800000) — `skip_out` takes every value
+ * published, as half, `pooled` the published pool — so the float32 output itself is
+ * never stored, nor read back by a pass of its own. */
+int xmx_rec_gemm_window_residual_pool(int a, int b, int skip_out, int skip, int cosine,
+				      int pooled, unsigned M, unsigned N, unsigned K,
+				      unsigned flags, unsigned height, unsigned width,
+				      unsigned across, unsigned pad)
+{
+	if (skip < 0 || cosine < 0 || !height || !width || !across)
+		FAIL("invalid window residual", 0);
+	uint32_t window[] = { height, width, across, pad };
+	return record_gemm(a, b, skip_out, M, N, K, 1, M * K, K * N, M * N,
+			   flags | 0x8a0000u, 0, 0, 0, 0, 0, 0, skip, cosine, window, NULL, -1,
+			   NULL, pooled);
 }
 
 /* The QKV projection with Q and K normalised and V published in its own epilogue
@@ -1204,7 +1236,7 @@ static int record_gemm_qkv(int a, int weight, int q, int k, int v, int scale,
 	struct qkv_targets targets = { k, v, scale, tokens, heads };
 	unsigned N = 3u * channels;
 	return record_gemm(a, weight, q, M, N, channels, 1, M * channels, channels * N, M * N,
-			   0x100000u | flags, 0, 0, 0, 0, 0, 0, -1, -1, NULL, &targets, -1, window_a);
+			   0x100000u | flags, 0, 0, 0, 0, 0, 0, -1, -1, NULL, &targets, -1, window_a, -1);
 }
 
 int xmx_rec_gemm_qkv(int a, int weight, int q, int k, int v, int scale,
@@ -1234,7 +1266,7 @@ int xmx_rec_gemm_dual(int a, int b, int c, int half_copy, unsigned M, unsigned N
 {
 	if (half_copy < 0) FAIL("invalid GEMM half copy", 0);
 	return record_gemm(a, b, c, M, N, K, 1, M * K, K * N, M * N,
-			   0x200000u, 0, 0, 0, 0, 0, 0, -1, -1, NULL, NULL, half_copy, NULL);
+			   0x200000u, 0, 0, 0, 0, 0, 0, -1, -1, NULL, NULL, half_copy, NULL, -1);
 }
 
 static int record_unary(unsigned kind, int a, int b, int c, int d, int second,

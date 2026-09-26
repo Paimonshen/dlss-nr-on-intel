@@ -385,7 +385,12 @@ class ResidentFrame:
         # block 0 runs at full resolution; its output is both the skip the post block
         # merges and, pooled, the encoder's input
         stage[0] = "block0 + pool"
-        raw = self.buffer("block0", pixels * 32)
+        # Block 0's output has two readers, the pool into the encoder and the published
+        # skip the last block merges, and its closing residual can serve both itself
+        # (`gemm_residual_pool`); then the float32 output is never stored. A capture keeps
+        # it, since it wants to look at it.
+        pooled_here = rt.fuse_glue and capture is None and R.can_pool_output(rt, block0, scratch0)
+        raw = None if pooled_here else self.buffer("block0", pixels * 32)
         # Everything the graph publishes is E4M3, which is exact in float16, so every
         # published buffer is stored narrow: half the traffic, and the widening pass in
         # front of each block's first GEMM disappears. `src/bench/bf16_check.py`.
@@ -395,10 +400,13 @@ class ResidentFrame:
         begin()
         R.record_block(rt, block0, scratch0, source=stem, target=raw,
                        source16=scratch0.value16 if rt.fuse_glue and not made_stem else None,
-                       stem=(source16, self.adapter) if made_stem else None)
+                       stem=(source16, self.adapter) if made_stem else None,
+                       pool=(value, full_skip) if pooled_here else None)
         # the post block's skip is block 0 published; the encoder pools the
         # *unpublished* output, so both come from `raw` and neither from the other
-        if rt.fuse_glue and height % 2 == 0 and width % 2 == 0:
+        if pooled_here:
+            pass
+        elif rt.fuse_glue and height % 2 == 0 and width % 2 == 0:
             rt.pool2_skip(raw, value, full_skip, height, width, 32)
         else:
             with rt.independent():
@@ -408,7 +416,8 @@ class ResidentFrame:
         submit()
         if stem is not None:
             keep("stem", stem, pixels * 32, (1, height, width, 32))
-        keep("block0", raw, pixels * 32, (1, height, width, 32))
+        if raw is not None:
+            keep("block0", raw, pixels * 32, (1, height, width, 32))
         keep("full_skip", full_skip, pixels * 32, (1, height, width, 32), np.float16)
         keep("l1_in", value, h * w * 32, (1, h, w, 32), np.float16)
 

@@ -73,6 +73,8 @@ def _describe(name, args):
         return "gemm %dx%dx%d%s flags %#x" % (m, n, k, " x%d" % batch if batch > 1 else "", bt)
     if name == "xmx_rec_gemm_residual":
         return "gemm+residual %dx%dx%d flags %#x" % args[5:9]
+    if name == "xmx_rec_gemm_window_residual_pool":
+        return "gemm+window residual %dx%dx%d, pooled and published" % args[6:9]
     if name == "xmx_rec_gemm_window_residual":
         return "gemm+window residual %dx%dx%d flags %#x" % args[5:9]
     if name == "xmx_rec_gemm_qkv":

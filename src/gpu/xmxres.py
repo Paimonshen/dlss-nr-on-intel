@@ -118,6 +118,7 @@ def _load():
             ("xmx_rec_ffn", [ctypes.c_int] * 6 + [ctypes.c_uint] * 5),
             ("xmx_rec_ffn_merge", [ctypes.c_int] * 7 + [ctypes.c_uint] * 4),
             ("xmx_rec_ffn_stem", [ctypes.c_int] * 6 + [ctypes.c_uint] * 2),
+            ("xmx_rec_gemm_window_residual_pool", [ctypes.c_int] * 6 + [ctypes.c_uint] * 8),
             ("xmx_rec_unary2", [ctypes.c_uint] + [ctypes.c_int] * 5
              + [ctypes.c_uint, ctypes.c_uint, ctypes.c_float] + [ctypes.c_uint] * 5),
             ("xmx_rec_window_attention", [ctypes.c_int] * 5 + [ctypes.c_uint] * 3),
@@ -514,6 +515,8 @@ class Runtime:
         self.fuse_merge_ffn = os.environ.get("NR_FUSE_MERGE_FFN", "1") != "0"
         # Block 0's stem made inside its fused feed-forward, the same way.
         self.fuse_stem_ffn = os.environ.get("NR_FUSE_STEM_FFN", "1") != "0"
+        # Block 0's output pooled and published in its window residual's own epilogue.
+        self.fuse_pool = os.environ.get("NR_FUSE_POOL", "1") != "0"
 
     def graph_key(self):
         return (self.lib.xmx_specialization() | (int(self.fuse_qk) << 3)
@@ -533,7 +536,8 @@ class Runtime:
                 | (int(self.fuse_partition) << 16)
                 | (int(self.fuse_transition) << 17)
                 | (int(self.fuse_merge_ffn) << 18)
-                | (int(self.fuse_stem_ffn) << 19))
+                | (int(self.fuse_stem_ffn) << 19)
+                | (int(self.fuse_pool) << 20))
 
     @property
     def buffer_bytes(self):
@@ -678,6 +682,39 @@ class Runtime:
         if record(a.id, b.id, target.id, skip.id, cosine.id,
                   rows, cols, inner, flags, *window) != 0:
             raise RuntimeError("xmx_rec_gemm_residual: " + self.lib.xmx_error().decode())
+        self.recorded += 1
+        return self
+
+    def gemm_residual_pool(self, a, b, skip, cosine, skip_out, pooled, rows, inner, reverse, *,
+                           skip_half=False):
+        """Block 0's window residual with both of its readers served from the epilogue.
+
+        What `gemm_residual(..., reverse=reverse)` into a float32 output followed by
+        `pool2_skip(output, pooled, skip_out, height, width, 32)` write, bit for bit, without
+        the float32 output existing (`src/gpu/test_glue.py`): `skip_out` takes every value
+        published as half, `pooled` the published 2x2 pool. 32 channels, even extents and
+        pads.
+        """
+        height, width, size, origin = reverse
+        if height <= 0 or width <= 0 or height % 2 or width % 2 or size != 8:
+            raise ValueError("a pooled window residual needs even extents and 8x8 windows")
+        ph, pw, (top, left) = self.window_extent(height, width, origin, size)
+        if top % 2 or left % 2 or rows != ph * pw:
+            raise ValueError("a pooled window residual needs even pads and the padded rows")
+        if len({a.id, b.id, skip.id, cosine.id, skip_out.id, pooled.id}) != 6:
+            raise ValueError("pooled window residual operands must be distinct")
+        pixels = height * width
+        for buf, needed in ((a, rows * inner * 2), (b, inner * 32 * 2),
+                            (skip, pixels * 32 * (2 if skip_half else 4)), (cosine, 32 * 4),
+                            (skip_out, pixels * 32 * 2), (pooled, pixels // 4 * 32 * 2)):
+            if buf.nbytes < needed:
+                raise ValueError("pooled window residual buffer is too small")
+        if self.lib.xmx_rec_gemm_window_residual_pool(
+                a.id, b.id, skip_out.id, skip.id, cosine.id, pooled.id, rows, 32, inner,
+                0x40000 if skip_half else 0, height, width, pw // size,
+                (top << 16) | left) != 0:
+            raise RuntimeError("xmx_rec_gemm_window_residual_pool: "
+                               + self.lib.xmx_error().decode())
         self.recorded += 1
         return self
 
