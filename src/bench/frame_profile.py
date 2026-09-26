@@ -97,7 +97,8 @@ def _describe(name, args):
     if name == "xmx_rec_ffn_stem":
         return "ffn fused %dx32x128, stem made from the features" % args[6]
     if name == "xmx_rec_window_block":
-        return "window block %d windows%s" % (args[7], ", half image" if args[12] & 0x8000 else "")
+        return "window block %d windows%s%s" % (args[8], ", half image" if args[13] & 0x8000 else "",
+                                                ", pooled" if args[13] & 0x800000 else "")
     if name == "xmx_rec_gemm_dual":
         return "gemm+half copy %dx%dx%d" % args[4:7]
     if name == "xmx_rec_unary2":

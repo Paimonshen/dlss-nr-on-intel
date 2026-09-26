@@ -484,14 +484,21 @@ def record_window_attention(runtime, w, s, source, target=None, publish=0,
     not the scratch's worst case.
     """
     channels, heads, tokens = w.channels, w.heads, s.tokens
-    if (target is not None and pool is None and channels == 32 and heads == 1 and tokens == 64
-            and runtime.fuse_window_block and runtime.qkv_epilogue and runtime.fuse_partition
-            and runtime.fuse_window_attention and runtime.fuse_attention_merge):
+    if ((target is not None or pool is not None) and channels == 32 and heads == 1
+            and tokens == 64 and runtime.fuse_window_block and runtime.qkv_epilogue
+            and runtime.fuse_partition and runtime.fuse_window_attention
+            and runtime.fuse_attention_merge):
         # the three fused passes below in one, a window a workgroup (window_block.comp);
         # only on top of them, so that turning one of them off still compares its own path
-        runtime.window_block(source, w.qkv, w.out, target, w.bias, w.attn_cos, w.scale,
-                             s.height, s.width, w.origin, epilogue=publish, narrow=target_half,
-                             image_half=source_half)
+        if pool is not None:
+            pooled, published = pool
+            runtime.window_block(source, w.qkv, w.out, published, w.bias, w.attn_cos, w.scale,
+                                 s.height, s.width, w.origin, narrow=True,
+                                 image_half=source_half, pooled=pooled)
+        else:
+            runtime.window_block(source, w.qkv, w.out, target, w.bias, w.attn_cos, w.scale,
+                                 s.height, s.width, w.origin, epilogue=publish,
+                                 narrow=target_half, image_half=source_half)
         return
     padded_height, padded_width, _ = runtime.window_extent(s.height, s.width, w.origin)
     windows = (padded_height // 8) * (padded_width // 8)

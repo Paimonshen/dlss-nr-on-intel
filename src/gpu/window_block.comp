@@ -57,7 +57,7 @@ layout(push_constant, scalar) uniform Push {
     uint m, n, k, batch;
     uint sa, sb, sc, flags;
     uint64_t projection;                       // offset 64: the output projection (32 x 32)
-    float p2, p3;
+    uint64_t pooled;                           // offset 72: block 0's pooled output (0x800000)
     uint lda, ldb, ldc, spare;
     uint64_t residual_cos;                     // the residual's per-channel cosine
     uint image_h, image_w, window_cols, window_pad;
@@ -348,6 +348,12 @@ void main() {
      * the block's publish, into the image where the token lives. */
     uint epilogue = (operation_flags() >> 8) & 0xFu;
     bool narrow = (operation_flags() & 0x1000u) != 0u;
+    /* Bit 0x800000: block 0's output, read only pooled 2x2 and published into the encoder
+     * or published as the last block's skip — both made here, as gemm_residual_pool makes
+     * them (gemm_staged.comp): each value goes out published as half and back into the
+     * kilobyte as it is, and after a barrier the window's sixteen pooled pixels are summed
+     * from two subgroups' rows in POOL2_SKIP's order. The target is the published skip. */
+    bool pooling = (operation_flags() & 0x800000u) != 0u;
     for (uint e = local * 4u; e < 256u; e += 128u) {
         uint t = e / 32u, c = e % 32u;
         int x = x0 + int(t);
@@ -360,7 +366,40 @@ void main() {
             precise float total = fma(skip[i], cosine[i], f32[scratch + e + i]);
             out4[i] = publish(epilogue, total);
         }
+        if (pooling) {
+            f16vec4 published;
+            for (uint i = 0u; i < 4u; i++) {
+                published[i] = float16_t(e4m3(out4[i]));
+                f32[scratch + e + i] = out4[i];
+            }
+            Half4Buf(uint64_t(pc.c)).v4[at >> 2] = published;
+            continue;
+        }
         if (narrow) Half4Buf(uint64_t(pc.c)).v4[at >> 2] = f16vec4(out4);
         else        Vec4Buf(uint64_t(pc.c)).v4[at >> 2] = out4;
+    }
+    if (!pooling) return;
+    barrier();
+    /* The pool, four channels a lane: pooled pixel (py, px) takes window rows 2py and
+     * 2py + 1 — two subgroups' kilobytes — at columns 2px and 2px + 1. The host checks the
+     * extent and the pads are even, so a 2x2 block is all in the image or all out. */
+    uint lane = gl_LocalInvocationIndex;
+    for (uint e = lane * 4u; e < 16u * 32u; e += 1024u) {
+        uint pixel = e / 32u, c = e % 32u;
+        uint py = pixel / 4u, px = pixel % 4u;
+        int yy = int((window / pc.window_cols) * 8u + 2u * py) - int(top);
+        int xx = x0 + int(2u * px);
+        if (yy < 0 || xx < 0 || yy >= int(pc.image_h) || xx >= int(pc.image_w)) continue;
+        uint upper = 2048u + 256u * (2u * py) + (2u * px) * 32u + c;   // (y, x) in its row
+        uint lower = upper + 256u;                                      // (y + 1, x)
+        vec4 pooled;
+        for (uint i = 0u; i < 4u; i++) {
+            precise float total = f32[upper + i] + f32[lower + i];
+            total += f32[upper + 32u + i];
+            total += f32[lower + 32u + i];
+            pooled[i] = e4m3(total * 0.25);
+        }
+        uint at = ((uint(yy) / 2u) * (pc.image_w / 2u) + uint(xx) / 2u) * 32u + c;
+        Half4Buf(pc.pooled).v4[at >> 2] = f16vec4(pooled);
     }
 }

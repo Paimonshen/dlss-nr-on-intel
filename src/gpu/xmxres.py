@@ -120,7 +120,7 @@ def _load():
             ("xmx_rec_ffn_stem", [ctypes.c_int] * 6 + [ctypes.c_uint] * 2),
             ("xmx_rec_gemm_window_residual_pool", [ctypes.c_int] * 6 + [ctypes.c_uint] * 8),
             ("xmx_window_block_init", [ctypes.c_char_p]),
-            ("xmx_rec_window_block", [ctypes.c_int] * 7 + [ctypes.c_uint] * 6),
+            ("xmx_rec_window_block", [ctypes.c_int] * 8 + [ctypes.c_uint] * 6),
             ("xmx_int8_init", [ctypes.c_char_p]),
             ("xmx_rec_gemm_int8", [ctypes.c_int] * 5 + [ctypes.c_uint] * 4),
             ("xmx_rec_unary2", [ctypes.c_uint] + [ctypes.c_int] * 5
@@ -694,7 +694,7 @@ class Runtime:
         return self
 
     def window_block(self, image, qkv, projection, target, bias, cosine, scale, height, width,
-                     origin, *, epilogue=0, narrow=False, image_half=False):
+                     origin, *, epilogue=0, narrow=False, image_half=False, pooled=None):
         """A 32-channel window block's attention half in one pass (window_block.comp).
 
         What `gemm_qkv(image, qkv, ..., window=(height, width, origin))`, `window_attention(
@@ -702,8 +702,17 @@ class Runtime:
         ..., reverse=(height, width, 8, origin))` write into `target`, bit for bit, with
         nothing in between leaving the workgroup (`src/gpu/test_window_block.py`). `image`
         is the projection's input and the residual's skip, float32 or half; one head.
+
+        With `pooled`, block 0's output as `gemm_residual_pool` writes it: `target` takes the
+        published skip (half), `pooled` the published 2x2 pool; even extents and pads.
         """
         ph, pw, (top, left) = self.window_extent(height, width, origin, 8)
+        if pooled is not None:
+            if height % 2 or width % 2 or top % 2 or left % 2 or epilogue or not narrow:
+                raise ValueError("a pooled window block needs even extents and pads, no "
+                                 "publish and a half target")
+            if pooled.nbytes < height * width // 4 * 32 * 2 or pooled.id == target.id:
+                raise ValueError("the pooled output is too small or aliases the target")
         windows = (ph // 8) * (pw // 8)
         if height <= 0 or width <= 0 or not windows:
             raise ValueError("a window block needs a positive extent")
@@ -718,10 +727,15 @@ class Runtime:
         path = os.environ.get("XMX_WINDOW_BLOCK_SPV") or str(ROOT / "work" / "window_block.spv")
         if self.lib.xmx_window_block_init(path.encode()) != 0:
             raise RuntimeError("window block pipeline: " + self.lib.xmx_error().decode())
-        flags = _publish(epilogue, narrow) | (0x8000 if image_half else 0)
+        flags = (_publish(epilogue, narrow) | (0x8000 if image_half else 0)
+                 | (0x800000 if pooled is not None else 0))
+        if pooled is not None:
+            flags &= ~0x1000                     # the pool's target is half by definition
         if self.lib.xmx_rec_window_block(image.id, qkv.id, projection.id, target.id, bias.id,
-                                         cosine.id, scale.id, windows, height, width, pw // 8,
-                                         (top << 16) | left, flags) != 0:
+                                         cosine.id, scale.id,
+                                         pooled.id if pooled is not None else -1, windows,
+                                         height, width, pw // 8, (top << 16) | left,
+                                         flags) != 0:
             raise RuntimeError("xmx_rec_window_block: " + self.lib.xmx_error().decode())
         self.recorded += 1
         return self

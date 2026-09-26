@@ -1441,22 +1441,29 @@ int xmx_window_block_init(const char *path)
  * attention, and the output projection with the residual into `target`. `image` is also
  * the residual's skip, as it is in the graph. */
 int xmx_rec_window_block(int image, int qkv, int projection, int target, int bias,
-			 int cosine, int scale, unsigned windows, unsigned height,
+			 int cosine, int scale, int pooled, unsigned windows, unsigned height,
 			 unsigned width, unsigned across, unsigned pad, unsigned flags)
 {
 	if (!g.recording || !g.rblock) FAIL("window block not ready for recording", 0);
 	if (!windows || !height || !width || !across || windows % across)
 		FAIL("invalid window block geometry", 0);
-	if (flags & ~0x9f00u) FAIL("the window block takes a publish, a half target and a half image", 0);
+	if (flags & ~0x809f00u) FAIL("the window block takes a publish, a half target, a half image and a pool", 0);
+	/* the pool (0x800000) is block 0's: the target takes the published skip as half */
+	if ((flags & 0x800000u) && (pooled < 0 || (flags & 0x1f00u) || height % 2u || width % 2u
+				    || (pad >> 16) % 2u || (pad & 0xffffu) % 2u))
+		FAIL("a pooled window block needs its pool, no publish, even extents and pads", 0);
 	struct push p = { .a = addr_of(image), .b = addr_of(qkv), .c = addr_of(target),
 			  .d = addr_of(bias), .m = windows, .n = 32u, .k = 32u, .batch = 1u,
 			  .flags = flags, .residual_cos = addr_of(cosine), .image_h = height,
 			  .image_w = width, .window_cols = across, .window_pad = pad,
 			  .qkv_scale = addr_of(scale) };
-	/* the shader reads p0 and p1 as one 64-bit address, the output projection */
-	uint64_t weights = addr_of(projection);
+	/* the shader reads p0-p1 and p2-p3 as 64-bit addresses: the output projection and
+	 * the pool */
+	uint64_t weights = addr_of(projection), pool = pooled >= 0 ? addr_of(pooled) : 0;
 	memcpy(&p.p0, &weights, sizeof weights);
-	if (!p.a || !p.b || !p.c || !p.d || !weights || !p.residual_cos || !p.qkv_scale)
+	memcpy(&p.p2, &pool, sizeof pool);
+	if (!p.a || !p.b || !p.c || !p.d || !weights || !p.residual_cos || !p.qkv_scale
+	    || ((flags & 0x800000u) && !pool))
 		FAIL("window block operand is not a live buffer", 0);
 	VkPipeline pipeline;
 	if (resident_pipeline(10, flags, g.rblock, &pipeline)) return -1;
