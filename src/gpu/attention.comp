@@ -1,4 +1,4 @@
-#version 450
+﻿#version 450
 #extension GL_GOOGLE_include_directive : require
 /*
  * attention — the row-wise operators: the cosine publish and the bit-affine softmax.
@@ -159,8 +159,8 @@ void pair_fast(float l0, float l1, out float w0, out float w1) {
         scaled += 1.30078125;
         affine[j] = clamp(scaled, 1.03125, 1.5693359375);
     }
-    uint transformed = (packHalf2x16(affine) << 5) + 0x7FF88000u;
-    vec2 weights = unpackHalf2x16(transformed);
+    uint transformed = (pack_half2(affine) << 5) + 0x7FF88000u;
+    vec2 weights = unpack_half2(transformed);
     w0 = weights.x; w1 = weights.y;
 }
 

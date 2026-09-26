@@ -1,4 +1,4 @@
-#version 450
+﻿#version 450
 #extension GL_GOOGLE_include_directive : require
 #extension GL_EXT_buffer_reference : require
 #extension GL_EXT_buffer_reference2 : require
@@ -61,7 +61,7 @@ vec2 weights(uint pair) {
         scaled += 1.30078125;
         affine[j] = clamp(scaled, 1.03125, 1.5693359375);
     }
-    return unpackHalf2x16((packHalf2x16(affine) << 5) + 0x7ff88000u);
+    return unpack_half2((pack_half2(affine) << 5) + 0x7ff88000u);
 }
 
 void main() {
@@ -113,7 +113,7 @@ void main() {
             subgroupBarrier();
             for (uint t = 0u; t < 4u; t++) {
                 uint at = local * 2u + t * 64u;          // row at / 32, keys at % 32 and one more
-                kept[half_keys * 4u + t] = packHalf2x16(weights(scratch / 2u + at / 2u));
+                kept[half_keys * 4u + t] = pack_half2(weights(scratch / 2u + at / 2u));
             }
             subgroupMemoryBarrierShared();
             subgroupBarrier();
@@ -138,7 +138,7 @@ void main() {
         for (uint i = 0u; i < 8u; i++) {
             uvec4 eight = u4[weights_at + i];
             for (uint w = 0u; w < 4u; w++) {
-                vec2 two = unpackHalf2x16(eight[w]);
+                vec2 two = unpack_half2(eight[w]);
                 total += two.x;
                 total += two.y;
             }
@@ -150,10 +150,10 @@ void main() {
     for (uint at = local * 2u; at < 8u * 64u; at += 64u) {
         /* two neighbours of one row a lane, every lane of an iteration on the same row */
         float scale = f32[row + at / 64u];
-        vec2 pair = unpackHalf2x16(u32[scratch + at / 2u]);
+        vec2 pair = unpack_half2(u32[scratch + at / 2u]);
         precise float first = pair.x * scale;
         precise float second = pair.y * scale;
-        u32[scratch + at / 2u] = packHalf2x16(vec2(e4m3(half_round(first)),
+        u32[scratch + at / 2u] = pack_half2(vec2(e4m3(half_round(first)),
                                                    e4m3(half_round(second))));
     }
     subgroupMemoryBarrierShared();

@@ -801,6 +801,100 @@ def process_connection(connection, backend, args):
         print(args.meter.report(), flush=True)
 
 
+def check_half_rounding(tolerance=0):
+    """Fail loudly if the driver stopped rounding float32 to half where the graph needs it.
+
+    `float(float16_t(x))` is correct only while the compiler keeps the conversion. Mesa
+    folds it away - 360 428 of 360 704 values came back unrounded when this was written
+    (src/bench/half_probe.py) - and every vendor rounding point in publish.glsl then moves,
+    silently, per frame. The graph has been through that once; a driver update must not be
+    able to put it back without anyone noticing.
+
+    Three spellings are compared against numpy's float16 on values that cover ordinary
+    numbers, half subnormals, overflow and the edges, and the one this build actually uses
+    has to match exactly. `NR_SKIP_HALF_CHECK=1` skips it for a machine where the probe
+    itself misbehaves, and says so in the log.
+
+    Runs on whatever XMX_UNARY_SPV names, the same entry point the graph's own unary
+    passes use, so it exercises the real path rather than a special case.
+    """
+    if os.environ.get("NR_SKIP_HALF_CHECK") == "1":
+        print("half rounding: NOT CHECKED (NR_SKIP_HALF_CHECK=1)", flush=True)
+        return
+    spv = os.environ.get("XMX_UNARY_SPV") or str(ROOT / "work" / "half_probe.spv")
+    if not pathlib.Path(spv).exists():
+        # Not fatal: a deployment that left the probe out still runs the graph.
+        print(f"half rounding: NOT CHECKED (no {spv})", flush=True)
+        return
+    spv = str(ROOT / "work" / "half_probe.spv")
+    if not pathlib.Path(spv).exists():
+        # Not fatal: a deployment that left the probe out still runs the graph.
+        print(f"half rounding: NOT CHECKED (no {spv})", flush=True)
+        return
+    # The unary shader is picked when a runtime is built, so XMX_UNARY_SPV has to be set
+    # first; this runs before the graph's own runtime exists and removes it again.
+    import xmxres
+    os.environ["XMX_UNARY_SPV"] = spv
+    try:
+        probe = xmxres.Runtime()
+    finally:
+        del os.environ["XMX_UNARY_SPV"]
+    check_half_rounding_on(probe, tolerance)
+
+
+def check_half_rounding_on(rt, tolerance):
+    """Compare the three spellings against numpy's float16 on this device."""
+    rng = np.random.default_rng(3)
+    values = np.concatenate([
+        rng.standard_normal(1 << 16).astype(np.float32) * 4.0,      # ordinary
+        rng.standard_normal(1 << 14).astype(np.float32) * 1e-5,     # half subnormals
+        rng.standard_normal(1 << 12).astype(np.float32) * 1e-7,     # far below
+        rng.standard_normal(1 << 12).astype(np.float32) * 1e5,      # overflow range
+        np.float32([0.0, -0.0, 65504.0, 65520.0, 65519.0, 6.09e-05, 5.96e-08, 2.98e-08]),
+    ]).astype(np.float32)
+    n = (values.size + 255) // 256 * 256
+    padded = np.zeros(n, np.float32)
+    padded[:values.size] = values
+
+    src = rt.buffer_from(padded)
+    outs = [rt.buffer(n) for _ in range(3)]
+    rt.begin()
+    rt.unary(0, src, outs[1], n, second=outs[0], third=outs[2])
+    rt.submit()
+
+    # The overflow range is deliberate - half saturates to infinity there and the
+    # spellings have to agree about it - so the numpy warning it raises is expected.
+    with np.errstate(over="ignore"):
+        want = padded.astype(np.float16).astype(np.float32)
+    mismatches = {}
+    for name, buf in zip(("bit-twiddled", "packHalf2x16", "float16_t"), outs):
+        got = buf.view()[:n]
+        bad = ~((got == want) | (np.isnan(got) & np.isnan(want)))
+        mismatches[name] = int(bad.sum())
+
+    print("half rounding: " + ", ".join(f"{k} {v}/{n}" for k, v in mismatches.items()),
+          flush=True)
+
+    # The third spelling is what a Windows build compiles in (HALF_ROUND_FLOAT16); on
+    # Linux the first is what the shaders use. Either way, if the one in play is wrong the
+    # picture is wrong, and that is worth stopping for.
+    used = "float16_t" if os.environ.get("NR_HALF_ROUND_FLOAT16") == "1" else "bit-twiddled"
+    if mismatches[used] > tolerance:
+        raise SystemExit(
+            f"half rounding is wrong on this driver: {used} disagrees with float16 on "
+            f"{mismatches[used]} of {n} values.\n"
+            "  Every rounding point in publish.glsl would move, per frame, silently.\n"
+            "  This is the Mesa fast-math / folded-conversion failure the probe exists for.\n"
+            "  To run anyway: NR_SKIP_HALF_CHECK=1"
+        )
+    if mismatches["packHalf2x16"] > tolerance:
+        # Not used by this build, but it is what window attention's softmax weights are
+        # built from, and a driver that breaks it produces a visibly wrong picture.
+        print(f"  warning: packHalf2x16 is wrong on this driver "
+              f"({mismatches['packHalf2x16']}/{n} values); window attention uses it",
+              flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -865,6 +959,10 @@ def main():
             "They are NVIDIA's and are not distributed here: extract them from your own "
             "copy of nvngx_dlssnr.dll as the README's Build section describes.")
     started = time.perf_counter()
+    # Check the rounding the graph depends on before any frame is processed. Runs first,
+    # while XMX_UNARY_SPV can still select the probe shader - the graph's own runtime is
+    # built below and picks its shader then.
+    check_half_rounding()
     backend = nr_frame.ResidentBackend()
     # which GPU, because the library takes the first Vulkan device and a machine can
     # have more than one, or a different one than the person assumes

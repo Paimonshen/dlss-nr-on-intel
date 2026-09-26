@@ -98,6 +98,16 @@ cl /nologo /O2 /TC /D_WIN32 /I"%VULKAN_SDK%\Include" /I"%REPO%\src\layer" /Fe:"%
 if errorlevel 1 ( echo ERROR: nr_layer.dll failed & exit /b 1 )
 echo   nr_layer.dll
 
+rem The host-side passes around the network. Without it those passes fall back to NumPy,
+rem which at 4K is where most of a frame goes. /fp:precise matters: the file is required
+rem to be byte-identical to the NumPy it transcribes, and fast maths moves the rounding
+rem points. The export list is generated for the same reason as libxmx's.
+echo [4/4] building libnr_image.dll ...
+powershell -NoProfile -Command "$s = Get-Content '%REPO%\src\ref\nr_image.c' -Raw; $m = [regex]::Matches($s, '(?m)^(?!static)[^\n]*?\b(nr_\w+)\s*\([^;]*\)\s*\{') | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique; @('LIBRARY libnr_image','EXPORTS') + ($m | ForEach-Object { '    ' + $_ }) | Set-Content '%WORK%\libnr_image.def'"
+cl /nologo /O2 /TC /D_WIN32 /D_CRT_SECURE_NO_WARNINGS /fp:precise /Fe:"%WORK%\libnr_image.dll" /LD "%REPO%\src\ref\nr_image.c" /link /DEF:"%WORK%\libnr_image.def"
+if errorlevel 1 ( echo ERROR: libnr_image.dll failed & exit /b 1 )
+echo   libnr_image.dll
+
 :done
 
 echo.
@@ -113,18 +123,25 @@ exit /b 0
 
 rem ---- :shader <name> - one .comp -> .spv, skipped when the source is absent ----
 rem
-rem -DHALF_ROUND_FLOAT16 is not optional on this platform. The B580's Windows driver
-rem (101.8993) does not merely round differently on packHalf2x16 - the shaders produce
-rem wrong values, and the error accumulates frame after frame into red horizontal bands
-rem across the picture. That was measured here: the same scene through the same daemon
-rem is clean with float16_t and banded with packHalf2x16. The two agree bit for bit on
-rem this GPU (0 differences over 12020 values covering ordinary values, subnormals, NaN
-rem and Inf), so this selects the instruction, not the number.
+rem Two defines, and neither is optional on this platform. The B580's Windows driver
+rem (101.8993) gets float16 wrong in both spellings the graph uses:
 rem
-rem Mesa keeps the other spelling - set NR_PACKHALF2X16=1 to build for it.
+rem   -DHALF_ROUND_FLOAT16  `float(float16_t(x))` instead of the
+rem                         `packHalf2x16`/`unpackHalf2x16` pair. Measured by the
+rem                         daemon's start-up probe: packHalf2x16 disagrees with float16
+rem                         on 90109 of 90368 values on this driver, while float16_t
+rem                         agrees on all of them.
+rem   -DPACK_HALF_BITS      the softmax's exponential is a bit trick on the packed word
+rem                         in all four attention shaders, so a wrong pack breaks every
+rem                         attention path at once: the graph's output comes back NaN.
+rem                         This spells the packing and unpacking by hand instead.
+rem
+rem Both are compile-time because both are about one driver. Mesa keeps the hardware
+rem spellings and is where they were measured to be correct; build for it with
+rem NR_PACKHALF2X16=1.
 :shader
 if not exist "%GPU%\%1.comp" goto :eof
-set "HALF_FLAG=-DHALF_ROUND_FLOAT16"
+set "HALF_FLAG=-DHALF_ROUND_FLOAT16 -DPACK_HALF_BITS"
 if defined NR_PACKHALF2X16 set "HALF_FLAG="
 "%GLSL%" --target-env vulkan1.3 %HALF_FLAG% -I"%GPU%" -o "%WORK%\%1.spv" "%GPU%\%1.comp" >nul 2>&1
 if exist "%WORK%\%1.spv" (echo   %1.spv) else (echo   %1.spv FAILED)
@@ -135,7 +152,7 @@ rem For the variants the Makefile builds from one source with -D, e.g. the 32-ro
 rem staged GEMM and the 256-lane attention rows.
 :shader_def
 if not exist "%GPU%\%2.comp" goto :eof
-set "HALF_FLAG=-DHALF_ROUND_FLOAT16"
+set "HALF_FLAG=-DHALF_ROUND_FLOAT16 -DPACK_HALF_BITS"
 if defined NR_PACKHALF2X16 set "HALF_FLAG="
 "%GLSL%" --target-env vulkan1.3 %HALF_FLAG% %3 %4 -I"%GPU%" -o "%WORK%\%1.spv" "%GPU%\%2.comp" >nul 2>&1
 if exist "%WORK%\%1.spv" (echo   %1.spv) else (echo   %1.spv FAILED)
