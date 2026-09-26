@@ -132,7 +132,9 @@ storage format, not the attention (section 4). This file said otherwise when it 
 published, repeating a claim the project's own notes had already withdrawn.
 
 The non-linearity in attention is a **softmax**, hand-rolled in `f16x2` with hard logit
-clamps and **no max subtraction**.
+clamps and **no max subtraction**. The ViT's is its own: another affine and a four-bit shift for
+the exponential, the weights published unnormalised and the value sum normalised instead, over
+keys padded to a whole 64 whose weight the denominator gives back.
 
 **Each encoder level's skip is its last block's output** — blocks 4, 8, 14 and 22, the ones
 whose output is also pooled into the next level, published E4M3 (and 30 at 512 channels).
@@ -141,6 +143,15 @@ MLX-DLSS's model, and this implementation until 2026-09-27, merged the block bef
 claims its network bit-exact against captures of the original, the first decoder blocks agree
 with it 18-25 % that way and 61-69 % this way, like any other block
 (`notes/opendlss-reference.md`).
+
+**Every GEMM reads its operand published as E4M3**; half carries only accumulators and the
+32-channel blocks' skips. So a 32-channel block's QKV projection reads its feed-forward output
+published while the attention's residual takes it raw; a feed-forward whose input arrives raw —
+block 0's stem, the merges into blocks 66 and 70 — reads it published and keeps it raw as the
+skip; the 512-channel and ViT blocks publish their feed-forward output, as the narrower branched
+ones do; and the bottleneck pools block 30's raw output, published before its projection.
+MLX-DLSS's graph fed four of those GEMMs a raw value; step by step on the reference's inputs each
+of them agrees with it on 0.8-2.3 % of values one way and 48-100 % the other.
 
 `notes/MODEL-SPEC.txt` tabulates the **container** — per-block element counts and layout as
 stored. Those counts are storage, not parameters: their total, 73 841 889, is the weight
@@ -183,8 +194,9 @@ and output. NumPy's own float32 GEMM carries more error than the threshold below
 perturbations vanish. Judge on the composed image and on whether the controls behave;
 `notes/phase9-numerics.md` has the measurements. OpenDLSS-NR claims per-element agreement by
 doing the vendor's arithmetic itself — FP8 products summed as fixed point onto an f16
-accumulator, the vendor's reduction orders — which this implementation does not; its head is
-0.97-0.99 correlated with theirs on the same input (`notes/opendlss-reference.md`).
+accumulator, the vendor's reduction orders — which this implementation does not; with the graph
+the same, its head is 0.98-0.997 correlated with theirs on the same input and the pictures 0.5-1.9
+levels of 255 apart, about what two arithmetics of one graph make (`notes/opendlss-reference.md`).
 
 ## 6. The temporal path
 

@@ -428,8 +428,9 @@ game ──presents──▶ Vulkan layer ──socket──▶ daemon ──▶
 ```
 
 - **The graph** is a symmetric U-Net: five Swin stages at 32/64/128/256/512 channels down
-  to a ViT-1D bottleneck and back, 71 blocks, recovered from the DLL's intact RTTI and
-  anchored on MLX-DLSS's independent extraction of the same binary.
+  to a ViT-1D bottleneck and back, 71 blocks, recovered from the DLL's intact RTTI,
+  anchored on MLX-DLSS's independent extraction of the same binary, and corrected where it
+  and the vendor's differ against OpenDLSS-NR, which claims the vendor's own arithmetic.
 - **Every GEMM runs on XMX** in FP16 with FP32 accumulate, through cooperative matrix.
   The whole graph is resident: operands travel as 64-bit addresses in push constants, and
   activations never come back to the host.
@@ -572,7 +573,11 @@ and a skip is not a pass.
 The graph was recovered by [MLX-DLSS](https://github.com/iamwavecut/MLX-DLSS) (Apache-2.0)
 from vendor captures; this port reads its weight specification and its numpy modules, and
 the two independent extractions of the same DLL agree exactly — 0 missing, 0 extra, 0
-shape mismatches.
+shape mismatches. Where that graph and the vendor's differ — the decoder's skips, which
+values the GEMMs read published, the bottleneck's own attention — it follows
+[OpenDLSS-NR](https://github.com/maanHimself/OpenDLSS-NR) (MIT), which claims its network
+bit-exact against captures of the original: `src/bench/opendlss_*` run its WebGPU port here
+and compare, block by block and step by step (`notes/opendlss-reference.md`).
 
 DLSS, Neural Rendering and `nvngx_dlssnr.dll` are NVIDIA Corporation's. This is an
 independent reimplementation of the inference pass, not affiliated with or endorsed by

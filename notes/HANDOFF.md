@@ -1,6 +1,6 @@
 # HANDOFF — read this first
 
-State of the DLSS-NR on Intel Xe2 project as of **2026-09-26**. notes/CLAUDE.md holds the
+State of the DLSS-NR on Intel Xe2 project as of **2026-09-27**. notes/CLAUDE.md holds the
 original brief; **this file overrides it wherever they disagree**, and after
 2026-09-09 they disagree about something foundational.
 
@@ -24,7 +24,61 @@ you need the evidence behind a line in this file, rather than reading them in or
   have no upscaler, so it needs a newer game.
 - **A FAQ** in the README, for the questions that keep coming back. Later.
 
+## The graph is the vendor's now, as far as a head can tell (2026-09-27, later)
+
+**Six more places where MLX-DLSS's graph — which this tree ported — computed something the vendor's
+does not**, found by running OpenDLSS-NR's port with captures inside its blocks and each of our
+steps on its own input to that step (`src/bench/opendlss_steps.py`, a capture-only patch to their
+clone beside it). A structural difference shows as a step agreeing on almost no values; rounding as
+one agreeing on most. The rule under them is the reference's: **every GEMM operand is E4M3**, and
+MLX-DLSS fed four GEMMs a raw value.
+
+- the 32-channel blocks' **QKV projection reads the feed-forward output published**, the attention's
+  residual keeps it raw — 0.8 % of values equal the old way, 92.8 % this way;
+- **every feed-forward reads its input published**, its residual the input as it came: block 0's
+  stem and block 70's merge were read raw (2 % -> 51 %, 1.5 % -> 48 %), and block 66 takes its merge
+  raw as the skip where it took it published (2 % -> 54 %);
+- **the bottleneck pools block 30's raw output** and publishes the pool before its GEMM (the pool
+  86.6 % -> 100.00 % equal, the ViT's input 76 % -> 99.8 %);
+- **the 512 split blocks and the ViT publish their feed-forward output**, as the 64-256 channel
+  blocks did — a block at a time, 55-81 % -> 60-96 % and 52-56 % -> 60-65 %;
+- **the ViT's attention is its own**: its normalisation tree, its query taking half(sqrt 32) and the
+  learned scale as two multiplies, its exponential (another affine, a 4-bit shift), the weights
+  published unnormalised, the reciprocal on the value sum, the keys padded to 64 and their weight
+  taken off — the window blocks' attention with the logits capped at 3 was MLX-DLSS's stand-in.
+
+All of it in the numpy reference — `nr_model.MLX_DLSS_GRAPH` restores MLX-DLSS's graph, which
+`test_against_torch.py` still compares with its PyTorch original bit for bit — and on the GPU path,
+every fused and unfused route. The ViT's attention is one pass through the keys now, the
+normalisation coming after the value sum; its four unfused passes (`vit_softmax` in attention.comp,
+the head merge scaled) are what `global_attention.comp` is bit-identical to. **The picture changes,
+deliberately**: against the reference, same four frames, the composed pictures **1.04-2.52 -> 0.53-1.85
+levels of 255 apart**, head RGB corr 0.974-0.993 -> **0.984-0.997**, the gate 0.89-0.93 -> 0.89-0.96,
+and the pass's own size now the reference's to the level (5.80 against 5.80 on one frame). That is
+about the distance our own two arithmetics make of one graph; what is left is arithmetic, listed in
+`notes/opendlss-reference.md`. **Speed unchanged**: graph 320x320 23.5 ms, 1920x1088 270; the daemon
+25 / 32 / 47 ms at the three live sizes.
+
+Every switch still gives the default's head, at five extents and in both memory modes, and `make
+test` is green in both. New references: heads (noise 384x384, noise 1280x720, Cyberpunk 1280x720)
+`e33f401ecfc1c911` / `91fa8f8478fa0123` / `f3b8841cb18aeae2`; graph 320x320 `c886c425`, 640x384
+`9772b707`, 1280x768 `d099400f`, 1920x1088 `db975dcc`; small networks 192x128 `a6e1751a`, 256x128
+`79c8cd3c`, 320x192 `da29acc7`; the daemon's answers `4b1a690ed745c3bb` / `adf5f2f46c6c015c` /
+`8e1cea1ac4a9dddb`.
+
+**Two traps from the work.** The subgroup width was never pinned: the shaders are SPIR-V 1.6, where
+the driver may choose it, and ANV takes SIMD16 where SIMD32 would spill. Every kernel here is written
+for 32-lane subgroups; the row passes order their shared memory with subgroup barriers, and when the
+ViT's softmax tipped attention.comp's unspecialised build over, a handful of cosine publishes a run
+came out unpublished — nondeterministically, in the one test that compared that build. Every
+pipeline now requires 32 and full subgroups (`build_pipeline_spec`); nothing got slower. And the
+scratch arena's roles alias across a block: `ffn16` is K's role (`ScratchArena.ALIASES`), so a
+value that must outlive the QKV projection's passes cannot live there — the ViT's published
+feed-forward output lives in `ffn`, the residual role, as the split blocks' does.
+
 ## A reference that claims the vendor's arithmetic, and how far we are from it (2026-09-27)
+
+*The distances below are before the entry above; the skips are fixed and so are six more places.*
 
 `maanHimself/OpenDLSS-NR` claims the network bit-exact against captures of the original on an NVIDIA
 GPU — every block boundary — and its WebGPU port the same bytes with no FP8. That port runs here, in
@@ -1111,6 +1165,10 @@ followed from the wrong gate form), the leading-region projection, and "1.01x pa
 - **External write-ups are summaries, not sources.** A WebFetch of `weight_spec.json`
   returned plausible-looking shapes with a confabulated label (`block31` as "final
   output stage"). Clone the repo and read the file.
+- **Nothing pinned the subgroup width.** SPIR-V 1.6 lets the driver pick it, and ANV picks SIMD16
+  where SIMD32 spills; code written for 32 lanes then races, only in the build that spills. Every
+  pipeline now requires 32 (`build_pipeline_spec`, 2026-09-27). A kernel that is right only
+  sometimes, and only unspecialised, was this.
 - **A reset to the remote drops whatever was never pushed.** On 2026-09-23 `master` was
   reset to `origin/master`, and three commits kept on purpose the day before went with it;
   `test_present.c` cited two notes that no longer existed until they were restored on

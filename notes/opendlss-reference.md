@@ -97,5 +97,69 @@ again, same four frames:
 
 The temporal gate moved most — the channel live mode blends the history by.
 
-Not yet measured: the two field sizes that differ, which need both networks run at their own geometry
-on the same valid frame.
+## Step by step: six more places the graph was MLX-DLSS's, not the vendor's (2026-09-27)
+
+A block boundary compares a whole block, where four or five GEMMs' worth of rounding hide what is
+structural. So the reference port now records inside blocks too — the feed-forward's output in both
+its forms, the QKV projection, the attention's output, block 30's raw output, the pool into the ViT
+and its projection, the merges into blocks 66 and 70 (`src/bench/opendlss_captures.patch`, a
+capture-only patch to their `graph.js`) — and each of our steps is run on the reference's own input
+to that step (`src/bench/opendlss_steps.py`). A step that differs only in rounding agrees on most values; one
+that computes a different thing agrees on almost none. Cyberpunk, 320x180 on 320x320:
+
+| step | ours, as MLX-DLSS had it | the reference's structure |
+| --- | --- | --- |
+| a 32-channel block's QKV projection, from the feed-forward output | **0.8 %** equal (raw input) | **92.8 %** (published input) |
+| block 0's feed-forward, from the adapter | **2.2 %** (half input) | **51.1 %** (published input, half skip) |
+| block 66's feed-forward, from the merge | **2.3 %** (published skip) | **53.5 %** (raw skip) |
+| block 70's feed-forward, from the merge | **1.5 %** (raw input) | **48.0 %** (published input, raw skip) |
+| the pool into the ViT, from block 30 | 86.6 % (published output) | **100.00 %** (raw output, half adds) |
+| the ViT's input, the pool projected | 76.4 % (no publish before the GEMM) | **99.8 %** (published) |
+
+(The 48-53 % are half values, which a GEMM's rounding moves more often than an E4M3 byte.) Three
+more, measured a block at a time: the 512 split blocks and the ViT publish their feed-forward output
+before the attention reads it, as the 64-256 channel blocks already did — 55-81 % of bytes equal ->
+60-96 % for the split blocks, 52-56 -> 60-65 % for the ViT — and the ViT's attention is its own, not
+the window blocks' with the logits capped: 60-65 -> 63-69 % (block 31, from the reference's pool:
+45 -> 51 %). The rule under all of it is the reference's `numerics.md`: **every GEMM operand is
+E4M3**; half carries only accumulators and the 32-channel blocks' skips. MLX-DLSS's graph fed four
+GEMMs a raw value.
+
+All six are in the numpy reference (`nr_model.MLX_DLSS_GRAPH` restores MLX-DLSS's graph, and
+`test_against_torch.py` compares that one with its PyTorch original, bit for bit) and on the GPU
+path, every fused and unfused route of it — the published input in the staged GEMM's window gather
+and in `window_block.comp`, the stem and the merge in `ffn_fused.comp`, a second, published output
+on the decoder merge for block 66, block 30 into the bottleneck raw, and the ViT's attention in
+`global_attention.comp` and in its four unfused passes, which the fused kernel is bit-identical to.
+With the normalisation after the value sum, the ViT's attention is one trip through the keys where
+the window-style softmax took two. Every switch still gives the same head as every other, both
+memory modes, and the speed is the same (320x320 23.5 ms, 1920x1088 270 ms of graph; the daemon
+25 / 32 / 47 ms at the three live sizes).
+
+The numpy reference, block by block on the reference's inputs, now: 75-94 % of bytes equal for the
+32-channel blocks, 67-86 % at 64-256 channels, 60-96 % for the split blocks, 63-69 % for the ViT —
+what is left is arithmetic. And the GPU path against the reference, same four frames:
+
+| frame, field | head RGB corr | gate logit corr | composed apart | the pass: ours / theirs |
+| --- | --- | --- | --- | --- |
+| Cyberpunk, 320x320 | 0.974-0.981 -> **0.987-0.990** | 0.92 -> **0.96** | 1.04 -> **0.72** levels | 4.02 / 4.19 |
+| DoA5, 320x320 | 0.979-0.980 -> **0.984-0.989** | 0.89 -> 0.89 | 2.52 -> **1.85** | 12.61 / 12.51 |
+| DoA5, 1088x640 | 0.990-0.993 -> **0.996-0.997** | 0.93 -> **0.95** | 1.33 -> **0.79** | 10.85 / 10.87 |
+| Cyberpunk, 1088x640 | 0.990-0.991 -> **0.995-0.996** | 0.92 -> **0.95** | 1.36 -> **0.53** | 5.80 / 5.80 |
+
+Against where this began, before the skips: 1.13-2.74 levels apart, now 0.53-1.85. That is about
+the distance our own two arithmetics make of one graph (the GPU path against the numpy reference,
+`test_resident.py`: head corr 0.98 at 320x320), so the structure is as far as a comparison of
+heads can see; the rest is arithmetic, and a single frame's head moves by as much between two
+float32 GEMM blockings of the same graph (0.04 in the gate's correlation, 0.2 levels composed).
+
+## What still differs
+
+Arithmetic, all of it: the GEMMs (FP8 products as 13-bit fixed point onto an f16 accumulator the
+residual seeds, the ViT's split-K partitions — against fp16 x fp16 -> fp32 on XMX); the window
+blocks' cosine norm, which pairs channels (c, c+16) where ours pairs (c, c+8), and their softmax
+denominator, a fixed half tree over the keys in 4x4-tiled order where ours sums in float32 — the two
+together 0.2-1.4 points of the attention's bytes in the step test (97.9 -> 98.1 % at one head, 95.4
+-> 96.8 % at eight); the pools' and merges' half roundings; E4M3 always by way of half. Of these only
+the norm and the denominator are cheap, and they are worth little. Not arithmetic, and not measured: the padded field at 1280x720 and 1920x1080, where the
+window grids differ; the history stored truncated to half; the noise generator.
