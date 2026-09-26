@@ -152,6 +152,7 @@ class ResidentFrame:
         self._scratch, self._blocks, self._buffers, self._edges = {}, {}, {}, {}
         self._graphs = {}
         self._arena = xmxres.ScratchArena(runtime) if os.environ.get("NR_SCRATCH_ARENA", "1") != "0" else None
+        self._planned = None      # what the arena was planned for: `_prepare_scratch`
         self._closed = False
 
     @staticmethod
@@ -228,10 +229,27 @@ class ResidentFrame:
     def edge(self, index, kind):
         return self.w.edge(index, kind)
 
-    def _prepare_scratch(self):
-        """Plan every role's maximum size before a buffer address can be recorded."""
-        if self._arena is None or self._arena.sealed:
+    def _prepare_scratch(self, capture=None):
+        """Plan every role's size before a buffer address can be recorded.
+
+        Every block's scratch plans every buffer it might use; a recording made once with
+        stand-in addresses (`ScratchArena.discover`) finds the ones it does use, and only
+        those are allocated. Which ones depends on the switches in force and on whether a
+        capture is wanted — a capture keeps block 0's stem — so either changing plans the
+        arena again, dropping the graphs recorded against the old one."""
+        if self._arena is None:
             return
+        plan = (self.rt.scratch_key(), capture is not None)
+        if self._arena.sealed:
+            if plan == self._planned:
+                return
+            for graph in self._graphs.values():
+                graph.free()
+            self._graphs.clear()
+            self._scratch.clear()
+            self._edges.clear()
+            self._arena.free()
+            self._arena = xmxres.ScratchArena(self.rt)
         for index in (0, 70):
             self.scratch(self.block(index, 1), self.height, self.width)
         for level, (regular, transition, heads) in enumerate(ENCODER, 1):
@@ -253,7 +271,10 @@ class ResidentFrame:
             for index in (transition, *regular):
                 self.scratch(self.block(index, heads), sh, sw)
             channels = schannels
+        with self._arena.discover():
+            self._run(None, None, capture, None, None, dry=True)
         self._arena.seal()
+        self._planned = plan
 
     def close(self):
         """Release recorded commands before any buffers they reference."""
@@ -284,20 +305,24 @@ class ResidentFrame:
             self.rt.abort()
             raise
 
-    def _run(self, features, submits, capture, timing, execution):
+    def _run(self, features, submits, capture, timing, execution, dry=False):
         rt = self.rt
         import time as _time
 
         if self._closed:
             raise RuntimeError("ResidentFrame is closed")
-        if features.shape != (self.height, self.width, 16):
-            raise ValueError("features must match the frame's (height, width, 16)")
-        self._prepare_scratch()
-        execution = execution or os.environ.get("NR_FRAME_MODE", "replay")
+        if dry:
+            # the scratch plan's discovery: recorded as a replay would be, never run
+            execution = "replay"
+        else:
+            if features.shape != (self.height, self.width, 16):
+                raise ValueError("features must match the frame's (height, width, 16)")
+            self._prepare_scratch(capture)
+            execution = execution or os.environ.get("NR_FRAME_MODE", "replay")
         if execution not in ("block", "single", "replay"):
             raise ValueError("NR_FRAME_MODE must be block, single or replay")
         # Diagnostic reads require a fence after each block.
-        if capture is not None or timing is not None:
+        if not dry and (capture is not None or timing is not None):
             execution = "block"
         batched = execution != "block"
         staged = rt.staging
@@ -311,7 +336,7 @@ class ResidentFrame:
                 recording = True
 
         def keep(name, buffer, count, shape=None, dtype=np.float32):
-            if capture is not None:
+            if capture is not None and not dry:
                 data = host_copy(buffer, dtype, count).astype(np.float32)
                 capture[name] = data if shape is None else data.reshape(shape)
 
@@ -337,8 +362,10 @@ class ResidentFrame:
         # Wall times around host writes, graph completion and host reads. They are
         # not PCIe counters: GPU access to mapped host memory occurs during the graph.
         mark = _time.perf_counter()
-        view = self.input_view()
-        if features.ctypes.data == view.ctypes.data and features.dtype == view.dtype:
+        view = None if dry else self.input_view()
+        if dry:
+            pass                     # nothing runs, so nothing goes in
+        elif features.ctypes.data == view.ctypes.data and features.dtype == view.dtype:
             pass                     # built in place (`input_view`): nothing to copy
         elif rt.input_fp16:
             # Convert directly into the mapped input: no temporary half array and no
@@ -350,7 +377,7 @@ class ResidentFrame:
         else:
             xmxres.host_write(source, features.reshape(-1, 16), rows=(pixels, 16))
         carried = _time.perf_counter() - mark
-        if execution == "replay" and key in self._graphs:
+        if execution == "replay" and key in self._graphs and not dry:
             mark = _time.perf_counter()
             passes = self._graphs[key].run()
             ran = _time.perf_counter() - mark
@@ -582,6 +609,9 @@ class ResidentFrame:
                     compact_output=rt.compact_head)
         submit()
 
+        if dry:
+            rt.abort()
+            return None
         if execution == "replay":
             self._graphs[key] = rt.capture()
             counter[0] = self._graphs[key].run()

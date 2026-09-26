@@ -22,6 +22,7 @@ an output is an address, not a transfer.
 """
 from __future__ import annotations
 
+import contextlib
 import ctypes
 import os
 import pathlib
@@ -325,6 +326,13 @@ class ScratchArena:
 
     Blocks run sequentially and may share each role's storage. Input, output and
     encoder skips belong to the frame separately. Unused roles allocate no memory.
+
+    Every block plans every buffer its recorders might use, and which ones they do
+    use depends on the switches in force: the fused paths never touch the float32
+    scores, the half probabilities or the float32 QKV projection, and those are the
+    largest buffers in the frame. `discover()` records once with a stand-in address
+    for each role and sizes the role by the buffers that recording touched — 2.2 GiB
+    of scratch at 1920x1088 became under half a gigabyte.
     """
 
     # Within a block these roles have disjoint live intervals. Barriers already
@@ -350,6 +358,8 @@ class ScratchArena:
         self.buffers = {}
         self.sealed = False
         self._plan_state = [False]
+        # while discovering, each touched role's stand-in buffer, by role
+        self._stand_ins = [None]
 
     def buffer(self, name, count, dtype=np.float32):
         dtype = np.dtype(dtype)
@@ -364,7 +374,24 @@ class ScratchArena:
             if self.sealed:
                 raise RuntimeError(f"scratch role exceeds its plan: {name}")
             buffer.nbytes = size
-        return buffer
+        return _ScratchHandle(buffer, key, name, size, self._stand_ins)
+
+    @contextlib.contextmanager
+    def discover(self):
+        """Inside, a planned buffer's `id` is its role's stand-in and marks it used; on
+        leaving, every role shrinks to the largest buffer used in it — nothing, if none
+        was. A recording made inside must never run: its addresses are the stand-ins'."""
+        if self.sealed or self._stand_ins[0] is not None:
+            raise RuntimeError("scratch discovery comes once, before the seal")
+        self._stand_ins[0] = {}
+        try:
+            yield self
+        finally:
+            for stand_in in self._stand_ins[0].values():
+                stand_in.free()
+            self._stand_ins[0] = None
+        for buffer in self.buffers.values():
+            buffer.nbytes = max((size for size, used in buffer.planned if used[0]), default=0)
 
     def seal(self):
         self.sealed = True
@@ -382,6 +409,7 @@ class _ScratchBuffer:
         self.runtime = arena.runtime
         self._plan_state = arena._plan_state
         self.nbytes = nbytes
+        self.planned = []          # (size, [used]) for every buffer planned in this role
         self._buffer = None
         self._zero = False
         self._closed = False
@@ -424,6 +452,58 @@ class _ScratchBuffer:
         if self._buffer is not None:
             self._buffer.free()
         self._closed = True
+
+
+class _ScratchHandle:
+    """One planned buffer: its own name and size, its role's storage.
+
+    References only the role and a shared cell, never the arena or its siblings, so
+    nothing here forms a cycle and a dropped frame releases its memory at once."""
+
+    __slots__ = ("_role", "_key", "name", "nbytes", "_used", "_stand_ins")
+
+    def __init__(self, role, key, name, nbytes, stand_ins):
+        self._role, self._key, self.name, self.nbytes = role, key, name, nbytes
+        self._used = [False]
+        self._stand_ins = stand_ins
+        role.planned.append((nbytes, self._used))
+
+    def _get(self):
+        if self._stand_ins[0] is not None:
+            raise RuntimeError(f"scratch {self.name} reached from the host while discovering")
+        if self.nbytes > self._role.nbytes:
+            raise RuntimeError(f"scratch role exceeds its plan: {self.name}")
+        return self._role._get()
+
+    @property
+    def id(self):
+        stand_ins = self._stand_ins[0]
+        if stand_ins is None:
+            return self._get().id
+        self._used[0] = True
+        if self._key not in stand_ins:
+            stand_ins[self._key] = self._role.runtime.buffer(256, np.uint8)
+        return stand_ins[self._key].id
+
+    @property
+    def mapped(self):
+        return self._get().mapped
+
+    def view(self, dtype=np.float32, shape=None):
+        return self._get().view(dtype, shape)
+
+    def upload(self, array, offset=0):
+        return self._get().upload(array, offset)
+
+    def download(self, dtype=np.float32, count=None, offset=0):
+        return self._get().download(dtype, count, offset)
+
+    def zero(self):
+        self._role.zero()
+        return self
+
+    def free(self):
+        self._role.free()
 
 
 # The families a profiled pass can belong to; a kind is `family * 32 + subkind`, so a
@@ -554,6 +634,12 @@ class Runtime:
                 | (int(self.fuse_window_block) << 21)
                 | (int(self.fuse_head) << 22)
                 | (int(self.fuse_global_attention) << 23))
+
+    def scratch_key(self):
+        """What decides which scratch a frame's recording touches: the switches, not the
+        shader specialisation (the key's low three bits), so a frame keeps its scratch plan
+        and its graphs across a change of specialisation."""
+        return self.graph_key() & ~0x7
 
     @property
     def buffer_bytes(self):
