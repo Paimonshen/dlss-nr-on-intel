@@ -24,6 +24,41 @@ you need the evidence behind a line in this file, rather than reading them in or
   have no upscaler, so it needs a newer game.
 - **A FAQ** in the README, for the questions that keep coming back. Later.
 
+## The bottleneck's attention in one pass, and a bug under `min_extent` (2026-09-26, evening)
+
+**A bug, fixed in `bb9cadf`: with `min_extent` below 320 the bottleneck's attention was
+wrong from 2026-09-25 23:10 (`7fd27ea`) until now.** That commit padded a bottleneck of 32
+tokens or fewer to 32 rows. At 16 tokens — every network from 128x128 to 256x192, so 640x360
+at 0.35 and 512x288 at 0.35 in the table below — the softmax then ran on `softmax_rows`,
+which keeps one reciprocal a row in the last 32 floats of its stage but took `2016 / (stride
++ 1)` rows a workgroup: 61 at a stride of 32, and rows 32-60 of each read a reciprocal from
+past the stage and came out zero. Capped at 32 rows; the 32-row pad now gives the 64-row
+pad's head bit for bit. The default, 320, never reached it, and the `min_extent` pictures
+below were taken before it existed — **an in-game comparison made since then saw the bug
+and needs redoing.** `7fd27ea` was checked by comparing the GEMM routing with the pad at 32
+on both sides: a comparison that holds the change constant proves nothing about the change.
+It surfaced because the fused kernel below disagreed with its reference at 17 tokens on 32
+rows, and the reference was the one that was wrong.
+
+**The global blocks' attention in one pass** (`global_attention.comp`,
+`NR_FUSE_GLOBAL_ATTENTION`): QK^T, the softmax, PV and the head merge, no score stored. A
+workgroup takes one head and 64 query rows, the keys go through shared memory twice — the
+first time each row's lane adds its weights in key order, the softmax's own order, for the
+reciprocal; the second the probabilities are made as the softmax publishes them and
+multiplied into V over the PV GEMM's own K steps. Sixteen keys at a time inside a block: all
+64 at once spilled 30 registers and ran 1.3 ms a call at 640 tokens, against 0.9.
+Bit-identical — 32 cases in both memory modes, frame heads, graph hashes, the daemon's
+answers — and `make test` green in both modes. **1920x1088 281.6 -> 267.7 ms** of replayed
+graph (the pass 20.0 -> 6.9 ms), 1280x768 134.0 -> 132.9; nothing at the live sizes, where
+the bottleneck is 64-96 tokens.
+
+What the frame holds that nothing reads, at 1920x1088 (2885 MiB resident, 2192 of it the
+scratch arena): the arena sizes each role by every buffer planned in it, used or not, and
+the window blocks' float32 scores (510 MiB), their half probabilities (255) and the float32
+QKV projection (765) are planned though the fused paths never touch them — about 770 MiB of
+roles larger than their users need. Planning by the switches in force, and planning again
+when they change, is the fix; not done.
+
 ## The one-head blocks' attention in one pass a window (2026-09-26, afternoon)
 
 Blocks 0 and 70 and the eight at half resolution — 32 channels, one head — ran their
@@ -163,8 +198,8 @@ the effect came out stronger (7.2 against 4.6 levels of change), at 192x128 slig
 Which is better is taste, so it is a knob: `min_extent`, 128-320 in steps of 64, **default
 320**, unchanged behaviour. The owner is to compare in a game.
 
-At those small frames the bottleneck is 6-32 tokens, and it is now padded to 64 rows
-outright: its GEMMs wait on the K loop, not on rows, and a whole block moves the QKV
+At those small frames the bottleneck is 16 or 32 tokens, and it is now padded to 64 rows
+outright (to 32 at 32 tokens or fewer since `7fd27ea` — see the bug above): its GEMMs wait on the K loop, not on rows, and a whole block moves the QKV
 projection's epilogue off the tiled kernel (0.22 -> 0.14 ms a call, ~0.6 ms of a 192x128
 frame, bit-identical). What is left there is the staged kernel's K loop itself: even with
 every global load taken out, a 32-deep step costs ~0.93 us of shared-memory stores,
