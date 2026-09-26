@@ -141,7 +141,7 @@ rem spellings and is where they were measured to be correct; build for it with
 rem NR_PACKHALF2X16=1.
 :shader
 if not exist "%GPU%\%1.comp" goto :eof
-set "HALF_FLAG=-DHALF_ROUND_FLOAT16 -DPACK_HALF_BITS"
+set "HALF_FLAG=-DHALF_ROUND_FLOAT16"
 if defined NR_PACKHALF2X16 set "HALF_FLAG="
 "%GLSL%" --target-env vulkan1.3 %HALF_FLAG% -I"%GPU%" -o "%WORK%\%1.spv" "%GPU%\%1.comp" >nul 2>&1
 if exist "%WORK%\%1.spv" (echo   %1.spv) else (echo   %1.spv FAILED)
@@ -152,7 +152,7 @@ rem For the variants the Makefile builds from one source with -D, e.g. the 32-ro
 rem staged GEMM and the 256-lane attention rows.
 :shader_def
 if not exist "%GPU%\%2.comp" goto :eof
-set "HALF_FLAG=-DHALF_ROUND_FLOAT16 -DPACK_HALF_BITS"
+set "HALF_FLAG=-DHALF_ROUND_FLOAT16"
 if defined NR_PACKHALF2X16 set "HALF_FLAG="
 "%GLSL%" --target-env vulkan1.3 %HALF_FLAG% %3 %4 -I"%GPU%" -o "%WORK%\%1.spv" "%GPU%\%2.comp" >nul 2>&1
 if exist "%WORK%\%1.spv" (echo   %1.spv) else (echo   %1.spv FAILED)
