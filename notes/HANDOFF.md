@@ -39,6 +39,17 @@ On the same features our head is **RGB corr 0.97 at 320x320, 0.99 at 1088x640; t
 (0.65-0.86). Our own GPU path against our numpy reference is about half that distance. Side by side
 the pictures look the same; the difference is fine texture. `notes/opendlss-reference.md`.
 
+**Block by block it found a real error, and it is fixed** (`src/bench/opendlss_blocks.py`, our
+blocks on the reference's inputs one at a time): **the decoder merged the wrong skip.** At every
+level ours — MLX-DLSS's graph, ported — took the block before the transition block (3, 7, 13, 21);
+the reference takes the transition block's own output (4, 8, 14, 22). The first decoder blocks
+agreed with it 18-25 % of bytes that way, 61-69 % the right way, like every other block. Fixed in the
+numpy reference and the GPU path (one publish of the transition block's output a level): **the
+picture changes, deliberately** — every reference hash below this entry is from the old graph. The
+temporal gate moved towards the reference's most, corr 0.65-0.86 -> 0.89-0.93. The repository as it
+was is backed up: branch `backup-20260927-before-skip-fix`, `~/ProjectsClaude-backup-20260927.git`
+and `.bundle`.
+
 ## The bottleneck's attention in one pass, and a bug under `min_extent` (2026-09-26, evening)
 
 **A bug, fixed in `bb9cadf`: with `min_extent` below 320 the bottleneck's attention was

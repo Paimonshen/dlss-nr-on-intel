@@ -844,11 +844,14 @@ class NeuralRenderingModel:
             head_count=32))
 
     def _downsample_window(self, value, index, *, head_count):
+        """A transition block: its own output published — the skip the decoder merges at
+        this level — and that output pooled and projected into the next level."""
         transformed = self._window(value, index, head_count=head_count, publish=False)
+        skip = e4m3(transformed)
         if index == 22:
             transformed = pad_spatial_end(transformed, 8)
-        return e4m3(matmul(e4m3(average_pool2(transformed)),
-                           self.weight(f"block{index}.layer0.weight0")))
+        return skip, e4m3(matmul(e4m3(average_pool2(transformed)),
+                                 self.weight(f"block{index}.layer0.weight0")))
 
     def _upsample_window(self, value, skip, index, *, head_count):
         prefix = f"block{index}.layer0"
@@ -874,21 +877,20 @@ class NeuralRenderingModel:
         full_resolution_skip = e4m3(block0_output)
         value = e4m3(average_pool2(block0_output))
         del block0_output
-        for index in range(1, 4):
-            value = self._window(value, index, head_count=1)
-            step(f"block{index}")
-        skips = [value]
-        value = self._downsample_window(value, 4, head_count=1)
-        step("block4")
-
-        for regular, transition, head_count in ((range(5, 8), 8, 2),
+        # Each level's skip is its transition block's own output (4, 8, 14, 22), not the
+        # block before it: MLX-DLSS's model took the latter, and OpenDLSS-NR, which is
+        # bit-exact against captures of the original, the former. Run on its inputs, our
+        # first decoder blocks agree with it 18-25 % with ours and 61-69 % with its, like
+        # every other block (`src/bench/opendlss_blocks.py`, notes/opendlss-reference.md).
+        skips = []
+        for regular, transition, head_count in ((range(1, 4), 4, 1), (range(5, 8), 8, 2),
                                                 (range(9, 14), 14, 4),
                                                 (range(15, 22), 22, 8)):
             for index in regular:
                 value = self._window(value, index, head_count=head_count)
                 step(f"block{index}")
-            skips.append(value)
-            value = self._downsample_window(value, transition, head_count=head_count)
+            skip, value = self._downsample_window(value, transition, head_count=head_count)
+            skips.append(skip)
             step(f"block{transition}")
 
         for index in range(23, 31):

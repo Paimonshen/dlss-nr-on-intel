@@ -83,5 +83,19 @@ moves towards theirs — RGB corr 0.958/0.958/0.973 -> 0.962/0.960/0.973, the ga
 less than the per-block distance suggests, because everything else still differs in rounding and the
 graph amplifies it: what remains is spread along the whole graph, most in the ViT.
 
+**Fixed on 2026-09-27, in the numpy reference and the GPU path alike** (the transition block's output
+published into the level's buffer, one small pass a level; `test_against_torch.py` gives MLX-DLSS's
+model the same skips and stays bit-identical everywhere else). The GPU path against the reference
+again, same four frames:
+
+| frame, field | head RGB corr | gate logit corr | composed apart |
+| --- | --- | --- | --- |
+| Cyberpunk, 320x320 | 0.971-0.976 -> 0.974-0.981 | 0.86 -> 0.92 | 1.13 -> 1.04 levels |
+| DoA5, 320x320 | 0.971-0.976 -> 0.979-0.980 | 0.65 -> 0.89 | 2.74 -> 2.52 |
+| DoA5, 1088x640 | 0.988-0.992 -> 0.990-0.993 | 0.81 -> 0.93 | 1.37 -> 1.33 |
+| Cyberpunk, 1088x640 | 0.988-0.990 -> 0.990-0.991 | 0.81 -> 0.92 | 1.45 -> 1.36 |
+
+The temporal gate moved most — the channel live mode blends the history by.
+
 Not yet measured: the two field sizes that differ, which need both networks run at their own geometry
 on the same valid frame.

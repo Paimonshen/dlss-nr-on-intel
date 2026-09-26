@@ -460,10 +460,6 @@ class ResidentFrame:
                                source_half=True, target_half=True)
                 submit()
             keep(f"l{level}", value, h * w * channels, (1, h, w, channels), np.float16)
-            # The level's own buffer is its skip. The decoder writes d1-d4 and nothing
-            # writes l1-l4 again in the frame, so the copy it used to read from moved the
-            # same bytes into a second buffer for nothing.
-            skips[level] = value
 
             block = self.block(transition, heads)
             edge = self.edge(transition, "down")
@@ -475,6 +471,12 @@ class ResidentFrame:
             begin()
             R.record_block(rt, block, self.scratch(block, h, w), source=value,
                            target=unpublished, source_half=True)
+            # The level's skip is the transition block's own output, published — not the
+            # block before it, which is what MLX-DLSS's graph merged (notes/opendlss-
+            # reference.md). It goes into the level's buffer, which nothing reads again
+            # once the transition block has: the decoder writes d1-d4, never l1-l4.
+            rt.e4m3_half(unpublished, value, h * w * channels)
+            skips[level] = value
             R.record_downsample(rt, edge, self.transition_scratch(padded), unpublished,
                                 nxt, h, w, channels, pad_to=8 if transition == 22 else 0,
                                 target_half=True)

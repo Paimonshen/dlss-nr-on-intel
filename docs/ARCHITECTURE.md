@@ -134,6 +134,14 @@ published, repeating a claim the project's own notes had already withdrawn.
 The non-linearity in attention is a **softmax**, hand-rolled in `f16x2` with hard logit
 clamps and **no max subtraction**.
 
+**Each encoder level's skip is its last block's output** — blocks 4, 8, 14 and 22, the ones
+whose output is also pooled into the next level, published E4M3 (and 30 at 512 channels).
+MLX-DLSS's model, and this implementation until 2026-09-27, merged the block before it (3, 7,
+13, 21). Run on the inputs of [OpenDLSS-NR](https://github.com/maanHimself/OpenDLSS-NR), which
+claims its network bit-exact against captures of the original, the first decoder blocks agree
+with it 18-25 % that way and 61-69 % this way, like any other block
+(`notes/opendlss-reference.md`).
+
 `notes/MODEL-SPEC.txt` tabulates the **container** — per-block element counts and layout as
 stored. Those counts are storage, not parameters: their total, 73 841 889, is the weight
 section's size divided by two, and the model has **145 755 123** (`notes/phase61`). The logical shape list is MLX-DLSS's `weight_spec.json`.
@@ -168,12 +176,15 @@ FP32-accumulate implementation is therefore 400–800x *more* accurate than the 
 an isolated GEMM — it is not a reproduction of it. Which you want depends on whether you
 are matching their output or making a good picture.
 
-**Per-element agreement is not a property a port can have.** The graph is chaotic: a
-relative 1e-06 perturbation of the input moves the head as much as an FP16 GEMM does,
-because roughly 100 E4M3 publishes, each with a 6.25 % quantum, stand between input and
-output. NumPy's own float32 GEMM carries more error than the threshold below which
+**Per-element agreement is not a property a port with other arithmetic can have.** The
+graph is chaotic: a relative 1e-06 perturbation of the input moves the head as much as an FP16
+GEMM does, because roughly 100 E4M3 publishes, each with a 6.25 % quantum, stand between input
+and output. NumPy's own float32 GEMM carries more error than the threshold below which
 perturbations vanish. Judge on the composed image and on whether the controls behave;
-`notes/phase9-numerics.md` has the measurements.
+`notes/phase9-numerics.md` has the measurements. OpenDLSS-NR claims per-element agreement by
+doing the vendor's arithmetic itself — FP8 products summed as fixed point onto an f16
+accumulator, the vendor's reduction orders — which this implementation does not; its head is
+0.97-0.99 correlated with theirs on the same input (`notes/opendlss-reference.md`).
 
 ## 6. The temporal path
 
