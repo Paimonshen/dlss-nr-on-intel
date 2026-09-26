@@ -60,40 +60,27 @@ if not exist "%GAME%" (
   exit /b 2
 )
 
-rem ---- build (MSVC + the .def that names the three loader entry points) ----
-if "%SKIP_BUILD%"=="1" (
-  echo [skip] build  [--skip-build]
-) else (
-  echo [1/2] building the layer ...
-  if not defined VULKAN_SDK (
-    echo ERROR: VULKAN_SDK is not set; install the Vulkan SDK and reopen the prompt
-    exit /b 3
-  )
-  if not exist "%WORK%" mkdir "%WORK%"
-  where cl >nul 2>nul
-  if errorlevel 1 (
-    set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
-    set "VSROOT="
-    if exist "%VSWHERE%" "%VSWHERE%" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath > "%TEMP%\nr_vsroot.txt" 2>nul
-    if exist "%TEMP%\nr_vsroot.txt" set /p VSROOT=< "%TEMP%\nr_vsroot.txt"
-    del /Q "%TEMP%\nr_vsroot.txt" >nul 2>&1
-    if not defined VSROOT (
-      echo ERROR: no MSVC found; run from a "x64 Native Tools Command Prompt for VS"
-      exit /b 3
-    )
-    call "%VSROOT%\VC\Auxiliary\Build\vcvars64.bat" >nul
-  )
-  cl /nologo /O2 /TC /D_WIN32 /I"%VULKAN_SDK%\Include" /I"%REPO%\src\layer" ^
-     /Fe:"%WORK%\nr_layer.dll" /LD "%REPO%\src\layer\nr_layer.c" ^
-     /link /DEF:"%REPO%\src\layer\nr_layer.def" "%VULKAN_SDK%\Lib\vulkan-1.lib"
-  if errorlevel 1 (
-    echo ERROR: the layer did not build
-    exit /b 3
-  )
+rem ---- build: delegated to build_win.bat, which also builds libxmx.dll and the shaders ----
+rem Kept in one place on purpose: deploy only has to know that the runtime exists, and
+rem a second copy of the MSVC invocation here is a second thing to get wrong.
+if "%SKIP_BUILD%"=="1" goto :after_build
+echo [1/2] building with build_win.bat ...
+if not exist "%TOOLSDIR%build_win.bat" (
+  echo ERROR: tools\build_win.bat not found
+  exit /b 3
 )
+call "%TOOLSDIR%build_win.bat"
+if errorlevel 1 (
+  echo ERROR: the build failed
+  exit /b 3
+)
+:after_build
 if not exist "%WORK%\nr_layer.dll" (
   echo ERROR: %WORK%\nr_layer.dll is missing; build it first or drop --skip-build
   exit /b 3
+)
+if not exist "%WORK%\libxmx.dll" (
+  echo WARNING: %WORK%\libxmx.dll is missing - the daemon cannot start without it
 )
 
 rem ---- install into the game folder ----
@@ -116,9 +103,10 @@ rem here, the same manifest loads with the full path and not without it.
 powershell -NoProfile -Command "$lib = (Join-Path '%DEPLOY%' '%NAME%'); (Get-Content '%MANIFEST_SRC%') -replace 'LIBRARY_PATH_PLACEHOLDER', $lib.Replace('\','\\') | Set-Content '%MANIFEST_DST%'"
 echo   manifest:   %MANIFEST_DST%  library_path = %DEPLOY%\%NAME%
 
-rem The runtime the daemon imports. Copied because the daemon runs from this tree and
-rem the game folder has to be self-contained. The weights are NOT copied - the launcher
-rem points NR_ROOT back here instead.
+rem The runtime the daemon needs at start: the MLX extractor it imports, the resident
+rem Vulkan runtime, and the shaders. Without these the daemon stops before it listens.
+rem The weights are NOT copied - the launcher points NR_ROOT at this checkout instead,
+rem so nothing large can travel with the game folder.
 if not exist "%DEPLOY%\src" mkdir "%DEPLOY%\src"
 if not exist "%DEPLOY%\work" mkdir "%DEPLOY%\work"
 xcopy /E /I /Y /Q "%REPO%\src\layer" "%DEPLOY%\src\layer" >nul
@@ -130,12 +118,18 @@ if exist "%WORK%\mlx-dlss" (
   xcopy /E /I /Y /Q "%WORK%\mlx-dlss" "%DEPLOY%\work\mlx-dlss" >nul
   echo   runtime:    work\mlx-dlss
 ) else (
-  echo   WARNING: %WORK%\mlx-dlss is missing; the daemon needs it (see README)
+  echo   WARNING: %WORK%\mlx-dlss is missing; the daemon cannot start without it
 )
-copy /Y "%WORK%\libxmx.*"     "%DEPLOY%\work\" >nul 2>&1
-copy /Y "%WORK%\libnr_image.*" "%DEPLOY%\work\" >nul 2>&1
-copy /Y "%WORK%\*.spv"        "%DEPLOY%\work\" >nul 2>&1
-echo   runtime:    libxmx, libnr_image, shaders
+if exist "%WORK%\libxmx.dll"    copy /Y "%WORK%\libxmx.dll"    "%DEPLOY%\work\" >nul
+if exist "%WORK%\libnr_image.dll" copy /Y "%WORK%\libnr_image.dll" "%DEPLOY%\work\" >nul
+copy /Y "%WORK%\*.spv" "%DEPLOY%\work\" >nul 2>&1
+echo   runtime:    libxmx.dll, libnr_image.dll, shaders
+
+rem Keep local junk out of the deployed tree
+for /d /r "%DEPLOY%\src" %%J in (__pycache__) do @if exist "%%J" rmdir /S /Q "%%J" 2>nul
+del /S /Q "%DEPLOY%\src\*.obj" >nul 2>&1
+del /S /Q "%DEPLOY%\src\*.lib" >nul 2>&1
+del /S /Q "%DEPLOY%\src\*.exp" >nul 2>&1
 
 rem Drop local junk the copy may have brought along
 for /d /r "%DEPLOY%\src" %%J in (__pycache__) do @if exist "%%J" rmdir /S /Q "%%J" 2>nul

@@ -17,6 +17,7 @@ daemon's frame loop stays as it is.
 """
 import ctypes
 import errno
+import time
 from ctypes import wintypes
 
 _k32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -27,6 +28,7 @@ PIPE_READMODE_BYTE = 0x00000000
 PIPE_WAIT = 0x00000000
 
 ERROR_PIPE_CONNECTED = 535
+ERROR_PIPE_BUSY = 231        # every instance is in use; retry, it is not a failure
 ERROR_BROKEN_PIPE = 109
 ERROR_NO_DATA = 232
 
@@ -122,18 +124,32 @@ class NamedPipeServer:
         self._timeout = timeout
         self._handle = self._make()
 
-    def _make(self):
-        handle = _k32.CreateNamedPipeW(
-            self.path, PIPE_ACCESS_DUPLEX,
-            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
-            self.backlog, self.buffer_size, self.buffer_size, 0, None)
-        value = int(handle)
-        if value == INVALID_HANDLE_VALUE:
-            raise OSError(ctypes.get_last_error(), "CreateNamedPipeW")
-        return value
+    def _make(self, attempts=50):
+        """Create one pipe instance.
+
+        ERROR_PIPE_BUSY means the instance count is momentarily at `backlog` — the
+        normal state while accepted connections are still open. It is not fatal: wait
+        and retry, and only give up when the caller really cannot get an endpoint.
+        """
+        for attempt in range(attempts):
+            handle = _k32.CreateNamedPipeW(
+                self.path, PIPE_ACCESS_DUPLEX,
+                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+                self.backlog, self.buffer_size, self.buffer_size, 0, None)
+            value = int(handle)
+            if value != INVALID_HANDLE_VALUE:
+                return value
+            err = ctypes.get_last_error()
+            if err != ERROR_PIPE_BUSY:
+                raise OSError(err, "CreateNamedPipeW")
+            time.sleep(0.02 * (attempt + 1))
+        raise OSError(ctypes.get_last_error(), "CreateNamedPipeW")
 
     def accept(self):
         """Wait for one client, then return a connected `NamedPipeConnection`."""
+        if not self._handle:
+            # Every instance was in use last time round; make a new one now.
+            self._handle = self._make()
         ok = _k32.ConnectNamedPipe(self._handle, None)
         if not ok:
             err = ctypes.get_last_error()
@@ -141,8 +157,14 @@ class NamedPipeServer:
                 raise OSError(err, "ConnectNamedPipe")
         connection = NamedPipeConnection(self._handle, self._timeout)
         # A fresh pipe instance replaces the one just handed over, so the next
-        # `accept` waits on a new endpoint rather than the one in use.
-        self._handle = self._make()
+        # `accept` waits on a new endpoint rather than the one in use. When the
+        # backlog is momentarily full this leaves `_handle` empty and the next
+        # accept() creates the instance instead - so a busy pipe costs a retry,
+        # not the daemon.
+        try:
+            self._handle = self._make()
+        except OSError:
+            self._handle = 0
         return connection, None
 
     def close(self):

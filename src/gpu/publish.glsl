@@ -13,8 +13,21 @@
  * the bit representation so it cannot be elided, and it is bit-exact against numpy's
  * float16 over ordinary values, half subnormals and overflow to infinity
  * (`src/bench/half_probe.py`): two instructions and no branches, where doing the
- * exponent and mantissa by hand took ten and two branches. */
+ * exponent and mantissa by hand took ten and two branches.
+ *
+ * That is the default and it stays the default: on Mesa the other spelling is folded
+ * away, so it is not a substitute there — it is only a fallback for a driver that
+ * cannot run this one at all. The B580's Windows driver (101.8993) is such a driver:
+ * `packHalf2x16` makes it lose the device (`VK_ERROR_DEVICE_LOST`). A build for it
+ * defines HALF_ROUND_FLOAT16, where `float(float16_t(x))` is used instead. On the
+ * B580 the two agree bit for bit — 0 differences over 12020 values covering ordinary
+ * values, subnormals, NaN and Inf (`src/bench/half_probe.py`) — so this changes which
+ * instruction runs, not the number it produces. */
+#ifdef HALF_ROUND_FLOAT16
+float half_round(float x) { return float(float16_t(x)); }
+#else
 float half_round(float x) { return unpackHalf2x16(packHalf2x16(vec2(x, 0.0))).x; }
+#endif
 
 float e4m3(float x) {
     float magnitude = min(abs(x), 448.0);
