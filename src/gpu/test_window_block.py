@@ -92,6 +92,77 @@ def pool_cases(rt, rng):
     return cases
 
 
+def head_cases(rt, rng):
+    """Block 70's form: its output straight into the compact head, never stored."""
+    cases = 0
+    for height, width in ((8, 8), (16, 24), (20, 36), (40, 56)):
+        for origin in ((0, 0), (-4, -4)):
+            ph, pw, _ = rt.window_extent(height, width, origin)
+            windows, rows, pixels = (ph // 8) * (pw // 8), ph * pw, height * width
+            buffers = []
+
+            def alloc(n, dtype):
+                b = rt.buffer(n, dtype)
+                buffers.append(b)
+                return b
+            try:
+                image32, image16 = alloc(pixels * 32, np.float32), alloc(pixels * 32, np.float16)
+                qkv, projection = alloc(32 * 96, np.float16), alloc(32 * 32, np.float16)
+                bias, cosine, scale = alloc(64 * 64, np.float32), alloc(32, np.float32), alloc(1, np.float32)
+                weights = alloc(32 * 16, np.float16)
+                q, k, v = (alloc(rows * 32, np.float16) for _ in range(3))
+                attended, out16 = alloc(rows * 32, np.float16), alloc(pixels * 32, np.float16)
+                values = rng.normal(0, 1.0, pixels * 32)
+                X.host_write(image32, values.astype(np.float32))
+                X.host_write(image16, values.astype(np.float16))
+                X.host_write(qkv, rng.normal(0, 0.25, 32 * 96).astype(np.float16))
+                X.host_write(projection, rng.normal(0, 0.25, 32 * 32).astype(np.float16))
+                X.host_write(bias, rng.normal(0, 1.0, 64 * 64).astype(np.float32))
+                X.host_write(cosine, rng.uniform(-1.5, 1.5, 32).astype(np.float32))
+                X.host_write(scale, rng.uniform(2.0, 20.0, 1).astype(np.float32))
+                head = np.zeros((32, 16), np.float32)
+                head[:, :4] = rng.normal(0, 0.3, (32, 4))
+                X.host_write(weights, head.astype(np.float16))
+                for image, image_half in ((image32, False), (image16, True)):
+                    for mask in (0, 7):
+                        rt.specialize(mask)
+                        for columns in (4, 16):
+                            outs = []
+                            for fused in (False, True):
+                                target = alloc(pixels * columns + GUARD, np.float32)
+                                X.host_write(target, np.full(pixels * columns + GUARD, FILL32, np.float32))
+                                rt.begin()
+                                if fused:
+                                    rt.window_block(image, qkv, projection, target, bias, cosine,
+                                                    scale, height, width, origin,
+                                                    image_half=image_half, head=weights,
+                                                    head_columns=columns)
+                                else:
+                                    rt.gemm_qkv(image, qkv, q, k, v, scale, rows, 32, 1, 64,
+                                                window=(height, width, origin), image_half=image_half)
+                                    rt.window_attention(q, k, v, attended, windows, 1, bias=bias,
+                                                        merged=True)
+                                    rt.gemm_residual(attended, projection, image, cosine, out16, rows,
+                                                     32, 32, reverse=(height, width, 8, origin),
+                                                     narrow=True, skip_half=image_half)
+                                    rt.gemm(out16, weights, target, pixels, 16, 32,
+                                            compact_output=columns == 4)
+                                rt.submit()
+                                outs.append(X.host_view(target).copy())
+                            name = (f"head ({columns} columns) {height}x{width} origin {origin} "
+                                    f"{'half' if image_half else 'float'} image mask {mask}")
+                            n = pixels * columns
+                            assert np.array_equal(outs[1][:n].view(np.uint32), outs[0][:n].view(np.uint32)), \
+                                f"{name}: {np.count_nonzero(outs[1][:n].view(np.uint32) != outs[0][:n].view(np.uint32))} differ"
+                            assert filled(outs[1][n:], np.float32).all(), f"{name}: written past"
+                            assert not filled(outs[1][:n], np.float32).any(), f"{name}: left unwritten"
+                            cases += 1
+            finally:
+                for b in buffers:
+                    b.free()
+    return cases
+
+
 def main():
     rt = X.Runtime()
     rng = np.random.default_rng(5150)
@@ -160,11 +231,15 @@ def main():
                 for b in buffers:
                     b.free()
     pooled_cases = pool_cases(rt, rng)
+    head_count = head_cases(rt, rng)
     before = rt.graph_key()
     rt.fuse_window_block = not rt.fuse_window_block
     assert rt.graph_key() != before, "the window block's switch must change the graph key"
-    print(f"window block: {cases} cases and {pooled_cases} pooled ones bit-identical to the "
-          f"three passes they replace, graph key OK; staging={rt.staging}")
+    middle = rt.graph_key()
+    rt.fuse_head = not rt.fuse_head
+    assert rt.graph_key() not in (before, middle), "the head's switch must change the graph key"
+    print(f"window block: {cases} cases, {pooled_cases} pooled and {head_count} with the head "
+          f"bit-identical to the passes they replace, graph key OK; staging={rt.staging}")
 
 
 if __name__ == "__main__":

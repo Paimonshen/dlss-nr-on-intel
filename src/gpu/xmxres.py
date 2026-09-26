@@ -524,6 +524,8 @@ class Runtime:
         # A 32-channel window block's QKV projection, attention and output projection in
         # one pass a window, nothing in between leaving the workgroup.
         self.fuse_window_block = os.environ.get("NR_FUSE_WINDOW_BLOCK", "1") != "0"
+        # Block 70's output straight into the compact head inside that pass, never stored.
+        self.fuse_head = os.environ.get("NR_FUSE_HEAD", "1") != "0"
 
     def graph_key(self):
         return (self.lib.xmx_specialization() | (int(self.fuse_qk) << 3)
@@ -545,7 +547,8 @@ class Runtime:
                 | (int(self.fuse_merge_ffn) << 18)
                 | (int(self.fuse_stem_ffn) << 19)
                 | (int(self.fuse_pool) << 20)
-                | (int(self.fuse_window_block) << 21))
+                | (int(self.fuse_window_block) << 21)
+                | (int(self.fuse_head) << 22))
 
     @property
     def buffer_bytes(self):
@@ -694,7 +697,8 @@ class Runtime:
         return self
 
     def window_block(self, image, qkv, projection, target, bias, cosine, scale, height, width,
-                     origin, *, epilogue=0, narrow=False, image_half=False, pooled=None):
+                     origin, *, epilogue=0, narrow=False, image_half=False, pooled=None,
+                     head=None, head_columns=4):
         """A 32-channel window block's attention half in one pass (window_block.comp).
 
         What `gemm_qkv(image, qkv, ..., window=(height, width, origin))`, `window_attention(
@@ -705,6 +709,11 @@ class Runtime:
 
         With `pooled`, block 0's output as `gemm_residual_pool` writes it: `target` takes the
         published skip (half), `pooled` the published 2x2 pool; even extents and pads.
+
+        With `head` (the head's padded 32 x 16 weights), block 70's: its output is not stored
+        and `target` takes what `gemm(output16, head, target, pixels, 16, 32,
+        compact_output=True)` would, four float32 columns a pixel — or with
+        `head_columns=16` what the same GEMM stores without the compact output.
         """
         ph, pw, (top, left) = self.window_extent(height, width, origin, 8)
         if pooled is not None:
@@ -719,21 +728,30 @@ class Runtime:
         if target.id in {image.id, qkv.id, projection.id, bias.id, cosine.id, scale.id}:
             raise ValueError("the window block's target must not alias its inputs")
         pixels = height * width
+        if head is not None and (pooled is not None or epilogue or narrow):
+            raise ValueError("the head is block 70's: no pool, no publish, a float32 target")
+        if head_columns not in (4, 16):
+            raise ValueError("the head stores four columns or all sixteen")
+        output = (pixels * head_columns * 4 if head is not None
+                  else pixels * 32 * (2 if narrow else 4))
         for buf, needed in ((image, pixels * 32 * (2 if image_half else 4)), (qkv, 32 * 96 * 2),
                             (projection, 32 * 32 * 2), (bias, 64 * 64 * 4), (cosine, 32 * 4),
-                            (scale, 4), (target, pixels * 32 * (2 if narrow else 4))):
+                            (scale, 4), (target, output)) + (((head, 32 * 16 * 2),) if head else ()):
             if buf.nbytes < needed:
                 raise ValueError("window block buffer is too small")
         path = os.environ.get("XMX_WINDOW_BLOCK_SPV") or str(ROOT / "work" / "window_block.spv")
         if self.lib.xmx_window_block_init(path.encode()) != 0:
             raise RuntimeError("window block pipeline: " + self.lib.xmx_error().decode())
         flags = (_publish(epilogue, narrow) | (0x8000 if image_half else 0)
-                 | (0x800000 if pooled is not None else 0))
+                 | (0x800000 if pooled is not None else 0)
+                 | (0x1000000 if head is not None else 0)
+                 | (0x2000000 if head is not None and head_columns == 16 else 0))
         if pooled is not None:
             flags &= ~0x1000                     # the pool's target is half by definition
+        extra = pooled if pooled is not None else head
         if self.lib.xmx_rec_window_block(image.id, qkv.id, projection.id, target.id, bias.id,
                                          cosine.id, scale.id,
-                                         pooled.id if pooled is not None else -1, windows,
+                                         extra.id if extra is not None else -1, windows,
                                          height, width, pw // 8, (top << 16) | left,
                                          flags) != 0:
             raise RuntimeError("xmx_rec_window_block: " + self.lib.xmx_error().decode())

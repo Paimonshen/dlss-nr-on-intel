@@ -57,7 +57,8 @@ layout(push_constant, scalar) uniform Push {
     uint m, n, k, batch;
     uint sa, sb, sc, flags;
     uint64_t projection;                       // offset 64: the output projection (32 x 32)
-    uint64_t pooled;                           // offset 72: block 0's pooled output (0x800000)
+    uint64_t pooled;                           // offset 72: block 0's pooled output (0x800000),
+                                               // or block 70's head weights (0x1000000)
     uint lda, ldb, ldc, spare;
     uint64_t residual_cos;                     // the residual's per-channel cosine
     uint image_h, image_w, window_cols, window_pad;
@@ -265,6 +266,9 @@ void main() {
      * QK^T is done, and the barrier the denominators need is the one that publishes them. */
     if (gl_LocalInvocationIndex < 128u)
         u4[64u + gl_LocalInvocationIndex] = Uvec4Buf(pc.projection).v[gl_LocalInvocationIndex];
+    /* and block 70's head weights, 1 KB, in the last of K's bytes */
+    if ((operation_flags() & 0x1000000u) != 0u && gl_LocalInvocationIndex < 64u)
+        u4[192u + gl_LocalInvocationIndex] = Uvec4Buf(pc.pooled).v[gl_LocalInvocationIndex];
     if (sub < 2u) {
         uint r = sub * 32u + local;
         uint weights_at = (2048u + 256u * (r / 8u)) / 4u + (r % 8u) * 8u;
@@ -354,6 +358,12 @@ void main() {
      * kilobyte as it is, and after a barrier the window's sixteen pooled pixels are summed
      * from two subgroups' rows in POOL2_SKIP's order. The target is the published skip. */
     bool pooling = (operation_flags() & 0x800000u) != 0u;
+    /* Bit 0x1000000: block 70's output, read only by the head — 32 channels to the four
+     * that are used — is not stored: its halves stay here and the head's two
+     * multiply-adds from zero follow, the base GEMM's, writing the four columns the
+     * compact head keeps. The target is then the head's (pixels x 4, float32). */
+    bool head = (operation_flags() & 0x1000000u) != 0u;
+    f16vec4 kept[2] = f16vec4[2](f16vec4(0.0), f16vec4(0.0));
     for (uint e = local * 4u; e < 256u; e += 128u) {
         uint t = e / 32u, c = e % 32u;
         int x = x0 + int(t);
@@ -366,6 +376,10 @@ void main() {
             precise float total = fma(skip[i], cosine[i], f32[scratch + e + i]);
             out4[i] = publish(epilogue, total);
         }
+        if (head) {
+            kept[e / 128u] = f16vec4(out4);
+            continue;
+        }
         if (pooling) {
             f16vec4 published;
             for (uint i = 0u; i < 4u; i++) {
@@ -377,6 +391,47 @@ void main() {
         }
         if (narrow) Half4Buf(uint64_t(pc.c)).v4[at >> 2] = f16vec4(out4);
         else        Vec4Buf(uint64_t(pc.c)).v4[at >> 2] = out4;
+    }
+    if (head) {
+        subgroupMemoryBarrierShared();           // every lane has read its branch values
+        subgroupBarrier();
+        for (uint n = 0u; n < 2u; n++)
+            h4[(scratch * 2u + local * 4u + n * 128u) >> 2] = kept[n];
+        subgroupMemoryBarrierShared();
+        subgroupBarrier();
+        coopmat<float16_t, gl_ScopeSubgroup, 8, 16, gl_MatrixUseA> block_out[2];
+        for (uint kk = 0u; kk < 2u; kk++)
+            coopMatLoad(block_out[kk], h16, scratch * 2u + kk * 16u, 32u,
+                        gl_CooperativeMatrixLayoutRowMajor);
+        coopmat<float, gl_ScopeSubgroup, 8, 16, gl_MatrixUseAccumulator> head_acc =
+            coopmat<float, gl_ScopeSubgroup, 8, 16, gl_MatrixUseAccumulator>(0.0);
+        for (uint kk = 0u; kk < 2u; kk++) {
+            coopmat<float16_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseB> w;
+            coopMatLoad(w, h16, 1536u + kk * 16u * 16u, 16u, gl_CooperativeMatrixLayoutRowMajor);
+            head_acc = coopMatMulAdd(block_out[kk], w, head_acc);
+        }
+        subgroupMemoryBarrierShared();
+        subgroupBarrier();
+        coopMatStore(head_acc, f32, scratch, 16u, gl_CooperativeMatrixLayoutRowMajor);
+        subgroupMemoryBarrierShared();
+        subgroupBarrier();
+        if ((operation_flags() & 0x2000000u) == 0u) {
+            // the compact head: the four columns the head uses
+            uint t = local / 4u, c = local % 4u;
+            int x = x0 + int(t);
+            if (row_in && x >= 0 && x < int(pc.image_w))
+                pc.c.v[(uint(y) * pc.image_w + uint(x)) * 4u + c] = f32[scratch + t * 16u + c];
+        } else {
+            // bit 0x2000000: all sixteen, as the head GEMM stores them without the compact store
+            for (uint e = local * 4u; e < 128u; e += 128u) {
+                uint t = e / 16u, c = e % 16u;
+                int x = x0 + int(t);
+                if (row_in && x >= 0 && x < int(pc.image_w))
+                    Vec4Buf(uint64_t(pc.c)).v4[((uint(y) * pc.image_w + uint(x)) * 16u + c) >> 2] =
+                        v4[(scratch + t * 16u + c) / 4u];
+            }
+        }
+        return;
     }
     if (!pooling) return;
     barrier();

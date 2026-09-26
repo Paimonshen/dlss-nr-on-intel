@@ -470,8 +470,16 @@ def record_split_feed_forward(runtime, w, s, source, source_half=False):
                             s.ffn, pixels, channels, channels, skip_half=source_half)
 
 
+def can_fuse_window_block(runtime, w, s):
+    """Whether this block's attention half runs as one pass a window (window_block.comp)."""
+    return (w.channels == 32 and w.heads == 1 and s.tokens == 64 and runtime.fuse_window_block
+            and runtime.qkv_epilogue and runtime.fuse_partition
+            and runtime.fuse_window_attention and runtime.fuse_attention_merge
+            and runtime.fuse_window_residual)
+
+
 def record_window_attention(runtime, w, s, source, target=None, publish=0,
-                            target_half=False, source_half=False, pool=None):
+                            target_half=False, source_half=False, pool=None, head=None):
     """Window attention over `source`, into `s.attended` — in window order.
 
     With a `target`, the output projection finishes the block instead: it adds
@@ -484,13 +492,16 @@ def record_window_attention(runtime, w, s, source, target=None, publish=0,
     not the scratch's worst case.
     """
     channels, heads, tokens = w.channels, w.heads, s.tokens
-    if ((target is not None or pool is not None) and channels == 32 and heads == 1
-            and tokens == 64 and runtime.fuse_window_block and runtime.qkv_epilogue
-            and runtime.fuse_partition and runtime.fuse_window_attention
-            and runtime.fuse_attention_merge):
+    if ((target is not None or pool is not None or head is not None)
+            and can_fuse_window_block(runtime, w, s)):
         # the three fused passes below in one, a window a workgroup (window_block.comp);
         # only on top of them, so that turning one of them off still compares its own path
-        if pool is not None:
+        if head is not None:
+            weights, head_target, columns = head
+            runtime.window_block(source, w.qkv, w.out, head_target, w.bias, w.attn_cos,
+                                 w.scale, s.height, s.width, w.origin,
+                                 image_half=source_half, head=weights, head_columns=columns)
+        elif pool is not None:
             pooled, published = pool
             runtime.window_block(source, w.qkv, w.out, published, w.bias, w.attn_cos, w.scale,
                                  s.height, s.width, w.origin, narrow=True,
@@ -558,7 +569,8 @@ def can_pool_output(runtime, w, s):
 
 
 def record_block(runtime, w, s, source=None, target=None, publish=0, source_half=False,
-                 target_half=False, source16=None, merge=None, stem=None, pool=None):
+                 target_half=False, source16=None, merge=None, stem=None, pool=None,
+                 head=None):
     """A whole window block: feed-forward, attention, both residuals.
 
     `source` and `target` default to the scratch's own buffers; passing them lets one
@@ -581,9 +593,12 @@ def record_block(runtime, w, s, source=None, target=None, publish=0, source_half
                                        merge=merge, stem=stem)
     if pool is not None and not can_pool_output(runtime, w, s):
         raise ValueError("this block's window residual cannot pool its own output")
+    if head is not None and not can_fuse_window_block(runtime, w, s):
+        raise ValueError("only a fused window block computes the head itself")
     if runtime.fuse_window_residual:
         record_window_attention(runtime, w, s, s.ffn, target=target, publish=publish,
-                                target_half=target_half, source_half=ffn_half, pool=pool)
+                                target_half=target_half, source_half=ffn_half, pool=pool,
+                                head=head)
         return
     record_window_attention(runtime, w, s, s.ffn, source_half=ffn_half)
     # the window reverse is the residual's own gather, not a pass of its own

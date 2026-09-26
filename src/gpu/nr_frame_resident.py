@@ -549,7 +549,11 @@ class ResidentFrame:
         # The head reads block 70's output as half, and nothing reads it as float32, so
         # the block's closing residual stores half itself: the same rounding the separate
         # to_half pass applied, without 126 MB of float32 written at 720p to be read once.
-        out16 = self.buffer("out16", pixels * 32, np.float16)
+        # And with the fused window block the head itself comes out of block 70's own pass,
+        # so neither the output nor its half copy is ever stored (window_block.comp).
+        fused_head = (rt.fuse_head and capture is None
+                      and R.can_fuse_window_block(rt, block70, scratch70))
+        out16 = None if fused_head else self.buffer("out16", pixels * 32, np.float16)
         # Block 70's input is read only by its feed-forward, which can make it itself:
         # then neither width of it is ever stored (`ffn_fused_merge`).
         merge = None
@@ -570,9 +574,12 @@ class ResidentFrame:
                         b_half=True)
         R.record_block(rt, block70, scratch70, source=merged, target=out16, target_half=True,
                        source16=scratch70.value16 if rt.fuse_glue and not merge else None,
-                       merge=merge)
-        rt.gemm(out16, self.head, self.head_buffer(), pixels, 16, 32,
-                compact_output=rt.compact_head)
+                       merge=merge,
+                       head=(self.head, self.head_buffer(), 4 if rt.compact_head else 16)
+                       if fused_head else None)
+        if not fused_head:
+            rt.gemm(out16, self.head, self.head_buffer(), pixels, 16, 32,
+                    compact_output=rt.compact_head)
         submit()
 
         if execution == "replay":

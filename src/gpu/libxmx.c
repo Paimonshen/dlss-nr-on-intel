@@ -1447,7 +1447,14 @@ int xmx_rec_window_block(int image, int qkv, int projection, int target, int bia
 	if (!g.recording || !g.rblock) FAIL("window block not ready for recording", 0);
 	if (!windows || !height || !width || !across || windows % across)
 		FAIL("invalid window block geometry", 0);
-	if (flags & ~0x809f00u) FAIL("the window block takes a publish, a half target, a half image and a pool", 0);
+	if (flags & ~0x3809f00u)
+		FAIL("the window block takes a publish, a half target, a half image, a pool or a head", 0);
+	if ((flags & 0x2000000u) && !(flags & 0x1000000u))
+		FAIL("all sixteen head columns without the head", 0);
+	/* the head (0x1000000) is block 70's: `pooled` carries the head's weights, and the
+	 * target is the compact head, four float32 columns a pixel */
+	if ((flags & 0x1000000u) && (pooled < 0 || (flags & 0x801f00u)))
+		FAIL("a window block with the head needs its weights, no publish and no pool", 0);
 	/* the pool (0x800000) is block 0's: the target takes the published skip as half */
 	if ((flags & 0x800000u) && (pooled < 0 || (flags & 0x1f00u) || height % 2u || width % 2u
 				    || (pad >> 16) % 2u || (pad & 0xffffu) % 2u))
@@ -1463,7 +1470,7 @@ int xmx_rec_window_block(int image, int qkv, int projection, int target, int bia
 	memcpy(&p.p0, &weights, sizeof weights);
 	memcpy(&p.p2, &pool, sizeof pool);
 	if (!p.a || !p.b || !p.c || !p.d || !weights || !p.residual_cos || !p.qkv_scale
-	    || ((flags & 0x800000u) && !pool))
+	    || ((flags & 0x1800000u) && !pool))
 		FAIL("window block operand is not a live buffer", 0);
 	VkPipeline pipeline;
 	if (resident_pipeline(10, flags, g.rblock, &pipeline)) return -1;
