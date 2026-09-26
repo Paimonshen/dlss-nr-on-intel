@@ -180,3 +180,15 @@ a step where there were 32 16-bit ones. Bit-identical, and **5-7 % slower in a f
 (320x320 23.9 -> 25.4 ms, 1280x768 135 -> 144, 1920x1088 281.6 -> 296.4): the compiled kernel
 came out with more instructions and more sends, not fewer. The K loop is not bound by its
 loads, as the timing proxies above already said.
+
+## A level-1 block whole, its feed-forward inside the window block (tried, not kept)
+
+The one-head blocks' feed-forward writes its float32 output — 67 MB a block at level 1 of a
+1920x1088 frame — for the window block to read straight back. Run inside the window block
+instead (a flag on `window_block.comp`: each window makes its 64 tokens' feed-forward, the
+weights in K's and V's bytes a hidden chunk at a time, the output kept in registers as the
+closing residual's skip), it is bit-identical and **no faster**: 1.04x at 160x160, 0.97x at
+640x384, 0.95x at 960x544. The traffic it saves is paid back in work: every window loads
+all 16 KB of the feed-forward's weights for 64 tokens where `ffn_fused.comp` shares them
+among 256, a subgroup takes 8 rows where it took 16 — half the use of each B fragment — and
+the chunks need four more barriers a window.
