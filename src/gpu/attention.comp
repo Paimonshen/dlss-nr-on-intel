@@ -245,13 +245,15 @@ void softmax(uint row, uint local) {
  * workgroup normalises and stores along the rows again. A pair that starts below `n` counts
  * both halves, as the one-row loop did, and the pad past it is zeroed so the following
  * P@V contributes nothing. Rows sit `stride + 1` apart, so the lanes adding their rows at
- * the same column meet different banks; the last 32 floats hold the reciprocals, and
- * libxmx dispatches one workgroup per `WHOLE / (stride + 1)` rows to match. */
+ * the same column meet different banks; the last 32 floats hold the reciprocals, so a
+ * workgroup takes at most 32 rows, and libxmx dispatches one per `min(32, WHOLE / (stride
+ * + 1))` to match. Below a stride of 62 more would fit, and the ones past 32 lost their
+ * reciprocal: the 16-token bottleneck on 32 rows came out zero in rows 32-60 of each. */
 const uint WHOLE = 2016u;
 
 void softmax_rows(uint local) {
     uint stride = pc.sa != 0u ? pc.sa : pc.n, pitch = stride + 1u;
-    uint per = WHOLE / pitch, first = gl_WorkGroupID.x * per;
+    uint per = min(32u, WHOLE / pitch), first = gl_WorkGroupID.x * per;
     uint rows = min(per, pc.m - first);
     uint paired = (pc.n + 1u) & ~1u, pairs = paired / 2u;
     for (uint q = local; q < rows * stride; q += ROW_LANES)

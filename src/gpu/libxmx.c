@@ -1362,6 +1362,7 @@ int xmx_rec_row(unsigned kind, int a, int b, int c, int d, unsigned rows, unsign
 		    && row_stride + 1u <= 2016u;
 	if (whole) {
 		unsigned per = 2016u / (row_stride + 1u);
+		if (per > 32u) per = 32u;       /* the last 32 floats hold one reciprocal a row */
 		groups = (rows + per - 1u) / per;
 	}
 	VkPipeline pipeline;
