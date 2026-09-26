@@ -168,3 +168,15 @@ the bytes the projection went 3.78 -> 3.93 ms and attention 3.22 -> 3.93, and th
 155.5 -> 161 ms (1920x1088 328 -> 343.5). Neither pass waits on those bytes; the encode and
 decode are what it paid for. A pass running at the machine's bandwidth is not thereby
 bandwidth-bound.
+
+## B by pairs of K in shared memory (tried, not kept)
+
+Mesa's 16x16 half B fragment, probed with a known matrix: lane `l` holds column `l % 16`, and
+with `h = l / 16` its elements `2i` and `2i + 1` are rows `4i + 2h` and `4i + 2h + 1` — four
+pairs of K, a pair a register (the A fragment: rows `l / 8` and `l / 8 + 4`, K pair
+`2 (l % 8)`). So B was staged as words holding `B[2p][n]` and `B[2p + 1][n]` and each fragment
+filled by element from four word loads, where by row it is eight 16-bit loads: 16 word loads
+a step where there were 32 16-bit ones. Bit-identical, and **5-7 % slower in a frame**
+(320x320 23.9 -> 25.4 ms, 1280x768 135 -> 144, 1920x1088 281.6 -> 296.4): the compiled kernel
+came out with more instructions and more sends, not fewer. The K loop is not bound by its
+loads, as the timing proxies above already said.
