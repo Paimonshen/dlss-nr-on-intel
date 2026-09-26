@@ -57,7 +57,10 @@ block's feed-forward inside its window block (no faster: each window reloads the
 weights ffn_fused shares among 256 rows), and the fused branched feed-forward re-measured
 (slower at every extent, 1920x1088 +14.5 ms). What is left inside the graph at 320x320:
 GEMM two-thirds of it, at the staged kernel's ~3.5-3.8 TFLOP/s on the large shapes; the
-window blocks 12 %.
+window blocks 12 %. And the bottleneck's QKV projection at 96 tokens — 1920x1080 at 0.3 —
+left the tiled kernel once the QKV epilogue could skip a partial block's rows (0.255 ->
+0.166 ms a call; the daemon there 49.3 -> 48.5 ms). At high extents the next lever is the
+global attention in one kernel (`notes/improve-b.md`, 7 % at 1920x1088, not written).
 
 ## int8 on the bottleneck: measured again, and kept as a measurement (2026-09-26)
 

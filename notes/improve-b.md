@@ -192,3 +192,17 @@ closing residual's skip), it is bit-identical and **no faster**: 1.04x at 160x16
 all 16 KB of the feed-forward's weights for 64 tokens where `ffn_fused.comp` shares them
 among 256, a subgroup takes 8 rows where it took 16 — half the use of each B fragment — and
 the chunks need four more barriers a window.
+
+## Two small measurements (2026-09-26, evening)
+
+- **32-row blocks for a 96-token bottleneck** (a 576x352 network): slower, where 64 tokens
+  gained. The two N = 1024 GEMMs went 0.246 -> 0.325 and 0.069 -> 0.085 ms a call: a partial
+  64-row block wastes a quarter of its rows but reads the weights twice, three 32-row blocks
+  read them three times. The rule stays at M = 64.
+- **The global blocks' softmax at 640 tokens** (1920x1088): 1.65 ms a call, of which the
+  rows' serial sums are 0.43 (taken out, 1.22). Three rows of 641 fit a workgroup's 8 KB, so
+  three lanes of 256 sum while the rest wait; the other 1.2 ms is near the memory floor of
+  the pass itself — 52 MB of float32 scores in, 26 MB of half out, ~1 ms at 80 GB/s. What
+  would pay is not writing the scores at all: QK^T, the weights and PV in one kernel, each
+  row's sum still taken in key order — about 7 % of a 1920x1088 frame, growing with the
+  square of the tokens, and nothing at the live extents. Not written.
