@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
 nr_daemon — runs DLSS-NR for the Vulkan layer.
 
@@ -625,8 +625,19 @@ def process_connection(connection, backend, args):
     history_inner, history_full, history_pixels = args.history.take(
         shot, inner, live.cut_limit if live.temporal > 0 else -1.0)
     # Built in the graph's own mapped input where the backend offers it, so nothing is
-    # copied on the way in.
-    input_view = getattr(backend, "input_view", None)
+    # copied on the way in — on Linux that is measured and clean (test_input_fp16.py).
+    #
+    # Off on Windows: on the B580 the features built into the mapped half buffer come
+    # back through the graph as NaN - every frame, reproducibly, while the same features
+    # built on the host and copied in give a correct picture (measured here through the
+    # deployed layer: 163 clean frames with the host path, an all-black answer through
+    # the mapped one, at the same resolution and scale). Discrete-card memory on this
+    # driver is not behaving like the integrated one this was written on, and until that
+    # is pinned down the host copy is the choice that works. NR_INPUT_VIEW=1 turns it
+    # back on for a driver where it is fine.
+    input_view = (getattr(backend, "input_view", None)
+                  if os.environ.get("NR_INPUT_VIEW", "0" if os.name == "nt" else "1") == "1"
+                  else None)
     features = nr_frame.build_features(
         inner, geometry=geometry, history=history_inner,
         out=input_view(geometry.network_height, geometry.network_width) if input_view else None,
@@ -831,15 +842,22 @@ def check_half_rounding(tolerance=0):
         # Not fatal: a deployment that left the probe out still runs the graph.
         print(f"half rounding: NOT CHECKED (no {spv})", flush=True)
         return
-    # The unary shader is picked when a runtime is built, so XMX_UNARY_SPV has to be set
-    # first; this runs before the graph's own runtime exists and removes it again.
-    import xmxres
-    os.environ["XMX_UNARY_SPV"] = spv
-    try:
-        probe = xmxres.Runtime()
-    finally:
-        del os.environ["XMX_UNARY_SPV"]
-    check_half_rounding_on(probe, tolerance)
+    # In a child process, deliberately. libxmx.c keeps its Vulkan state in process
+    # globals, so a probe that builds a runtime inside this one resets state the graph is
+    # about to build on - on the B580 every frame then comes back NaN (measured here:
+    # all-black answers through the daemon, clean with NR_SKIP_HALF_CHECK=1, which is how
+    # this was found). A child keeps the probe's Vulkan lifetime out of the graph's.
+    r = subprocess.run(
+        [sys.executable, str(pathlib.Path(__file__).resolve()), "--half-probe"],
+        env={**os.environ, "NR_ROOT": str(ROOT),
+             "PYTHONPATH": os.pathsep.join([str(ROOT / "src" / "gpu"),
+                                            str(ROOT / "src" / "ref"),
+                                            str(ROOT / "src" / "layer")])},
+        capture_output=True, text=True, timeout=180)
+    for line in (r.stdout or "").splitlines():
+        print(line, flush=True)
+    if r.returncode != 0:
+        raise SystemExit((r.stderr or "the half-rounding probe failed").strip())
 
 
 def check_half_rounding_on(rt, tolerance):
@@ -895,7 +913,59 @@ def check_half_rounding_on(rt, tolerance):
               flush=True)
 
 
+
+
+def half_probe_child():
+    """The probe as its own process: compare, print, exit 0 or 1."""
+    spv = str(ROOT / "work" / "half_probe.spv")
+    if not pathlib.Path(spv).exists():
+        print(f"half rounding: NOT CHECKED (no {spv})", flush=True)
+        return 0
+    import xmxres
+    os.environ["XMX_UNARY_SPV"] = spv
+    probe = xmxres.Runtime()
+    rng = np.random.default_rng(3)
+    values = np.concatenate([
+        rng.standard_normal(1 << 16).astype(np.float32) * 4.0,      # ordinary
+        rng.standard_normal(1 << 14).astype(np.float32) * 1e-5,     # half subnormals
+        rng.standard_normal(1 << 12).astype(np.float32) * 1e-7,     # far below
+        rng.standard_normal(1 << 12).astype(np.float32) * 1e5,      # overflow range
+        np.float32([0.0, -0.0, 65504.0, 65520.0, 65519.0, 6.09e-05, 5.96e-08, 2.98e-08]),
+    ]).astype(np.float32)
+    n = (values.size + 255) // 256 * 256
+    padded = np.zeros(n, np.float32)
+    padded[:values.size] = values
+    src = probe.buffer_from(padded)
+    outs = [probe.buffer(n) for _ in range(3)]
+    probe.begin()
+    probe.unary(0, src, outs[1], n, second=outs[0], third=outs[2])
+    probe.submit()
+    with np.errstate(over="ignore"):
+        want = padded.astype(np.float16).astype(np.float32)
+    mismatches = {}
+    for name, buf in zip(("bit-twiddled", "packHalf2x16", "float16_t"), outs):
+        got = buf.view()[:n]
+        bad = ~((got == want) | (np.isnan(got) & np.isnan(want)))
+        mismatches[name] = int(bad.sum())
+    print("half rounding: " + ", ".join(f"{k} {v}/{n}" for k, v in mismatches.items()),
+          flush=True)
+    used = "float16_t" if os.environ.get("NR_HALF_ROUND_FLOAT16") == "1" else "bit-twiddled"
+    if mismatches[used] > 0:
+        print(f"FAIL: {used} disagrees with float16 on {mismatches[used]} of {n} values; "
+              "every rounding point in publish.glsl would move, per frame, silently.",
+              flush=True)
+        return 1
+    if mismatches["packHalf2x16"] > 0:
+        print(f"  warning: packHalf2x16 is wrong on this driver "
+              f"({mismatches['packHalf2x16']}/{n} values); the attention shaders use it",
+              flush=True)
+    return 0
+
+
 def main():
+    if len(sys.argv) == 2 and sys.argv[1] == "--half-probe":
+        sys.exit(half_probe_child())
+
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--socket", default="/tmp/nr_layer.sock")
