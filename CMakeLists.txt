@@ -43,27 +43,40 @@ function(nr_output target)
   target_compile_options(${target} PRIVATE -Wall -Wextra -Wno-unused-parameter)
 endfunction()
 
+# Every shader the runtime loads, with the Makefile's defines; `src/tools/build_check.py`
+# fails the tests if the two lists part. Every shader depends on every shared GLSL
+# include: a superset, so an edit to one rebuilds a few shaders too many, never too few.
 set(NR_SPV)
+set(NR_GLSL_INCLUDES publish specialize residual_epilogue cosine_tree qkv_epilogue)
+list(TRANSFORM NR_GLSL_INCLUDES PREPEND "${PROJECT_SOURCE_DIR}/src/gpu/")
+list(TRANSFORM NR_GLSL_INCLUDES APPEND ".glsl")
 function(nr_shader output source)
   set(out "${NR_WORK_DIR}/${output}")
   add_custom_command(OUTPUT "${out}"
     COMMAND "${NR_GLSLANG}" --target-env vulkan1.3
       "-I${PROJECT_SOURCE_DIR}/src/gpu" ${ARGN} -o "${out}" "${PROJECT_SOURCE_DIR}/${source}"
-    DEPENDS "${PROJECT_SOURCE_DIR}/${source}"
-      "${PROJECT_SOURCE_DIR}/src/gpu/publish.glsl"
-      "${PROJECT_SOURCE_DIR}/src/gpu/specialize.glsl"
+    DEPENDS "${PROJECT_SOURCE_DIR}/${source}" ${NR_GLSL_INCLUDES}
     VERBATIM)
   set(NR_SPV ${NR_SPV} "${out}" PARENT_SCOPE)
 endfunction()
 nr_shader(gemm_resident.spv src/gpu/gemm_resident.comp)
 nr_shader(gemm_tiled.spv src/gpu/gemm_resident.comp -DRM=2 -DRN=2)
 nr_shader(gemm_staged.spv src/gpu/gemm_staged.comp)
+nr_shader(gemm_staged32.spv src/gpu/gemm_staged.comp -DSTAGED_BM=32)
+nr_shader(gemm_staged32_deep.spv src/gpu/gemm_staged.comp -DSTAGED_BM=32 -DSTAGED_BK=64)
+nr_shader(attention_rows.spv src/gpu/attention.comp -DROW_LANES=256)
 nr_shader(resident.spv src/gpu/resident.comp)
 nr_shader(attention.spv src/gpu/attention.comp)
 nr_shader(history.spv src/gpu/history.comp)
 nr_shader(gemm_coopmat.spv src/gpu/gemm_coopmat.comp)
 nr_shader(gemm_batched.spv src/gpu/gemm_coopmat_batched.comp)
 nr_shader(gemm_f16acc.spv src/gpu/gemm_coopmat_f16acc.comp)
+nr_shader(gemm_coopmat_int8.spv src/gpu/gemm_coopmat_int8.comp)
+nr_shader(gemm_staged_int8.spv src/gpu/gemm_staged_int8.comp)
+nr_shader(window_attention.spv src/gpu/window_attention.comp)
+nr_shader(window_block.spv src/gpu/window_block.comp)
+nr_shader(global_attention.spv src/gpu/global_attention.comp)
+nr_shader(ffn_fused.spv src/gpu/ffn_fused.comp)
 if(NR_BUILD_TESTS)
   nr_shader(attention_ab.spv src/gpu/attention.comp -DSOFTMAX_AB)
 endif()
@@ -78,8 +91,14 @@ target_link_libraries(gemm_runner PRIVATE nr_vulkan)
 target_compile_options(gemm_runner PRIVATE -O2)
 nr_output(gemm_runner)
 
+# The Makefile's flags, for the Makefile's reasons: no contraction and no fast maths keep
+# the bytes the NumPy's; -fno-trapping-math lets the fused composition vectorise; OpenMP
+# splits every pass by rows.
+find_package(OpenMP REQUIRED COMPONENTS C)
 add_library(nr_image SHARED src/ref/nr_image.c)
-target_compile_options(nr_image PRIVATE -O3 -ffp-contract=off -fno-fast-math)
+target_compile_options(nr_image PRIVATE -O3 -ffp-contract=off -fno-fast-math
+  -fno-trapping-math)
+target_link_libraries(nr_image PRIVATE OpenMP::OpenMP_C m)
 include(CheckCCompilerFlag)
 if(NOT CMAKE_CROSSCOMPILING)
   check_c_compiler_flag(-march=native NR_HAS_MARCH_NATIVE)
@@ -125,11 +144,13 @@ if(NR_BUILD_TESTS)
       "${PROJECT_SOURCE_DIR}/src/layer/test_present.py" --negative-control)
     set_tests_properties(layer_present_negative PROPERTIES SKIP_RETURN_CODE 77)
   endif()
-  foreach(name publish_check claims_check)
+  foreach(name publish_check claims_check build_check)
     nr_test(${name} "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/src/tools/${name}.py")
   endforeach()
-  foreach(name gemm_contract input_fp16 compact_head joint_qkv epilogue specialization softmax_pack qkv_fusion
-      scratch_arena graph frame_execution resident)
+  foreach(name gemm_contract input_fp16 compact_head joint_qkv gemm_int8 gemm_int8_staged
+      window_block global_attention int8_quant gemm_residual window_residual window_attention
+      gemm_qkv glue ffn_fused staged_partial staged32 epilogue specialization softmax_pack
+      qkv_fusion scratch_arena graph frame_execution resident)
     nr_test(gpu_${name} "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/src/gpu/test_${name}.py")
   endforeach()
   nr_test(gpu_ffn_batch "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/src/gpu/test_ffn_batch.py" --gpu)
