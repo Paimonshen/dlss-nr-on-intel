@@ -33,16 +33,28 @@ engine `HNet`, configs `crazy-cuckoo` and `hnet-vigilant-squid`.
 
 ### Extent
 
-The network runs on an extent that is **at least 320 and a multiple of 64** on each axis.
-A frame smaller than that, or not on the grid, is mirrored outward to fit and cropped back
-afterwards; the mirror is a reflection of row and column indices, not padding.
+The network runs on a padded field, **at least 320 on each axis**, each side aligned to the
+graph's own reductions: two to the number of halvings, rounded up to 4, that shrink it, and
+one more when level 0 would not be whole 8-pixel windows — 64 for most sizes, 128 for some.
+And when both sides come out at four alignments the width takes one more. A frame smaller
+than its field is mirrored outward to fit and cropped back afterwards; the mirror is a
+reflection of row and column indices, not padding.
 
 ```
 1024x576 -> 1024x576      already aligned
- 563x317 ->  576x320      rounded up
-1920x1080 -> 1920x1088
-   64x48 ->  320x320      the floor
+ 563x317 ->  640x320      317 aligns to 64, 563 to 128
+1920x1080 -> 1920x1152    level 0 would be 540 rows: aligned to 128
+1280x720 -> 1344x768      1280x768 is four alignments each way: one more on the width
+   64x48 ->  384x320      the floor, then as for 1280x720: 336, rounded up to 64 here
 ```
+
+The last step is the one to keep. A field whose sides are both multiples of 256 pools to a
+bottleneck with no padding token, and on every such field the pass comes out 25-30 % weaker
+than on the fields around it; the vendor's extra column keeps the common sizes off them. This
+is the vendor's rule as [OpenDLSS-NR](https://github.com/maanHimself/OpenDLSS-NR) reproduces it
+from captures (`notes/opendlss-reference.md`); MLX-DLSS's — a multiple of 64 — put 1280x720 on
+1280x768. Below 129 pixels a side the rule need not give a multiple of 64, which this
+implementation's exact halvings cannot follow, and it rounds up there.
 
 ### Input: 16 channels, float32
 

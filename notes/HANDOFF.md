@@ -24,6 +24,28 @@ you need the evidence behind a line in this file, rather than reading them in or
   have no upscaler, so it needs a newer game.
 - **A FAQ** in the README, for the questions that keep coming back. Later.
 
+## The padded field is the vendor's, and 1280x720 had been drawing a weaker pass (2026-09-27, evening)
+
+**Every network field whose sides are both multiples of 256 draws a pass 25-30 % weaker** than any
+field around it — 1280x768, 1024x768, 768x512, 512x512, 1536x768, 1280x1024, each 7.7-8.6 levels of
+255 on a DoA5 frame against 9.8-11.6 beside it. Such a field pools to a bottleneck with no padding
+token. MLX-DLSS's field rule (a multiple of 64, at least 320) put **1280x720 on 1280x768**, one of
+them; the vendor's, as OpenDLSS-NR reproduces it from captures, aligns each side to the graph's own
+reductions and adds a column of windows when both sides are four alignments — 1344x768. Ours on our
+field against the reference on its own was **4.3-8.4 levels apart, head corr 0.41-0.76**; on its field,
+0.5-0.75 and 0.996. The weakness is the network's, not ours: where the vendor's rule itself lands on
+1280x768 (a 1153x642 frame) the reference is just as weak, 7.44 against our 7.42 levels.
+
+`nr_frame.network_geometry` is the vendor's rule now — `min_extent` its floor, rounded to 64 only
+below 129 pixels a side — and MLX-DLSS's pipeline takes it too. **It corrects "0.9 looks better than
+1.0" below**: the 1.5-1.7x weaker change at 1.0 was the field. Re-measured on the same three frames,
+1.0 changes the picture as much as 0.9; what is left is 1.5-3x more pixel-level grain at 1.0, and
+whether 0.9 still looks better is the owner's to see again. Fields that grew: 1280x720 -> 1344x768,
+1920x1080 -> 1920x1152, 1152x648 (0.9 at 720p) -> 1152x768, 1024x768 at 0.55 -> 640x512 (48.5 ->
+56.5 ms, the one rate row that changed; the table is re-measured, medians of six); at the graph's
+floor 320x180 now runs at 320x256 (13.5-14.6 ms at 512x288 and 0.35, 25 at 320). The live sizes'
+fields are unchanged. `notes/opendlss-reference.md`, "The padded field".
+
 ## The graph is the vendor's now, as far as a head can tell (2026-09-27, later)
 
 **Six more places where MLX-DLSS's graph — which this tree ported — computed something the vendor's
@@ -301,7 +323,7 @@ of the extent. At live sizes most of a 320x320 frame was mirror padding: 44 % of
 
 | game size, scale | network at 320 | network at 128 | ms a frame |
 | --- | --- | --- | --- |
-| 640x360, 0.5 | 320x320 | 320x192 | 30.3 -> 22.7 |
+| 640x360, 0.5 | 320x320 | 320x192 (320x256 since 2026-09-27) | 30.3 -> 22.7 |
 | 640x360, 0.35 | 320x320 | 256x128 | 29.4 -> 16.1 |
 | 512x288, 0.35 | 320x320 | 192x128 | 28.6 -> 14.7 |
 
@@ -354,6 +376,10 @@ choice from 4/8/16/24 in the game; 0 restores the old behaviour. `notes/phase54`
 
 The knob descriptions were rewritten at the owner's request: general, no scene a user
 cannot see (a kimono, an iris). The measurements they used to quote are in the notes.
+
+> **Corrected 2026-09-27**: the weaker change at 1.0 below was the padded field — 1280x720 ran on
+> 1280x768, a field that draws a 25-30 % weaker pass. On the vendor's field 1.0 changes the picture as
+> much as 0.9; the extra grain at 1.0 remains. See the entry at the top.
 
 **Render scale 0.9 looks better than 1.0, and it is not arithmetic.** The owner saw it in
 DoA5 at 720p (0.9 over 0.95 and 1.0) and it measures (`src/bench/scale_spectrum.py`, three

@@ -316,13 +316,13 @@ all of them move between frames. Only `profile` costs a forward pass.
 
 `0.05` to `1`, step `0.05`, default `1`
 
-The only knob that changes the frame rate. The network draws its detail on a frame this much smaller; the detail is then scaled up and laid over the game's full-resolution frame, so the game's own pixels are never resampled. Lower is faster and draws coarser detail. The network never runs below 320 pixels on a side, so on a small window the low scales all cost the same: at 512x288, everything up to about 0.6 runs the same 320x320 network. For play, 0.35-0.6 is the useful range. For screenshots 0.9 tends to look better than 1.0: at exactly the display size the network is handed the game's raw pixels, jagged edges and all, turns part of them into pixel-level grain, and its effect comes out weaker. Cost on an Arc 140V: about 9 ms plus 162 ms per megapixel of network frame.
+The only knob that changes the frame rate. The network draws its detail on a frame this much smaller; the detail is then scaled up and laid over the game's full-resolution frame, so the game's own pixels are never resampled. Lower is faster and draws coarser detail. The network never runs below 320 pixels on a side, so on a small window the low scales all cost the same: at 512x288, everything up to about 0.6 runs the same 320x320 network. For play, 0.35-0.6 is the useful range. For screenshots, 1.0 hands the network the game's raw pixels, jagged edges and all, and it turns a little of them into pixel-level grain; 0.9 smooths them first and draws the same strength of effect. Cost on an Arc 140V: about 9 ms plus 162 ms per megapixel of network frame.
 
 ### `min_extent` — the smallest side the network's frame is padded to
 
 `128` to `320`, step `64`, default `320`
 
-The network's frame is padded, by mirroring the picture, to at least this many pixels on a side. 320 is what NVIDIA's own driver does; the network itself runs down to 128. At small live sizes most of a 320 frame is padding, so a lower floor is much faster — on an Arc 140V, 512x288 at scale 0.35 takes 29 ms a frame at 320 and 15 at 128 — and draws a somewhat different picture, since the network no longer sees a mirrored copy of the scene around it. Neither is wrong; compare them in a game. It changes nothing once the scaled frame is larger than this anyway.
+The network's frame is padded, by mirroring the picture, to at least this many pixels on a side. 320 is what NVIDIA's own driver does; the network itself runs down to 128. At small live sizes most of a 320 frame is padding, so a lower floor is much faster — on an Arc 140V, 512x288 at scale 0.35 takes 25 ms a frame at 320 and 14 at 128 — and draws a somewhat different picture, since the network no longer sees a mirrored copy of the scene around it. Neither is wrong; compare them in a game. It changes nothing once the scaled frame is larger than this anyway.
 
 ### `profile` — which way to trade skin texture against highlights and colour
 
@@ -378,19 +378,19 @@ The average change between two frames above which the scene is taken to have cut
 
 <!-- rates:begin -->
 
-Measured through the socket on 2026-09-26 by `python3 src/bench/live_rates.py` — the whole round trip a game waits for, median of nine frames, not graph time alone:
+Measured through the socket on 2026-09-27 by `python3 src/bench/live_rates.py` — the whole round trip a game waits for, median of nine frames, not graph time alone:
 
 | swapchain | render scale | ms | fps |
 | --- | ---: | ---: | ---: |
-| 512x288 | 0.35 | 26 | 39.2 |
+| 512x288 | 0.35 | 26 | 38.6 |
 | 512x288 | 0.50 | 26 | 38.5 |
-| 640x360 | 0.35 | 26 | 38.8 |
-| 640x360 | 0.50 | 26 | 37.7 |
-| 854x480 | 0.50 | 32 | 31.0 |
-| 1024x768 | 0.55 | 48 | 20.6 |
-| 1920x1080 | 0.55 | 111 | 9.0 |
+| 640x360 | 0.35 | 26 | 38.5 |
+| 640x360 | 0.50 | 27 | 37.0 |
+| 854x480 | 0.50 | 34 | 29.4 |
+| 1024x768 | 0.55 | 56 | 17.7 |
+| 1920x1080 | 0.55 | 112 | 8.9 |
 
-Medians of three runs with swap empty, which agreed within 10 %. On 2026-09-23, with 5.5 GiB in zram and the kernel's memory-pressure figures rising, 1920x1080 ran anywhere from 322 to 463 ms: if that row is much slower for you, look at swap before anything else.
+Medians of six runs with swap empty; a row's runs spread up to 15 %. On 2026-09-23, with 5.5 GiB in zram and the kernel's memory-pressure figures rising, 1920x1080 ran anywhere from 322 to 463 ms: if that row is much slower for you, look at swap before anything else.
 
 That is the daemon's own cost with nothing else on the GPU. A game adds its own frame to it: **Tekken 7** ran at **25 fps at 640x360** in a live session on 2026-09-24, against 10.5 fps nine days earlier (`notes/phase59`).
 

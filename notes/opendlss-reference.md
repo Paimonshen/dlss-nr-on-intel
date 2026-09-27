@@ -153,6 +153,48 @@ the distance our own two arithmetics make of one graph (the GPU path against the
 heads can see; the rest is arithmetic, and a single frame's head moves by as much between two
 float32 GEMM blockings of the same graph (0.04 in the gate's correlation, 0.2 levels composed).
 
+## The padded field: a whole class of frames drew a weaker pass (2026-09-27)
+
+The features were never the question — our noise is the reference's generator (the same hash, the
+same Box-Muller, the last bits of the transcendentals apart), and the mirror, the colour's three half
+roundings and the control lanes are its too. The field they fill was. MLX-DLSS padded each side to a
+multiple of 64 and at least 320; the reference aligns each side to the graph's own reductions and adds
+one alignment to the width when both sides are four alignments (`geometryFromValid`, a rule it
+reproduces "because it moves the window grid"). At 1280x720 the two give 1280x768 and 1344x768.
+
+**Every field whose sides are both multiples of 256 draws a pass 25-30 % weaker than any field around
+it.** One DoA5 frame, the pass's mean change in levels of 255, our GPU path on the frame resampled to the
+first size and padded to each field:
+
+| frame | fields with both sides a multiple of 256 | the fields beside them |
+| --- | --- | --- |
+| 1024x768 | 1024x768: 7.95 | 1088x768 10.74, 1024x832 11.07, 1152x768 10.68 |
+| 768x512 | 768x512: 7.75 | 832x512 11.50, 768x576 11.46, 896x512 11.50 |
+| 512x512 | 512x512: 8.63 | 576x512 11.55, 512x576 11.13, 640x512 11.64 |
+| 1280x1024 | 1280x1024: 7.83 | 1344x1024 10.47, 1280x1088 10.53 |
+| 1536x768 | 1536x768: 7.84 | 1600x768 9.79, 1536x832 10.05 |
+| 1280x720 | 1280x768: 7.73 | 1344x768 10.53, 1408x768 10.44, 1280x832 10.69 |
+
+Such a field pools down to a bottleneck with no padding token in it — every halving exact, no
+row or column of zeros at levels 4 and 5 — and that is the only thing the weak fields share; the
+amount of mirrored padding is not it (1024x768 has none, 768x768 for a 700x720 frame has plenty, both
+weak). The reference's extra alignment is exactly the step that keeps the common sizes out of it,
+and it is the network's, not ours: at 1153x642, where the reference's rule itself lands on 1280x768
+(both sides align to 128 there, and its extra step needs four of those), its pass is as weak as ours
+— 7.44 against 7.42 levels, 4.53 against 4.51 — and the two agree to 0.54-0.76 levels.
+
+What that did to this tree: 1280x720 at render scale 1.0 ran on 1280x768. Ours on our field against
+the reference on its own: **4.28 and 8.41 levels apart, head RGB corr 0.41-0.76** — against 0.48-0.75
+levels and 0.996-0.997 for ours on the reference's field. And it is most of why 0.9 looked better than
+1.0 at 720p (HANDOFF, 2026-09-25): three DoA5 frames through the daemon now change as much at 1.0 as at
+0.9 (0.0396 / 0.0399, 0.0143 / 0.0143, 0.0218 / 0.0209 of luma) where the 1.5-1.7x gap was measured;
+what is left is the grain — 1.5-3x more of the added energy above half Nyquist at 1.0.
+
+`nr_frame.network_geometry` is the reference's rule now, `min_extent` its floor. Below 129 pixels a
+side the rule need not give a multiple of 64, which this graph's exact halvings cannot follow, and it
+is rounded up there. The published live sizes keep their fields except 1024x768 at 0.55 (563x422:
+576x448 -> 640x512, 48.5 -> 56.5 ms); at the graph's floor a 320x180 frame runs at 320x256, not 320x192.
+
 ## What still differs
 
 Arithmetic, all of it: the GEMMs (FP8 products as 13-bit fixed point onto an f16 accumulator the
@@ -161,5 +203,4 @@ blocks' cosine norm, which pairs channels (c, c+16) where ours pairs (c, c+8), a
 denominator, a fixed half tree over the keys in 4x4-tiled order where ours sums in float32 — the two
 together 0.2-1.4 points of the attention's bytes in the step test (97.9 -> 98.1 % at one head, 95.4
 -> 96.8 % at eight); the pools' and merges' half roundings; E4M3 always by way of half. Of these only
-the norm and the denominator are cheap, and they are worth little. Not arithmetic, and not measured: the padded field at 1280x720 and 1920x1080, where the
-window grids differ; the history stored truncated to half; the noise generator.
+the norm and the denominator are cheap, and they are worth little. Not arithmetic, and not measured: the history stored truncated to half.
