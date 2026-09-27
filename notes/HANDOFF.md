@@ -53,6 +53,20 @@ And the local `windows` branch (CMake for the compute side with MSYS2's gcc, `do
 overlaps PR #3, which does the layer and the daemon with MSVC: the two are to be reconciled
 before a Windows session starts from either.
 
+## On Windows: the `windows` branch (2026-09-27, late night)
+
+**If this is being read on Windows, the hardware facts in this file and in the brief are not
+facts there.** The brief's "do not re-probe, trust these values" is about Mesa's ANV on Linux;
+Intel's Windows driver is another driver with another shader compiler. Run `work/coopmat_probe`
+first — every kernel here needs the `fp16 x fp16 -> fp32` configuration at M=8 N=16 K=16 — and
+measure every speed rather than quote one. The checklist, in order, is `docs/WINDOWS.md`.
+
+What the branch has: CMake builds the compute side there with MSYS2's UCRT64 gcc (MSVC is refused,
+for `_Float16`), `xmx.native_library` finds `work/lib<name>.dll` and its MinGW runtime, CTest runs
+in UTF-8 mode, and the layer is off. Written on Linux and never compiled on Windows; on Linux both
+build systems still build it and pass (`make test`, CTest 42 of 42). Live mode in a game is the
+second milestone: the layer's threads and socket, the daemon's transport, DXVK for D3D9-11.
+
 ## Xe2's 256-register mode: reachable, correct, and slower (2026-09-27, late night)
 
 The owner asked to try lifting the register ceiling `phase26` found. **Lunar Lake has the mode**

@@ -16,6 +16,7 @@ Two things this layer must do that the kernel does not:
   2. **Pad to the tile shape.** The only float configuration is M=8 N=16 K=16.
 """
 import ctypes
+import os
 from pathlib import Path
 
 import numpy as np
@@ -25,13 +26,30 @@ FP16_MAX = 65504.0
 TM, TN, TK = 8, 16, 16
 
 _lib = None
+_dll_directories = []          # the handles keep the directories on Windows' search path
+
+
+def native_library(name):
+    """`work/lib<name>.so`, or `work/lib<name>.dll` on Windows, where Python since 3.8 finds a
+    DLL's own dependencies only in the system folders and the ones added here: the build's
+    `work/`, and `NR_DLL_PATH` for a toolchain's runtime — MinGW's libgomp and libwinpthread —
+    wherever it is installed."""
+    folder = ROOT / "work"
+    if os.name == "nt":
+        if not _dll_directories:
+            extra = [p for p in os.environ.get("NR_DLL_PATH", "").split(os.pathsep) if p]
+            for directory in [str(folder), *extra]:
+                if os.path.isdir(directory):
+                    _dll_directories.append(os.add_dll_directory(directory))
+        return ctypes.CDLL(str(folder / f"lib{name}.dll"))
+    return ctypes.CDLL(str(folder / f"lib{name}.so"))
 
 
 def _load(spv="gemm_coopmat.spv"):
     global _lib
     if _lib is not None:
         return _lib
-    lib = ctypes.CDLL(str(ROOT / "work" / "libxmx.so"))
+    lib = native_library("xmx")
     lib.xmx_init.argtypes = [ctypes.c_char_p]
     lib.xmx_init.restype = ctypes.c_int
     lib.xmx_gemm.argtypes = [ctypes.c_uint] * 3 + [ctypes.c_void_p] * 3 + [ctypes.c_uint]
