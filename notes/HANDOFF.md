@@ -24,9 +24,38 @@ you need the evidence behind a line in this file, rather than reading them in or
   have no upscaler, so it needs a newer game.
 - **A FAQ** in the README, for the questions that keep coming back. Later.
 
-## The reference was not rounding on this GPU; the vendor's GEMM in numpy (2026-09-27, night)
+## What the vendor does after the network: the styles' grade, and the history (2026-09-27, late)
 
-**Not published — the owner asked to hold pushes; this and everything after it are local commits.**
+**`natural` and `cinematic` were missing NVIDIA's own colour grade.** The vendor runs a post-process
+after the network, `cg2r_post_process_kernel` (PTX module 13): a whole grading chain — levels,
+temperature and tint, exposure, a smoothstep contrast, a five-zone tone curve, a gamma, HSL
+saturation and a saturation power — then `frame + intensity * mask * (graded - frame)`. The styles
+set three of its values from a table in the DLL (`0x1800b0de4`): **style 1 exposure -0.1 EV,
+contrast -0.25, saturation -0.1; style 2 saturation -0.15; style 0 nothing**, each times
+`clamp(LocalToneStrength, 0, 1)` (`0x18001d5f0`). Read from the PTX and the x86 code, not taken
+on trust; OpenDLSS-NR has the same values. Now in `nr_frame.grade_for` / `style_grade` and in
+`nr_image.c`, byte-identical to each other. On DoA5 at 1080p it moves `natural` 6.2 levels of 255
+— the pass itself moves the frame 9 — and `cinematic` 1.65. Cost 0.7 / 2.1 / 3.7 ms at the three
+live sizes, in a loop of its own: inside the fused pixel it kept the whole row from vectorising,
++19 ms at 1080p, because GCC's jump threading turns its clamps into branches — off for that loop.
+
+**And the history is the prediction, not the answer.** The vendor carries the composed head after
+its history blend and before the grade, the intensity and the masks, in RGBA16F (truncated toward
+zero, per OpenDLSS-NR's captures). This tree carried what the game received — after the intensity,
+the strengths and the interface restore. Changed in the daemon, both compositions (`neural=`) and
+`nr_temporal`'s session. Every answer after the first moves a little, at the same time; the
+daemon's references over 48 panning frames (standard): `f29ffcfaee77c496` / `23f59257381d0b3b` /
+`cba8fc4f60fd907d`. Heads and graph hashes are untouched.
+
+Also read out of it: in 310.8.0.0 the network always runs at the output's extent —
+`DLSSNR.ScalingRatio` is overwritten with 1.0 — so the kernel's Oklab transfer from a smaller
+network picture is unused. Left different: an intensity above 1 extrapolates here always, where the
+vendor's pass does not run for it alone; detail and colour strength are MLX-DLSS's. And a trap:
+`test_temporal.py`'s "a held scene settles" compared the fourth step with the first, which the
+network's own 0.06-0.2-level floor decides by chance — the old history's fifth step was the
+largest. `notes/phase70-post-process.md`.
+
+## The reference was not rounding on this GPU; the vendor's GEMM in numpy (2026-09-27, night)
 
 OpenDLSS-NR's WebGPU port rounds its GEMMs' f16 accumulator with WGSL's `f32(f16(x))`, which Mesa
 folds away: on this GPU the port was not rounding between its groups of 16 products at all. With the

@@ -625,6 +625,13 @@ def process_connection(connection, backend, args):
     # carrying it through the upscale would be a quarter of that pass for nothing
     # (notes/phase48) — and with history it is what decides the blend, per pixel.
     channels = 4 if history_full is not None else 3
+    # The style's colour grade, which the vendor runs after the network, and where the
+    # prediction the vendor keeps as the next frame's history is written — before the
+    # grade, the intensity, the strengths and the interface restore
+    # (`notes/phase70-post-process.md`).
+    grade = nr_frame.grade_for(**nr_frame.PROFILES[live.profile])
+    neural = (np.empty((active_height, active_width, 3), np.float32)
+              if live.temporal > 0 else None)
     control = None
     held = None
     if interface is not None:
@@ -675,7 +682,7 @@ def process_connection(connection, backend, args):
             top=top, left=left, bgra=kind == "bgra8", intensity=live.intensity,
             control_mask=control, history=history_full, history_confidence=live.temporal,
             history_previous=previous, history_hold=live.hold,
-            history_release=live.release, samples=8)
+            history_release=live.release, samples=8, grade=grade, neural=neural)
     full = None
     if fused is not None:
         composed, samples = fused
@@ -690,7 +697,8 @@ def process_connection(connection, backend, args):
                                     control_mask=control, history=history_full,
                                     history_confidence=live.temporal,
                                     history_previous=previous, history_hold=live.hold,
-                                    history_release=live.release)
+                                    history_release=live.release, grade=grade,
+                                    neural=neural)
         if boxed:
             # A copy, not a write into `whole`: aliasing the input and the output through
             # one array has now caused two bugs in this function — `change` printed
@@ -731,15 +739,17 @@ def process_connection(connection, backend, args):
     connection.sendall(encoded)
     if changed is None:
         changed = float(np.abs(composed[::4] - colour[::4]).mean())
-    # What the game was handed at the active region: after the interface restore, so what
-    # is carried forward is what the game actually received.
+    # What the game was handed at the active region, for the dump below.
     active = full[top:bottom, left:right] if full is not None else composed
     if live.temporal > 0:
-        # Kept as they are, not copied: each is this frame's own — decode, the resample and
-        # the composition all hand back fresh arrays, nothing writes them from here on, and
-        # History only reads what it holds. Three frame copies a frame were 0.4 ms at
-        # 640x360 and 2-3 at 1280x720.
-        args.history.keep(shot, active, inner, colour)
+        # What is carried forward is the vendor's history, the prediction before anything
+        # after the network — not what the game received, which the intensity, the grade,
+        # the strengths and the interface restore have all moved. Kept as they are, not
+        # copied: each is this frame's own — decode, the resample and the composition all
+        # hand back fresh arrays, nothing writes them from here on, and History only reads
+        # what it holds. Three frame copies a frame were 0.4 ms at 640x360 and 2-3 at
+        # 1280x720.
+        args.history.keep(shot, neural, inner, colour)
     if args.dump:
         import image_io
         try:

@@ -55,6 +55,7 @@ disproved.
 | `phase15-residency.md` | activations never return to the host |
 | `phase16-hdr.md` | the display codec, so an HDR frame survives the round trip |
 | `phase12-temporal.md` | the temporal gate discriminates: 0.705 right, 0.032 wrong motion |
+| `phase70-post-process.md` | what the vendor does after the network, read from the DLL: `cg2r_post_process_kernel` is a whole grading chain, the styles set three of its values (natural exposure -0.1, contrast -0.25, saturation -0.1; cinematic saturation -0.15) scaled by the tone, and the history is the prediction before any of it, in half |
 | `phase28-frame-replay.md` | one submission a frame, commands reused |
 | `phase27-pipeline-specialization.md` | specialize before believing a register ceiling |
 | `phase32-scratch-and-qk.md` | the scratch arena: 720p from 5041 to 2303 MiB |

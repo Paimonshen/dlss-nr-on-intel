@@ -43,14 +43,16 @@ KNOBS = (
     ),
     Knob(
         "profile", "profile", "choice", None, None, None, "standard",
-        "which way to trade skin texture against highlights and colour",
-        "The style the network is asked for. The profiles are a trade, not a quality "
-        "ladder: what one adds to skin and surface texture it takes from highlights and "
-        "colour. `standard` is the default and adds the most texture; `natural` and "
-        "`cinematic` keep more of the highlights and colour, and on very bright scenes "
-        "`cinematic` can smooth fine detail rather than add it. `neutral` all but switches "
-        "the effect off. The profile is an input to the network, so it takes effect on the "
-        "next frame the network draws; the knobs below act after it.",
+        "which way to trade skin texture against highlights, and its colour grade",
+        "The style the network is asked for, and the colour grade that comes with it. The "
+        "profiles are a trade, not a quality ladder: what one adds to skin and surface "
+        "texture it takes from highlights. `standard` is the default and adds the most "
+        "texture; `natural` and `cinematic` keep more of the highlights, and on very bright "
+        "scenes `cinematic` can smooth fine detail rather than add it. After the network, "
+        "as NVIDIA grades them, `natural` comes out a little darker, flatter and less "
+        "saturated and `cinematic` less saturated. `neutral` all but switches the effect "
+        "off. The profile is an input to the network, so it takes effect on the next frame "
+        "the network draws; the knobs below act after it.",
     ),
     Knob(
         "intensity", "intensity", "number", 0.0, 2.0, 0.05, 1.0,
