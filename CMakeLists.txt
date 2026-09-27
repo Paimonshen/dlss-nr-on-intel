@@ -147,6 +147,7 @@ if(NR_BUILD_TESTS)
   foreach(name publish_check claims_check build_check)
     nr_test(${name} "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/src/tools/${name}.py")
   endforeach()
+  nr_test(profile_tables "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/src/bench/frame_profile.py" --tables)
   foreach(name gemm_contract input_fp16 compact_head joint_qkv gemm_int8 gemm_int8_staged
       window_block global_attention int8_quant gemm_residual window_residual window_attention
       gemm_qkv glue ffn_fused staged_partial staged32 epilogue specialization softmax_pack

@@ -141,6 +141,7 @@ test: all work/attention_ab.spv work/test_exchange work/test_settled work/test_p
 	python3 src/tools/publish_check.py
 	python3 src/tools/claims_check.py
 	python3 src/tools/build_check.py
+	python3 src/bench/frame_profile.py --tables
 	python3 src/gpu/test_gemm_int8.py
 	python3 src/gpu/test_gemm_int8_staged.py
 	python3 src/gpu/test_window_block.py
