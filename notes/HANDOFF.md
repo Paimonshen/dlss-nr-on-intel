@@ -24,6 +24,35 @@ you need the evidence behind a line in this file, rather than reading them in or
   have no upscaler, so it needs a newer game.
 - **A FAQ** in the README, for the questions that keep coming back. Later.
 
+## PR #3 run on Linux; the bands it reports not explained here; the stills rendered again (2026-09-28, night)
+
+**PR #3** (the Windows link between layer and daemon, an outside contributor on a B580) was run
+here and reviewed on the PR. It did not build on Linux — two one-line errors — and with those
+fixed its own `make test` passed and the layer's daemon spawn worked from `make`'s layout. Its
+setup scripts fetch a third-party pack carrying NVIDIA's DLL, which cannot be merged in any form.
+It turns `NR_QKV_EPILOGUE` off for everyone after horizontal bands on the B580; here that costs
+**143 -> 257 ms** of graph at 1344x768 and 23.3 -> 34.8 at 320x320, for the same head.
+
+**The bands are not explained from here.** The subgroup width, forced with `XMX_SUBGROUP_WIDTH`
+(local branch `subgroup-width`, not merged): every pipeline at 16 lanes makes the head wrong and
+different on every run, epilogue on or off — the row passes in `attention.comp`, one subgroup a
+workgroup and ordered by subgroup barriers, race; any single other family at 16, both GEMMs
+included, leaves `test_gemm_qkv.py` and the frame's head bit for bit. And no QKV epilogue dispatch
+writes memory it reads: every call at four extents checked, buffer by buffer. **A driver that
+cannot pin 32 lanes gets a wrong picture from the row passes, and libxmx's one-line warning is
+the only sign of it.**
+
+**The README's five stills rendered again** from the same captured frames through today's graph:
+`src/bench/restill.py` replays a `--dump` capture through a fresh daemon in its order, history
+and all; `src/tools/comparisons.py` is the record of which frame and which pixels each published
+image is, and rebuilds the old ones exactly from the old captures (the table to the digit). More
+texture than on 2026-09-16 (Tekken's weave +50 -> +61 %), the same kind of change. Ready and not
+published — local branches `media-refresh` and `stills-refresh`, for the owner to approve.
+
+And the local `windows` branch (CMake for the compute side with MSYS2's gcc, `docs/WINDOWS.md`)
+overlaps PR #3, which does the layer and the daemon with MSVC: the two are to be reconciled
+before a Windows session starts from either.
+
 ## Xe2's 256-register mode: reachable, correct, and slower (2026-09-27, late night)
 
 The owner asked to try lifting the register ceiling `phase26` found. **Lunar Lake has the mode**
