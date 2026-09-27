@@ -55,6 +55,13 @@ there — the tests compare bytes — and expect to measure the speed rather tha
    the ANSI code page, and the notes, the README and the knob table are UTF-8; CTest sets it for
    its own tests.
 
+## Git on Windows
+
+The repository's `.gitattributes` keeps every file LF in the checkout and batch files CRLF, so
+`core.autocrlf` cannot turn a one-line change into a whole-file rewrite, as it once did. Write
+commit messages from a file, or from Git Bash: PowerShell's defaults put a byte-order mark in
+front of them.
+
 ## Build
 
 ```sh
@@ -97,3 +104,7 @@ and the tree's own checks, not the layer's.
   log, and are portable once their paths leave `/tmp`.
 - **The launchers** — `nr-photo`, `nr-toggle` — are bash; a Python or PowerShell one replaces
   them.
+
+PR #3 on GitHub is an outside contributor's port of exactly this part — the layer's threads and
+transport, a named pipe for the daemon, an MSVC build — run on a B580. Its review lists what it
+needs before it can be merged; once it is, this milestone starts from it rather than from here.
