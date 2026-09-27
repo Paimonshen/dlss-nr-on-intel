@@ -24,6 +24,20 @@ you need the evidence behind a line in this file, rather than reading them in or
   have no upscaler, so it needs a newer game.
 - **A FAQ** in the README, for the questions that keep coming back. Later.
 
+## Xe2's 256-register mode: reachable, correct, and slower (2026-09-27, late night)
+
+The owner asked to try lifting the register ceiling `phase26` found. **Lunar Lake has the mode**
+(`STATE_COMPUTE_MODE`'s `Large GRF Mode`, never set by Mesa), Xe2's encoding already reaches
+r255, and three changes to Mesa 26.2.3 behind `INTEL_XE2_LARGE_GRF=1` turn it on
+(`src/probe/mesa-xe2-large-grf.patch`): Xe3's 256 allocator slots, the SIMD32 pressure threshold
+raised, the mode bit in anv's queue inits. Shaders use r128-r255 and the daemon's answers come out
+byte for byte at four sizes. **But every frame is slower** — 640x360 at 0.5 25.3 -> 28.7 ms, 1080p
+at full scale 300 -> 378 — because the mode halves the threads an EU runs and the staged GEMM is
+tuned for full occupancy (51 -> 60 us a call). Isolated, starved kernels gain up to 3x (16x64
+blocks 1289 -> 4153 GFLOP/s), which is not what the frame runs. A win needs the mode per dispatch
+and a staged GEMM written for 256 registers; about 6 % on big shapes at best, not built.
+`notes/improve-large-grf.md`.
+
 ## A low render scale on a small window was paying for mirror padding (2026-09-27, night)
 
 The owner's Tekken 7 at 800x450: **30 fps at render scale 0.35, 27 at 0.6**. On a window that

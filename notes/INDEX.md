@@ -59,6 +59,7 @@ disproved.
 | `phase28-frame-replay.md` | one submission a frame, commands reused |
 | `phase27-pipeline-specialization.md` | specialize before believing a register ceiling |
 | `phase32-scratch-and-qk.md` | the scratch arena: 720p from 5041 to 2303 MiB |
+| `improve-large-grf.md` | Xe2's 256-register mode, reached with a three-place Mesa patch: correct at every size, and 13-26 % slower in a frame with kernels tuned for full occupancy; what a win would take |
 
 ## Performance, and the levers that are closed
 
