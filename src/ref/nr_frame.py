@@ -112,6 +112,45 @@ def network_geometry(width, height, minimum=VENDOR_MINIMUM_EXTENT):
 # MLX-DLSS's own pipeline and temporal session ask `vendor_aligned` for their field, and their
 # answer — a multiple of 64 — is theirs, not the vendor's; in this tree it is the vendor's.
 NetworkGeometry.vendor_aligned = classmethod(lambda cls, width, height: network_geometry(width, height))
+
+
+_EXTENTS: dict = {}
+
+
+def render_extent(width, height, scale, minimum=VENDOR_MINIMUM_EXTENT):
+    """The frame the network is handed for a `width` x `height` picture at render `scale`, as
+    (width, height): of all the frames at least the scale's own, aspect kept, the one on the
+    cheapest network field — and of those the largest.
+
+    The graph runs on the field, not on the frame: a frame smaller than the field is mirrored
+    out to it, and every frame on the same field costs the same. On a small window the field
+    is held at `minimum` a side, and there a low scale bought no speed and handed the network
+    mostly its own mirror image — 640x360 at 0.35 is 224x126 in a 320x320 field, 28 % of it
+    the picture, and the pass came out a quarter weaker than at 0.5, on the same field in the
+    same time. And the vendor's field is not monotonic in the frame: 800x450 at 0.35 is
+    280x158, whose width aligns to 384, where 0.4's 320x180 lands on 320x320 — the lower scale
+    was the slower. Now 640x360 runs as 0.5 for any scale up to it and 800x450 at 0.35 as 0.4,
+    a lower scale is never the slower, and where a scale already fills its field — 1280x720
+    and up — nothing moves.
+    """
+    key = (int(width), int(height), float(scale), int(minimum))
+    if key in _EXTENTS:
+        return _EXTENTS[key]
+    if scale >= 1.0:
+        best = (int(width), int(height))
+    else:
+        def cost(w, h):
+            geometry = network_geometry(w, h, minimum=minimum)
+            return geometry.network_width * geometry.network_height
+        best = (max(64, round(width * scale)), max(64, round(height * scale)))
+        cheapest = cost(*best)
+        for w in range(best[0] + 1, int(width) + 1):
+            candidate = (w, max(64, round(height * w / width)))
+            price = cost(*candidate)
+            if price <= cheapest:
+                best, cheapest = candidate, price
+    _EXTENTS[key] = best
+    return best
 # The three noise channels depend on the extent and the frame index and on nothing else,
 # and both callers copy the result into a slice rather than writing through it. In a live
 # mode the frame index does not move — the daemon never sets one — so the same array was

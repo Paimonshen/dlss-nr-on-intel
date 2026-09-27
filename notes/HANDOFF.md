@@ -24,6 +24,37 @@ you need the evidence behind a line in this file, rather than reading them in or
   have no upscaler, so it needs a newer game.
 - **A FAQ** in the README, for the questions that keep coming back. Later.
 
+## A low render scale on a small window was paying for mirror padding (2026-09-27, night)
+
+The owner's Tekken 7 at 800x450: **30 fps at render scale 0.35, 27 at 0.6**. On a window that
+small the network's field is held at 320 a side, and the frames it was handed were mostly its own
+mirror image: 640x360 at 0.35 is 224x126 in a 320x320 field, 28 % picture, and the pass came out
+a quarter weaker than at 0.5 (8.4 against 11.1 levels of 255) on the same field in the same 25 ms.
+Worse, the vendor's field is not monotonic in the frame: 800x450 at 0.35 is 280x158, whose width
+aligns to 384, where 0.4's 320x180 lands on 320x320 — the lower scale was the slower (27.9 against
+25.7 ms).
+
+`nr_frame.render_extent` now hands the network, of all frames at least the scale's own (aspect
+kept), the one on the cheapest field and of those the largest; the daemon uses it and its log
+line says `scale 0.35 (runs as 0.4)`. 640x360 runs as 0.5 for any scale up to it, 800x450 as 0.4
+(26.0 ms where 0.35 took 27.9, and the full-strength pass), a lower scale is never the slower, and
+from 1280x720 up nothing moves. Scale swept on the daemon's path, DoA5 frames: the strength holds
+at 9-11 levels from 0.35 to 1.0 on 720p and 1080p windows; the cost is about 130 ms per megapixel of
+field plus 10-20 ms at the window's resolution — the render scale text says both now.
+
+And a trap: **`frame_profile.py` had been failing at import since the ViT's softmax took row kind
+3**, which window attention's profile stamps already used — the profiler reads the kind tables out
+of the shaders and refuses a clash, but nothing ran it. `VIT_SOFTMAX` is 6, and `make test` (and
+CTest) run `frame_profile.py --tables`. At 320x320 now: GEMM 16.6 ms of 24.5 on the device, the
+bottleneck's four GEMMs 4.2 of it on 16-64 workgroups. The vendor itself splits exactly those
+(contract 4096/1024, QKV 1024/512, projection 1024/256, OpenDLSS-NR's `numerics.md`), so a split-K
+there would be its structure rather than a departure — **measured and not worth it**: the
+partitions run as a batch of the same GEMM, contract 169 -> 171 us at 64 rows, QKV 91 -> 104,
+projection 42 -> 34, so the four are not short of workgroups either (and `improve-b.md` found
+them not short of weight bytes). And `min_extent` is the lever on a small window: 800x450 at 0.35
+takes 26.0 ms at 320, 23.1 at 256 (320x256, 10.6 levels against 11.0) and 18.9 at 192 (320x192,
+9.7) — the owner's to judge in a game.
+
 ## What the vendor does after the network: the styles' grade, and the history (2026-09-27, late)
 
 **`natural` and `cinematic` were missing NVIDIA's own colour grade.** The vendor runs a post-process

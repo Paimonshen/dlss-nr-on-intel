@@ -603,8 +603,12 @@ def process_connection(connection, backend, args):
     # are never resampled and only the synthesised part is interpolated.
     inner = colour
     if live.render_scale < 1.0:
-        inner = resample(colour, (max(64, round(active_height * live.render_scale)),
-                                  max(64, round(active_width * live.render_scale))))
+        # The scale's own frame, or the largest that lands on the same network field — the
+        # same cost, more of the picture and less of its mirror image (`render_extent`).
+        extent = nr_frame.render_extent(active_width, active_height, float(live.render_scale),
+                                        int(live.min_extent))
+        if extent != (active_width, active_height):
+            inner = resample(colour, (extent[1], extent[0]))
     geometry = nr_frame.network_geometry(inner.shape[1], inner.shape[0],
                                          minimum=int(live.min_extent))
     # `inner` is a view of the decoded frame at scale 1; the history keeps it for the next
@@ -795,7 +799,10 @@ def process_connection(connection, backend, args):
           f"{time.perf_counter() - clock:.2f}s  "
           f"change {changed:.5f}{note}{split}{box}"
           f"  network {geometry.network_width}x{geometry.network_height}"
-          f" scale {live.render_scale:g}", flush=True)
+          f" scale {live.render_scale:g}"
+          + (f" (runs as {inner.shape[1] / active_width:.3g})"
+             if inner.shape[1] != round(active_width * live.render_scale)
+             and live.render_scale < 1.0 else ""), flush=True)
     if args.meter is not None:
         print(args.meter.report(), flush=True)
 
