@@ -24,6 +24,24 @@ you need the evidence behind a line in this file, rather than reading them in or
   have no upscaler, so it needs a newer game.
 - **A FAQ** in the README, for the questions that keep coming back. Later.
 
+## The reference was not rounding on this GPU; the vendor's GEMM in numpy (2026-09-27, night)
+
+**Not published — the owner asked to hold pushes; this and everything after it are local commits.**
+
+OpenDLSS-NR's WebGPU port rounds its GEMMs' f16 accumulator with WGSL's `f32(f16(x))`, which Mesa
+folds away: on this GPU the port was not rounding between its groups of 16 products at all. With the
+round trips unfoldable (`src/bench/opendlss_rounding.patch`) a numpy transcription of its
+specification, `src/bench/vendor_fp8.py` — FP8 products in groups of 16, 13-bit truncation, the
+accumulator rounded to half each group, the residual seeding it — matches the port's own steps on
+**100 %** of values (block 1's QKV and its whole feed-forward). Structural findings unaffected; the
+patched port against our GPU path is 0.47-1.99 levels apart, as before.
+
+**XMX's half accumulator** is 2-6x closer per GEMM to that arithmetic than our float32 one (E4M3
+mismatches 0.32 % -> 0.05 % at K = 32), and **moves the picture a tenth of the way** (numpy graph:
+0.78 -> 0.70, 2.09 -> 1.91 levels from the reference) — noise, for rewriting every GEMM kernel. Not
+done. And the subgroup width is now pinned only where the driver can pin it: a driver without
+subgroup size control — any desktop Arc's might be one — got no device at all before.
+
 ## The padded field is the vendor's, and 1280x720 had been drawing a weaker pass (2026-09-27, evening)
 
 **Every network field whose sides are both multiples of 256 draws a pass 25-30 % weaker** than any

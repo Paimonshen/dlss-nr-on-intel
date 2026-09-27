@@ -56,6 +56,7 @@ static struct {
 	VkQueryPool qpool; unsigned prof, prof_n; float ts_period;
 	char name[256]; char err[256]; char memory[256]; char memory_read[256];
 	int ready, lost, discrete, unmapped;
+	int pin32;                /* pipelines require 32-lane subgroups (build_pipeline_spec) */
 	struct buf stage;
 } g;
 
@@ -278,14 +279,15 @@ static int build_pipeline_spec(const char *spv_path, VkPipelineLayout layout, Vk
 	 * 1.6 lets the driver pick the width: ANV takes SIMD16 where SIMD32 would spill, and
 	 * the row passes, which order their shared memory with subgroup barriers, then raced.
 	 * Adding the ViT's softmax to attention.comp tipped its unspecialised build over, and
-	 * a handful of cosine publishes came out unpublished. So the width is pinned. */
+	 * a handful of cosine publishes came out unpublished. So the width is pinned.
+	 * A driver that cannot pin it (g.pin32 unset, `xmx_init`) builds as before. */
 	VkPipelineShaderStageRequiredSubgroupSizeCreateInfo width = {
 		.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO,
 		.requiredSubgroupSize = 32 };
 	VkComputePipelineCreateInfo cpi = { .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
 		.stage = { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-			   .pNext = &width,
-			   .flags = VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT,
+			   .pNext = (g.pin32 & 1) ? &width : NULL,
+			   .flags = (g.pin32 & 2) ? VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT : 0,
 			   .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = sm, .pName = "main",
 			   .pSpecializationInfo = specialization }, .layout = layout };
 	r = vkCreateComputePipelines(g.dev, VK_NULL_HANDLE, 1, &cpi, NULL, out);
@@ -464,13 +466,32 @@ int xmx_init(const char *spv_path)
 
 	VkPhysicalDeviceCooperativeMatrixFeaturesKHR cm = {
 		.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR, .cooperativeMatrix = VK_TRUE };
+	/* The subgroup width pinned at 32 on every pipeline (build_pipeline_spec), where the
+	 * driver can: Vulkan 1.3's subgroup size control with 32 in range for compute, and full
+	 * subgroups apart. Not every driver a desktop Arc runs has both, and asking for a
+	 * feature the device lacks fails the device outright. */
+	VkPhysicalDeviceVulkan13Features have13 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES };
+	VkPhysicalDeviceVulkan13Properties sizes = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_PROPERTIES };
+	g.pin32 = 0;
+	if (props.apiVersion >= VK_API_VERSION_1_3) {
+		VkPhysicalDeviceFeatures2 query = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &have13 };
+		vkGetPhysicalDeviceFeatures2(g.pd, &query);
+		VkPhysicalDeviceProperties2 props2 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &sizes };
+		vkGetPhysicalDeviceProperties2(g.pd, &props2);
+		if (have13.subgroupSizeControl && sizes.minSubgroupSize <= 32 && sizes.maxSubgroupSize >= 32
+		    && (sizes.requiredSubgroupSizeStages & VK_SHADER_STAGE_COMPUTE_BIT))
+			g.pin32 = 1 | (have13.computeFullSubgroups ? 2 : 0);
+	}
+	if (!(g.pin32 & 1))
+		fprintf(stderr, "libxmx: %s cannot fix the subgroup width at 32; the kernels are written "
+			"for 32 lanes, and a driver that picks another width can make them race\n", g.name);
+	VkPhysicalDeviceVulkan13Features v13 = {
+		.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES, .pNext = &cm,
+		.subgroupSizeControl = (g.pin32 & 1) ? VK_TRUE : VK_FALSE,
+		.computeFullSubgroups = (g.pin32 & 2) ? VK_TRUE : VK_FALSE };
 	/* Shared-memory blocks that alias: gemm_staged.comp puts its operand tiles and its
 	 * output stage in the same bytes, which is what fits sixteen of its workgroups in a
 	 * core's 128 KB (notes/improve-shared-memory.md). */
-	/* the subgroup width pinned at 32 on every pipeline (build_pipeline_spec) */
-	VkPhysicalDeviceVulkan13Features v13 = {
-		.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES, .pNext = &cm,
-		.subgroupSizeControl = VK_TRUE, .computeFullSubgroups = VK_TRUE };
 	VkPhysicalDeviceWorkgroupMemoryExplicitLayoutFeaturesKHR wm = {
 		.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_WORKGROUP_MEMORY_EXPLICIT_LAYOUT_FEATURES_KHR, .pNext = &v13,
 		.workgroupMemoryExplicitLayout = VK_TRUE, .workgroupMemoryExplicitLayoutScalarBlockLayout = VK_TRUE,

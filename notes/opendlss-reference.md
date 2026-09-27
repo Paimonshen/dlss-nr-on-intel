@@ -195,6 +195,44 @@ side the rule need not give a multiple of 64, which this graph's exact halvings 
 is rounded up there. The published live sizes keep their fields except 1024x768 at 0.55 (563x422:
 576x448 -> 640x512, 48.5 -> 56.5 ms); at the graph's floor a 320x180 frame runs at 320x256, not 320x192.
 
+## The GEMMs' arithmetic, and a reference that was not rounding here (2026-09-27)
+
+**The reference port did not compute the vendor's arithmetic on this GPU.** Its GEMM kernels round
+their f16 accumulator with WGSL's `f32(f16(x))`, and Mesa folds that round trip away: run on the
+port's own captured inputs, a numpy transcription of its specification (`src/bench/vendor_fp8.py`:
+groups of 16 products, 13-bit truncation, the accumulator rounded to half after each group) matched
+its QKV projection on 74.5 % of values, and one that never rounds between the groups matched it on
+100 %. With the round trip made unfoldable (`src/bench/opendlss_rounding.patch`, `pack2x16float`, as
+this tree's own `half_round` does) the specification matches the port on **100 % of values on block
+1's QKV projection and on its whole feed-forward** — the SiLU between and the residual seeding the
+accumulator included. So the emulation is exact, and the port is a faithful reference here only
+patched. The patched port against our GPU path, same frames: 0.91 / 1.99 / 0.80 / 0.47 levels
+apart — about what the unpatched one gave; the structural findings above stand either way, being
+tens of times larger than the difference.
+
+**XMX's half accumulator is closer to that arithmetic than our float32, and the picture does not
+care.** Real GEMMs of the graph, the reference's inputs, the share of half results equal to the
+vendor's (in brackets, of E4M3 publications):
+
+| GEMM | K | float32 accumulator (ours) | half accumulator |
+| --- | --- | --- | --- |
+| block 1 QKV | 32 | 72.5 % (99.68) | 95.0 % (99.95) |
+| block 1 expand | 32 | 71.9 % (99.71) | 97.6 % (99.98) |
+| block 5 QKV | 64 | 61.2 % (99.26) | 88.6 % (99.80) |
+| block 9 QKV | 128 | 43.2 % (98.66) | 79.2 % (99.52) |
+| block 15 QKV | 256 | 36.6 % (98.47) | 68.5 % (99.26) |
+| block 23 QKV | 512 | 47.2 % (98.20) | 67.7 % (98.88) |
+| block 32 expand | 1024 | 21.5 % (97.92) | 31.1 % (98.24) |
+
+Our float32 accumulator is the exact sum rounded once, to the value. The half one is the hardware's
+own 16-deep step rounded to half each time, which is the vendor's grouping less its truncation. But
+put through the whole numpy graph — every GEMM accumulated that way — the head moves towards the
+reference by a tenth: composed 0.78 -> 0.70 and 2.09 -> 1.91 levels on two frames, within what a
+change of rounding anywhere makes of one frame. The graph's other arithmetic differences dominate.
+Porting it would touch every GEMM kernel, with the residual moved into the accumulator's seed and the
+ViT's split-K partitions added, for no visible change and no speed (a half accumulator measured 1.36x
+on an isolated GEMM and nothing in a frame, `phase31`). Not done.
+
 ## What still differs
 
 Arithmetic, all of it: the GEMMs (FP8 products as 13-bit fixed point onto an f16 accumulator the

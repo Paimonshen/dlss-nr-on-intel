@@ -44,8 +44,9 @@ OpenDLSS-NR — https://github.com/maanHimself/OpenDLSS-NR
   Where MLX-DLSS's graph and the vendor's differ, this project follows the structure
   OpenDLSS-NR documents, and was checked against its WebGPU port, which the benches
   `src/bench/opendlss_*` run from a clone in `work/`; the port is not redistributed here.
-  `src/bench/opendlss_captures.patch` is a capture-only change to that port and quotes a
-  few of its lines as context. Those lines are theirs, under their licence:
+  `src/bench/opendlss_captures.patch` (a capture-only change) and
+  `src/bench/opendlss_rounding.patch` (its half roundings made unfoldable) change that port and
+  quote a few of its lines as context. Those lines are theirs, under their licence:
 
     Permission is hereby granted, free of charge, to any person obtaining a copy
     of this software and associated documentation files (the "Software"), to deal
