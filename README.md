@@ -25,10 +25,9 @@ Read "What to expect" before deciding it is broken.
 Stills with the model at full resolution. Left, or on top: the game's own frame. Right, or
 below: the same frame through DLSS-NR on this Intel Arc 140V.
 
-<sub>These stills and the measurements under them were taken on 2026-09-16 to 21, with the
-graph as it was then. Since 2026-09-27 the graph follows NVIDIA's own in eight more places
-(`notes/opendlss-reference.md`) and the styles carry NVIDIA's colour grade
-(`notes/phase70-post-process.md`); the effect is the same kind, the exact figures are not.</sub>
+<sub>Captured on 2026-09-16 and rendered again on 2026-09-28, from the same captured frames,
+through the graph as it is now (`src/bench/restill.py`); the images and the table below come
+out of `src/tools/comparisons.py`.</sub>
 
 **Tekken 7** — Unreal Engine 4, D3D11, 1920x1080, crops enlarged 2x:
 
@@ -51,21 +50,21 @@ change in brightness, because on this model the brightness moves and it fools th
 
 | image | region | brightness | relative texture | colour change |
 | --- | --- | --- | ---: | ---: |
-| Tekken 7 | face | 78 -> 57 | **+22 %** | 23.5 |
-| | jacket weave | 90 -> 71 | **+50 %** | 19.4 |
-| | embroidery | 135 -> 115 | +36 % | 20.6 |
-| | background | 35 -> 34 | -9 % | **4.8** |
-| DoA5, close-up | face | 107 -> 90 | +4 % | 20.3 |
-| | background | | -22 % | **4.3** |
-| DoA5, by the fire | face | 96 -> 83 | +12 % | 15.6 |
-| | background, fire | | -3 % | 8.9 |
-| Mortal Kombat 1 | Omni-Man's face | 131 -> 132 | **-14 %** | 15.6 |
-| | Homelander's face | 131 -> 131 | **-24 %** | 14.6 |
+| Tekken 7 | face | 78 -> 59 | **+28 %** | 22.0 |
+| | jacket weave | 90 -> 70 | **+61 %** | 20.9 |
+| | embroidery | 135 -> 115 | +43 % | 21.0 |
+| | background | 35 -> 34 | -9 % | **4.5** |
+| DoA5, close-up | face | 107 -> 93 | +10 % | 17.9 |
+| | background | | -24 % | **4.7** |
+| DoA5, by the fire | face | 96 -> 84 | +16 % | 15.3 |
+| | background, fire | | -4 % | 8.2 |
+| Mortal Kombat 1 | Omni-Man's face | 131 -> 131 | **-10 %** | 14.8 |
+| | Homelander's face | 131 -> 130 | **-19 %** | 13.8 |
 | | the whole fight frame | 56 -> 57 | -2 % | 6.8 |
 
 **The three games do not get the same treatment, and that is the honest summary.** On
 Tekken 7 and Dead or Alive 5 the character comes out darker and gains texture — a great deal
-on Tekken's fabric, little on Dead or Alive's already-smooth skin — while the background is
+on Tekken's fabric, less on Dead or Alive's already-smooth skin — while the background is
 left almost alone. On Mortal Kombat 1, whose faces are already rendered in fine detail, the
 brightness does not move and the fine detail on the faces goes *down*: what changes is the
 colour, with the warm filmic grade and the glow on the skin taken out. That is not film grain
