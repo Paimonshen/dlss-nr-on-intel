@@ -8,6 +8,11 @@ No NVIDIA hardware, no NGX, no CUDA. The graph runs on Intel's XMX matrix units 
 `VK_KHR_cooperative_matrix`, and the pass is injected at `vkQueuePresentKHR`, so it
 attaches to anything that presents with Vulkan — including a Windows game under Proton.
 
+**It is playable.** Live, every frame goes through the network on the laptop's own iGPU,
+beside the game: Tekken 7 runs at **30 fps at 800x450**. Block by block, its graph matches a
+reference implementation that claims NVIDIA's own arithmetic; what is left between the two is
+rounding, not structure (`notes/opendlss-reference.md`).
+
 **This is a research port, not a product.**  
 Read "What to expect" before deciding it is broken.
 
@@ -19,6 +24,11 @@ Read "What to expect" before deciding it is broken.
 
 Stills with the model at full resolution. Left, or on top: the game's own frame. Right, or
 below: the same frame through DLSS-NR on this Intel Arc 140V.
+
+<sub>These stills and the measurements under them were taken on 2026-09-16 to 21, with the
+graph as it was then. Since 2026-09-27 the graph follows NVIDIA's own in eight more places
+(`notes/opendlss-reference.md`) and the styles carry NVIDIA's colour grade
+(`notes/phase70-post-process.md`); the effect is the same kind, the exact figures are not.</sub>
 
 **Tekken 7** — Unreal Engine 4, D3D11, 1920x1080, crops enlarged 2x:
 
@@ -65,7 +75,9 @@ what goes is skin detail or the game's own sharpening has not been measured.
 Across all of them, what the pass adds in one place it takes from another. **Whether any of
 it is better is taste, not measurement** — it is photographic where the games are stylised.
 
-These are stills. Live, Tekken 7 runs at **25 fps at 640x360**.
+These are stills. Live — every frame through the network, beside the game on the same
+iGPU — **Tekken 7 runs at 30 fps at 800x450** with the render scale at 0.35, and 27 at 0.6
+(the author, 2026-09-27).
 
 <sub>Tekken 7 © Bandai Namco Entertainment. Dead or Alive 5 Last Round © Koei Tecmo Games.
 Mortal Kombat 1 © Warner Bros. Entertainment Inc.; its guest characters belong to their
@@ -77,14 +89,14 @@ respective owners. Shown for comparison.</sub>
 
 **This project was written by AI agents.** The author supplied the machine, the binary and
 the direction, and made the decisions; the code, the measurements and the notes were
-produced by **Claude Opus 5** and, in a parallel tree, by **Astra** — whose work on the
+produced by **Claude Opus 5 and 5.5** and, in a parallel tree, by **Astra** — whose work on the
 native host passes was taken into this one (`src/ref/nr_image.c`, `notes/phase57`).
 
 That is stated here rather than left to be noticed, because it changes how you should read
 everything else. What it means in practice:
 
 - **Nothing is asserted that was not measured.** Every number in the notes has a program
-  behind it in `src/bench/`, and `make test` is around 190 checks, including the native
+  behind it in `src/bench/`, and `make test` is about 570 checks, including the native
   passes against the NumPy they replace byte for byte.
 - **The wrong turns are in the notes too**, deliberately. A hypothesis about shared-memory
   bank conflicts that measured 1.11x instead of the textbook 32x. A "driver bug" that
@@ -130,7 +142,7 @@ already have. See [Build](#build).
 - Linux. Python 3 with NumPy. A C compiler, `glslangValidator`, the Vulkan loader.
 - **ImageMagick** for the still-frame tools, which read and write pictures through
   `magick`. The game path does not touch it.
-- About 0.7 GiB of memory for the device buffers at 720p and 1.2 GiB at 1080p, the weights
+- About 0.7 GiB of memory for the device buffers at 720p and 1.3 GiB at 1080p, the weights
   included — it shares system RAM.
 - OpenCV is optional and worth having: it is the fast path for the blur that moving
   `detail_strength` or `colour_strength` needs — 32 ms against 110 at 854x480
@@ -164,8 +176,9 @@ The CMake build and additional GEMM checks are adapted from
 [andyvand's fork](https://github.com/andyvand/dlss-nr-on-vulkan); see `NOTICE`.
 Its macOS/Windows runtime and C frame library are separate changes, not included here.
 The normal CMake build covers the 64-bit layer; use the existing Makefile target for
-`work/libnr_layer32.so` when a 32-bit game needs it. Avoid running both build systems
-at the same time because they write the same artifacts.
+`work/libnr_layer32.so` when a 32-bit game needs it. The two build the same shaders with the
+same flags and register the same tests — `src/tools/build_check.py` fails the suite when they
+part. Avoid running both at the same time because they write the same artifacts.
 
 Then extract the weights from your own DLL (needs `safetensors` as well as NumPy):
 
@@ -189,7 +202,7 @@ it on the machine that runs it rather than copying it. Everything still works wi
 `NR_HOST_NATIVE=0` selects the NumPy path for a paired measurement.
 
 ```sh
-make test                                        # 190-odd checks, fewer without weights
+make test                                        # about 570 checks, fewer without weights
 python3 src/ref/nr_frame.py IN.png OUT.png --resident   # one still, no game
 ```
 
@@ -246,8 +259,9 @@ run it again. Leave out `NR_LIVE=1` for photo mode. For a native Vulkan game,
 one of the first four is missing or wrong: the layer is capturing and has nowhere to send it.
 
 Without `NR_LAYER_LIVE` it is a **photo mode**: the pass fires once and holds its result
-on screen while the trigger exists. With it, every Nth frame is re-rendered and the ones
-between hold the last result — a slideshow you can play.
+on screen while the trigger exists. With `NR_LAYER_LIVE=1` every present goes through the
+network — 25-30 fps at 640x360 to 800x450 on the Arc 140V, beside the game; with a larger N
+the presents between hold the last result.
 
 ## The three tools
 
@@ -392,7 +406,7 @@ Measured through the socket on 2026-09-27 by `python3 src/bench/live_rates.py` �
 
 Medians of six runs with swap empty; a row's runs spread up to 15 %. On 2026-09-23, with 5.5 GiB in zram and the kernel's memory-pressure figures rising, 1920x1080 ran anywhere from 322 to 463 ms: if that row is much slower for you, look at swap before anything else.
 
-That is the daemon's own cost with nothing else on the GPU. A game adds its own frame to it: **Tekken 7** ran at **25 fps at 640x360** in a live session on 2026-09-24, against 10.5 fps nine days earlier (`notes/phase59`).
+That is the daemon's own cost with nothing else on the GPU. A game adds its own frame to it: **Tekken 7** ran at **30 fps at 800x450** with the render scale at 0.35, and 27 at 0.6, in a live session on 2026-09-27 — against 10.5 fps at 640x360 on 2026-09-16 (`notes/phase59`).
 
 <!-- rates:end -->
 
@@ -409,15 +423,23 @@ did move the graph was deleting passes: a pass at the memory ceiling that need n
 all waste. Folding the residuals into the projections, attention into one pass with its
 head merge, Q/K normalisation and the window partition into the QKV projection's own
 epilogue and loads, the narrow blocks' feed-forward into one kernel and the full-resolution
-glue into fewer passes took a 1280x720 frame from 445 to 231 ms, 48 %, with every output
-bit-identical
+glue into fewer passes took a 1280x720 frame from 445 to 231 ms at the time, 48 %, with every
+output bit-identical
 (`notes/improve-fusions.md`, `notes/improve-qkv-epilogue.md`). The other thing that moved it
 was shared memory, which decides how many workgroups a core holds: 128 KB between them,
 each share rounded up to 1, 2, 4 ... KB. Window attention at 3104 bytes took 4 KB and so half
 the core's threads, and at exactly 2 KB is 18 % faster; the staged GEMM at 15.5 KB took 16
-and half the threads too — with its tiles and its stage sharing 8 KB, the 1280x720 frame
-went from 228 to 208 ms (`notes/improve-shared-memory.md`, which also has a driver quirk
-that makes some *smaller* declarations slower).
+and half the threads too (`notes/improve-shared-memory.md`, which also has a driver quirk
+that makes some *smaller* declarations slower). With the one-pass window blocks and
+bottleneck attention since, a full-scale 1280x720 frame is about 150 ms end to end and the
+live sizes 25-27 ms. What bounds the GEMMs now is the register file: Xe2's 256-register mode
+can be reached with a small Mesa patch, and with these kernels it is slower
+(`notes/improve-large-grf.md`).
+
+**On a small window, a low render scale costs no more than the frame it fills.** The network's
+frame is never smaller than 320 a side, so a scale whose frame would be smaller is raised,
+free, to fill the cheapest frame it lands on — 640x360 runs as 0.5 for anything up to 0.5, and
+800x450 as 0.4. The daemon's log line says `runs as` when it happens.
 
 ## How it works
 
@@ -473,8 +495,8 @@ library; `make work/libnr_layer32.so` builds it and `prepare_layer.py` writes bo
 manifests.
 
 **It is unbearably slow.** Look at the swapchain size before the render scale. See the
-table above; at 1920x1080 the daemon alone manages about 4 fps, and nothing will fix that
-but a smaller window.
+table above; at 1920x1080 the daemon alone manages about 3 fps at full scale and 9 at 0.55,
+and nothing will fix that but a smaller window.
 
 **`GPU lost, stopping` in the daemon's log** — or, from a clone older than 2026-09-17,
 `frame rejected/failed ... xmx_graph_run: resident submit (-4)` on every frame. `-4` is
@@ -557,7 +579,7 @@ work/         builds, checkouts and your weights. Ignored, and stays that way.
 make test
 ```
 
-Around 190 checks, including the layer's wire protocol, the native host passes
+About 570 checks, including the layer's wire protocol, the native host passes
 against the NumPy they replace byte for byte, the interface mask down to the
 byte, the temporal path against MLX-DLSS's own composition, and the panel driven through
 a pseudo-terminal. This page is checked too: the knob and frame-time tables are generated

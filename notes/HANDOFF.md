@@ -1160,9 +1160,11 @@ value:
 5041 to 2303 MiB and 1080p now fits without swapping (phase 32) — and 701 MiB since the
 scratch is sized by what the recording touches (2026-09-26).
 
-**Real time is still not on the table.** At `17 ms + 488 ms/Mpixel`, 30 fps needs about
+~~**Real time is still not on the table.** At `17 ms + 488 ms/Mpixel`, 30 fps needs about
 a 243x137 extent and 15 fps about 425x239. On this hardware with this graph, DLSS-NR is
-a photo mode — which is what the Vulkan layer delivers.
+a photo mode — which is what the Vulkan layer delivers.~~ **Withdrawn** — written at 488 ms a
+megapixel. Live mode runs every present: Tekken 7 at 30 fps at 800x450 beside the game
+(2026-09-27), the daemon alone 25-27 ms at the live sizes.
 
 ---
 
