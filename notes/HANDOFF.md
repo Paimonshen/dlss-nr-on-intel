@@ -46,8 +46,8 @@ the only sign of it.**
 `src/bench/restill.py` replays a `--dump` capture through a fresh daemon in its order, history
 and all; `src/tools/comparisons.py` is the record of which frame and which pixels each published
 image is, and rebuilds the old ones exactly from the old captures (the table to the digit). More
-texture than on 2026-09-16 (Tekken's weave +50 -> +61 %), the same kind of change. Ready and not
-published — local branches `media-refresh` and `stills-refresh`, for the owner to approve.
+texture than on 2026-09-16 (Tekken's weave +50 -> +61 %), the same kind of change. Published
+on 2026-09-28 with the owner's approval — the images on `media`, the table in the README.
 
 And the local `windows` branch (CMake for the compute side with MSYS2's gcc, `docs/WINDOWS.md`)
 overlaps PR #3, which does the layer and the daemon with MSVC: the two are to be reconciled
