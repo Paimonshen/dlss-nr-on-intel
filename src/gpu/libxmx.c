@@ -57,6 +57,7 @@ static struct {
 	char name[256]; char err[256]; char memory[256]; char memory_read[256];
 	int ready, lost, discrete, unmapped;
 	int pin32;                /* pipelines require 32-lane subgroups (build_pipeline_spec) */
+	int half_by_cast;         /* half_round's spelling, constant 1 on every pipeline (xmx_init) */
 	struct buf stage;
 } g;
 
@@ -262,6 +263,27 @@ static uint32_t memtype(uint32_t bits, VkMemoryPropertyFlags want, int host_read
 static int build_pipeline_spec(const char *spv_path, VkPipelineLayout layout, VkPipeline *out,
 			      const VkSpecializationInfo *specialization)
 {
+	/* Every pipeline also gets constant 1, half_round's spelling (publish.glsl, xmx_init);
+	 * a shader that does not declare it ignores the entry. */
+	VkSpecializationMapEntry entries[4];
+	unsigned char data[32];
+	uint32_t count = 0, size = 0;
+	if (specialization) {
+		if (specialization->mapEntryCount >= sizeof entries / sizeof *entries
+		    || specialization->dataSize > sizeof data - sizeof(VkBool32))
+			FAIL("specialization too large", 0);
+		count = specialization->mapEntryCount;
+		size = (uint32_t)specialization->dataSize;
+		memcpy(entries, specialization->pMapEntries, count * sizeof *entries);
+		memcpy(data, specialization->pData, size);
+	}
+	VkBool32 cast = g.half_by_cast ? VK_TRUE : VK_FALSE;
+	entries[count++] = (VkSpecializationMapEntry){ .constantID = 1, .offset = size, .size = sizeof cast };
+	memcpy(data + size, &cast, sizeof cast);
+	size += sizeof cast;
+	VkSpecializationInfo constants = { .mapEntryCount = count, .pMapEntries = entries,
+					   .dataSize = size, .pData = data };
+
 	FILE *f = fopen(spv_path, "rb");
 	if (!f) FAIL("cannot open spv", 0);
 	fseek(f, 0, SEEK_END); long len = ftell(f); fseek(f, 0, SEEK_SET);
@@ -289,7 +311,7 @@ static int build_pipeline_spec(const char *spv_path, VkPipelineLayout layout, Vk
 			   .pNext = (g.pin32 & 1) ? &width : NULL,
 			   .flags = (g.pin32 & 2) ? VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT : 0,
 			   .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = sm, .pName = "main",
-			   .pSpecializationInfo = specialization }, .layout = layout };
+			   .pSpecializationInfo = &constants }, .layout = layout };
 	r = vkCreateComputePipelines(g.dev, VK_NULL_HANDLE, 1, &cpi, NULL, out);
 	vkDestroyShaderModule(g.dev, sm, NULL);
 	if (r) FAIL("pipeline", r);
@@ -485,6 +507,27 @@ int xmx_init(const char *spv_path)
 	if (!(g.pin32 & 1))
 		fprintf(stderr, "libxmx: %s cannot fix the subgroup width at 32; the kernels are written "
 			"for 32 lanes, and a driver that picks another width can make them race\n", g.name);
+	/* half_round's spelling (publish.glsl) is the compiler's to decide, not ours: Mesa folds
+	 * `float(float16_t(x))` away and keeps packHalf2x16's round trip, and Intel's Windows
+	 * compiler folds the round trip and keeps the cast. Whichever is folded, every vendor
+	 * rounding point in the graph silently vanishes. `XMX_HALF_ROUND=pack` or `cast` overrides,
+	 * to measure the other one on either driver. */
+	g.half_by_cast = 0;
+	if (props.apiVersion >= VK_API_VERSION_1_2) {
+		VkPhysicalDeviceDriverProperties driver = {
+			.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES };
+		VkPhysicalDeviceProperties2 query = {
+			.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &driver };
+		vkGetPhysicalDeviceProperties2(g.pd, &query);
+		g.half_by_cast = driver.driverID == VK_DRIVER_ID_INTEL_PROPRIETARY_WINDOWS;
+	}
+	const char *half = getenv("XMX_HALF_ROUND");
+	if (half && *half) {
+		if (!strcmp(half, "cast")) g.half_by_cast = 1;
+		else if (!strcmp(half, "pack")) g.half_by_cast = 0;
+		else fprintf(stderr, "libxmx: XMX_HALF_ROUND=%s is neither pack nor cast; keeping %s\n",
+			     half, g.half_by_cast ? "cast" : "pack");
+	}
 	VkPhysicalDeviceVulkan13Features v13 = {
 		.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES, .pNext = &cm,
 		.subgroupSizeControl = (g.pin32 & 1) ? VK_TRUE : VK_FALSE,
