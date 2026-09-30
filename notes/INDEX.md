@@ -48,6 +48,7 @@ disproved.
 | note | what it settles |
 | --- | --- |
 | `hw-coopmat.md` | six cooperative-matrix configs, all M=8 N=16, subgroup scope |
+| `phase71-intel-windows-driver.md` | the first Windows session, on Intel's own driver: the fp16 configuration is there (four configs), the compiler folds `packHalf2x16`'s round trip so `half_round` is chosen per driver, the unmerged window attention hangs the engine, and the picture is 47-49 dB from Linux's at 1.2-1.4x the graph time |
 | `phase4-subnormal-flush.md` | XMX flushes subnormal FP16 operands (premise later corrected) |
 | `phase4-accumulation-choice.md` | NVIDIA accumulates in FP16; we use FP32 and are more accurate |
 | `phase7-first-render.md` | the first real frame, with its two adversarial controls |

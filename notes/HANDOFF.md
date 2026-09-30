@@ -24,6 +24,31 @@ you need the evidence behind a line in this file, rather than reading them in or
   have no upscaler, so it needs a newer game.
 - **A FAQ** in the README, for the questions that keep coming back. Later.
 
+## On Windows, measured: Intel's compiler differs, and the picture is 47-49 dB from Linux's (2026-09-30)
+
+The first Windows session ran the `windows` branch on this machine under Windows 11, with Intel's
+own driver: 101.8991, then 101.9033 (WHQL, released 2026-09-29). The evidence is in
+`notes/phase71-intel-windows-driver.md`. **The fp16 cooperative-matrix configuration is there.**
+What differs is the compiler:
+
+- **It folds `unpackHalf2x16(packHalf2x16(x))` to x.** So `half_round` rounded nothing and every
+  vendor rounding point vanished, and 17 of 34 CTest checks failed. It keeps
+  `float(float16_t(x))`, the spelling Mesa folds. `half_round` now takes its spelling from a
+  specialization constant that libxmx sets per driver, and `XMX_HALF_ROUND` overrides it. **This
+  has not yet run on Mesa**, so run `make test` there before it goes anywhere.
+- **The unmerged window attention hangs the engine** from 32 windows up: a TDR, then
+  `VK_ERROR_DEVICE_LOST`. The graph uses the merged variant, which does not hang. Leave
+  `gpu_window_attention` out of CTest on this driver.
+- Two failures remain. A zero's sign differs in two GEMMs, which is PR #3's B580 failure and so
+  the driver's. And 378 of 65 536 values differ in the ViT attention's unfused reference. CTest
+  passes 30 of 33.
+
+Against Linux on the same frames (Tekken 7's restill capture, 1080p, history and all), the
+composed picture is **0.47-0.62 levels of 255 apart, at PSNR 47.5-49.4 dB**. The head differs,
+as it would with any operation computed differently. The graph is slower here: **199.6 ms at
+720p against 143 on Linux, and 28.1 ms at 320x320 against 23.3**, on a machine checked quiet.
+`shaderInt64` is now enabled where the device has it, as the validation layer asked.
+
 ## PR #3 run on Linux; the bands it reports not explained here; the stills rendered again (2026-09-28, night)
 
 **PR #3** (the Windows link between layer and daemon, an outside contributor on a B580) was run

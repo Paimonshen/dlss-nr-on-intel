@@ -1,8 +1,9 @@
 # Windows — the port, and where it stands
 
-**Experimental, on the `windows` branch, and not yet run on Windows.** Everything below the
-first heading was written on Linux before the first Windows session; it is the plan and the
-checklist for that session, and it will be corrected by what the machine says.
+**Experimental, on the `windows` branch; first run on Windows on 2026-09-29/30** (Arc 140V,
+Intel's driver 101.8991, then 101.9033). What the machine said is
+`notes/phase71-intel-windows-driver.md`. The plan below was written on Linux before that
+session, and it is corrected where the machine disagreed.
 
 ## What is meant to run
 
@@ -31,6 +32,12 @@ And every speed figure in this repository was measured on Mesa: the shared-memor
 the subgroup width, the specialisation constants and the kernels' shapes were all tuned against
 ANV's compiler. Intel's compiler is another one. Expect correct results if the configuration is
 there — the tests compare bytes — and expect to measure the speed rather than assume it.
+
+**Answered on 2026-09-29: the configuration is there.** Intel's driver offers four configs, the
+fp16 one among them. The compiler turned out to be the difference: it folds
+`unpackHalf2x16(packHalf2x16(x))`, which `half_round` relied on, so libxmx now picks the spelling
+per driver. The graph runs 1.2-1.4x Mesa's time, and the picture is 47-49 dB from Linux's
+(phase71).
 
 ## Before building
 
@@ -73,6 +80,11 @@ ctest --test-dir work/cmake --output-on-failure
 
 The layer is off by default on Windows (`NR_BUILD_LAYER`), so CTest registers the compute tests
 and the tree's own checks, not the layer's.
+
+On Intel's driver, leave `gpu_window_attention` out: `ctest --test-dir work/cmake -E
+gpu_window_attention`. Its unmerged variant, which the graph does not use by default, hangs the
+engine from 32 windows up (phase71). Three checks fail there all the same: a zero's sign in two
+GEMMs, and 378 values in the ViT attention's unfused reference.
 
 ## The first session, in order
 
