@@ -24,6 +24,39 @@ you need the evidence behind a line in this file, rather than reading them in or
   have no upscaler, so it needs a newer game.
 - **A FAQ** in the README, for the questions that keep coming back. Later.
 
+## PR #3 on Windows, and what the Linux run of this branch has to show (2026-09-30, night)
+
+**PR #3 at 4b95863** is the author's answer to the second review: all five items, and the
+spawn's log handle made inheritable. It was built and run here under Windows on Intel's
+101.9033:
+
+- `tools/build_win.bat` builds with 0 errors. The test list passes 30 of 33, with the same three
+  failures as this branch's CMake build down to the element (phase71). `test_window_attention`
+  was not run, because it hangs the engine here.
+- **Its head is this branch's, bit for bit**, at 320x320 and 720p. Its compile-time
+  `-DHALF_ROUND_FLOAT16` and this branch's per-driver constant are the same fix.
+- vkcube went through its layer to its daemon on a named pipe, and every frame was answered.
+  The layer was found through `VK_ADD_IMPLICIT_LAYER_PATH`, with nothing registered. The
+  auto-spawn works too, once the probe's subprocess gets a stdin (item 2 below).
+
+Five findings are drafted for the PR, for the owner to post:
+
+1. The unmerged window attention hangs the engine. That is master's kernel.
+2. A spawned daemon dies at start once `half_probe.spv` exists. The layer hands it no stdin, and
+   the probe's `subprocess.run` asks for one. `stdin=subprocess.DEVNULL` fixes it; that was
+   tested.
+3. `build_win.bat` never builds `half_probe.spv`, whose source is in `src/bench`.
+4. It runs about 10 % slower at 720p than the gcc build. All of it is `libnr_image` running its
+   host passes on one core, because MSVC compiles `NR_PARALLEL_FOR` out.
+5. `nr_layer.c`'s fifteen em dashes went through GBK.
+
+**What the Linux run has to show.** This branch's two runtime changes must be no-ops on Mesa.
+There `half_round`'s constant keeps `packHalf2x16`, and `shaderInt64` only enables what the
+shaders already declared. So `make test` should be green, and `frame_replay.py --size 320 320`
+and `--size 720 1280` should give the same `head_sha256` on this branch as on master. Windows
+gives `e62005b80145b97a…` and `c217fd2fdbbe6b79…` on 101.9033. Where Linux's differ from those,
+per-block hashes on both machines find the first block that parts.
+
 ## On Windows, measured: Intel's compiler differs, and the picture is 47-49 dB from Linux's (2026-09-30)
 
 The first Windows session ran the `windows` branch on this machine under Windows 11, with Intel's
