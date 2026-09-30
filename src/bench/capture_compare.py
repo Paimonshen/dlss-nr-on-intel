@@ -9,7 +9,11 @@ how many values are the same bits, how many differ only in the sign of a zero, a
 the rest are apart, so the first point that parts — and by how much — is plain.
 
     python3 src/bench/capture_compare.py --size 320 320 --save linux-320.npz
+    python3 src/bench/capture_compare.py --save windows-320.npz --features linux-320.npz
     python3 src/bench/capture_compare.py --compare linux-320.npz windows-320.npz
+
+The capture keeps its input too, and `--features` runs on another capture's: the synthetic
+frame is made with NumPy's float32 sin and cos, which two builds may round differently.
 """
 import argparse
 import hashlib
@@ -33,9 +37,19 @@ def synthetic(h, w):
 def save(args):
     import nr_frame
     h, w = args.size
-    geometry = nr_frame.NetworkGeometry.vendor_aligned(w, h)
-    features = nr_frame.make_features(synthetic(h, w), geometry=geometry,
-                                      **nr_frame.PROFILES["standard"])
+    if args.features:
+        # The other machine's input, bit for bit: the synthetic frame goes through NumPy's
+        # float32 sin and cos, which are not correctly rounded (on NumPy 2.5.3 about a sixth
+        # of the values are an ulp off), so two builds can hand their graphs different input.
+        other = np.load(args.features)
+        features = other["features"]
+        h, w = json.loads(bytes(other["meta"]).decode())["size"]
+        source = str(args.features.name)
+    else:
+        geometry = nr_frame.NetworkGeometry.vendor_aligned(w, h)
+        features = nr_frame.make_features(synthetic(h, w), geometry=geometry,
+                                          **nr_frame.PROFILES["standard"])
+        source = "synthetic"
     backend = nr_frame.ResidentBackend()
     frame = backend.frame(*features.shape[:2])
     plain = frame.run(features, execution="block").copy()
@@ -47,12 +61,16 @@ def save(args):
                          "change what the graph computes")
     order = list(captured) + ["head"]
     captured["head"] = head
+    features = np.ascontiguousarray(features)
     meta = {"size": [h, w], "network": list(features.shape[:2]), "order": order,
-            "head_sha256": hashlib.sha256(head.tobytes()).hexdigest()}
+            "head_sha256": hashlib.sha256(head.tobytes()).hexdigest(),
+            "features_from": source,
+            "features_sha256": hashlib.sha256(features.tobytes()).hexdigest()}
     np.savez(args.save, meta=np.frombuffer(json.dumps(meta).encode(), np.uint8),
+             features=features,
              **{name: np.ascontiguousarray(captured[name], np.float32) for name in order})
     print(f"  {args.save}: network {meta['network'][0]}x{meta['network'][1]}, "
-          f"head {meta['head_sha256'][:16]}")
+          f"input {source} {meta['features_sha256'][:16]}, head {meta['head_sha256'][:16]}")
     for name in order:
         array = captured[name]
         print(f"  {name:10} {str(array.shape):24} "
@@ -66,6 +84,20 @@ def compare(args):
         raise SystemExit(f"different networks: {meta_a['network']} against {meta_b['network']}")
     print(f"  {args.compare[0]} against {args.compare[1]}, network "
           f"{meta_a['network'][0]}x{meta_a['network'][1]}")
+    # Only a difference downstream of identical input belongs to the graph.
+    if "features" in a and "features" in b:
+        fa, fb = a["features"], b["features"]
+        if fa.dtype == fb.dtype and fa.shape == fb.shape and np.array_equal(
+                fa.view(np.uint8), fb.view(np.uint8)):
+            print("  input: the same bits on both sides")
+        else:
+            differ = int((fa != fb).sum()) if fa.shape == fb.shape else fa.size
+            print(f"  input: DIFFERENT - {differ} of {fa.size} values - so what follows mixes the "
+                  "input's difference with the graph's; capture again with --features")
+    else:
+        missing = [str(p) for p, x in zip(args.compare, (a, b)) if "features" not in x]
+        print(f"  input: not recorded in {', '.join(missing)}, so an input difference cannot be "
+              "told from a graph one; capture again with this version")
     print(f"  {'point':10} {'same bits':>10} {'only ±0':>9} {'differ':>8} {'max |d|':>10} "
           f"{'mean |d|':>10} {'of mean |x|':>12}")
     first = None
@@ -93,6 +125,9 @@ def main():
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--size", type=int, nargs=2, default=(320, 320), metavar=("H", "W"))
     parser.add_argument("--save", type=pathlib.Path, help="capture this machine's graph to .npz")
+    parser.add_argument("--features", type=pathlib.Path, metavar="NPZ",
+                        help="with --save: run on the input recorded in another capture instead "
+                             "of this machine's synthetic frame, so both graphs see the same bits")
     parser.add_argument("--compare", type=pathlib.Path, nargs=2, metavar=("A", "B"))
     args = parser.parse_args()
     if bool(args.save) == bool(args.compare):
