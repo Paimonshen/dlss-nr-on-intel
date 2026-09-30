@@ -552,7 +552,13 @@ int xmx_init(const char *spv_path)
 	VkPhysicalDeviceVulkan11Features v11 = {
 		.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES, .pNext = &v12,
 		.storageBuffer16BitAccess = VK_TRUE };
-	VkPhysicalDeviceFeatures2 f2 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &v11 };
+	/* The shaders do their address arithmetic in uint64_t, which declares SPIR-V's Int64
+	 * capability, and that needs shaderInt64 on: the validation layer says so for nine of
+	 * them. Mesa never minded. Asked for only where the device has it. */
+	VkPhysicalDeviceFeatures base;
+	vkGetPhysicalDeviceFeatures(g.pd, &base);
+	VkPhysicalDeviceFeatures2 f2 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &v11,
+					 .features.shaderInt64 = base.shaderInt64 };
 	float prio = 1.0f;
 	VkDeviceQueueCreateInfo qci = { .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
 					.queueFamilyIndex = g.qi, .queueCount = 1, .pQueuePriorities = &prio };
