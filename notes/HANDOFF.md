@@ -67,6 +67,20 @@ in UTF-8 mode, and the layer is off. Written on Linux and never compiled on Wind
 build systems still build it and pass (`make test`, CTest 42 of 42). Live mode in a game is the
 second milestone: the layer's threads and socket, the daemon's transport, DXVK for D3D9-11.
 
+**The first Windows session starts from a checkout prepared on Linux** (2026-09-30) on the NTFS
+disk the owner boots Windows from, with the weights in `work/mlxw` and MLX-DLSS in `work/mlx-dlss`,
+and Claude's memory from the Linux sessions in `..\claude-memory` beside it — copy it into this
+project's memory folder first. Two routes, both local branches of it:
+
+- `windows`, this one: CMake with MSYS2's gcc, the compute side only, never compiled on Windows.
+- `pr3`, PR #3's head: an MSVC build of everything (`tools/build_win.bat` — `libxmx.dll`,
+  `nr_layer.dll`, `libnr_image.dll`, the shaders), the layer and the daemon over a named pipe,
+  run on a B580 by its author. Not merged — its review on GitHub lists what is left. It turns
+  `NR_QKV_EPILOGUE` off on Windows by default: set it to 1. Off costs 143 -> 257 ms of graph at
+  1344x768 here, and the author's own runs show it was not what drew the bands.
+
+`coopmat_probe` first, on either. If the configuration is there, `pr3` builds the whole thing today.
+
 ## Xe2's 256-register mode: reachable, correct, and slower (2026-09-27, late night)
 
 The owner asked to try lifting the register ceiling `phase26` found. **Lunar Lake has the mode**
