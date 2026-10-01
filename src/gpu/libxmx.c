@@ -58,6 +58,7 @@ static struct {
 	int ready, lost, discrete, unmapped;
 	int pin32;                /* pipelines require 32-lane subgroups (build_pipeline_spec) */
 	int half_by_cast;         /* half_round's spelling, constant 1 on every pipeline (xmx_init) */
+	int preserve16;           /* float16 subnormals kept: DenormPreserve 16 on every module (xmx_init) */
 	struct buf stage;
 } g;
 
@@ -260,6 +261,52 @@ static uint32_t memtype(uint32_t bits, VkMemoryPropertyFlags want, int host_read
 	return UINT32_MAX;
 }
 
+/* `words` with DenormPreserve declared for 16-bit floats on every entry point, or NULL when
+ * there is nothing to add: a module that already declares a 16-bit denorm mode keeps its own
+ * (src/bench/denorm_mode.py's copies do), and SPIR-V before 1.4 would need
+ * SPV_KHR_float_controls, which this does not add. The caller frees the result. */
+static uint32_t *declare_preserve16(const uint32_t *words, size_t n, size_t *out_n)
+{
+	enum { CAPABILITY = 17, ENTRY_POINT = 15, EXECUTION_MODE = 16, EXECUTION_MODE_ID = 331,
+	       DENORM_PRESERVE = 4459, DENORM_FLUSH = 4460, CAP_DENORM_PRESERVE = 4464 };
+	if (n < 5 || words[0] != 0x07230203u || words[1] < 0x00010400u) return NULL;
+	size_t cap_end = 0, mode_end = 0, entries = 0;
+	int has_cap = 0;
+	for (size_t i = 5; i < n;) {
+		uint32_t count = words[i] >> 16, op = words[i] & 0xffffu;
+		if (count == 0 || i + count > n) return NULL;
+		if (op == CAPABILITY) {
+			cap_end = i + count;
+			if (count > 1 && words[i + 1] == CAP_DENORM_PRESERVE) has_cap = 1;
+		}
+		if (op == ENTRY_POINT) entries++;
+		if (op == ENTRY_POINT || op == EXECUTION_MODE || op == EXECUTION_MODE_ID) mode_end = i + count;
+		if (op == EXECUTION_MODE && count >= 4 && words[i + 3] == 16
+		    && (words[i + 2] == DENORM_PRESERVE || words[i + 2] == DENORM_FLUSH))
+			return NULL;
+		i += count;
+	}
+	if (!cap_end || !mode_end || !entries || cap_end > mode_end) return NULL;
+	size_t m = n + (has_cap ? 0 : 2) + 4 * entries;
+	uint32_t *out = malloc(m * sizeof *out);
+	if (!out) return NULL;
+	size_t o = 0;
+	memcpy(out, words, cap_end * sizeof *out); o = cap_end;
+	if (!has_cap) { out[o++] = (2u << 16) | CAPABILITY; out[o++] = CAP_DENORM_PRESERVE; }
+	memcpy(out + o, words + cap_end, (mode_end - cap_end) * sizeof *out); o += mode_end - cap_end;
+	for (size_t i = 5; i < n;) {
+		uint32_t count = words[i] >> 16;
+		if ((words[i] & 0xffffu) == ENTRY_POINT) {
+			out[o++] = (4u << 16) | EXECUTION_MODE; out[o++] = words[i + 2];
+			out[o++] = DENORM_PRESERVE; out[o++] = 16;
+		}
+		i += count;
+	}
+	memcpy(out + o, words + mode_end, (n - mode_end) * sizeof *out); o += n - mode_end;
+	*out_n = o;
+	return out;
+}
+
 static int build_pipeline_spec(const char *spv_path, VkPipelineLayout layout, VkPipeline *out,
 			      const VkSpecializationInfo *specialization)
 {
@@ -290,10 +337,18 @@ static int build_pipeline_spec(const char *spv_path, VkPipelineLayout layout, Vk
 	void *code = malloc(len);
 	if (fread(code, 1, len, f) != (size_t)len) { fclose(f); free(code); FAIL("short spv read", 0); }
 	fclose(f);
+	/* Float16 subnormals are kept where the driver can be told to (xmx_init): Mesa flushes them
+	 * in the cooperative-matrix GEMMs unless a mode is declared, Intel's Windows driver keeps
+	 * them, and with the mode declared the two compute the same graph bit for bit
+	 * (notes/phase71). The built shaders are not touched; the copy given to the driver is. */
+	size_t patched_n = 0;
+	uint32_t *patched = g.preserve16 ? declare_preserve16(code, (size_t)len / 4, &patched_n) : NULL;
 	VkShaderModuleCreateInfo smi = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-					 .codeSize = len, .pCode = code };
+					 .codeSize = patched ? patched_n * 4 : (size_t)len,
+					 .pCode = patched ? patched : code };
 	VkShaderModule sm;
 	VkResult r = vkCreateShaderModule(g.dev, &smi, NULL, &sm);
+	free(patched);
 	free(code);
 	if (r) FAIL("shader module", r);
 	/* Every kernel here is written for 32-lane subgroups — a row pass's workgroup is one
@@ -455,6 +510,9 @@ static int ensure(struct buf *b, VkDeviceSize size, int host_read)
 	return 0;
 }
 
+/* Whether the pipelines declare DenormPreserve 16 (xmx_init). */
+int xmx_preserve16(void) { return g.preserve16; }
+
 int xmx_init(const char *spv_path)
 {
 	if (g.ready) return 0;
@@ -528,6 +586,31 @@ int xmx_init(const char *spv_path)
 		else fprintf(stderr, "libxmx: XMX_HALF_ROUND=%s is neither pack nor cast; keeping %s\n",
 			     half, g.half_by_cast ? "cast" : "pack");
 	}
+	/* Keep float16 subnormals wherever the driver can declare it. NVIDIA's tensor cores keep
+	 * them (notes/phase71), Mesa's undeclared default flushes them in the GEMMs, and without one
+	 * mode on every driver the same graph gives a different picture on each. `XMX_DENORM16=driver`
+	 * leaves the choice to the driver again, to measure what it does. */
+	g.preserve16 = 0;
+	if (props.apiVersion >= VK_API_VERSION_1_2) {
+		VkPhysicalDeviceFloatControlsProperties controls = {
+			.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FLOAT_CONTROLS_PROPERTIES };
+		VkPhysicalDeviceProperties2 query = {
+			.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &controls };
+		vkGetPhysicalDeviceProperties2(g.pd, &query);
+		/* Only the 16-bit mode is declared, which a driver must allow to differ from the
+		 * other widths' (VUID-RuntimeSpirv-denormBehaviorIndependence-06289 and -06290).
+		 * ANV and Intel's Windows driver both report ALL. */
+		g.preserve16 = controls.shaderDenormPreserveFloat16 == VK_TRUE
+			&& controls.denormBehaviorIndependence == VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_ALL;
+	}
+	const char *denorm = getenv("XMX_DENORM16");
+	if (denorm && !strcmp(denorm, "driver")) g.preserve16 = 0;
+	else if (denorm && *denorm && strcmp(denorm, "preserve"))
+		fprintf(stderr, "libxmx: XMX_DENORM16=%s is neither preserve nor driver; keeping %s\n",
+			denorm, g.preserve16 ? "preserve" : "driver");
+	if (!g.preserve16 && !(denorm && !strcmp(denorm, "driver")))
+		fprintf(stderr, "libxmx: %s cannot keep float16 subnormals by declaration; its own default "
+			"decides, and the picture may differ from other drivers'\n", g.name);
 	VkPhysicalDeviceVulkan13Features v13 = {
 		.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES, .pNext = &cm,
 		.subgroupSizeControl = (g.pin32 & 1) ? VK_TRUE : VK_FALSE,

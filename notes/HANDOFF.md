@@ -1,6 +1,6 @@
 # HANDOFF — read this first
 
-State of the DLSS-NR on Intel Xe2 project as of **2026-09-27**. notes/CLAUDE.md holds the
+State of the DLSS-NR on Intel Xe2 project as of **2026-10-01**. notes/CLAUDE.md holds the
 original brief; **this file overrides it wherever they disagree**, and after
 2026-09-09 they disagree about something foundational.
 
@@ -23,6 +23,34 @@ you need the evidence behind a line in this file, rather than reading them in or
   game's motion-vector convention); deferred by the owner on 2026-09-26. Tekken 7 and DoA5
   have no upscaler, so it needs a newer game.
 - **A FAQ** in the README, for the questions that keep coming back. Later.
+
+## `DenormPreserve 16` is declared: one graph on both drivers (2026-10-01, night)
+
+The owner's decision on step 3 below. libxmx adds the `DenormPreserve` capability and
+`OpExecutionMode DenormPreserve 16` to every module it loads, where the device reports
+`shaderDenormPreserveFloat16` and lets the 16-bit mode differ from the other widths'
+(`denormBehaviorIndependence = ALL`; ANV and Intel's 101.9033 both do). The built shaders are not
+touched, only the copy handed to the driver. A module that declares a 16-bit mode of its own
+keeps it, so `denorm_mode.py flush` still flushes. `XMX_DENORM16=driver` leaves it to the driver
+again, and a driver that cannot declare it gets a one-line warning, as for the subgroup width.
+
+**New references, the same on Linux and on Windows**: `frame_replay.py` 320x320
+`e62005b80145b97a`, 720p (1344x768) `c217fd2fdbbe6b79`. Under `XMX_DENORM16=driver` Mesa gives
+the old `2beef230a33a120a` / `b3e91f68c1e9e718`. **Every reference hash in this file older than
+this entry is from the flushed graph** (heads, graph hashes, the daemon's answers), and the
+pictures move by the old Linux-Windows gap: 0.47-0.62 levels of 255 on Tekken's capture.
+
+- `src/gpu/test_denorm.py` puts 2^-20 through an identity on each GEMM kernel the graph uses (the
+  tiled one at K = 16, the staged one, a partial last block). It must come out 2^-20; under
+  `driver` it shows Mesa flushing it. It runs in `make test` (green, 570 checks) and in CTest
+  (43 of 43).
+- The validation layer reports nothing for the patched modules, in either mode.
+- Speed, replayed graph, paired, three rounds, on battery: 320x320 24.7 / 23.3 / 23.6 ms declared
+  against 23.4 / 23.0 / 24.2 left to the driver; 720p 151.4 / 146.6 / 152.1 against
+  149.8 / 150.6 / 151.3. The same.
+
+The flush is called Mesa's default now wherever it was called the XMX units': `docs/ARCHITECTURE.md`,
+`src/gpu/xmx.py`, `phase4`'s correction, the brief.
 
 ## Linux ran it: with `DenormPreserve 16` Mesa computes Windows' graph bit for bit (2026-10-01, evening)
 
@@ -1425,7 +1453,7 @@ megapixel. Live mode runs every present: Tekken 7 at 30 fps at 800x450 beside th
 | **Input is five optional 2D textures**, `tex.2d.v4.f32`; only colour is required | `notes/phase5-input-contract.md` |
 | **16-channel packing order**: ch4-6 colour, ch7-9 reprojected history (same affine `(x−a)·b`), ch12-14 sign-encoded validity. MLX-DLSS agrees independently | `notes/phase5-channel-order.md` |
 | Output head is **32 → 4**; three channels become display RGB | `notes/phase5-output-head.md` |
-| Under **Mesa's default** float controls the XMX multiply flushes subnormal FP16 operands to zero; a per-tensor 2^k rescale guards against it. It is the driver's mode, not the units': Intel's Windows driver keeps them (2026-10-01) | `notes/phase4-subnormal-flush.md`, `phase71` |
+| Under **Mesa's default** float controls the XMX multiply flushes subnormal FP16 operands to zero; a per-tensor 2^k rescale guards against it. It is the driver's mode, not the units': Intel's Windows driver keeps them, and since 2026-10-01 libxmx declares `DenormPreserve 16`, so Mesa does too | `notes/phase4-subnormal-flush.md`, `phase71` |
 | **Each precision regime has a sharp threshold**: below it a perturbation is annihilated exactly, above it the head jumps to 9-12 % of its sd. float32 ~1e-07, half ~1e-04. The half path is the **more stable** of the two | `notes/phase9-numerics.md` |
 | The whole CPU/XMX gap is the FP16 rounding of GEMM *activations*, and **97.3 % of them are already half-valued** — only 186 of 6987 calls are touched. Weights change nothing: 579 of 649 tensors are stored F16, the other 70 are `attn_scale`, not a GEMM operand | `notes/phase9-numerics.md` |
 | Batched attention and the folded branched FFN are **bit-identical** to the plain GEMM hook; the two 720p renders are pixel-identical | `notes/phase9-numerics.md` |

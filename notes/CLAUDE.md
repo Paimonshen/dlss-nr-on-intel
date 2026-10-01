@@ -259,7 +259,8 @@ Treat all of the above as *reported*, not verified. Verifying it is Phase 1's jo
   *(Both halves corrected since. The 27 % counted the misread decode, and the real
   weights hold 7 subnormals (`phase61`). The flush is Mesa's default float-controls mode,
   not the XMX units': under Intel's Windows driver the same units keep float16
-  subnormals (`phase71`, 2026-10-01).)*
+  subnormals (`phase71`, 2026-10-01), and libxmx now declares `DenormPreserve 16`, so
+  Mesa keeps them too.)*
   **All three block families now validated on hardware** — 20 layer evaluations,
   worst deviation 2.8e-04 (`src/gpu/test_attention_gpu.py`). The fused Swin layout is
   now anchored on the cosine gate, which is exactly `C` long after 8 zero pad bytes at

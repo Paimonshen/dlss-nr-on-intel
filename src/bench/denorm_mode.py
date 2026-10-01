@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Run a command with every graph shader declaring what it does with float16 subnormals.
 
-The shaders declare no float-controls mode, so each driver does its own: Mesa flushes
-float16 subnormals to zero in the cooperative-matrix GEMMs and Intel's Windows driver keeps
-them, and that alone is where the two first part (notes/phase71). This copies the SPIR-V
-the graph loads with `DenormPreserve` or `DenormFlushToZero` declared, for 16-bit floats
-unless `--widths` says otherwise, into a folder of its own, points the `XMX_*_SPV` variables
-at the copies, and runs the command under them:
+Left to itself each driver does its own: Mesa flushes float16 subnormals to zero in the
+cooperative-matrix GEMMs and Intel's Windows driver keeps them, and that alone is where the
+two first part (notes/phase71). libxmx now declares `DenormPreserve 16` on every module it
+loads, where the driver allows it; a module that declares a 16-bit mode of its own keeps it.
+This copies the SPIR-V the graph loads with `DenormPreserve` or `DenormFlushToZero` declared,
+for 16-bit floats unless `--widths` says otherwise, into a folder of its own, points the
+`XMX_*_SPV` variables at the copies, and runs the command under them:
 
     python3 src/bench/denorm_mode.py preserve -- python3 src/bench/frame_replay.py --size 320 320
     python3 src/bench/denorm_mode.py flush -- python3 src/bench/capture_compare.py --save x.npz

@@ -8,11 +8,13 @@ and a fence wait rather than ~80 ms of setup.
 
 Two things this layer must do that the kernel does not:
 
-  1. **Rescale both operands by a power of two.** XMX flushes subnormal FP16 operands to
-     zero (notes/phase4-subnormal-flush.md), and an activation can land there whatever the
-     weights hold. A power-of-two scale is exact, so this is lossless. (That note's "27 %
-     of this model" was measured on the dense-FP16 misreading of the container and is
-     withdrawn: the real weights hold 7 subnormals, notes/phase61.)
+  1. **Rescale both operands by a power of two.** Mesa flushes subnormal FP16 operands to
+     zero in the GEMM unless a float-controls mode is declared (notes/phase71). libxmx
+     declares `DenormPreserve 16` where the driver can; where it cannot, an activation can
+     land there whatever the weights hold. A power-of-two scale is exact, so this is
+     lossless. (notes/phase4-subnormal-flush.md's "27 % of this model" was measured on the
+     dense-FP16 misreading of the container and is withdrawn: the real weights hold 7
+     subnormals, notes/phase61.)
   2. **Pad to the tile shape.** The only float configuration is M=8 N=16 K=16.
 """
 import ctypes
@@ -83,10 +85,11 @@ def memory_note():
 def _shift(x):
     """The exact 2^k that lifts |x| just under the FP16 ceiling.
 
-    XMX flushes subnormal FP16 operands to zero (notes/phase4-subnormal-flush.md);
-    a power of two is lossless. The "27 %" that note reports is withdrawn — it counted
-    the misread decode, notes/phase61 — but the flush is real and an activation can
-    reach it at any time.
+    A driver that cannot be told to keep FP16 subnormals may flush them (Mesa's default
+    does, notes/phase71); a power of two is lossless. The "27 %" that
+    notes/phase4-subnormal-flush.md reports is withdrawn — it counted the misread decode,
+    notes/phase61 — but where a flush happens it is real, and an activation can reach it
+    at any time.
     Two reductions rather than `abs(x).max()`, which allocates a whole temporary.
     """
     x = np.asarray(x)

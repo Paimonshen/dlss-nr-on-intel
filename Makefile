@@ -128,6 +128,7 @@ bench: all work/half_probe.spv
 test: all work/attention_ab.spv work/test_exchange work/test_settled work/test_present
 	python3 src/gpu/test_ffn_batch.py --gpu
 	python3 src/gpu/test_gemm_contract.py
+	python3 src/gpu/test_denorm.py
 	python3 src/gpu/test_input_fp16.py
 	python3 src/gpu/test_compact_head.py
 	python3 src/gpu/test_joint_qkv.py

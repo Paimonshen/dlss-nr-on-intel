@@ -171,7 +171,8 @@ Shown on Windows by declaring the mode in SPIR-V, with the shaders' code untouch
 and its flush-to-zero model reproduced the GPU. But the flush is Mesa's default mode, not the
 XMX units' behaviour: the same units keep float16 subnormals under Intel's driver. Mesa keeps
 them too when a shader declares `DenormPreserve 16`: run on Linux on 2026-10-01, it gives Windows'
-graph bit for bit (HANDOFF, 2026-10-01, evening).
+graph bit for bit (HANDOFF, 2026-10-01, evening). libxmx has declared it on every module since,
+wherever the driver reports it (`src/gpu/test_denorm.py`); `XMX_DENORM16=driver` turns it off.
 
 **The vendor's hardware keeps them.** NVIDIA's tensor cores support subnormal inputs and outputs
 on every architecture measured, from V100 to B200 and the RTX PRO 6000 (Khattak and Mikaitis,
