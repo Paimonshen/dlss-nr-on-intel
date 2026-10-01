@@ -24,6 +24,37 @@ you need the evidence behind a line in this file, rather than reading them in or
   have no upscaler, so it needs a newer game.
 - **A FAQ** in the README, for the questions that keep coming back. Later.
 
+## Where Windows' time goes: page faults on the host, GEMMs on the device (2026-10-01, late night)
+
+Measured on Windows while the owner was away and Linux was not reachable. `phase71`, last
+section, has the numbers.
+
+- **On the host, every fresh large array pays page faults.** Windows' heap returns freed blocks of
+  that size to the system. Reading the 720p head took 15 ms, and the copy was 2.4 of them.
+  **`f7a801a`**: `read_head` now lends a block the frame keeps, through the buffer protocol. A
+  block goes out again only once every array and view over the last head in it is gone. Heads
+  unchanged, CTest 34 of 34; before Python 3.12 it copies as it did.
+- The daemon does the same for every full-frame array. Its frame costs 36 478 page faults at
+  1920x1080 (25-35 ms of ~42 on the host) and 2 031 at 640x360. **Windows' live rates are
+  1.28-1.52x Linux's**, from 34.2 ms at 512x288 to 165.7 at 1080p.
+  `work/tools-win/live_rates_win.py` runs the daemon in-process, on loopback TCP. The general
+  fix is NumPy's allocator keeping large blocks (a `PyDataMem_Handler`), or the daemon keeping its
+  own buffers. That is the owner's call; neither is started.
+- **On the device the gap is GEMM**: at 320x320, 20.3 ms against Linux's 16.6, while the other
+  passes are faster here (7.0 against 7.9). It is not spills, not a 256-register mode, and not
+  bandwidth: a copy runs 94 GB/s. Four bit-identical variants of the staged GEMM were no faster.
+  **`7d61047`**: `XMX_PIPELINE_STATS=FILE` writes what the driver's compiler reports for each
+  pipeline. Intel reports five numbers; Mesa reports registers, SIMD width, spills and cycles.
+
+**On Linux next, in order:**
+
+1. `make test` on `7d61047` and `f7a801a` (after the push).
+2. `frame_profile.py --size 320 320 --runs 5 --calls 25` and `--size 768 1344 --runs 3 --calls 40`,
+   on a quiet machine, set beside `NRonWindows/windows-profile-320x320-9033.txt` and
+   `windows-profile-1344x768-9033.txt`. Which call sites are slower on Intel, and by how much.
+3. The same 1344x768 run under `XMX_PIPELINE_STATS=<NR>/linux-stats.tsv`, with Mesa's registers,
+   spills and SIMD width for the slow kernels.
+
 ## On Windows at 2deb0d9: the declared mode holds, and the last three failures are gone (2026-10-01, night)
 
 Linux's five checks, run on Intel's 101.9033:

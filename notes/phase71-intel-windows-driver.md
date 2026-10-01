@@ -128,8 +128,8 @@ CPU 1-2 %):
 
 The heads were `e62005b80145b97a…` at 320x320 and `c217fd2fdbbe6b79…` at 720p, the same on
 every run. The kernels' shapes, shared-memory sizes and occupancy were tuned against Mesa's
-compiler, and this is Intel's; it has not been profiled yet. The daemon's `--dump` costs another
-1.6 s a 1080p frame here, for the PNGs.
+compiler, and this is Intel's; *where the difference goes is the section "Where the time goes
+on Windows" below.* The daemon's `--dump` costs another 1.6 s a 1080p frame here, for the PNGs.
 
 The in-process replay, the quiet check and the probes live outside the tree, in the checkout's
 `work/tools-win/`.
@@ -199,3 +199,59 @@ fused window block, and nothing between them is stored. `src/bench/block0_probe.
 on a capture's input as the graph does, and again with every fusion off, keeping what each pass
 writes. It saves both in `capture_compare.py`'s format. On Windows the fused and unfused runs
 agree bit for bit, with and without the flush. Linux's run of it names the pass.
+
+## Where the time goes on Windows (2026-10-01, night)
+
+On 101.9033, on a machine checked quiet before and after every timed run (mains, best
+performance, CPU 1-10 %). Two causes, of different kinds.
+
+**On the host, every fresh large array is page faults.** Windows' heap gives a freed block of
+this size back to the system. So the next array of that size starts on fresh pages, and pays a
+fault every 4 KB, about 0.65-1 us each. Linux's glibc keeps such blocks, and NumPy asks for huge
+pages there. Reading the 720p head took 15 ms, and the copy itself was 2.4 of them. `read_head`
+now lends a block the frame keeps (`f7a801a`): the 720p read is 2.2 ms, and 320x320's goes from
+2.0 to 0.5.
+
+The daemon pays the same for every full-frame array it makes. Counted in-process, with
+`work/tools-win/live_rates_win.py`, which runs the daemon's `serve()` on loopback TCP because
+Python here has no `AF_UNIX`:
+
+| swapchain, scale | Windows, ms | Linux, `nr_knobs.RATES`, ms | page faults a frame |
+|---|---:|---:|---:|
+| 512x288, 0.35 | 34.2 | 25.9 | 1 572 |
+| 640x360, 0.50 | 34.8 | 27.0 | 2 031 |
+| 854x480, 0.50 | 48.2 | 34.0 | 6 858 |
+| 1024x768, 0.55 | 71.3 | 56.5 | 13 887 |
+| 1920x1080, 0.55 | 165.7 | 111.8 | 36 478 |
+
+At 1080p that is about 140 MB of fresh pages a frame, 25-35 ms of the ~42 ms the frame spends on
+the host. Lending one array does not reach the rest. That needs NumPy's allocator itself to keep
+large blocks, through a `PyDataMem_Handler`, or the daemon to keep its own buffers.
+
+**On the device, the GEMMs.** At 320x320 the device total is 27.3 ms against Linux's 24.5
+(HANDOFF, 2026-09-27). GEMM is 20.3 of it against 16.6, and everything else 7.0 against 7.9,
+which is faster here. At 720p's field, 1344x768, the total is 179.5 ms, and GEMM 126.0 of it.
+
+In the frame, the bottleneck's GEMMs with an epilogue take 1.7-1.9x Linux's in-frame figures of
+2026-09-27: contract 290 against 169 us, QKV 169 against 91, projection 79 against 42. The
+expand, which has no epilogue, takes the same: 221 against ~223. What else differs needs Linux's
+per-call profile at the same fields.
+
+What it is not:
+
+- **Spills.** No graph kernel spills. `XMX_PIPELINE_STATS` (libxmx, `7d61047`) writes the
+  compiler's statistics for each pipeline. Intel gives five, among them the scratch size, and
+  every specialised build has 0 bytes of scratch. It offers no representation of the code itself.
+- **A 256-register mode.** The staged GEMM is not in one. Padded to 16 KB of shared memory, so
+  that a core holds half the workgroups, it slows by 15 % (124.6-129.4 -> 146.5-148.6 ms); at
+  24 KB it slows by 38 %.
+- **Memory bandwidth.** A copy and an add move 94 GB/s here, and `to_half` 70: Linux's ceiling.
+
+Tried on Intel's compiler and no faster, all bit-identical:
+
+| variant | staged GEMM at 1344x768 |
+|---|---|
+| K steps of 64 | 157 ms, against 130 |
+| operand stores four halves at a time | the same |
+| B kept in shared memory as [n][k], loaded column-major | 150-155 ms |
+| small-K GEMMs moved to the tiled kernel | the same |
