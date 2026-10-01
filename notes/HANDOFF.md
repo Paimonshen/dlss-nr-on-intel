@@ -24,6 +24,44 @@ you need the evidence behind a line in this file, rather than reading them in or
   have no upscaler, so it needs a newer game.
 - **A FAQ** in the README, for the questions that keep coming back. Later.
 
+## PR #3 joins the main line, squashed and on the main line's mechanisms (2026-10-02)
+
+**Branch `pr3-integration`, on `windows` at `950d837`:** the pull request in one commit, then
+ours on top. It is not merged into `windows` or `master` yet: that, closing PR #3 and a word
+to its author are the owner's to give, after Linux's `make test`.
+
+- **Why squashed.** The history carries a setup script that fetched a third-party pack with
+  NVIDIA's DLL: added in `52b3e55`, removed in `c22b6f5` within the same pull request. The
+  project carries that in no form. The commits are also authored `paimon@local`, which
+  `publish_check --history` refuses. So the pull request is one commit (`62d3242`), authored by
+  its author's GitHub noreply address, with the history left behind at 4b95863.
+- **Three conflicts went the main line's way.** `half_round` is the per-driver constant, not
+  `-DHALF_ROUND_FLOAT16`. The libraries load through `xmx.native_library`; its `nr_build` hooks
+  pointed at a module neither tree has. `publish.glsl` keeps its note on the attention shaders'
+  `packHalf2x16` bit trick.
+- **Ours on top (`e7d258a`, and the docs):**
+  - the daemon's probe asks libxmx which spelling to check (`xmx_half_by_cast`), so there is no
+    `half_round.txt` stamp;
+  - the probe's child gets `NUL` for stdin (WinError 6 in a spawned daemon);
+  - `build_win.bat` builds `half_probe.spv` from `src/bench`;
+  - the mapped input is off only on a discrete card under Windows (`xmx_discrete`), not on
+    every Windows machine;
+  - `nr_layer.c`'s eighteen em dashes are back from GBK, and its default paths can no longer
+    be cut short;
+  - README, `docs/WINDOWS.md` and a merge note on `docs/WINDOWS-PORT.md`.
+- **Run on Windows** (Arc 140V, 101.9033):
+  - CMake/MinGW: CTest 34 of 34.
+  - MSVC `build_win.bat`: the same 34, `gpu_denorm` included. Heads `e62005b8` and
+    `c217fd2f`, Linux's.
+  - vkcube through the MSVC layer to the daemon on a named pipe: 30 frames answered.
+  - The layer spawning its own daemon: 90 frames, and the probe's `float16_t 0/90368`.
+
+**Left:**
+- Linux's `make test` on the branch.
+- MSVC's OpenMP. Under `/openmp` the host loops want signed indices, so `libnr_image` runs on
+  one core in that build, about 10 % at 720p.
+- A game on this machine.
+
 ## Where Windows' time goes: page faults on the host, GEMMs on the device (2026-10-01, late night)
 
 Measured on Windows while the owner was away and Linux was not reachable. `phase71`, last

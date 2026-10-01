@@ -3,6 +3,23 @@
 *Every discovery, change, test and lesson from porting DLSS-NR on Intel to Windows, in
 the order it happened. Written for whoever picks this up next.*
 
+## Since it joined the main line (2026-10-02)
+
+This branch came in squashed, with three of its choices replaced by the main line's, and
+what follows is kept as the record of how the port was made. Where it and the code disagree,
+the code is the current one:
+
+- `half_round`'s spelling is chosen per driver when libxmx builds each pipeline
+  (specialisation constant 1), not by `-DHALF_ROUND_FLOAT16`; `build_win.bat` defines nothing
+  per driver and writes no `half_round.txt`, and the start-up probe asks libxmx
+  (`xmx_half_by_cast`) which spelling it has to check.
+- The libraries load through `xmx.native_library`; there is no `nr_build` hook.
+- The features go into the mapped input except on a discrete card under Windows
+  (`xmx_discrete`), where the B580 got NaN that way; `NR_INPUT_VIEW` decides either way.
+- libxmx declares `DenormPreserve 16`, so Windows and Linux compute the same graph bit for
+  bit, and the three tests that differed here by a zero's sign or at mask 7 pass
+  (`notes/phase71-intel-windows-driver.md`).
+
 ## What this branch adds to master
 
 1. **The Vulkan layer builds and runs on Windows** (MSVC), with a named-pipe transport,
@@ -160,7 +177,7 @@ r_daemon.py normalized to LF (its CRLF copy read as a 2000-line diff).
   the driver can — a desktop Arc without subgroup size control got no device before) and
   the OpenDLSS-NR reference files. Both rebased in cleanly; all suites re-run green after.
 - Git notes from the trench: a detached-HEAD commit after a rebase is easily lost when a
-  ranch -f reads the wrong HEAD — reflog has it, cherry-pick recovers it; and a CRLF
+  branch -f reads the wrong HEAD — reflog has it, cherry-pick recovers it; and a CRLF
   copy makes every diff review impossible, so normalize before reviewing anything.
 
 

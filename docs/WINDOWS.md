@@ -1,7 +1,8 @@
 # Windows — the port, and where it stands
 
 **Experimental; first run on Windows on 2026-09-29/30** (Arc 140V, Intel's driver 101.8991,
-then 101.9033). The compute side builds and runs there, and the game layer does not yet. What
+then 101.9033). The compute side builds and runs there, and since PR #3 joined (2026-10-02) the
+layer and the daemon do too, from an MSVC build (`docs/WINDOWS-PORT.md`). What
 the machine said is `notes/phase71-intel-windows-driver.md`. The plan below was written on Linux
 before that session, and it is corrected where the machine disagreed.
 
@@ -13,7 +14,7 @@ before that session, and it is corrected where the machine disagreed.
 | the native host passes, `libnr_image` | yes | `work/libnr_image.dll` |
 | `coopmat_probe`, the GPU tests | yes | yes |
 | photo mode on a still, `src/ref/nr_frame.py` | yes | yes |
-| the game layer and live mode | yes | **not yet** — see the second milestone |
+| the game layer and live mode | yes | the MSVC build, on a named pipe (`docs/WINDOWS-PORT.md`) |
 | `nr-photo`, `nr-toggle` (bash) | yes | no |
 
 The runtime is plain C and Vulkan and the native passes plain C with OpenMP, so the compute side
@@ -80,13 +81,16 @@ work/coopmat_probe
 ctest --test-dir work/cmake --output-on-failure
 ```
 
-The layer is off by default on Windows (`NR_BUILD_LAYER`), so CTest registers the compute tests
-and the tree's own checks, not the layer's.
+The layer is off by default in this build on Windows (`NR_BUILD_LAYER`), so CTest registers the
+compute tests and the tree's own checks, not the layer's. The layer, the daemon's named pipe and
+everything else build with MSVC instead: `tools\build_win.bat`, into the same `work/`, so keep
+one build per checkout (`docs/WINDOWS-PORT.md`). Both give the same heads.
 
 On Intel's driver, leave `gpu_window_attention` out: `ctest --test-dir work/cmake -E
 gpu_window_attention`. Its unmerged variant, which the graph does not use by default, hangs the
-engine from 32 windows up (phase71). Three checks fail there all the same: a zero's sign in two
-GEMMs, and 378 values in the ViT attention's unfused reference.
+engine from 32 windows up (phase71). Everything else passes, now that libxmx declares
+`DenormPreserve 16`; before it, a zero's sign in two GEMMs and 378 values of the ViT attention's
+unfused reference differed here.
 
 ## The first session, in order
 
@@ -97,8 +101,8 @@ GEMMs, and 378 values in the ViT attention's unfused reference.
    --resident`. The picture should be the Linux one; `src/bench/frame_replay.py` prints the
    head's hash and the warm graph time, the same numbers on both.
 4. **Timing** with `src/bench/frame_replay.py --size 320 320` and `--size 720 1280`: the live
-   extent and a 720p frame (on its 1344x768 field), against the same commands on Linux. `live_rates.py` needs the
-   daemon's socket, which is the second milestone.
+   extent and a 720p frame (on its 1344x768 field), against the same commands on Linux. `live_rates.py` speaks `AF_UNIX`,
+   which Python has not here; the daemon itself listens on a named pipe.
 
 ## The second milestone: live mode in a game
 
@@ -119,6 +123,7 @@ GEMMs, and 378 values in the ViT attention's unfused reference.
 - **The launchers** — `nr-photo`, `nr-toggle` — are bash; a Python or PowerShell one replaces
   them.
 
-PR #3 on GitHub is an outside contributor's port of exactly this part — the layer's threads and
-transport, a named pipe for the daemon, an MSVC build — run on a B580. Its review lists what it
-needs before it can be merged; once it is, this milestone starts from it rather than from here.
+PR #3, an outside contributor's port of exactly this part — the layer's threads and transport, a
+named pipe for the daemon, an MSVC build, deploy scripts — run on a B580, joined the main line on
+2026-10-02. What is left of the milestone is a game on this machine: a D3D9-11 one through
+DXVK, with the layer from `build_win.bat` and `tools\deploy.bat`.
