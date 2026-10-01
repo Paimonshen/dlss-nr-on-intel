@@ -24,6 +24,18 @@ you need the evidence behind a line in this file, rather than reading them in or
   have no upscaler, so it needs a newer game.
 - **A FAQ** in the README, for the questions that keep coming back. Later.
 
+## The `windows` branch is on master (2026-10-01, night)
+
+Merged with the owner's OK as a fast-forward. It brings the compute side's Windows build (CMake
+with MSYS2's gcc, `docs/WINDOWS.md`), `half_round`'s spelling chosen per driver, `shaderInt64`,
+`DenormPreserve 16`, and the tools that found where the drivers part (`capture_compare.py`,
+`denorm_mode.py`, `block0_probe.py`). On Linux only the picture changes, by the declared mode in
+the entry below. Windows work goes on from the same branch.
+
+**PR #3 conflicts with it now**, in `publish.glsl`, `xmx.py` and `nr_image.py`. Its compile-time
+`half_round` switch, its `half_round.txt` stamp and its own DLL loading meet the per-driver
+constant and `native_library` here, and it has to take ours.
+
 ## `DenormPreserve 16` is declared: one graph on both drivers (2026-10-01, night)
 
 The owner's decision on step 3 below. libxmx adds the `DenormPreserve` capability and

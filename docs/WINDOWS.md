@@ -1,9 +1,9 @@
 # Windows — the port, and where it stands
 
-**Experimental, on the `windows` branch; first run on Windows on 2026-09-29/30** (Arc 140V,
-Intel's driver 101.8991, then 101.9033). What the machine said is
-`notes/phase71-intel-windows-driver.md`. The plan below was written on Linux before that
-session, and it is corrected where the machine disagreed.
+**Experimental; first run on Windows on 2026-09-29/30** (Arc 140V, Intel's driver 101.8991,
+then 101.9033). The compute side builds and runs there, and the game layer does not yet. What
+the machine said is `notes/phase71-intel-windows-driver.md`. The plan below was written on Linux
+before that session, and it is corrected where the machine disagreed.
 
 ## What is meant to run
 
@@ -36,8 +36,10 @@ there — the tests compare bytes — and expect to measure the speed rather tha
 **Answered on 2026-09-29: the configuration is there.** Intel's driver offers four configs, the
 fp16 one among them. The compiler turned out to be the difference: it folds
 `unpackHalf2x16(packHalf2x16(x))`, which `half_round` relied on, so libxmx now picks the spelling
-per driver. The graph runs 1.2-1.4x Mesa's time, and the picture is 47-49 dB from Linux's
-(phase71).
+per driver. The graph runs 1.2-1.4x Mesa's time. The picture was 47-49 dB from Linux's until
+libxmx declared `DenormPreserve 16`. Left undeclared, Mesa flushes float16 subnormals in the
+GEMMs and Intel's driver keeps them. With the mode declared, the two compute the same network
+output bit for bit (phase71).
 
 ## Before building
 

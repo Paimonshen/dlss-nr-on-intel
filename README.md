@@ -138,8 +138,9 @@ already have. See [Build](#build).
   it for everything else — but it is no longer the difference between working and crawling.
   This is written from one owner's report and tested by forcing the same path on the
   integrated GPU; it has not been measured on a discrete card.
-- Linux. Python 3 with NumPy. A C compiler, `glslangValidator`, the Vulkan loader. Windows
-  is being ported on the `windows` branch — the compute side first, not yet run there
+- Linux. Python 3 with NumPy. A C compiler, `glslangValidator`, the Vulkan loader. On Windows
+  the compute side builds and runs with Intel's own driver, and the network's output is the
+  same as on Linux, bit for bit. The game layer does not run there yet
   ([docs/WINDOWS.md](docs/WINDOWS.md)).
 - **ImageMagick** for the still-frame tools, which read and write pictures through
   `magick`. The game path does not touch it.
