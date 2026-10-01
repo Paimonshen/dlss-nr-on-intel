@@ -24,22 +24,68 @@ you need the evidence behind a line in this file, rather than reading them in or
   have no upscaler, so it needs a newer game.
 - **A FAQ** in the README, for the questions that keep coming back. Later.
 
+## `pr3-integration` on Linux: green after one test fix, and where Intel's compiler loses time (2026-10-02)
+
+The Windows session's list, run on Linux at `fcde1ce`:
+
+- `make` and CMake build it, and `nr_layer.c` has no warnings left. `half_probe.spv` is in `all`.
+- **`make test` green (570). CTest 42 of 43.** `layer_present_negative` could not compile its
+  faulty copy of the layer. The copy is built in a temporary folder, and since PR #3
+  `nr_layer.c` includes `nr_transport.h`, which sits beside it. `make test` does not run that
+  control and Windows' CTest has no layer, so nothing had. Fixed in `010cb9d` (`-I src/layer`).
+  The control catches the missing wait 6 times of 6 again, and CTest is 43 of 43.
+- The daemon's probe: `half rounding: bit-twiddled 0/90368, packHalf2x16 0/90368, float16_t
+  90109/90368`, no FAIL. libxmx chose `packHalf2x16`. Mesa folds the cast on 90 109 of the
+  90 368 values, the count Intel's driver gives for the round trip.
+- Heads `e62005b80145b97a` / `c217fd2fdbbe6b79`, replayed in 23.4 / 144.0 ms.
+- `live_rates.py` paired with master: no regression. Two whole tables, then three rounds of 40
+  frames: 512x288 at 0.35 26.3 against 26.3 ms, 640x360 at 0.5 27.8 against 28.0.
+- Publishing: `origin/master..pr3-integration` carries only the two noreply identities.
+  `publish_check --history` flags the original commits of PR #1 and PR #3, which live only in
+  local refs that are never pushed (`refs/pr/1`, `refs/pr/3`, `origin/pr3-head`).
+
+**Where Intel's compiler loses the time.** Profiled with `frame_profile.py --warm`, which is new:
+on Linux the GPU's clock is still climbing through the first frames. The default five timed
+320x320 frames after one warm one read 31.7 ms of device time, where thirty warm frames first
+read 24.4. The files are in `NRonWindows`: `linux-profile-*-warm.txt`, the requested runs
+without the warm-up, `linux-stats.tsv`, and `linux-vs-windows-callsites.txt` with the tables.
+
+- **Per pass, only the staged GEMM is slower on Windows.** At 320x320 it takes 20.3 ms against
+  16.9 (1.20x), and at 1344x768 126.0 against 81.7 (1.54x). Every other pass is the same or
+  faster there: the window block 0.80x, global attention 0.69x.
+- **Per call site at 1344x768**:
+  - the N = 32 contracts (`0x1100`, batched) run at 0.84-1.17x;
+  - every other GEMM runs at 1.3-2.2x;
+  - the worst are short K loops with a heavy epilogue. At K = 64 the gate activation takes
+    2.09x, the residual 2.16x and the QKV epilogue 2.03-2.05x. The same epilogues at K = 256-512
+    take 1.29-1.50x;
+  - also 1.76x: the bottleneck's contract, 320x1024x4096, a long K loop on 80 workgroups.
+- **Mesa's account of the same kernels** (`XMX_PIPELINE_STATS`). Every specialised staged GEMM
+  is SIMD32, with 0 spills, 0 scratch, 246-250 live registers and 8 KB of shared memory. Its
+  instruction count runs from 1 367 with no epilogue, through 1 621 (E4M3), 1 981 (the gate
+  activation) and 2 220-2 559 (the residual), to 2 896-3 394 (the QKV epilogue).
+
+So the gap scales with the work per output element: the stage through shared memory, the
+epilogue's scalar loop and the stores. A starved long K loop shows it too. Next on Windows:
+the same shape with each epilogue in turn, and Intel's five numbers set beside Mesa's for the
+specialisations above.
+
 ## PR #3 joins the main line, squashed and on the main line's mechanisms (2026-10-02)
 
-**Branch `pr3-integration`, on `windows` at `950d837`:** the pull request in one commit, then
+**Branch `pr3-integration`, on `windows` at `a526db9`:** the pull request in one commit, then
 ours on top. It is not merged into `windows` or `master` yet: that, closing PR #3 and a word
 to its author are the owner's to give, after Linux's `make test`.
 
 - **Why squashed.** The history carries a setup script that fetched a third-party pack with
   NVIDIA's DLL: added in `52b3e55`, removed in `c22b6f5` within the same pull request. The
   project carries that in no form. The commits are also authored `paimon@local`, which
-  `publish_check --history` refuses. So the pull request is one commit (`62d3242`), authored by
+  `publish_check --history` refuses. So the pull request is one commit (`c443fd2`), authored by
   its author's GitHub noreply address, with the history left behind at 4b95863.
 - **Three conflicts went the main line's way.** `half_round` is the per-driver constant, not
   `-DHALF_ROUND_FLOAT16`. The libraries load through `xmx.native_library`; its `nr_build` hooks
   pointed at a module neither tree has. `publish.glsl` keeps its note on the attention shaders'
   `packHalf2x16` bit trick.
-- **Ours on top (`e7d258a`, and the docs):**
+- **Ours on top (`c20a70f`, and the docs in `fcde1ce`):**
   - the daemon's probe asks libxmx which spelling to check (`xmx_half_by_cast`), so there is no
     `half_round.txt` stamp;
   - the probe's child gets `NUL` for stdin (WinError 6 in a spawned daemon);
