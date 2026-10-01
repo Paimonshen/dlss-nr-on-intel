@@ -90,8 +90,11 @@ hung, and the second, with `shaderInt64` on, sat for 60 s (`VK_TIMEOUT`) before 
 staging moves the hang and does not remove it, so it was not kept. The merged variant passed
 300 submits at 32 windows and 16 heads, and every whole-graph test.
 
-There were about ten engine resets over the two days, and none took the adapter down. The hang
-has not been re-tested on 101.9033. On this driver, leave the test out:
+There were about ten engine resets over the two days, and none took the adapter down. **On
+101.9033 it still hangs** (2026-10-02, with `DenormPreserve 16` declared): one of the test's
+submits waits out libxmx's 60 s fence timeout (`VK_TIMEOUT`), Windows records LiveKernelEvent
+141 (`WATCHDOG-20261002-0202.dmp`), and the GPU comes back with the graph's head unchanged.
+On this driver, leave the test out:
 `ctest ... -E gpu_window_attention`.
 
 ## Against Linux, on the same frames
