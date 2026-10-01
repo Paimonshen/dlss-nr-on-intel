@@ -24,6 +24,40 @@ you need the evidence behind a line in this file, rather than reading them in or
   have no upscaler, so it needs a newer game.
 - **A FAQ** in the README, for the questions that keep coming back. Later.
 
+## The Linux run of this branch, and where the two drivers part: the first GEMM (2026-10-01)
+
+**This branch is a no-op on Mesa.** `make test` is green at `5ab7590` (570 checks), and
+`frame_replay.py` gives the same head on this branch (`53460f6`) as on `master`: 320x320
+`2beef230a33a120a`, 1280x720 on 1344x768 `b3e91f68c1e9e718`. Speed is the same within the
+machine's run-to-run spread: 320x320 23.0-24.9 ms against master's 23.1-23.8, 720p 146.2 against
+143.5-147.4, over five runs a side, two of them paired.
+
+**The input was never the difference.** The synthetic frame's features on Linux are Windows'
+bit for bit (`b1b4ff264c858e3f`): they are half values, and an ulp in NumPy's float32 sin or cos
+rarely survives the rounding to half. Linux run on Windows' recorded input gives Linux's own
+head, `2beef230…`.
+
+**On the same input bits the graphs part at the stem — the first GEMM.**
+`capture_compare.py --compare windows-capture-320x320.npz linux-capture-320x320-winput.npz`
+(both in `NRonWindows`, beside the working folder):
+
+| point | same bits | differ | max abs diff | mean abs diff over mean abs value |
+| --- | ---: | ---: | ---: | ---: |
+| stem | 93.7 % | 205 254 | 4.7e-5 | 6e-5 |
+| block0 | 93.4 % | 217 185 | 0.26 | 1.1e-3 |
+| l1 | 81.7 % | 150 240 | 2 | 0.059 |
+| l2 | 31.8 % | 279 209 | 18.8 | 0.20 |
+| l6 (bottleneck) | 15.8 % | 55 183 | 1.44 | 0.21 |
+| d1 | 24.5 % | 618 419 | 12 | 0.12 |
+| head | 0 % | 409 600 | 1.47 | 0.050 |
+
+The stem is a K = 16 GEMM on the tiled kernel, its fp16 operands the same on both machines, its
+float32 output a few parts in 10^5 apart on 6 % of values. So the two drivers' cooperative-matrix
+arithmetic differs on the very first GEMM; the E4M3 publishes then amplify it, as they amplify any
+change in a GEMM's rounding (`phase9`), into the 47-49 dB the composed pictures show. Not the
+input, and not `half_round`. **Next:** one GEMM of the stem's shape on both machines against an
+exact float64 sum, to see which driver accumulates in exact float32 and which does not.
+
 ## PR #3 on Windows, and what the Linux run of this branch has to show (2026-09-30, night)
 
 **PR #3 at 4b95863** is the author's answer to the second review: all five items, and the
