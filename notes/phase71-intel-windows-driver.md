@@ -228,6 +228,24 @@ At 1080p that is about 140 MB of fresh pages a frame, 25-35 ms of the ~42 ms the
 the host. Lending one array does not reach the rest. That needs NumPy's allocator itself to keep
 large blocks, through a `PyDataMem_Handler`, or the daemon to keep its own buffers.
 
+A prototype of the first exists outside the tree, in `work/tools-win/nr_alloc.c` and
+`keep_blocks.py`. It is a handler that keeps freed blocks of 1 MB and up, at most 64 of them and
+1 GB, for the next array of the same size, and zeroes them for a `calloc`. It is installed
+through NumPy's C API (`PyDataMem_SetHandler`, index 304 of the table) in each thread's context.
+With it, `live_rates_win.py --keep-blocks`:
+
+| swapchain, scale | default, ms | blocks kept, ms | page faults a frame |
+|---|---:|---:|---:|
+| 512x288, 0.35 | 33.9 | 31.6 | 1 571 -> 0 |
+| 640x360, 0.50 | 35.2 | 32.5 | 2 031 -> 0 |
+| 854x480, 0.50 | 45.6 | 41.0 | 6 681 -> 1 059 |
+| 1024x768, 0.55 | 71.1 | 62.5 | 13 991 -> 2 312 |
+| 1920x1080, 0.55 | 165.2 | 165.6 | 36 699 -> 23 907 |
+
+At 1080p what is left does not go through NumPy's allocator: the socket's bytes and the C
+library's own buffers. At 640x360 the frame is 32.5 ms against Linux's 27.0, and nearly all of
+the 5.5 ms between them is now the GEMMs.
+
 **On the device, the GEMMs.** At 320x320 the device total is 27.3 ms against Linux's 24.5
 (HANDOFF, 2026-09-27). GEMM is 20.3 of it against 16.6, and everything else 7.0 against 7.9,
 which is faster here. At 720p's field, 1344x768, the total is 179.5 ms, and GEMM 126.0 of it.

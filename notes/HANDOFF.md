@@ -38,8 +38,11 @@ section, has the numbers.
   1920x1080 (25-35 ms of ~42 on the host) and 2 031 at 640x360. **Windows' live rates are
   1.28-1.52x Linux's**, from 34.2 ms at 512x288 to 165.7 at 1080p.
   `work/tools-win/live_rates_win.py` runs the daemon in-process, on loopback TCP. The general
-  fix is NumPy's allocator keeping large blocks (a `PyDataMem_Handler`), or the daemon keeping its
-  own buffers. That is the owner's call; neither is started.
+  fix is NumPy's allocator keeping large blocks, or the daemon keeping its own buffers. A
+  prototype of the first is in `work/tools-win/nr_alloc.c` and `keep_blocks.py`: a
+  `PyDataMem_Handler` installed through NumPy's C API. With it, 640x360 at 0.5 goes from 35.2 to
+  32.5 ms (Linux 27.0) and 1024x768 from 71.1 to 62.5, and the page faults go to 0 at the live
+  sizes. **Whether it goes into the daemon on Windows is the owner's call.**
 - **On the device the gap is GEMM**: at 320x320, 20.3 ms against Linux's 16.6, while the other
   passes are faster here (7.0 against 7.9). It is not spills, not a 256-register mode, and not
   bandwidth: a copy runs 94 GB/s. Four bit-identical variants of the staged GEMM were no faster.
