@@ -59,6 +59,13 @@ static struct {
 	int pin32;                /* pipelines require 32-lane subgroups (build_pipeline_spec) */
 	int half_by_cast;         /* half_round's spelling, constant 1 on every pipeline (xmx_init) */
 	int preserve16;           /* float16 subnormals kept: DenormPreserve 16 on every module (xmx_init) */
+	/* XMX_PIPELINE_STATS=FILE: what the driver's compiler made of each pipeline, appended to
+	 * FILE through VK_KHR_pipeline_executable_properties, where the device has it */
+	FILE *stats;
+	PFN_vkGetPipelineExecutablePropertiesKHR stats_props;
+	PFN_vkGetPipelineExecutableStatisticsKHR stats_values;
+	PFN_vkGetPipelineExecutableInternalRepresentationsKHR stats_ir;
+	const char *ir_dir;       /* XMX_PIPELINE_IR: a folder for the compiled code, with the stats */
 	struct buf stage;
 } g;
 
@@ -367,9 +374,90 @@ static int build_pipeline_spec(const char *spv_path, VkPipelineLayout layout, Vk
 			   .flags = (g.pin32 & 2) ? VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT : 0,
 			   .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = sm, .pName = "main",
 			   .pSpecializationInfo = &constants }, .layout = layout };
+	if (g.stats) cpi.flags |= VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR;
+	if (g.stats && g.ir_dir) cpi.flags |= VK_PIPELINE_CREATE_CAPTURE_INTERNAL_REPRESENTATIONS_BIT_KHR;
 	r = vkCreateComputePipelines(g.dev, VK_NULL_HANDLE, 1, &cpi, NULL, out);
 	vkDestroyShaderModule(g.dev, sm, NULL);
 	if (r) FAIL("pipeline", r);
+	if (g.stats) {
+		/* constant 0, where given, is the specialisation flags (resident_pipeline) */
+		long flags = -1;
+		for (uint32_t i = 0; specialization && i < specialization->mapEntryCount; i++)
+			if (specialization->pMapEntries[i].constantID == 0
+			    && specialization->pMapEntries[i].size == sizeof(uint32_t))
+				flags = *(const uint32_t *)((const char *)specialization->pData
+							    + specialization->pMapEntries[i].offset);
+		const char *base = spv_path;
+		for (const char *p = spv_path; *p; p++)
+			if (*p == '/' || *p == '\\') base = p + 1;
+		VkPipelineInfoKHR info = { .sType = VK_STRUCTURE_TYPE_PIPELINE_INFO_KHR, .pipeline = *out };
+		VkPipelineExecutablePropertiesKHR props[4];
+		uint32_t executables = 4;
+		for (uint32_t i = 0; i < executables; i++)
+			props[i] = (VkPipelineExecutablePropertiesKHR){
+				.sType = VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_PROPERTIES_KHR };
+		if (g.stats_props(g.dev, &info, &executables, props) < 0) executables = 0;
+		for (uint32_t e = 0; e < executables; e++) {
+			VkPipelineExecutableInfoKHR which = {
+				.sType = VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_INFO_KHR,
+				.pipeline = *out, .executableIndex = e };
+			VkPipelineExecutableStatisticKHR values[64];
+			uint32_t n = 64;
+			for (uint32_t i = 0; i < n; i++)
+				values[i] = (VkPipelineExecutableStatisticKHR){
+					.sType = VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_STATISTIC_KHR };
+			if (g.stats_values(g.dev, &which, &n, values) < 0) n = 0;
+			fprintf(g.stats, "%s\tflags=%ld\t%s\tsubgroup=%u", base, flags, props[e].name,
+				props[e].subgroupSize);
+			for (uint32_t i = 0; i < n; i++) {
+				fprintf(g.stats, "\t%s=", values[i].name);
+				switch (values[i].format) {
+				case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_BOOL32_KHR:
+					fprintf(g.stats, "%u", values[i].value.b32); break;
+				case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_INT64_KHR:
+					fprintf(g.stats, "%lld", (long long)values[i].value.i64); break;
+				case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR:
+					fprintf(g.stats, "%llu", (unsigned long long)values[i].value.u64); break;
+				default:
+					fprintf(g.stats, "%g", values[i].value.f64); break;
+				}
+			}
+			fputc('\n', g.stats);
+			/* XMX_PIPELINE_IR=DIR: whatever the driver shows of the compiled code, a file
+			 * per representation, named after the shader and its flags */
+			uint32_t reps = 0;
+			if (!g.ir_dir || g.stats_ir(g.dev, &which, &reps, NULL) < 0) reps = 0;
+			VkPipelineExecutableInternalRepresentationKHR *rep = calloc(reps ? reps : 1, sizeof *rep);
+			for (uint32_t i = 0; rep && i < reps; i++)
+				rep[i].sType = VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_INTERNAL_REPRESENTATION_KHR;
+			if (rep && reps && g.stats_ir(g.dev, &which, &reps, rep) >= 0) {
+				for (uint32_t i = 0; i < reps; i++)
+					rep[i].pData = malloc(rep[i].dataSize ? rep[i].dataSize : 1);
+				g.stats_ir(g.dev, &which, &reps, rep);
+				for (uint32_t i = 0; i < reps; i++) {
+					char file[1024], tag[VK_MAX_DESCRIPTION_SIZE];
+					snprintf(tag, sizeof tag, "%s", rep[i].name);
+					for (char *c = tag; *c; c++)
+						if (!((*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z')
+						      || (*c >= '0' && *c <= '9'))) *c = '_';
+					snprintf(file, sizeof file, "%s/%s-%ld-%u-%s.%s", g.ir_dir, base, flags, e,
+						 tag, rep[i].isText ? "txt" : "bin");
+					FILE *o = rep[i].pData ? fopen(file, "wb") : NULL;
+					if (o) {
+						size_t bytes = rep[i].dataSize;
+						if (rep[i].isText && bytes && !((char *)rep[i].pData)[bytes - 1]) bytes--;
+						fwrite(rep[i].pData, 1, bytes, o);
+						fclose(o);
+					}
+					fprintf(g.stats, "\t\trepresentation %s (%s): %zu bytes\n", rep[i].name,
+						rep[i].description, rep[i].dataSize);
+					free(rep[i].pData);
+				}
+			}
+			free(rep);
+		}
+		fflush(g.stats);
+	}
 	return 0;
 }
 
@@ -640,20 +728,54 @@ int xmx_init(const char *spv_path)
 	 * them. Mesa never minded. Asked for only where the device has it. */
 	VkPhysicalDeviceFeatures base;
 	vkGetPhysicalDeviceFeatures(g.pd, &base);
-	VkPhysicalDeviceFeatures2 f2 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &v11,
+	/* XMX_PIPELINE_STATS: the compiler's own account of each pipeline (build_pipeline_spec) */
+	const char *stats_path = getenv("XMX_PIPELINE_STATS");
+	int stats = 0;
+	if (stats_path && *stats_path) {
+		uint32_t n = 0;
+		vkEnumerateDeviceExtensionProperties(g.pd, NULL, &n, NULL);
+		VkExtensionProperties *have = calloc(n ? n : 1, sizeof *have);
+		if (have && vkEnumerateDeviceExtensionProperties(g.pd, NULL, &n, have) >= 0)
+			for (uint32_t i = 0; i < n; i++)
+				if (!strcmp(have[i].extensionName,
+					    VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME))
+					stats = 1;
+		free(have);
+		if (!stats)
+			fprintf(stderr, "libxmx: XMX_PIPELINE_STATS is set, but %s has no %s\n",
+				g.name, VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME);
+	}
+	VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR executables = {
+		.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR,
+		.pNext = &v11, .pipelineExecutableInfo = VK_TRUE };
+	VkPhysicalDeviceFeatures2 f2 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+					 .pNext = stats ? (void *)&executables : (void *)&v11,
 					 .features.shaderInt64 = base.shaderInt64 };
 	float prio = 1.0f;
 	VkDeviceQueueCreateInfo qci = { .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
 					.queueFamilyIndex = g.qi, .queueCount = 1, .pQueuePriorities = &prio };
 	const char *ext[] = { VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME,
-			      VK_KHR_WORKGROUP_MEMORY_EXPLICIT_LAYOUT_EXTENSION_NAME };
+			      VK_KHR_WORKGROUP_MEMORY_EXPLICIT_LAYOUT_EXTENSION_NAME,
+			      VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME };
 	VkDeviceCreateInfo dci = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &f2,
 				   .queueCreateInfoCount = 1, .pQueueCreateInfos = &qci,
-				   .enabledExtensionCount = sizeof ext / sizeof *ext,
+				   .enabledExtensionCount = sizeof ext / sizeof *ext - (stats ? 0 : 1),
 				   .ppEnabledExtensionNames = ext };
 	r = vkCreateDevice(g.pd, &dci, NULL, &g.dev);
 	if (r) FAIL("vkCreateDevice", r);
 	vkGetDeviceQueue(g.dev, g.qi, 0, &g.q);
+	if (stats) {
+		g.stats_props = (PFN_vkGetPipelineExecutablePropertiesKHR)
+			vkGetDeviceProcAddr(g.dev, "vkGetPipelineExecutablePropertiesKHR");
+		g.stats_values = (PFN_vkGetPipelineExecutableStatisticsKHR)
+			vkGetDeviceProcAddr(g.dev, "vkGetPipelineExecutableStatisticsKHR");
+		g.stats_ir = (PFN_vkGetPipelineExecutableInternalRepresentationsKHR)
+			vkGetDeviceProcAddr(g.dev, "vkGetPipelineExecutableInternalRepresentationsKHR");
+		const char *ir = getenv("XMX_PIPELINE_IR");
+		g.ir_dir = ir && *ir && g.stats_ir ? ir : NULL;
+		if (g.stats_props && g.stats_values) g.stats = fopen(stats_path, "a");
+		if (!g.stats) fprintf(stderr, "libxmx: cannot write pipeline statistics to %s\n", stats_path);
+	}
 
 	VkDescriptorSetLayoutBinding bind[3];
 	for (int i = 0; i < 3; i++)
