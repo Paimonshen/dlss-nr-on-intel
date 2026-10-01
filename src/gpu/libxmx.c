@@ -601,6 +601,13 @@ static int ensure(struct buf *b, VkDeviceSize size, int host_read)
 /* Whether the pipelines declare DenormPreserve 16 (xmx_init). */
 int xmx_preserve16(void) { return g.preserve16; }
 
+/* Which half_round the pipelines compile, constant 1 (xmx_init): 1 is `float(float16_t(x))`,
+ * 0 the packHalf2x16 round trip. The daemon's start-up probe checks the one in use. */
+int xmx_half_by_cast(void) { return g.half_by_cast; }
+
+/* Whether the device is a card with memory of its own rather than the host's (memtype). */
+int xmx_discrete(void) { return g.discrete; }
+
 int xmx_init(const char *spv_path)
 {
 	if (g.ready) return 0;

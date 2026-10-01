@@ -73,8 +73,8 @@ rem missed the three aliases the daemon asks for by a name no source file carrie
 rem (gemm_batched.spv from gemm_coopmat_batched.comp, gemm_f16acc.spv from
 rem gemm_coopmat_f16acc.comp, gemm_tiled.spv from gemm_resident.comp), and a missing one
 rem fails at run time with "cannot open spv", which names the file but not the list.
-rem Same includes as the Makefile's GEMM_GLSL; -DHALF_ROUND_FLOAT16 per the note in
-rem :shader below.
+rem Same includes as the Makefile's GEMM_GLSL. Nothing is defined per driver here: libxmx
+rem chooses half_round's spelling when it builds each pipeline (publish.glsl's constant 1).
 for %%C in ("%GPU%\*.comp") do call :shader %%~nC
 call :shader gemm_coopmat_batched
 call :shader gemm_coopmat_f16acc
@@ -85,18 +85,9 @@ call :shader_def gemm_staged32      gemm_staged "-DSTAGED_BM=32"
 call :shader_def gemm_staged32_deep gemm_staged "-DSTAGED_BM=32" "-DSTAGED_BK=64"
 call :shader_def attention_rows     attention   "-DROW_LANES=256"
 call :shader_def attention_ab       attention   "-DSOFTMAX_AB"
-call :shader half_probe
-
-rem The daemon's start-up probe has to check the spelling this build compiled into
-rem publish.glsl, and it inferred that from an environment variable nobody set - so on
-rem Windows it checked `packHalf2x16`, which this build does not use, and refused to start
-rem for a defect that was not there. Record the choice beside the shaders, where the daemon
-rem already looks for them.
-if defined NR_PACKHALF2X16 (
-  > "%WORK%\half_round.txt" echo packHalf2x16
-) else (
-  > "%WORK%\half_round.txt" echo float16_t
-)
+rem The daemon's start-up probe, whose source is a bench tool rather than a graph shader.
+"%GLSL%" --target-env vulkan1.3 -I"%GPU%" -o "%WORK%\half_probe.spv" "%REPO%\src\bench\half_probe.comp" >nul 2>&1
+if exist "%WORK%\half_probe.spv" (echo   half_probe.spv) else (echo   half_probe.spv FAILED)
 
 rem ---- libxmx.dll ----
 echo [2/3] building libxmx.dll ...
@@ -141,40 +132,25 @@ exit /b 0
 
 rem ---- :shader <name> - one .comp -> .spv, skipped when the source is absent ----
 rem
-rem Two defines, and neither is optional on this platform. The B580's Windows driver
-rem (101.8993) gets float16 wrong in both spellings the graph uses:
-rem
-rem   -DHALF_ROUND_FLOAT16  `float(float16_t(x))` instead of the
-rem                         `packHalf2x16`/`unpackHalf2x16` pair. Measured by the
-rem                         daemon's start-up probe: packHalf2x16 disagrees with float16
-rem                         on 90109 of 90368 values on this driver, while float16_t
-rem                         agrees on all of them.
-rem   -DPACK_HALF_BITS      the softmax's exponential is a bit trick on the packed word
-rem                         in all four attention shaders, so a wrong pack breaks every
-rem                         attention path at once: the graph's output comes back NaN.
-rem                         This spells the packing and unpacking by hand instead.
-rem
-rem Both are compile-time because both are about one driver. Mesa keeps the hardware
-rem spellings and is where they were measured to be correct; build for it with
-rem NR_PACKHALF2X16=1.
+rem No per-driver defines. Intel's Windows compiler folds half_round's packHalf2x16 round
+rem trip to x (90109 of 90368 values on the B580's 101.8993, the same on the Arc 140V's
+rem 101.9033), so libxmx gives every pipeline the float16_t cast there instead, from the
+rem driver it finds, through specialisation constant 1. The attention shaders' softmax
+rem uses packHalf2x16 only as a bit trick on the packed word, which the fold does not touch.
 :shader
 if not exist "%GPU%\%1.comp" goto :eof
-set "HALF_FLAG=-DHALF_ROUND_FLOAT16"
-if defined NR_PACKHALF2X16 set "HALF_FLAG="
-"%GLSL%" --target-env vulkan1.3 %HALF_FLAG% -I"%GPU%" -o "%WORK%\%1.spv" "%GPU%\%1.comp" >nul 2>&1
+"%GLSL%" --target-env vulkan1.3 -I"%GPU%" -o "%WORK%\%1.spv" "%GPU%\%1.comp" >nul 2>&1
 if exist "%WORK%\%1.spv" (echo   %1.spv) else (echo   %1.spv FAILED)
 goto :eof
 
 rem ---- :shader_def <out-name> <source-name> <defines...> ----
 rem For the aliases and variants the Makefile builds from one source with -D. The
-rem defines argument may be empty, in which case only the half-rounding flag applies.
+rem defines argument may be empty.
 :shader_def
 if not exist "%GPU%\%2.comp" goto :eof
-set "HALF_FLAG=-DHALF_ROUND_FLOAT16"
-if defined NR_PACKHALF2X16 set "HALF_FLAG="
 set "DEFARGS="
 if not "%~3"=="" set "DEFARGS=%~3"
 if not "%~4"=="" set "DEFARGS=%DEFARGS% %~4"
-"%GLSL%" --target-env vulkan1.3 %HALF_FLAG% %DEFARGS% -I"%GPU%" -o "%WORK%\%1.spv" "%GPU%\%2.comp" >nul 2>&1
+"%GLSL%" --target-env vulkan1.3 %DEFARGS% -I"%GPU%" -o "%WORK%\%1.spv" "%GPU%\%2.comp" >nul 2>&1
 if exist "%WORK%\%1.spv" (echo   %1.spv) else (echo   %1.spv FAILED)
 goto :eof

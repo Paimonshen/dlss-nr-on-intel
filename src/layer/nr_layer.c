@@ -1,11 +1,11 @@
 #define _GNU_SOURCE
 /*
- * nr_layer 鈥?a Vulkan layer that hands the presented frame to DLSS-NR.
+ * nr_layer — a Vulkan layer that hands the presented frame to DLSS-NR.
  *
  * Why a Vulkan layer, and not the route everyone else takes.
  *
- * Every published way of getting DLSS-NR into a game 鈥?OptiScaler's fork, the
- * ReShade bridges, the dual-GPU MGPU Bridge 鈥?loads NVIDIA's own nvngx_dlssnr.dll
+ * Every published way of getting DLSS-NR into a game — OptiScaler's fork, the
+ * ReShade bridges, the dual-GPU MGPU Bridge — loads NVIDIA's own nvngx_dlssnr.dll
  * and therefore needs an NVIDIA GPU (or, for the AMD lab, a PTX translation of it).
  * None of them can run here. What we have instead is a reimplementation that is
  * already Vulkan compute.
@@ -175,7 +175,7 @@ static int ui_mask;
  * a per-frame pass would need the graph ported to C. */
 /* `reply_size` is deliberately separate from `payload_size`: the interface mask makes
  * the request larger than the answer, and reusing one size meant asking for bytes the
- * daemon never sends 鈥?the read hit EOF and every masked frame came back unchanged. */
+ * daemon never sends — the read hit EOF and every masked frame came back unchanged. */
 /* Sends the request and leaves the connection open: in asynchronous live mode the
  * answer is read on the next present, so the endpoint has to outlive this call.
  * Returns the open link, or -1. */
@@ -264,8 +264,8 @@ static struct queue_data *find_queue(VkQueue queue)
 }
 
 /* Whether a copy can be recorded for this family at all. A present queue is not
- * required to support graphics, compute or transfer 鈥?some drivers expose a
- * present-only family 鈥?and recording `vkCmdCopyImageToBuffer` on one is invalid.
+ * required to support graphics, compute or transfer — some drivers expose a
+ * present-only family — and recording `vkCmdCopyImageToBuffer` on one is invalid.
  * Ported from the parallel ProjectsCodex tree, which had this guard and we did not. */
 static int family_can_capture(struct device_data *data, uint32_t family)
 {
@@ -346,8 +346,8 @@ VKAPI_ATTR void VKAPI_CALL nr_GetDeviceQueue2(VkDevice device,
 
 /* Four bytes a pixel is assumed everywhere downstream: the staging buffer is sized
  * `width * height * 4`, `vkCmdCopyImageToBuffer` derives its extent from the image, and
- * the daemon decodes exactly these five formats. An HDR swapchain 鈥?R16G16B16A16_SFLOAT
- * is eight 鈥?would have the driver copy twice what the buffer holds. So a format that
+ * the daemon decodes exactly these five formats. An HDR swapchain — R16G16B16A16_SFLOAT
+ * is eight — would have the driver copy twice what the buffer holds. So a format that
  * is not on this list is not tracked at all, and the layer stays out of the way. */
 static int format_is_four_bytes(VkFormat format)
 {
@@ -582,13 +582,21 @@ static void ensure_daemon(void)
 	const char *settings = getenv("NR_SETTINGS");
 	char settings_dir[1024];
 	nr_default_dir(settings_dir, sizeof settings_dir);
-	char settings_def[1024];
+	/* room for the whole directory and the name: a 1024-byte default cannot be cut */
+	char settings_def[1024 + 32];
 	snprintf(settings_def, sizeof settings_def, "%s/nr_settings.json", settings_dir);
 	if (!settings || !*settings) settings = settings_def;
 
 	char cmd[4096];
-	snprintf(cmd, sizeof cmd, "\"%s\" \"%s\" --socket \"%s\" --settings \"%s\" --root \"%s\"",
-			 py, daemon, socket_path, settings, root);
+	int written = snprintf(cmd, sizeof cmd,
+			       "\"%s\" \"%s\" --socket \"%s\" --settings \"%s\" --root \"%s\"",
+			       py, daemon, socket_path, settings, root);
+	if (written < 0 || (size_t)written >= sizeof cmd) {
+		/* a cut command line would start some other program than the daemon */
+		fprintf(stderr, "[nr_layer] the daemon's command line is longer than %zu "
+			"bytes; start the daemon by hand\n", sizeof cmd);
+		return;
+	}
 
 #ifdef _WIN32
 	{
@@ -597,11 +605,14 @@ static void ensure_daemon(void)
 		memset(&pi, 0, sizeof pi);
 		si.dwFlags = STARTF_USESTDHANDLES;
 		si.hStdInput = INVALID_HANDLE_VALUE;
-		char log[1024];
+		char log[1024 + 32];
 		char log_dir[1024];
 		nr_default_dir(log_dir, sizeof log_dir);
-		snprintf(log, sizeof log, getenv("NR_LAYER_LOG") ? "%s" : "%s/nr_daemon.log",
-			 getenv("NR_LAYER_LOG") ? getenv("NR_LAYER_LOG") : log_dir, log_dir);
+		const char *log_env = getenv("NR_LAYER_LOG");
+		if (log_env && *log_env)
+			snprintf(log, sizeof log, "%s", log_env);
+		else
+			snprintf(log, sizeof log, "%s/nr_daemon.log", log_dir);
 		/* Inheritable, or the child's stdout is invalid and its log stays empty: the
 		 * spawn passes STARTF_USESTDHANDLES with bInheritHandles=TRUE, and a handle
 		 * created without this SECURITY_ATTRIBUTES is not inherited by anyone. Worth
@@ -686,10 +697,10 @@ static void ensure_daemon(void)
 		posix_spawn_file_actions_addopen(&fa, 0, "/dev/null", O_RDONLY, 0);
 		const char *log = getenv("NR_LAYER_LOG");
 		char log_dir2[1024];
-	nr_default_dir(log_dir2, sizeof log_dir2);
-	char log_def[1024];
-	snprintf(log_def, sizeof log_def, "%s/nr_daemon.log", log_dir2);
-	if (!log || !*log) log = log_def;
+		nr_default_dir(log_dir2, sizeof log_dir2);
+		char log_def[1024 + 32];
+		snprintf(log_def, sizeof log_def, "%s/nr_daemon.log", log_dir2);
+		if (!log || !*log) log = log_def;
 		posix_spawn_file_actions_addopen(&fa, 1, log, O_WRONLY | O_CREAT | O_APPEND, 0644);
 		posix_spawn_file_actions_adddup2(&fa, 1, 2);
 
@@ -725,7 +736,7 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateInstance(const VkInstanceCreateInfo *inf
 	VkResult r = create(info, allocator, instance);
 	if (r == VK_SUCCESS) {
 		/* Physical-device entry points cannot be resolved against a NULL
-		 * instance 鈥?only the handful of global ones can 鈥?so the instance has
+		 * instance — only the handful of global ones can — so the instance has
 		 * to be kept. */
 		layer_instance = *instance;
 		capture_path = getenv("NR_LAYER_CAPTURE");
@@ -827,7 +838,7 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateSwapchainKHR(VkDevice device,
 	if (r != VK_SUCCESS) {
 		/* The surface may refuse transfer usage. Falling back keeps the game alive,
 		 * but the images then lack TRANSFER_SRC and copying from them is invalid
-		 * usage 鈥?so the swapchain is created and deliberately not tracked. Before
+		 * usage — so the swapchain is created and deliberately not tracked. Before
 		 * this the fallback silently left us issuing an illegal copy every frame;
 		 * the parallel ProjectsCodex tree checks the flags and we did not. */
 		copyable = (info->imageUsage & copies) == copies;
@@ -888,7 +899,7 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateSwapchainKHR(VkDevice device,
 /* Everything this layer allocated per device, given back. The pointer to
  * `vkDestroyDevice` was being stored and never used: a staging buffer, its device memory
  * and its host mapping leaked on every device teardown, which a game that recreates its
- * device 鈥?a resolution change under some wrappers 鈥?does more than once. Ported from the
+ * device — a resolution change under some wrappers — does more than once. Ported from the
  * parallel ProjectsCodex tree. */
 static void release_device(struct device_data *data)
 {
@@ -1172,7 +1183,7 @@ failed:
  *
  * The shipped feature never has to ask: it inserts the pass before the interface is
  * drawn ("UI remains downstream"). A layer at `vkQueuePresentKHR` sees the composed
- * frame and has to work it out, and the one signal available is motion 鈥?an interface
+ * frame and has to work it out, and the one signal available is motion — an interface
  * holds still while the scene under it does not.
  *
  * That signal cannot separate an interface over a still scene from a still scene, so
@@ -1357,14 +1368,15 @@ static VkResult present_locked(VkQueue queue,
 
 	/* Live mode is a slideshow rather than a photo: every Nth present goes through the
 	 * network and the frames between re-blit the last result, so the picture is steady
-	 * instead of alternating with the game's own. The trigger file is not consulted 鈥?	 * an `access()` per present is a syscall the hot path does not need 鈥?and neither
+	 * instead of alternating with the game's own. The trigger file is not consulted —
+	 * an `access()` per present is a syscall the hot path does not need — and neither
 	 * is the interface mask, whose detector is built around a frame that was asked for.
 	 *
 	 * The rate this can hold is set by the daemon's `--render-scale`, not by N: the
 	 * network's cost follows the extent it is given (notes/phase37). N only decides how
 	 * many game frames each rendered one covers. */
 	if (live_every > 0) {
-		/* The trigger keeps its meaning 鈥?"do the thing" 鈥?so the effect can be
+		/* The trigger keeps its meaning — "do the thing" — so the effect can be
 		 * turned on and off mid-game without restarting it. With no trigger
 		 * configured, live mode simply always runs. */
 		int on = !trigger_path || access(trigger_path, F_OK) == 0;

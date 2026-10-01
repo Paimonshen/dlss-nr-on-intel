@@ -631,17 +631,20 @@ def process_connection(connection, backend, args):
     # Built in the graph's own mapped input where the backend offers it, so nothing is
     # copied on the way in — on Linux that is measured and clean (test_input_fp16.py).
     #
-    # Off on Windows: on the B580 the features built into the mapped half buffer come
-    # back through the graph as NaN - every frame, reproducibly, while the same features
-    # built on the host and copied in give a correct picture (measured here through the
-    # deployed layer: 163 clean frames with the host path, an all-black answer through
-    # the mapped one, at the same resolution and scale). Discrete-card memory on this
-    # driver is not behaving like the integrated one this was written on, and until that
-    # is pinned down the host copy is the choice that works. NR_INPUT_VIEW=1 turns it
-    # back on for a driver where it is fine.
+    # Off on a discrete card under Windows: on the B580 the features built into the mapped
+    # half buffer come back through the graph as NaN - every frame, reproducibly, while the
+    # same features built on the host and copied in give a correct picture (measured
+    # through the deployed layer: 163 clean frames with the host path, an all-black answer
+    # through the mapped one, at the same resolution and scale). Discrete-card memory on
+    # that driver is not behaving like the integrated one this was written on, and until
+    # that is pinned down the host copy is the choice that works there. The Arc 140V under
+    # Intel's own driver builds into it cleanly (notes/phase71), and there it also spares a
+    # fresh features array a frame, which on Windows is page faults. NR_INPUT_VIEW=1 or 0
+    # decides either way.
+    discrete = getattr(getattr(getattr(backend, "runtime", None), "lib", None), "xmx_discrete", None)
+    default = "0" if os.name == "nt" and discrete is not None and discrete() else "1"
     input_view = (getattr(backend, "input_view", None)
-                  if os.environ.get("NR_INPUT_VIEW", "0" if os.name == "nt" else "1") == "1"
-                  else None)
+                  if os.environ.get("NR_INPUT_VIEW", default) == "1" else None)
     features = nr_frame.build_features(
         inner, geometry=geometry, history=history_inner,
         out=input_view(geometry.network_height, geometry.network_width) if input_view else None,
@@ -829,28 +832,6 @@ def process_connection(connection, backend, args):
         print(args.meter.report(), flush=True)
 
 
-def half_round_spelling():
-    """Which `half_round` this build compiled into publish.glsl.
-
-    -DHALF_ROUND_FLOAT16 makes it `float(float16_t(x))`; every other build gets the
-    `packHalf2x16` round trip. The defining build records its choice in
-    `work/half_round.txt` beside the shaders, because an environment variable is not
-    something a build can set for the runtime that later loads its shaders - reading one
-    meant the Windows build was checked against `packHalf2x16`, which it does not use,
-    and the daemon then refused to start over a driver defect that was not there.
-
-    NR_HALF_ROUND_FLOAT16 still wins where it is set, so a single run can say.
-    """
-    override = os.environ.get("NR_HALF_ROUND_FLOAT16")
-    if override is not None:
-        return "float16_t" if override == "1" else "packHalf2x16"
-    try:
-        text = (ROOT / "work" / "half_round.txt").read_text(encoding="utf-8").strip()
-    except OSError:
-        return "packHalf2x16"
-    return "float16_t" if text == "float16_t" else "packHalf2x16"
-
-
 def check_half_rounding(tolerance=0):
     """Fail loudly if the driver stopped rounding float32 to half where the graph needs it.
 
@@ -861,8 +842,9 @@ def check_half_rounding(tolerance=0):
     able to put it back without anyone noticing.
 
     Three spellings are compared against numpy's float16 on values that cover ordinary
-    numbers, half subnormals, overflow and the edges, and the one this build actually uses
-    has to match exactly. `NR_SKIP_HALF_CHECK=1` skips it for a machine where the probe
+    numbers, half subnormals, overflow and the edges, and the one libxmx compiles into
+    `half_round` for this driver (`xmx_half_by_cast`, `XMX_HALF_ROUND` to override) has to
+    match exactly. `NR_SKIP_HALF_CHECK=1` skips it for a machine where the probe
     itself misbehaves, and says so in the log.
 
     Runs on whatever XMX_UNARY_SPV names, the same entry point the graph's own unary
@@ -881,17 +863,21 @@ def check_half_rounding(tolerance=0):
     # about to build on - on the B580 every frame then comes back NaN (measured here:
     # all-black answers through the daemon, clean with NR_SKIP_HALF_CHECK=1, which is how
     # this was found). A child keeps the probe's Vulkan lifetime out of the graph's.
+    # Its stdin is NUL: a daemon the layer spawned has no valid one, and asking Windows for
+    # the parent's then fails with WinError 6 before the probe starts.
     r = subprocess.run(
         [sys.executable, str(pathlib.Path(__file__).resolve()), "--half-probe"],
         env={**os.environ, "NR_ROOT": str(ROOT),
              "PYTHONPATH": os.pathsep.join([str(ROOT / "src" / "gpu"),
                                             str(ROOT / "src" / "ref"),
                                             str(ROOT / "src" / "layer")])},
-        capture_output=True, text=True, timeout=180)
+        stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=180)
     for line in (r.stdout or "").splitlines():
         print(line, flush=True)
     if r.returncode != 0:
         raise SystemExit((r.stderr or "the half-rounding probe failed").strip())
+
+
 def half_probe_child():
     """The probe as its own process: compare, print, exit 0 or 1."""
     spv = str(ROOT / "work" / "half_probe.spv")
@@ -926,17 +912,20 @@ def half_probe_child():
         mismatches[name] = int(bad.sum())
     print("half rounding: " + ", ".join(f"{k} {v}/{n}" for k, v in mismatches.items()),
           flush=True)
-    # What this build's publish.glsl actually runs - see the note in check_half_rounding.
-    used = half_round_spelling()
+    # What publish.glsl's half_round runs on this driver: libxmx chose it when it built
+    # the runtime above, from the driver (xmx_init).
+    used = "float16_t" if probe.lib.xmx_half_by_cast() else "packHalf2x16"
     if mismatches[used] > 0:
         print(f"FAIL: {used} disagrees with float16 on {mismatches[used]} of {n} values; "
               "every rounding point in publish.glsl would move, per frame, silently.",
               flush=True)
         return 1
     if mismatches["packHalf2x16"] > 0 and used != "packHalf2x16":
-        # Fine for half_round on this build, but the attention shaders' softmax uses it.
-        print(f"  warning: packHalf2x16 is wrong on this driver "
-              f"({mismatches['packHalf2x16']}/{n} values); the attention shaders use it",
+        # The round trip is folded on this driver, and half_round uses the cast here. The
+        # attention shaders' softmax uses packHalf2x16 only as a bit trick on the packed
+        # word, which the fold does not touch (publish.glsl).
+        print(f"  note: packHalf2x16's round trip is folded on this driver "
+              f"({mismatches['packHalf2x16']}/{n} values); half_round uses {used} here",
               flush=True)
     return 0
 
