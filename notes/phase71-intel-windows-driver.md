@@ -169,8 +169,9 @@ Shown on Windows by declaring the mode in SPIR-V, with the shaders' code untouch
 
 **This corrects `phase4-subnormal-flush.md`.** What it measured on 2026-09-08 was real on Mesa,
 and its flush-to-zero model reproduced the GPU. But the flush is Mesa's default mode, not the
-XMX units' behaviour: the same units keep float16 subnormals under Intel's driver. Whether Mesa
-keeps them when a shader declares `DenormPreserve 16` has not been run yet.
+XMX units' behaviour: the same units keep float16 subnormals under Intel's driver. Mesa keeps
+them too when a shader declares `DenormPreserve 16`: run on Linux on 2026-10-01, it gives Windows'
+graph bit for bit (HANDOFF, 2026-10-01, evening).
 
 **The vendor's hardware keeps them.** NVIDIA's tensor cores support subnormal inputs and outputs
 on every architecture measured, from V100 to B200 and the RTX PRO 6000 (Khattak and Mikaitis,

@@ -24,6 +24,43 @@ you need the evidence behind a line in this file, rather than reading them in or
   have no upscaler, so it needs a newer game.
 - **A FAQ** in the README, for the questions that keep coming back. Later.
 
+## Linux ran it: with `DenormPreserve 16` Mesa computes Windows' graph bit for bit (2026-10-01, evening)
+
+**Step 1, the reverse check, holds.** Under `denorm_mode.py preserve`, Linux on Windows' recorded
+input equals Windows' default capture at every point, the head included (`e62005b8…`).
+`frame_replay.py` under the mode gives Windows' heads at both sizes: 320x320 `e62005b80145b97a`,
+720p `c217fd2fdbbe6b79`. So Mesa honours the mode, and the float16 flush was the whole
+difference between the two drivers on these frames.
+
+**Step 2, block 0.** On Linux, block 0 fused and unfused are the same bits, by default and under
+the mode. Windows with the flush declared against Linux's default parts first at Q's
+normalisation (`u.q16`): 534 values, up to 0.031, besides 734 that differ only in a zero's sign.
+K follows with 32, then the scores. Before that, the hidden layer differs only in 1 226 zeros'
+signs. So a declared flush and Mesa's undeclared default are not the same mode in the half
+arithmetic of the cosine tree. Under `preserve` on Linux against Windows' default, every point is
+the same bits except 20 zeros' signs in the unfused reference's Q. That is the sign-of-zero class
+PR #3's B580 shows in `test_gemm_qkv.py`, and it is not on the graph's path.
+
+**Step 3, for the owner's decision.** No shader is changed; these are all under
+`denorm_mode.py preserve --` on Linux:
+
+- `make test`: all 41 lines pass. No test pins a head, though: the pinned references live in
+  this file, so the suite cannot tell the modes apart.
+- Speed, paired: 320x320 23.1 and 23.2 ms by default against 23.2 and 23.9 with the mode; 720p
+  144.0 and 143.6 against 143.3 and 143.5. The same.
+- Against OpenDLSS-NR's port on `opendlss-reference.md`'s four frames, the composed pictures move
+  0.91 -> 0.84, 1.99 -> 2.05, 0.80 -> 0.79 and 0.76 -> 0.83 levels of 255 apart. Head RGB corr
+  moves by up to 0.007 either way. No direction, and their port runs through Mesa too.
+- The picture: Tekken's capture through the daemon, default against the mode, is 0.47-0.62 levels
+  of 255 apart (99th percentile 3-4), where the pass moves the frame 8.8-9.0. That is the
+  Linux-Windows gap of 2026-09-30, as it should be.
+
+So declaring `DenormPreserve 16` buys one graph on both drivers, bit for bit, at no cost. It
+moves the picture by the size of the old gap, and no nearer to the reference or further from it.
+It is also what NVIDIA's tensor cores do (reported: arXiv:2512.07004, via `phase71`). **The
+owner's call**; the reference hashes in this file move with it. The captures are in `NRonWindows`:
+`linux-preserve16-winput.npz`, `linux-probe-default.npz` and `linux-probe-preserve16.npz`.
+
 ## Mesa flushes float16 subnormals and Intel's driver keeps them; what Linux runs next (2026-10-01, later)
 
 **Why the stem parts.** Mesa flushes float16 subnormal operands to zero in the cooperative-matrix
