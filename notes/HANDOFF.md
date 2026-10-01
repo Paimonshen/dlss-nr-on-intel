@@ -197,7 +197,7 @@ spawn's log handle made inheritable. It was built and run here under Windows on 
   The layer was found through `VK_ADD_IMPLICIT_LAYER_PATH`, with nothing registered. The
   auto-spawn works too, once the probe's subprocess gets a stdin (item 2 below).
 
-Five findings are drafted for the PR, for the owner to post:
+Five findings for the PR, posted on 2026-10-01 with the owner's OK (issuecomment-5930434822):
 
 1. The unmerged window attention hangs the engine. That is master's kernel.
 2. A spawned daemon dies at start once `half_probe.spv` exists. The layer hands it no stdin, and
