@@ -21,6 +21,15 @@ float half_round(float x) {
     return HALF_BY_CAST ? float(float16_t(x)) : unpackHalf2x16(packHalf2x16(vec2(x, 0.0))).x;
 }
 
+/* `packHalf2x16` is not only a rounding point: the softmax's exponential in the four
+ * attention shaders is a bit trick on the packed word — `(packHalf2x16(affine) << 5) +
+ * 0x7ff88000u`, read back as a float — so they use the hardware instruction there and
+ * never `half_round`. The two jobs must not be swapped. The trick needs only a packing
+ * whose bits land where its bias expects, and it gets one on every driver measured,
+ * Intel's Windows compiler included, which folds only the round trip above; replacing
+ * the instruction there with hand-packed half bits is what broke the picture on the B580
+ * (Paimon, PR #3). */
+
 float e4m3(float x) {
     float magnitude = min(abs(x), 448.0);
     int exponent = (floatBitsToInt(magnitude) >> 23) & 0xFF;

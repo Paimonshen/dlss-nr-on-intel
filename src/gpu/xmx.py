@@ -2,9 +2,9 @@
 """
 xmx — host-side interface to the Xe2 cooperative-matrix GEMM.
 
-Backed by `work/libxmx.so`, a resident Vulkan context: the instance, device,
-pipeline and buffers are created once and reused, so a call costs a memcpy, a submit
-and a fence wait rather than ~80 ms of setup.
+Backed by `work/libxmx.so` (`.dll` on Windows), a resident Vulkan context: the instance,
+device, pipeline and buffers are created once and reused, so a call costs a memcpy, a
+submit and a fence wait rather than ~80 ms of setup.
 
 Two things this layer must do that the kernel does not:
 

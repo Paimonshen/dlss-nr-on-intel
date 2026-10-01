@@ -12,7 +12,11 @@ SHADERS := work/gemm_resident.spv work/gemm_tiled.spv work/gemm_staged.spv \
            work/window_attention.spv work/window_block.spv work/global_attention.spv \
            work/ffn_fused.spv
 
-all: work/libxmx.so work/libnr_layer.so work/libnr_image.so work/gemm_runner $(SHADERS)
+# half_probe.spv is built by `all` because the daemon needs it: check_half_rounding()
+# runs it at start-up and refuses to run the graph if the driver's float16 conversion is
+# not what the build compiled in. It was only reachable through `bench`, so a plain
+# `make` left the daemon to start with the probe skipped.
+all: work/libxmx.so work/libnr_layer.so work/libnr_image.so work/gemm_runner work/half_probe.spv $(SHADERS)
 
 work:
 	mkdir -p $@

@@ -1,5 +1,4 @@
 # DLSS 5 Neural Rendering on an Intel Xe2 iGPU
-
 NVIDIA's DLSS 5 Neural Rendering pass — the one-step pixel-space diffusion model that
 re-renders a frame's detail — running on an **Intel Arc 140V (Lunar Lake, Xe2)**
 integrated GPU under Linux, in a real game, through a Vulkan layer.
@@ -259,6 +258,24 @@ run it again. Leave out `NR_LIVE=1` for photo mode. For a native Vulkan game,
 
 **If your frame rate drops as soon as the game starts and the daemon's log shows no frames**,
 one of the first four is missing or wrong: the layer is capturing and has nowhere to send it.
+
+  ### The layer can start the daemon itself
+
+  With `NR_LAYER_SPAWN=1` set next to the variables above, and `NR_LAYER_SOCKET` named, the
+  layer starts the daemon on that socket if nothing is listening there when the game creates
+  its instance. Without the variable nothing happens and nothing prints, which is the
+  default: `vulkaninfo` and every other Vulkan process that loads the layer must not each
+  bring up a model. A daemon started this way **outlives the game** — it keeps its buffers
+  and the weights resident, **0.7 GiB at 720p and 1.2 GiB at 1920x1088, weights included**
+  — so the next launch connects instead of paying the load again. It ends on its own when
+  the GPU is lost, and otherwise runs until you end the process. Its settings and log follow
+  `src/layer/nr_paths.py` (`/tmp/nr_settings.json`, `NR_LAYER_LOG`), the same files `nr-ctl`
+  and `nr-panel` write, so the knobs reach a daemon started this way too.
+
+  `NR_PYTHON` names the interpreter to start it with, for an install the layer cannot guess
+  at. On Windows the default is the `py` launcher, not `python3`: that name belongs there to
+  the Microsoft Store's zero-byte alias, which `CreateProcessA` starts happily and which
+  then exits without running anything.
 
 Without `NR_LAYER_LIVE` it is a **photo mode**: the pass fires once and holds its result
 on screen while the trigger exists. With `NR_LAYER_LIVE=1` every present goes through the
