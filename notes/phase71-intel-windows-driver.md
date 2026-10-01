@@ -66,6 +66,13 @@ now asks for the feature where the device has it, and nothing else changed.
   so it is the reference's specialised passes that move. The frame does not: with
   `XMX_SPECIALIZE=0` the Tekken frames below come out byte-identical to the default.
 
+**All three are gone once `DenormPreserve 16` is declared** (2026-10-01, libxmx at `a7a6531`, on
+101.9033). They pass, and with `XMX_DENORM16=driver` they fail again with the same counts. So
+Intel's undeclared mode keeps float16 subnormals in the GEMMs (`test_denorm.py` under `driver`)
+but not everywhere these specialised passes reach. Why declaring it moves a zero's sign is not
+known; every one of the failures is at mask 7, where the compiler sees the constants and folds
+more. CTest here is now 34 of 34, still without `gpu_window_attention`.
+
 ## The unmerged window attention hangs the engine
 
 `window_attention.comp` with `MERGED_OUTPUT` false is used by the graph only with

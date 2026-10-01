@@ -24,6 +24,46 @@ you need the evidence behind a line in this file, rather than reading them in or
   have no upscaler, so it needs a newer game.
 - **A FAQ** in the README, for the questions that keep coming back. Later.
 
+## On Windows at 2deb0d9: the declared mode holds, and the last three failures are gone (2026-10-01, night)
+
+Linux's five checks, run on Intel's 101.9033:
+
+1. `windows` at `2deb0d9` builds with CMake and UCRT64's gcc.
+2. **CTest without `gpu_window_attention`: 34 of 34.** The three failures Windows always had are
+   gone: `test_gemm_qkv.py`'s zero sign, `test_gemm_residual.py`'s sign byte and the ViT
+   attention's 378 values, all at specialization mask 7. With `XMX_DENORM16=driver` all three
+   fail again, with the same counts. Why the declaration moves them is not known (`phase71`,
+   "What still differs").
+3. `test_denorm.py`: declared, and 2^-20 kept on all three forms. Under `driver` it is kept too,
+   because Intel's default keeps it in the GEMMs.
+4. `frame_replay.py`: heads unchanged, `e62005b80145b97a` and `c217fd2fdbbe6b79`.
+5. The validation layer reports nothing on `frame_replay.py` at 320x320. The loader's log
+   confirms it was inserted.
+
+**Where the 720p graph's time goes on Intel's compiler.** Measured with
+`frame_profile.py --size 768 1344 --runs 3 --calls 40` on 101.9033, checked quiet before and
+after (mains, best performance, CPU 10 %). The device total is **179.5 ms**, against 194.5 of
+wall:
+
+| pass | ms |
+| --- | ---: |
+| staged GEMM (318 passes) | 126.0 (70 %) |
+| window block | 22.0 |
+| fused feed-forward | 16.6 |
+| window attention | 10.0 |
+| everything else | 5 |
+
+The per-pass comparison needs the same command on Linux. Windows' output, call sites included, is
+`NRonWindows/windows-profile-1344x768-9033.txt`. `--size` is the network's field, and the
+default, 768x1280, is no longer 720p's.
+
+Not run: **the unmerged window attention's hang**, because each try resets the GPU. That waits
+for the owner's word.
+
+A trap from the run: CTest's `publish_check` and `claims_check` call `git`. A UCRT64 shell started
+from Git Bash maps `/mingw64` to MSYS2's own folder and loses Git, and both then fail with
+`FileNotFoundError`. Start it from PowerShell, or run the two checks directly.
+
 ## The `windows` branch is on master (2026-10-01, night)
 
 Merged with the owner's OK as a fast-forward. It brings the compute side's Windows build (CMake
