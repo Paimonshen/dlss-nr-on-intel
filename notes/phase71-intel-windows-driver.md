@@ -4,7 +4,8 @@
 gcc 16.2 and the Vulkan SDK 1.4.357, against Intel's driver **101.8991**, replaced by **101.9033**
 (WHQL, released 2026-09-29) on the second day. `docs/WINDOWS.md`'s checklist was written on
 Linux, and this is what the machine said. Unless marked, a finding was made on 101.8991 and
-checked again on 101.9033.
+checked again on 101.9033. The last section is from 2026-10-01, on 101.9033, with Linux's
+captures beside it.
 
 ## The configuration is there
 
@@ -105,7 +106,7 @@ what a different head looks like in a chaotic graph (`phase8`); it is not a few 
 rounding boundary. Frame 001 has no history, so no temporal table touches it, and `nr_image.c`
 makes no libm call that could differ between the two C libraries. Finding where the head first
 differs needs numbers from Linux: `frame_replay.py`'s head hashes at the same commit, then per
-block.
+block. *They came on 2026-10-01: the first GEMM, and why, is the last section.*
 
 ## Speed
 
@@ -125,3 +126,67 @@ compiler, and this is Intel's; it has not been profiled yet. The daemon's `--dum
 
 The in-process replay, the quiet check and the probes live outside the tree, in the checkout's
 `work/tools-win/`.
+
+## Where the two drivers part: Mesa flushes float16 subnormals (2026-10-01)
+
+Linux ran `src/bench/capture_compare.py` on the input Windows had recorded, bit for bit the same
+(`b1b4ff26…`), and the two graphs parted at the stem, the first GEMM. 205 254 of its 3 276 800
+float32 outputs differed, by up to 4.7e-5 (HANDOFF, 2026-10-01). The stem is
+`features (pixels x 16) @ input_adapter_weight (16 x 32)`. Both operands are float16, and the
+products are exact in float32, so its exact sum can be taken in float64 from the two captures
+alone. Against that sum:
+
+| | equal to the exact sum, float32-rounded | with float16 subnormals flushed in both operands |
+|---|---|---|
+| Windows | **98.96 %** | 92.72 % |
+| Linux | 92.72 % | **98.98 %** |
+
+**The adapter holds exactly two float16 subnormals**: [9, 21] = 2.07e-5 and [14, 7] = 2.96e-5.
+Columns 21 and 7 are 204 447 of the differing values: every pixel in column 7, and every pixel
+but 353 in column 21. The other 807 are the 27 pixel rows whose features hold a subnormal, in
+channels 0-2. Flushing explains 205 245 of the 205 254. The values that miss the exact sum on
+either side sit below it, never above. Mostly the miss is one or two ulps, more only where the
+sum cancels to near zero, and never more than 1.2e-7. That is the accumulator's own
+truncation, the same on both drivers: 33 240 of those values are the same bits on Linux and
+Windows.
+
+**The mechanism is Mesa's default, not the hardware.** In Mesa 26.2.3, brw writes `cr0` only
+for an explicit float-controls execution mode (`emit_shader_float_controls_execution_mode` in
+`brw_from_nir.cpp`). ANV never sets the interface descriptor's Denorm Mode, which stays at
+`Ftz`. Our shaders declare no mode, so `cr0`'s FP16_DENORM_PRESERVE (bit 10) stays clear, and
+the cooperative-matrix multiply flushes float16 subnormal operands. ANV reports
+`shaderDenormPreserveFloat16 = true` and `shaderDenormFlushToZeroFloat16 = false`. Intel on
+101.9033 reports both true, with `denormBehaviorIndependence = ALL`. Its compiler keeps
+subnormals when nothing is declared.
+
+Shown on Windows by declaring the mode in SPIR-V, with the shaders' code untouched
+(`src/bench/denorm_mode.py`):
+
+- every graph shader with `DenormFlushToZero 16`: the stem is **bit-identical to Linux's**;
+- every graph shader with `DenormPreserve 16`: the whole graph is bit-identical to the default,
+  head `e62005b8…`;
+- `DenormFlushToZero` for 32-bit floats as well changes nothing beyond the 16-bit flush.
+
+**This corrects `phase4-subnormal-flush.md`.** What it measured on 2026-09-08 was real on Mesa,
+and its flush-to-zero model reproduced the GPU. But the flush is Mesa's default mode, not the
+XMX units' behaviour: the same units keep float16 subnormals under Intel's driver. Whether Mesa
+keeps them when a shader declares `DenormPreserve 16` has not been run yet.
+
+**The vendor's hardware keeps them.** NVIDIA's tensor cores support subnormal inputs and outputs
+on every architecture measured, from V100 to B200 and the RTX PRO 6000 (Khattak and Mikaitis,
+*Accurate Models of NVIDIA Tensor Cores*, arXiv:2512.07004). So on this point Windows computes
+what the vendor's GEMM computes, and Mesa's default does not. The scale is small. Only 7 of the
+model's 145.8 M weights are float16 subnormals: the two above, two each in block 70's
+`out_conv_weight` and `out_gain`, and `block33.layer3.attention_scalar`. Inputs are the other
+source, as on these 27 rows. No E4M3 publish can produce one, because E4M3's smallest step,
+2^-9, is far above half's smallest normal value. In a chaotic graph, though, that small
+difference is enough to change every head.
+
+**With the flush the same, they part next in block 0**, as Windows with `DenormFlushToZero 16`
+shows against Linux's default: 3 526 values, in 118 of 102 400 pixels, 30-32 of the 32
+channels each, in 109 of the 1 600 windows. One pixel at a time, then: a per-pixel step, which
+the flush does not explain. Block 0 is two passes in the graph, the fused feed-forward and the
+fused window block, and nothing between them is stored. `src/bench/block0_probe.py` runs block 0
+on a capture's input as the graph does, and again with every fusion off, keeping what each pass
+writes. It saves both in `capture_compare.py`'s format. On Windows the fused and unfused runs
+agree bit for bit, with and without the flush. Linux's run of it names the pass.

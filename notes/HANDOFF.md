@@ -24,6 +24,65 @@ you need the evidence behind a line in this file, rather than reading them in or
   have no upscaler, so it needs a newer game.
 - **A FAQ** in the README, for the questions that keep coming back. Later.
 
+## Mesa flushes float16 subnormals and Intel's driver keeps them; what Linux runs next (2026-10-01, later)
+
+**Why the stem parts.** Mesa flushes float16 subnormal operands to zero in the cooperative-matrix
+GEMM, and Intel's Windows driver keeps them. The XMX units are the same. The two captures below,
+held against the stem's exact float64 sum, show it. The adapter holds exactly two float16
+subnormals, at [9, 21] and [14, 7], and columns 21 and 7 are 204 447 of the 205 254 differing
+values. The rest are the 27 pixel rows whose features hold one. Windows equals the exact sum on
+98.96 %, and Linux equals it with both operands flushed on 98.98 %. The rest is the same
+accumulator truncation on both.
+
+The cause is Mesa's default. brw writes `cr0` only for a declared float-controls mode, and our
+shaders declare none, so its FP16 denorm bit stays clear. On Windows, all 14 graph shaders with
+`DenormFlushToZero 16` declared give **Linux's stem bit for bit**. With `DenormPreserve 16` they
+give Windows' own graph unchanged. NVIDIA's tensor cores keep subnormals (arXiv:2512.07004), so
+on this point Windows computes what the vendor's GEMM computes. This corrects `phase4`'s "XMX
+flushes" for the hardware, though not for Mesa. Only 7 of the model's weights are float16
+subnormals. `notes/phase71`, last section.
+
+**Where they part next: block 0.** With the flush aligned, 3 526 values differ, in 118 of
+102 400 pixels, each with 30-32 of its 32 channels. That is a per-pixel step, and it is not a
+denormal. Block 0 is two fused passes with nothing stored between them.
+
+Two new tools: `src/bench/denorm_mode.py` runs any command with every graph shader declaring
+`preserve` or `flush` (patched copies in `work/denorm-*`, the built shaders untouched).
+`src/bench/block0_probe.py` runs block 0 fused, then with every fusion off, and keeps each
+pass. The comparison is `capture_compare.py --compare`.
+
+**On Linux next.** `<NR>` is the folder on the Windows disk that holds the captures, beside the
+Windows checkout. In it: `windows-capture-320x320.npz` (the input and Windows' graph), and
+`windows-probe-ftz16.npz` and `windows-probe-default.npz` (Windows' block 0 with the flush and
+without).
+
+1. **The reverse check.** Run
+   `python3 src/bench/denorm_mode.py preserve -- python3 src/bench/capture_compare.py --save <NR>/linux-preserve16-winput.npz --features <NR>/windows-capture-320x320.npz`,
+   then `capture_compare.py --compare <NR>/windows-capture-320x320.npz <NR>/linux-preserve16-winput.npz`.
+   If Mesa honours the mode, the stem is 100 % the same and the first point that parts is
+   block0, as on Windows the other way round. If the stem still differs, Mesa's DPAS ignores
+   the mode, and that is the finding.
+2. **Block 0's pass.** Run
+   `python3 src/bench/block0_probe.py --features <NR>/windows-capture-320x320.npz --save <NR>/linux-probe-default.npz`
+   (Mesa's default, which flushes), then
+   `capture_compare.py --compare <NR>/windows-probe-ftz16.npz <NR>/linux-probe-default.npz`.
+   The probe must say block 0 fused and unfused are the same bits on Linux too. The first `u.*`
+   point that parts names the pass: hidden layer, branch, Q, K, V, scores, probabilities,
+   context. If step 1 held, `denorm_mode.py preserve --` on the probe against
+   `windows-probe-default.npz` should part at the same place.
+3. **For the owner's decision on declaring `DenormPreserve 16` in the shaders.** It is not
+   decided; change no shader. Under `denorm_mode.py preserve --`, collect four things:
+   - `make test`, and which checks fail: a pinned hash is expected to move, a correctness check
+     is not;
+   - `frame_replay.py --size 320 320` and `--size 720 1280`, with and without the mode, paired on
+     a quiet machine: heads and times;
+   - `opendlss_reference.py` on `opendlss-reference.md`'s four frames, with and without the
+     mode. Their port runs through Mesa too, so its own float16 arithmetic may flush;
+   - whether the picture moves at all.
+
+Still saying "the XMX units flush", to be corrected once step 1 is in: `docs/ARCHITECTURE.md`
+("Subnormals"), `src/gpu/xmx.py` (its docstring and `_shift`), and `src/gpu/test_layer.py`.
+
 ## The Linux run of this branch, and where the two drivers part: the first GEMM (2026-10-01)
 
 **This branch is a no-op on Mesa.** `make test` is green at `5ab7590` (570 checks), and
@@ -1329,7 +1388,7 @@ megapixel. Live mode runs every present: Tekken 7 at 30 fps at 800x450 beside th
 | **Input is five optional 2D textures**, `tex.2d.v4.f32`; only colour is required | `notes/phase5-input-contract.md` |
 | **16-channel packing order**: ch4-6 colour, ch7-9 reprojected history (same affine `(x−a)·b`), ch12-14 sign-encoded validity. MLX-DLSS agrees independently | `notes/phase5-channel-order.md` |
 | Output head is **32 → 4**; three channels become display RGB | `notes/phase5-output-head.md` |
-| XMX flushes subnormal FP16 to zero; fixed by a per-tensor 2^k rescale | `notes/phase4-subnormal-flush.md` |
+| Under **Mesa's default** float controls the XMX multiply flushes subnormal FP16 operands to zero; a per-tensor 2^k rescale guards against it. It is the driver's mode, not the units': Intel's Windows driver keeps them (2026-10-01) | `notes/phase4-subnormal-flush.md`, `phase71` |
 | **Each precision regime has a sharp threshold**: below it a perturbation is annihilated exactly, above it the head jumps to 9-12 % of its sd. float32 ~1e-07, half ~1e-04. The half path is the **more stable** of the two | `notes/phase9-numerics.md` |
 | The whole CPU/XMX gap is the FP16 rounding of GEMM *activations*, and **97.3 % of them are already half-valued** — only 186 of 6987 calls are touched. Weights change nothing: 579 of 649 tensors are stored F16, the other 70 are `attn_scale`, not a GEMM operand | `notes/phase9-numerics.md` |
 | Batched attention and the folded branched FFN are **bit-identical** to the plain GEMM hook; the two 720p renders are pixel-identical | `notes/phase9-numerics.md` |
