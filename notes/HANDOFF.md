@@ -24,6 +24,22 @@ you need the evidence behind a line in this file, rather than reading them in or
   have no upscaler, so it needs a newer game.
 - **A FAQ** in the README, for the questions that keep coming back. Later.
 
+## PR #3 merged with the button (2026-10-02)
+
+The owner wanted the pull request to end merged, not closed. So its author rebased his four
+newer commits onto master as one, `afb2a65`, under his GitHub noreply address, and fixed the two
+things the last review found: ten `-Wsign-compare` warnings in `nr_image.c`, and four comment
+lines in `build_win.bat` that had lost their `r`. The owner merged it as `1ac11f8`.
+
+It brings MSVC's OpenMP. `nr_image.c` goes through the C++ front end on Windows (`/TP /openmp`),
+because MSVC rejects `#pragma omp parallel for` in C mode, and its loops count with `ptrdiff_t`.
+The author measured the fused pass at 18.6 -> 4.1 ms. It also gives a daemon the layer spawns an
+inheritable `NUL` for stdin.
+
+On Linux at `afb2a65`: no warnings, `make test` green (570), CTest 43 of 43, the host passes
+byte-identical and the live rates unchanged. Not yet run here on Windows: `build_win.bat` at
+`1ac11f8`, where `libnr_image.dll` should now depend on `VCOMP140.DLL`.
+
 ## `pr3-integration` on Linux: green after one test fix, and where Intel's compiler loses time (2026-10-02)
 
 The Windows session's list, run on Linux at `fcde1ce`:
