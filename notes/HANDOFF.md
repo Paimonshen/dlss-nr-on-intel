@@ -44,7 +44,7 @@ The Windows session's list, run on Linux at `fcde1ce`:
   layer that could not load. Its manifest named the library bare, and the loader hands a bare
   name to `dlopen`, which does not look beside the manifest (`create instance: -6`). The
   launcher, which asks for the layer by name, would have kept the game from starting. Fixed in
-  `fe5e8b4`, where the manifest names `./NAME`: installed into a throwaway game folder, the layer
+  `6083140`, where the manifest names `./NAME`: installed into a throwaway game folder, the layer
   loads from there. `dist-tools/setup.sh` cannot run from the repository at all. It expects a
   release folder holding `nr_layer.so` and `work/`, and nothing here builds one; the Linux
   build's layer is `libnr_layer.so`. Left as it is: what a release is, is the owner's call.
