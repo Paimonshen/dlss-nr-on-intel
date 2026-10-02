@@ -10,8 +10,8 @@
 #                  or when the file is already there.
 #    2. build    - make builds libxmx.so, libnr_layer.so, libnr_image.so and the shaders.
 #    3. install  - copies the layer into the game folder next to a manifest whose
-#                  library_path is its name, copies the runtime the daemon needs, and
-#                  writes a launcher.
+#                  library_path is ./ and its name, copies the runtime the daemon needs,
+#                  and writes a launcher.
 #
 #  What it deliberately does not do:
 #
@@ -23,8 +23,9 @@
 #      work/*.spv. Without them the daemon stops at start.
 #
 #  Why the manifest matters: the Vulkan loader finds a layer through its manifest
-#  plus VK_LAYER_PATH, not through the dynamic loader's search order, so the manifest
-#  has to name the file and VK_LAYER_PATH has to point at the folder holding both.
+#  plus VK_LAYER_PATH, and the manifest names the library as ./NAME. A path is taken
+#  relative to the manifest's folder; a bare file name would be handed to dlopen, which
+#  searches the system's library path and not that folder, and the layer would not load.
 #
 #  Usage:
 #    ./deploy.sh --game /path/to/Game --dll /path/to/nvngx_dlssnr.dll
@@ -96,8 +97,8 @@ echo "  layer:      $DEPLOY/$NAME"
 MANIFEST_SRC="$REPO/src/layer/VkLayer_dlss_nr.json"
 MANIFEST_DST="$DEPLOY/VkLayer_dlss_nr.json"
 [[ -f "$MANIFEST_SRC" ]] || { echo "ERROR: manifest template not found: $MANIFEST_SRC" >&2; exit 3; }
-sed "s/LIBRARY_PATH_PLACEHOLDER/$NAME/g" "$MANIFEST_SRC" > "$MANIFEST_DST"
-echo "  manifest:   $MANIFEST_DST  library_path = $NAME"
+sed "s#LIBRARY_PATH_PLACEHOLDER#./$NAME#g" "$MANIFEST_SRC" > "$MANIFEST_DST"
+echo "  manifest:   $MANIFEST_DST  library_path = ./$NAME"
 
 for d in layer ref gpu bench; do
   [[ -d "$REPO/src/$d" ]] && cp -r "$REPO/src/$d" "$DEPLOY/src/$d"

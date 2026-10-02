@@ -40,6 +40,17 @@ The Windows session's list, run on Linux at `fcde1ce`:
 - Heads `e62005b80145b97a` / `c217fd2fdbbe6b79`, replayed in 23.4 / 144.0 ms.
 - `live_rates.py` paired with master: no regression. Two whole tables, then three rounds of 40
   frames: 512x288 at 0.35 26.3 against 26.3 ms, 640x360 at 0.5 27.8 against 28.0.
+- **The PR's install scripts, run on Linux for the first time.** `tools/deploy.sh` installed a
+  layer that could not load. Its manifest named the library bare, and the loader hands a bare
+  name to `dlopen`, which does not look beside the manifest (`create instance: -6`). The
+  launcher, which asks for the layer by name, would have kept the game from starting. Fixed in
+  `fe5e8b4`, where the manifest names `./NAME`: installed into a throwaway game folder, the layer
+  loads from there. `dist-tools/setup.sh` cannot run from the repository at all. It expects a
+  release folder holding `nr_layer.so` and `work/`, and nothing here builds one; the Linux
+  build's layer is `libnr_layer.so`. Left as it is: what a release is, is the owner's call.
+- The layer's own daemon spawn (`NR_LAYER_SPAWN=1`), which no test covers: on Linux it starts
+  the daemon, which runs the probe and listens, and a second launch connects to it. The 32-bit
+  layer builds without warnings and loads (`make test-proton`).
 - Publishing: `origin/master..pr3-integration` carries only the two noreply identities.
   `publish_check --history` flags the original commits of PR #1 and PR #3, which live only in
   local refs that are never pushed (`refs/pr/1`, `refs/pr/3`, `origin/pr3-head`).
