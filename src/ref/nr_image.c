@@ -29,17 +29,28 @@
 #if defined(_MSC_VER)
 #  define restrict __restrict
 #  define NR_ALWAYS_INLINE __forceinline
-/* MSVC's /openmp refuses the size_t loop variables these loops use (C3015), so on
- * Windows the loops run serially. That costs the host-side passes the OpenMP speedup -
- * 15.5 ms to 3.3 at 1080p on eight cores - and nothing else, which is a fair trade for
- * building at all. The GPU does the network; these are the passes around it. */
-#  define NR_PARALLEL_FOR(clause)
 #else
 /* Upstream writes this as `static inline NR_ALWAYS_INLINE`, and the
  * call sites read `static inline NR_ALWAYS_INLINE` — so the macro is the attribute
  * alone, not the attribute plus `inline`. It must not expand to itself: a
  * self-referential macro is undefined behaviour in C and GCC rejects it under -Wall. */
 #  define NR_ALWAYS_INLINE __attribute__((always_inline))
+#endif
+
+/* The OpenMP pragmas, the same on both compilers, now that every loop they carry counts
+ * and is bounded with `ptrdiff_t`.
+ *
+ * MSVC's /openmp is the reason this file is compiled as C++ on Windows: it rejects any
+ * `#pragma omp parallel for` in C mode with C3015, on the canonical sample as much as on
+ * these, and accepts it in C++ mode. The previous workaround was to compile the pragmas
+ * out under MSVC, which silently put every host pass on one core - 212-216 ms of replayed
+ * graph at 720p against 191-195 with gcc's OpenMP, all of it in this file. */
+#if defined(_MSC_VER) && !defined(_OPENMP)
+/* No OpenMP here: expand to nothing rather than to a pragma that would be ignored with a
+ * warning. `_OPENMP` is defined by /openmp and /openmp:llvm alike, so this tests whether
+ * the flag is on, not whether the compiler could honour it. */
+#  define NR_PARALLEL_FOR(clause)
+#else
 #  define NR_PARALLEL_FOR(clause) _Pragma(clause)
 #endif
 
@@ -200,10 +211,10 @@ static inline void finish_pixel(float predicted[3], const float *rgb, ptrdiff_t 
     }
 }
 
-void nr_decode8(const uint8_t *source, size_t pixels, int bgra, float *output)
+void nr_decode8(const uint8_t *source, ptrdiff_t pixels, int bgra, float *output)
 {
     NR_PARALLEL_FOR("omp parallel for schedule(static)")
-    for (size_t p = 0; p < pixels; ++p) {
+    for (ptrdiff_t p = 0; p < pixels; p++) {
         output[p * 3] = (float)source[p * 4 + (bgra ? 2 : 0)] / 255.0f;
         output[p * 3 + 1] = (float)source[p * 4 + 1] / 255.0f;
         output[p * 3 + 2] = (float)source[p * 4 + (bgra ? 0 : 2)] / 255.0f;
@@ -211,14 +222,14 @@ void nr_decode8(const uint8_t *source, size_t pixels, int bgra, float *output)
 }
 
 void nr_encode8(const float *image, ptrdiff_t sy, ptrdiff_t sx, ptrdiff_t sc,
-                 const uint8_t *raw, size_t height, size_t width, int bgra,
+                 const uint8_t *raw, ptrdiff_t height, ptrdiff_t width, int bgra,
                  uint8_t *output)
 {
     NR_PARALLEL_FOR("omp parallel for schedule(dynamic, 4)")
-    for (size_t y = 0; y < height; ++y) {
-        for (size_t x = 0; x < width; ++x) {
+    for (ptrdiff_t y = 0; y < height; y++) {
+        for (ptrdiff_t x = 0; x < width; ++x) {
             const float *rgb = image + (ptrdiff_t)y * sy + (ptrdiff_t)x * sx;
-            size_t p = y * width + x;
+            ptrdiff_t p = y * width + x;
             for (size_t c = 0; c < 3; ++c) {
                 float value = rgb[(ptrdiff_t)c * sc];
                 /* NumPy's byte cast maps NaN to zero; do not cast NaN in C. */
@@ -232,7 +243,7 @@ void nr_encode8(const float *image, ptrdiff_t sy, ptrdiff_t sx, ptrdiff_t sc,
 
 void nr_compose(const float *head, ptrdiff_t hy, ptrdiff_t hx, ptrdiff_t hc,
                 const float *colour, ptrdiff_t sy, ptrdiff_t sx, ptrdiff_t sc,
-                size_t height, size_t width, float intensity,
+                ptrdiff_t height, ptrdiff_t width, float intensity,
                 const float *grade, float *neural, float *output)
 {
     /* Our intensity > 1 extrapolates; the vendor recipe clamps negative intensity.
@@ -241,8 +252,8 @@ void nr_compose(const float *head, ptrdiff_t hy, ptrdiff_t hx, ptrdiff_t hc,
      */
     float blend = intensity > 1.0f ? intensity : unit(intensity);
     NR_PARALLEL_FOR("omp parallel for schedule(dynamic, 4)")
-    for (size_t y = 0; y < height; ++y) {
-        for (size_t x = 0; x < width; ++x) {
+    for (ptrdiff_t y = 0; y < height; y++) {
+        for (ptrdiff_t x = 0; x < width; ++x) {
             const float *h = head + (ptrdiff_t)y * hy + (ptrdiff_t)x * hx;
             const float *rgb = colour + (ptrdiff_t)y * sy + (ptrdiff_t)x * sx;
             float predicted[3];
@@ -282,15 +293,15 @@ static inline void feature_pixel(const float *rgb, ptrdiff_t sc, const float *wa
 void nr_features(const float *colour, ptrdiff_t sy, ptrdiff_t sx, ptrdiff_t sc,
                  const float *history, ptrdiff_t ty, ptrdiff_t tx, ptrdiff_t tc,
                  const int32_t *rows, const int32_t *columns,
-                 size_t height, size_t width, const float *noise,
+                 ptrdiff_t height, ptrdiff_t width, const float *noise,
                  const float *controls, float *output)
 {
     NR_PARALLEL_FOR("omp parallel for schedule(dynamic, 4)")
-    for (size_t y = 0; y < height; ++y) {
+    for (ptrdiff_t y = 0; y < height; y++) {
         const float *row = colour + rows[y] * sy;
         const float *old = history ? history + rows[y] * ty : 0;
-        for (size_t x = 0; x < width; ++x) {
-            size_t pixel = y * width + x;
+        for (ptrdiff_t x = 0; x < width; ++x) {
+            ptrdiff_t pixel = y * width + x;
             feature_pixel(row + columns[x] * sx, sc, old ? old + columns[x] * tx : 0, tc,
                           noise + pixel * 3, controls, output + pixel * 16);
         }
@@ -304,15 +315,15 @@ void nr_features(const float *colour, ptrdiff_t sy, ptrdiff_t sx, ptrdiff_t sc,
 void nr_features_half(const float *colour, ptrdiff_t sy, ptrdiff_t sx, ptrdiff_t sc,
                       const float *history, ptrdiff_t ty, ptrdiff_t tx, ptrdiff_t tc,
                       const int32_t *rows, const int32_t *columns,
-                      size_t height, size_t width, const float *noise,
+                      ptrdiff_t height, ptrdiff_t width, const float *noise,
                       const float *controls, nr_half *output)
 {
     NR_PARALLEL_FOR("omp parallel for schedule(dynamic, 4)")
-    for (size_t y = 0; y < height; ++y) {
+    for (ptrdiff_t y = 0; y < height; y++) {
         const float *row = colour + rows[y] * sy;
         const float *old = history ? history + rows[y] * ty : 0;
-        for (size_t x = 0; x < width; ++x) {
-            size_t pixel = y * width + x;
+        for (ptrdiff_t x = 0; x < width; ++x) {
+            ptrdiff_t pixel = y * width + x;
             float values[16];
             feature_pixel(row + columns[x] * sx, sc, old ? old + columns[x] * tx : 0, tc,
                           noise + pixel * 3, controls, values);
@@ -323,10 +334,10 @@ void nr_features_half(const float *colour, ptrdiff_t sy, ptrdiff_t sx, ptrdiff_t
 }
 
 /* float32 to half, rounding to nearest even — for features a caller built as float. */
-void nr_to_half(const float *source, size_t count, nr_half *target)
+void nr_to_half(const float *source, ptrdiff_t count, nr_half *target)
 {
     NR_PARALLEL_FOR("omp parallel for schedule(static)")
-    for (size_t i = 0; i < count; ++i) target[i] = nr_half_of(source[i]);
+    for (ptrdiff_t i = 0; i < count; i++) target[i] = nr_half_of(source[i]);
 }
 
 /* The area mean of a downscale by whole factors — `nr_daemon.resample`'s other branch,
@@ -334,20 +345,20 @@ void nr_to_half(const float *source, size_t count, nr_half *target)
  * The order is that NumPy code's: a block's first sample, each other one added in
  * row-major order, then one division by the count. */
 void nr_area_mean(const float *source, ptrdiff_t sy, ptrdiff_t sx, ptrdiff_t sc,
-                  size_t height, size_t width, size_t channels, size_t fy, size_t fx,
+                  ptrdiff_t height, ptrdiff_t width, ptrdiff_t channels, ptrdiff_t fy, ptrdiff_t fx,
                   float *output)
 {
     float count = (float)(fy * fx);
     NR_PARALLEL_FOR("omp parallel for schedule(dynamic, 4)")
-    for (size_t y = 0; y < height; ++y) {
-        for (size_t x = 0; x < width; ++x) {
+    for (ptrdiff_t y = 0; y < height; y++) {
+        for (ptrdiff_t x = 0; x < width; ++x) {
             const float *block = source + (ptrdiff_t)(y * fy) * sy + (ptrdiff_t)(x * fx) * sx;
             float *out = output + (y * width + x) * channels;
-            for (size_t c = 0; c < channels; ++c) {
+            for (ptrdiff_t c = 0; c < channels; ++c) {
                 const float *first = block + (ptrdiff_t)c * sc;
                 float total = first[0];
-                for (size_t dy = 0; dy < fy; ++dy)
-                    for (size_t dx = 0; dx < fx; ++dx)
+                for (ptrdiff_t dy = 0; dy < fy; ++dy)
+                    for (ptrdiff_t dx = 0; dx < fx; ++dx)
                         if (dy || dx)
                             total += first[(ptrdiff_t)dy * sy + (ptrdiff_t)dx * sx];
                 out[c] = total / count;
@@ -361,27 +372,27 @@ void nr_area_mean(const float *source, ptrdiff_t sy, ptrdiff_t sx, ptrdiff_t sc,
  * Signed strides permit padded crops and reversed views without another copy.
  */
 void nr_resize_axis(const float *source, ptrdiff_t sy, ptrdiff_t sx, ptrdiff_t sc,
-                    size_t height, size_t width, size_t channels, int axis,
+                    ptrdiff_t height, ptrdiff_t width, ptrdiff_t channels, int axis,
                     const int32_t *low, const int32_t *high,
                     const float *weight, float *output)
 {
     NR_PARALLEL_FOR("omp parallel for schedule(dynamic, 4)")
-    for (size_t y = 0; y < height; ++y) {
+    for (ptrdiff_t y = 0; y < height; y++) {
         if (axis == 0 && sx == (ptrdiff_t)channels && sc == 1) {
             const float *a = source + low[y] * sy;
             const float *b = source + high[y] * sy;
             float w = weight[y], other = 1.0f - w;
-            for (size_t i = 0; i < width * channels; ++i)
+            for (ptrdiff_t i = 0; i < width * channels; ++i)
                 output[y * width * channels + i] = a[i] * other + b[i] * w;
         } else {
-            for (size_t x = 0; x < width; ++x) {
+            for (ptrdiff_t x = 0; x < width; ++x) {
                 size_t index = axis == 0 ? y : x;
                 const float *a = axis == 0 ? source + low[y] * sy + (ptrdiff_t)x * sx
                                           : source + (ptrdiff_t)y * sy + low[x] * sx;
                 const float *b = axis == 0 ? source + high[y] * sy + (ptrdiff_t)x * sx
                                           : source + (ptrdiff_t)y * sy + high[x] * sx;
                 float w = weight[index], other = 1.0f - w;
-                for (size_t c = 0; c < channels; ++c)
+                for (ptrdiff_t c = 0; c < channels; ++c)
                     output[(y * width + x) * channels + c] =
                         a[(ptrdiff_t)c * sc] * other + b[(ptrdiff_t)c * sc] * w;
             }
@@ -504,13 +515,13 @@ void nr_compose_temporal(const float *head, ptrdiff_t hy, ptrdiff_t hx, ptrdiff_
                          const float *gate, ptrdiff_t gy, ptrdiff_t gx,
                          const float *table, float confidence,
                          const float *mask, ptrdiff_t my, ptrdiff_t mx,
-                         size_t height, size_t width, float intensity,
+                         ptrdiff_t height, ptrdiff_t width, float intensity,
                          float scale, float hold, float slope, float release,
                          const float *grade, float *neural, float *output)
 {
     NR_PARALLEL_FOR("omp parallel for schedule(dynamic, 4)")
-    for (size_t y = 0; y < height; ++y) {
-        for (size_t x = 0; x < width; ++x) {
+    for (ptrdiff_t y = 0; y < height; y++) {
+        for (ptrdiff_t x = 0; x < width; ++x) {
             temporal_pixel(head + (ptrdiff_t)y * hy + (ptrdiff_t)x * hx, hc,
                            colour + (ptrdiff_t)y * sy + (ptrdiff_t)x * sx, sc,
                            history + (ptrdiff_t)y * ry + (ptrdiff_t)x * rx, rc,
@@ -759,7 +770,7 @@ static void compose_encode_row(const float *restrict line, int lx,
  * the values the log's gate figure reads.
  */
 void nr_compose_encode(const float *head, ptrdiff_t hy, ptrdiff_t hx, ptrdiff_t hc,
-                       size_t head_width, size_t channels,
+                       ptrdiff_t head_width, ptrdiff_t channels,
                        const int32_t *low_y, const int32_t *high_y, const float *weight_y,
                        const int32_t *low_x, const int32_t *high_x, const float *weight_x,
                        const float *colour, ptrdiff_t sy, ptrdiff_t sx, ptrdiff_t sc,
@@ -767,7 +778,7 @@ void nr_compose_encode(const float *head, ptrdiff_t hy, ptrdiff_t hx, ptrdiff_t 
                        const float *previous, ptrdiff_t py, ptrdiff_t px, ptrdiff_t pc,
                        const float *table, float confidence,
                        const float *mask, ptrdiff_t my, ptrdiff_t mx,
-                       size_t height, size_t width, float intensity,
+                       ptrdiff_t height, ptrdiff_t width, float intensity,
                        float scale, float hold, float slope, float release,
                        float *output, const float *grade, float *neural,
                        uint8_t *encoded, size_t frame_width,
@@ -781,27 +792,29 @@ void nr_compose_encode(const float *head, ptrdiff_t hy, ptrdiff_t hx, ptrdiff_t 
                && (!history || (rx == 3 && rc == 1 && table))
                && (!previous || (px == 3 && pc == 1))
                && width < (1u << 24) && head_width * channels < (1u << 24);
-#if !defined(_MSC_VER)
+#ifdef _OPENMP
     #pragma omp parallel
 #endif
     {
-        float *row = low_y ? malloc(head_width * channels * sizeof *row) : NULL;
-        float *rows = fast ? malloc(4 * width * sizeof *rows) : NULL;
-        float *graded = fast && grade ? malloc(3 * width * sizeof *graded) : NULL;
+        /* The casts are for the C++ front end, which the Windows build uses so MSVC's
+         * /openmp is available at all - C++ does not convert void* implicitly. */
+        float *row = low_y ? (float *)malloc(head_width * channels * sizeof *row) : NULL;
+        float *rows = fast ? (float *)malloc(4 * width * sizeof *rows) : NULL;
+        float *graded = fast && grade ? (float *)malloc(3 * width * sizeof *graded) : NULL;
         /* where the fast rows put the history when nobody keeps it */
-        float *discard = fast && !neural ? malloc(3 * width * sizeof *discard) : NULL;
-#if !defined(_MSC_VER)
+        float *discard = fast && !neural ? (float *)malloc(3 * width * sizeof *discard) : NULL;
+#ifdef _OPENMP
         #pragma omp for schedule(dynamic, 4)
 #endif
-        for (size_t y = 0; y < height; ++y) {
+        for (ptrdiff_t y = 0; y < height; y++) {
             const float *line;
             ptrdiff_t lx, lc;
             if (low_y) {
                 float w = weight_y[y], other = 1.0f - w;
                 const float *a = head + (ptrdiff_t)low_y[y] * hy;
                 const float *b = head + (ptrdiff_t)high_y[y] * hy;
-                for (size_t i = 0; i < head_width; ++i)
-                    for (size_t c = 0; c < channels; ++c)
+                for (ptrdiff_t i = 0; i < head_width; ++i)
+                    for (ptrdiff_t c = 0; c < channels; ++c)
                         row[i * channels + c] = a[(ptrdiff_t)i * hx + (ptrdiff_t)c * hc] * other
                                               + b[(ptrdiff_t)i * hx + (ptrdiff_t)c * hc] * w;
                 line = row;
@@ -823,27 +836,27 @@ void nr_compose_encode(const float *head, ptrdiff_t hy, ptrdiff_t hx, ptrdiff_t 
                                    neural ? neural + y * width * 3 : discard,
                                    encoded + ((top + y) * frame_width + left) * 4, bgra);
                 if (sampled && y % step == 0) {
-                    for (size_t x = 0; x < width; x += step) {
+                    for (ptrdiff_t x = 0; x < width; x += step) {
                         float w = weight_x[x], other = 1.0f - w;
                         const float *a = line + (ptrdiff_t)low_x[x] * lx;
                         const float *b = line + (ptrdiff_t)high_x[x] * lx;
                         float *to = samples + ((y / step) * sampled + x / step) * channels;
-                        for (size_t c = 0; c < channels; ++c) to[c] = a[c] * other + b[c] * w;
+                        for (ptrdiff_t c = 0; c < channels; ++c) to[c] = a[c] * other + b[c] * w;
                     }
                 }
                 continue;
             }
-            for (size_t x = 0; x < width; ++x) {
+            for (ptrdiff_t x = 0; x < width; ++x) {
                 float h[4];
                 if (low_x) {
                     float w = weight_x[x], other = 1.0f - w;
                     const float *a = line + (ptrdiff_t)low_x[x] * lx;
                     const float *b = line + (ptrdiff_t)high_x[x] * lx;
-                    for (size_t c = 0; c < channels; ++c)
+                    for (ptrdiff_t c = 0; c < channels; ++c)
                         h[c] = a[(ptrdiff_t)c * lc] * other + b[(ptrdiff_t)c * lc] * w;
                 } else {
                     const float *a = line + (ptrdiff_t)x * lx;
-                    for (size_t c = 0; c < channels; ++c) h[c] = a[(ptrdiff_t)c * lc];
+                    for (ptrdiff_t c = 0; c < channels; ++c) h[c] = a[(ptrdiff_t)c * lc];
                 }
                 if (sampled && y % step == 0 && x % step == 0)
                     memcpy(samples + ((y / step) * sampled + x / step) * channels, h,

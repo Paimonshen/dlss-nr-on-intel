@@ -613,13 +613,20 @@ static void ensure_daemon(void)
 			snprintf(log, sizeof log, "%s", log_env);
 		else
 			snprintf(log, sizeof log, "%s/nr_daemon.log", log_dir);
-		/* Inheritable, or the child's stdout is invalid and its log stays empty: the
+		/* Both handles inheritable, or the child's standard streams are invalid: the
 		 * spawn passes STARTF_USESTDHANDLES with bInheritHandles=TRUE, and a handle
-		 * created without this SECURITY_ATTRIBUTES is not inherited by anyone. Worth
-		 * stating because it fails silently - the daemon starts, runs, and writes
-		 * nowhere. */
+		 * created without this SECURITY_ATTRIBUTES is not inherited by anyone. Both
+		 * failures are silent - the daemon starts and runs, and its log stays empty.
+		 *
+		 * stdin is NUL rather than INVALID_HANDLE_VALUE. An invalid handle is inherited
+		 * as invalid, and anything the daemon starts that asks for its stdin - Python's
+		 * own subprocess with capture_output is the one that bit us - fails with
+		 * "The handle is invalid" and takes the daemon down with it. NUL is a real,
+		 * readable handle that says there is nothing to read. */
 		SECURITY_ATTRIBUTES sa = { .nLength = sizeof sa, .lpSecurityDescriptor = NULL,
 					   .bInheritHandle = TRUE };
+		si.hStdInput = CreateFileA("NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+					   &sa, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
 		si.hStdOutput = CreateFileA(log, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
 					    &sa, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
 		si.hStdError = si.hStdOutput;
@@ -664,6 +671,8 @@ static void ensure_daemon(void)
 		BOOL ok = CreateProcessA(NULL, cmd, NULL, NULL, TRUE, DETACHED_PROCESS,
 					 env_block, NULL, &si, &pi);
 		free(env_block);
+		if (si.hStdInput != INVALID_HANDLE_VALUE &&
+		    si.hStdInput != NULL) CloseHandle(si.hStdInput);
 		if (si.hStdOutput != INVALID_HANDLE_VALUE) CloseHandle(si.hStdOutput);
 		if (!ok) {
 			fprintf(stderr, "[nr_layer] daemon spawn failed (%lu); frame stays "

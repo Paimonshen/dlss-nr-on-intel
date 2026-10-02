@@ -111,9 +111,15 @@ rem The host-side passes around the network. Without it those passes fall back t
 rem which at 4K is where most of a frame goes. /fp:precise matters: the file is required
 rem to be byte-identical to the NumPy it transcribes, and fast maths moves the rounding
 rem points. The export list is generated for the same reason as libxmx's.
+rem
+rem /TP and /openmp together, and both are needed: MSVC's /openmp rejects a #pragma omp
+rem parallel for in C mode outright (C3015 on the canonical sample, in /TC), and compiles
+rem it in C++ mode. So this one file goes through the C++ front end. The only C-isms that
+rem costs are explicit casts from malloc, added for it. Without OpenMP every host pass runs
+rem on one core: 212-216 ms of replayed graph at 720p against 191-195 with gcc's OpenMP.
 echo [4/4] building libnr_image.dll ...
 powershell -NoProfile -Command "$s = Get-Content '%REPO%\src\ref\nr_image.c' -Raw; $m = [regex]::Matches($s, '(?m)^(?!static)[^\n]*?\b(nr_\w+)\s*\([^;]*\)\s*\{') | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique; @('LIBRARY libnr_image','EXPORTS') + ($m | ForEach-Object { '    ' + $_ }) | Set-Content '%WORK%\libnr_image.def'"
-cl /nologo /O2 /TC /D_WIN32 /D_CRT_SECURE_NO_WARNINGS /fp:precise /Fe:"%WORK%\libnr_image.dll" /LD "%REPO%\src\ref\nr_image.c" /link /DEF:"%WORK%\libnr_image.def"
+cl /nologo /O2 /TP /D_WIN32 /D_CRT_SECURE_NO_WARNINGS /fp:precise /openmp /Fe:"%WORK%\libnr_image.dll" /LD "%REPO%\src\ref\nr_image.c" /link /DEF:"%WORK%\libnr_image.def"
 if errorlevel 1 ( echo ERROR: libnr_image.dll failed & exit /b 1 )
 echo   libnr_image.dll
 
@@ -130,16 +136,23 @@ echo daemon at this checkout, so nothing has to be copied into the game folder.
 endlocal
 exit /b 0
 
-rem ---- :shader <name> - one .comp -> .spv, skipped when the source is absent ----
+rem ---- :shader <name> - one .comp -> .spv, from src/gpu or src/bench ----
 rem
 rem No per-driver defines. Intel's Windows compiler folds half_round's packHalf2x16 round
 rem trip to x (90109 of 90368 values on the B580's 101.8993, the same on the Arc 140V's
 rem 101.9033), so libxmx gives every pipeline the float16_t cast there instead, from the
 rem driver it finds, through specialisation constant 1. The attention shaders' softmax
 rem uses packHalf2x16 only as a bit trick on the packed word, which the fold does not touch.
+rem
+rem Two sources, not one: the runtime's shaders live in src/gpu and the probe in src/bench,
+rem and the Makefile builds both. A missing source is an error here rather than a quiet
+rem skip - looking only in src/gpu once made `call :shader half_probe` fall through in
+rem silence, and a daemon spawned by the layer then died on the next thing that assumed it.
 :shader
-if not exist "%GPU%\%1.comp" goto :eof
-"%GLSL%" --target-env vulkan1.3 -I"%GPU%" -o "%WORK%\%1.spv" "%GPU%\%1.comp" >nul 2>&1
+set "SRC=%GPU%\%1.comp"
+if not exist "%SRC%" set "SRC=%REPO%\src\bench\%1.comp"
+if not exist "%SRC%" (echo ERROR: no source for %1.comp & exit /b 1)
+"%GLSL%" --target-env vulkan1.3 -I"%GPU%" -o "%WORK%\%1.spv" "%SRC%" >nul 2>&1
 if exist "%WORK%\%1.spv" (echo   %1.spv) else (echo   %1.spv FAILED)
 goto :eof
 
