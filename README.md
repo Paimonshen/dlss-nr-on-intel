@@ -178,10 +178,12 @@ Use `-DNR_BUILD_LAYER=OFF` for a compute-only build, or `-DNR_BUILD_TESTS=OFF` t
 The CMake build and additional GEMM checks are adapted from
 [andyvand's fork](https://github.com/andyvand/dlss-nr-on-vulkan); see `NOTICE`.
 Its macOS/Windows runtime and C frame library are separate changes, not included here.
-The normal CMake build covers the 64-bit layer; use the existing Makefile target for
-`work/libnr_layer32.so` when a 32-bit game needs it. The two build the same shaders with the
-same flags and register the same tests — `src/tools/build_check.py` fails the suite when they
-part. Avoid running both at the same time because they write the same artifacts.
+Both build the 32-bit layer, `work/libnr_layer32.so`, for 32-bit games, wherever a 32-bit
+compiler and a 32-bit Vulkan loader are installed (on Arch, `lib32-glibc`, `lib32-gcc-libs`
+and `lib32-vulkan-icd-loader` from multilib). `make LAYER32=0` or `-DNR_BUILD_LAYER32=OFF`
+leaves it out. The two build the same shaders with the same flags and register the same tests
+— `src/tools/build_check.py` fails the suite when they part. Avoid running both at the same
+time because they write the same artifacts.
 
 Then extract the weights from your own DLL (needs `safetensors` as well as NumPy):
 
@@ -512,8 +514,8 @@ the client, so exporting it in your shell does not reach it — use the launch o
 `src/layer/nr-photo --steam <appid>` prints, or launch Proton directly with `--proton`.
 
 **A 32-bit game (D3D9 through DXVK) does not load the layer.** It needs the 32-bit
-library; `make work/libnr_layer32.so` builds it and `prepare_layer.py` writes both
-manifests.
+library, which `make` builds only where a 32-bit compiler and a 32-bit Vulkan loader are
+installed; `make LAYER32=1` says what is missing. `prepare_layer.py` writes both manifests.
 
 **It is unbearably slow.** Look at the swapchain size before the render scale. See the
 table above; at 1920x1080 the daemon alone manages about 3 fps at full scale and 9 at 0.55,
