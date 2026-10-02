@@ -266,3 +266,47 @@ not that the happy path printed the right thing. Eight such cases now pass, incl
 `--dry-run`, which the reviewer suggested and which reports the full plan while writing
 nothing — the install being the first write, that flag makes the whole chain checkable on
 a machine nobody wants a layer installed on.
+
+
+## The second review round: OpenMP, stdin, and a papercut that was real
+
+The maintainer ran the branch on his own machine under both Linux and Windows and came back
+with five items. Four were as described; chasing them found one defect that no amount of
+reading would have caught, and one that could not be fixed the obvious way.
+
+- **MSVC's `/openmp` rejects `#pragma omp parallel for` in C mode.** Not these loops - the
+  canonical two-line sample, `int` index, no schedule clause, C3015 "improper form" - while
+  the identical code compiles in C++ mode. The suggested fix (signed loop counters) could
+  not have worked on its own; the file has to go through the C++ front end, which costs
+  four explicit `malloc` casts. Only then do the counters matter: OpenMP 2.0 also wants the
+  bound signed, so `ptrdiff_t` against `size_t` fails again.
+
+  Measured on the fused compose-and-encode pass at 1280x720: **18.64 ms → 4.06 ms**, and
+  `libnr_image.dll` now depends on `VCOMP140.DLL` where before it ran every pass on one
+  core. The whole 10 % the maintainer measured at 720p was this.
+
+- **A spawned daemon died on stdin.** `subprocess.run(capture_output=True)` with no `stdin`
+  against the layer's `hStdInput = INVALID_HANDLE_VALUE` → WinError 6. My own spawn test
+  passed only because `half_probe.spv` was not being built, so the probe returned before
+  reaching that call - the maintainer guessed exactly that, and deleting the stale `.spv`
+  confirmed it. Fixed on both sides: `stdin=DEVNULL` in the probe call, and an inheritable
+  `NUL` handle for the child in the layer.
+
+- **`build_win.bat` never built `half_probe.spv`.** `:shader` looked only in `src/gpu`, so
+  `call :shader half_probe` fell through to `:eof` in silence, and the `.spv` sitting in
+  `work/` was from a manual run three days earlier. A missing source is an error now.
+
+- **Em dashes through a GBK round trip.** Master's eighteen `—`, on fifteen lines, were
+  `鈥?` here, with the following space eaten. Two sat at end-of-line where the newline went
+  too, so a naive repair joined comment lines; done against master byte for byte.
+
+**The lesson, and it is the same one twice over:** both silent failures here - the log that
+stayed empty, the `.spv` that was never built - produced a *working* system that was merely
+slower or quieter than it should be. Neither had a symptom pointing at its cause. The build
+script skipping a missing source without a word is how a three-day-old artefact went on
+being used; that one line is now an error.
+
+One item was deliberately **not** acted on: `test_window_attention.py` hangs the GPU on the
+maintainer's machine (Windows LiveKernelEvent 141), on the unmerged store that the graph
+builds only under `NR_FUSE_ATTENTION_MERGE=0`. This machine already has two bugchecks and
+TDR events behind it, so it was left as his finding rather than reproduced blind.
