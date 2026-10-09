@@ -200,6 +200,15 @@ button, Mortal Kombat Komplete Edition from its own executable, and DOOM through
 - A game that loads System32's loader by its path, or keeps its DLL search to System32, never
   loads the proxy. Setup's **Launch game** still starts such a game with the variables.
 
+**A game that runs as administrator gets the proxy and never the layer.** Windows' Vulkan
+loader reads `VK_LAYER_PATH` and `VK_ADD_LAYER_PATH` through `loader_secure_getenv`, which in a
+process at High integrity or above returns nothing (Vulkan-Loader's `is_high_integrity`); it
+skips HKCU's layer keys then too, and reads `VK_INSTANCE_LAYERS` still, so the layer is asked for
+and not found. That is every program with UAC off, and every game a launcher running as
+administrator starts. The proxy records the game's integrity level in its launch record, and the
+setup window says when the game runs elevated. A tester's report from an Arc B580 (issue #12)
+fits it, the proxy's record and no daemon log at all, though the cause is not confirmed there.
+
 ## Shipping it to someone without a compiler
 
 Two scripts, and the split between them is the point:

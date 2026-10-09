@@ -35,6 +35,12 @@ game update, is left as it is and named.
 DirectX 12 games do not work on Windows yet: DXVK covers DirectX 8–11, and VKD3D-Proton,
 tried with Mortal Kombat 1, stopped the game at startup.
 
+For a Vulkan game, choose the executable that draws with Vulkan: NR works only in the one
+chosen. Steam starts DOOM (2016)'s `DOOMx64.exe`, which starts `DOOMx64vk.exe` when the
+game's Graphics API is Vulkan, so choose `DOOMx64vk.exe` and set the game to Vulkan.
+**Check** says when the chosen executable does not load the Vulkan loader itself, and
+names the one beside it that does.
+
 **Start the game the way you usually do.** That `vulkan-1.dll` is a small proxy: loaded
 into the game, it gives the game's own process NR's settings and passes every Vulkan call
 on to Windows' Vulkan loader, or to the game's own copy if it brought one. So Steam's Play
@@ -43,6 +49,12 @@ setup changes none of them. **Launch game** starts it from setup. If an earlier 
 Steam's launch options for NR, **Install NR** and **Remove NR** return them, and Steam
 restarts once. A game with anti-cheat may refuse a DLL beside it, or count it as
 tampering: test single-player games, offline.
+
+**Not as administrator.** In a program that runs as administrator, Windows' Vulkan loader
+ignores where NR's layer is, so NR cannot reach the game. Start the game, and Steam or the
+launcher that starts it, without administrator rights. With UAC off, Windows runs every
+program as administrator, and NR needs UAC on. The status says when a game runs as
+administrator, and **Check** when this window does.
 
 Set the game itself to an 800×450 window for the first comparison. NR starts off;
 **Enable/disable NR** changes it while the game runs. If the game was already running
@@ -68,8 +80,8 @@ Under **Launch options**, the optional Fossilize workaround turns off Steam's Fo
 layer in this game while NR is installed; it does not disable Steam Overlay or modify the
 global shader-cache setting. The game arguments there are for **Launch game**.
 
-**Save report** exports settings, version/driver information and diagnostic log
-data without NVIDIA DLLs or weights. The release's private profile and extracted
+**Save report** exports settings, version/driver information, what **Check** says, the
+game's DXVK logs and diagnostic log data without NVIDIA DLLs or weights. The release's private profile and extracted
 weights stay on this PC and must not be added to a distributable.
 The window supports English, Russian and Spanish, chooses its initial language from
 Windows, and has a language selector at the top. The manual setup below remains available.
