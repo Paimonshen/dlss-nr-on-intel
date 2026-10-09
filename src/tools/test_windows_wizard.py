@@ -31,6 +31,44 @@ def write_pe(path, x64=True, suffix=b""):
     return path
 
 
+def write_pe_importing(path, imports=(), delayed=(), x64=True, text=b""):
+    """A PE whose import and delay-load tables name `imports` and `delayed`, in one section with
+    `text` after them."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    first = 112 if x64 else 96  # the data directories, after NumberOfRvaAndSizes
+    optional = bytearray(first + 16 * 8)
+    struct.pack_into("<H", optional, 0, 0x20B if x64 else 0x10B)
+    struct.pack_into("<I", optional, first - 4, 16)
+    base, raw = 0x1000, 0x400
+    names_at = 20 * (len(imports) + 1) + 32 * (len(delayed) + 1)
+    entries, delay_entries, names = bytearray(), bytearray(), bytearray()
+    for name in imports:
+        entries += struct.pack("<5I", 0, 0, 0, base + names_at + len(names), 0)
+        names += name.encode("ascii") + b"\0"
+    for name in delayed:
+        delay_entries += struct.pack("<8I", 1, base + names_at + len(names), 0, 0, 0, 0, 0, 0)
+        names += name.encode("ascii") + b"\0"
+    section = bytes(entries) + bytes(20) + bytes(delay_entries) + bytes(32) + bytes(names) + text
+    if imports:
+        struct.pack_into("<II", optional, first + 8 * 1, base, 20 * (len(imports) + 1))
+    if delayed:
+        struct.pack_into("<II", optional, first + 8 * 13, base + 20 * (len(imports) + 1), 32 * (len(delayed) + 1))
+    dos = bytearray(64)
+    dos[:2] = b"MZ"
+    struct.pack_into("<I", dos, 60, 64)
+    coff = bytearray(24)
+    coff[:4] = b"PE\0\0"
+    struct.pack_into("<HH", coff, 4, 0x8664 if x64 else 0x14C, 1)
+    struct.pack_into("<H", coff, 20, len(optional))
+    table = bytearray(40)
+    table[:6] = b".rdata"
+    struct.pack_into("<IIII", table, 8, len(section), base, len(section), raw)
+    data = bytes(dos + coff + optional + table)
+    path.write_bytes(data + bytes(raw - len(data)) + section)
+    return path
+
+
 def write_weights(path):
     """Format-only zero-sized tensors; deliberately contain no real weights."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -86,6 +124,9 @@ class WizardFixture(unittest.TestCase):
         self.deps = patch.object(core, "_load_dependencies", return_value={"ok": True, "failures": {}}).start()
         self.processes = patch.object(core, "_process_snapshot", return_value=[]).start()
         self.running = patch.object(core, "_running_executable", return_value=None).start()
+        # The window's own level and UAC as Windows has them by default, whoever runs the tests.
+        self.integrity = patch.object(core, "_integrity", return_value=0x2000).start()
+        self.uac = patch.object(core, "_uac_enabled", return_value=True).start()
         self.addCleanup(patch.stopall)
         core._LOG_STATES.clear()
         self.addCleanup(core._LOG_STATES.clear)
@@ -408,6 +449,84 @@ class WizardFixture(unittest.TestCase):
         self.processes.return_value = []
         self.assertNotIn("warning", core.set_effect(self.profile, True))
 
+    def test_status_and_enabling_say_when_the_game_runs_as_administrator(self):
+        # Windows' Vulkan loader ignores VK_LAYER_PATH from High integrity up; the proxy
+        # records the game's level, and only the game's own, running, is told about.
+        self.own()
+        self.launch_state(pid=77)
+        state = self.root / "work/windows-wizard/launch-state.json"
+        record = core._read_json(state)
+        record["integrity"] = 0x3000
+        core._atomic_json(state, record)
+        seen = core.status(self.profile)
+        self.assertTrue(seen["game_elevated"])
+        self.assertEqual(seen["game_integrity"], 0x3000)
+        self.assertIs(seen["uac_enabled"], True)
+        enabled = core.set_effect(self.profile, True)
+        self.assertTrue(enabled["ok"])
+        self.assertEqual(enabled.get("warning"), "game_elevated")
+        self.assertIs(enabled["uac_enabled"], True)
+        self.assertIn("without administrator rights", enabled["detail"])
+        self.uac.return_value = False
+        self.assertIs(core.set_effect(self.profile, True)["uac_enabled"], False)
+        self.assertIs(core.status(self.profile)["uac_enabled"], False)
+        self.assertNotIn("warning", core.set_effect(self.profile, False))
+        # At medium, as Windows starts a game by default, nothing is said.
+        record["integrity"] = 0x2000
+        core._atomic_json(state, record)
+        self.assertFalse(core.status(self.profile)["game_elevated"])
+        self.assertNotIn("warning", core.set_effect(self.profile, True))
+        # Nor by a record from before the proxy wrote the level.
+        del record["integrity"]
+        core._atomic_json(state, record)
+        self.assertIsNone(core.status(self.profile)["game_integrity"])
+        self.assertNotIn("warning", core.set_effect(self.profile, True))
+        # Nor once the game has gone, nor for another game's record.
+        record["integrity"] = 0x3000
+        core._atomic_json(state, record)
+        self.running.side_effect = None
+        self.processes.return_value = []
+        self.assertFalse(core.status(self.profile)["game_elevated"])
+        self.assertNotIn("warning", core.set_effect(self.profile, True))
+        other = replace(self.profile, game_exe=write_pe(self.base / "other (test)" / "other.exe"))
+        self.launch_state(pid=78)
+        record = dict(core._read_json(state), integrity=0x3000, game_exe=str(other.game_exe))
+        core._atomic_json(state, record)
+        self.assertFalse(core._elevated_game(self.profile, record))
+
+    def test_check_says_when_this_window_runs_as_administrator(self):
+        # So does a game it starts, and with UAC off every program; a warning, not a failure.
+        self.integrity.return_value = 0x3000
+        checked = core.validate(self.profile)
+        self.assertTrue(checked["ok"], checked)
+        self.assertEqual([item["name"] for item in checked["warnings"]], ["window_elevated"])
+        self.uac.return_value = False
+        self.assertEqual([item["name"] for item in core.validate(self.profile)["warnings"]], ["uac_off"])
+        # A standard user's programs run at medium with UAC off too: nothing to say.
+        self.integrity.return_value = 0x2000
+        self.assertEqual(core.validate(self.profile)["warnings"], [])
+        self.integrity.return_value = None
+        self.assertEqual(core.validate(self.profile)["warnings"], [])
+
+    def test_check_names_the_executable_that_loads_vulkan_when_the_chosen_one_does_not(self):
+        # Steam starts DOOM's DOOMx64.exe, which draws with OpenGL and starts DOOMx64vk.exe.
+        folder = self.base / "DOOM (test)"
+        launcher = write_pe_importing(folder / "DOOMx64.exe", ["OPENGL32.dll", "KERNEL32.dll"])
+        write_pe_importing(folder / "DOOMx64vk.exe", ["KERNEL32.dll", "vulkan-1.dll"])
+        write_pe_importing(folder / "crashpad.exe", ["KERNEL32.dll"])
+        profile = replace(self.profile, game_exe=launcher)
+        checked = core.validate(profile)
+        self.assertTrue(checked["ok"], checked)
+        self.assertEqual([(item["name"], item["values"]) for item in checked["warnings"]],
+                         [("vulkan_executable_other", ["DOOMx64.exe", "DOOMx64vk.exe"])])
+        self.assertEqual(core.validate(replace(profile, game_exe=folder / "DOOMx64vk.exe"))["warnings"], [])
+        # DXVK loads the loader for a DirectX game: not asked.
+        self.assertEqual(core.validate(replace(profile, api="dxvk"))["warnings"], [])
+        alone = write_pe_importing(self.base / "alone (test)" / "alone.exe", ["KERNEL32.dll"])
+        self.assertEqual([(item["name"], item["values"]) for item in
+                          core.validate(replace(profile, game_exe=alone))["warnings"]],
+                         [("vulkan_executable", ["alone.exe"])])
+
     def test_remove_refuses_while_the_game_runs_and_without_an_installation(self):
         profile = replace(self.profile, api="dxvk")
         result = core.uninstall(profile)
@@ -438,6 +557,7 @@ class WizardFixture(unittest.TestCase):
         core._atomic_json(self.root / "work/nr_settings.json", {"render_scale": 0.8, "min_extent": 640, "keep_me": 7})
         result = core.install(self.profile)
         self.assertTrue(result["ok"], result)
+        self.assertEqual(result["warnings"], [])
         saved = core.load_profile(self.root)
         self.assertEqual(saved.python, self.python)
         self.assertEqual(saved.game_exe, self.game)
@@ -833,8 +953,41 @@ class WizardFixture(unittest.TestCase):
         self.assertIn("runtime_dependencies", {item["name"] for item in saved["checks"]})
         self.assertEqual(saved["dll"], {"present": False})
         self.assertEqual(saved["weights_log_tail"], "")
+        self.assertEqual(saved["warnings"], [])
+        self.assertEqual(saved["elevation"], {"window_integrity": 0x2000, "window_elevated": False, "uac_enabled": True})
+        self.assertEqual(saved["dxvk_logs"], [])
         self.assertNotIn("fixture_648", report.read_text(encoding="utf-8"))
         self.assertFalse(core.export_report(self.profile, self.base / "report.dll")["ok"])
+
+    def test_report_carries_dxvks_logs_and_the_windows_elevation(self):
+        # Whether DXVK drew the game at all is in its logs: the release's work/logs, the game's
+        # folder, and the folders the proxy saw the game started in. Another game's are not.
+        profile = replace(self.profile, api="dxvk")
+        logs = self.root / "work/logs"
+        logs.mkdir(parents=True, exist_ok=True)
+        (logs / "selected_d3d11.log").write_text("info:  Game: selected.exe\ninfo:  DXVK: v3.1.1\n", encoding="utf-8")
+        (logs / "other_d3d11.log").write_text("another game\n", encoding="utf-8")
+        (self.game.parent / "selected_dxgi.log").write_bytes(b"head " + b"x" * (3 * core.DXVK_LOG_PART) + b" tail")
+        started = self.base / "started (test)"
+        started.mkdir()
+        (started / "selected_d3d9.log").write_text("from where the game was started\n", encoding="utf-8")
+        (self.own(profile) / core.START_FOLDERS).write_text(f"{started}\n{self.base / 'gone'}\n", encoding="utf-8")
+        self.integrity.return_value = 0x3000
+        self.uac.return_value = False
+        report = self.base / "report.json"
+        with patch.object(core, "_system_metadata", return_value={}):
+            self.assertTrue(core.export_report(profile, report)["ok"])
+        saved = core._read_json(report)
+        self.assertEqual(saved["elevation"], {"window_integrity": 0x3000, "window_elevated": True, "uac_enabled": False})
+        self.assertEqual([item["name"] for item in saved["warnings"]], ["uac_off"])
+        texts = {Path(item["path"]).name: item["text"] for item in saved["dxvk_logs"]}
+        self.assertEqual(set(texts), {"selected_d3d11.log", "selected_dxgi.log", "selected_d3d9.log"})
+        self.assertIn("DXVK: v3.1.1", texts["selected_d3d11.log"])
+        self.assertIn("from where the game was started", texts["selected_d3d9.log"])
+        # A long log as its start, which names the GPU and the device, and its end.
+        long = texts["selected_dxgi.log"]
+        self.assertTrue(long.startswith("head ") and long.endswith(" tail") and "[...]" in long, long[:40])
+        self.assertLess(len(long), 2 * core.DXVK_LOG_PART + 16)
 
     def test_a_python_or_a_library_that_fails_says_why_in_its_check(self):
         self.native.return_value = python_info(probe_ok=False, probe_error="no answer in 30 s")
@@ -881,6 +1034,54 @@ class ProbeTests(unittest.TestCase):
             info = core._python_info(Path("python.exe"))
         self.assertFalse(info["probe_ok"])
         self.assertEqual(info["probe_error"], "no answer in 30 s")
+
+    @unittest.skipUnless(os.name == "nt", "Windows' token and UAC policy")
+    def test_this_processs_integrity_and_uac_are_read(self):
+        # Low 0x1000, medium 0x2000, high 0x3000, system 0x4000: whatever runs the tests.
+        self.assertIn(core._integrity(), (0x1000, 0x2000, 0x2100, 0x3000, 0x4000))
+        self.assertIn(core._uac_enabled(), (True, False))
+
+    def test_off_windows_neither_is_known(self):
+        with patch.object(core.os, "name", "posix"):
+            self.assertIsNone(core._integrity())
+            self.assertIsNone(core._uac_enabled())
+
+
+class PeImportTests(unittest.TestCase):
+    """The import and delay-load tables, read from the file: nothing in it is loaded."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="nr imports (fixture) ")
+        self.addCleanup(self.temporary.cleanup)
+        self.folder = Path(self.temporary.name)
+
+    def test_both_tables_and_both_architectures(self):
+        game = write_pe_importing(self.folder / "game.exe", ["KERNEL32.dll", "vulkan-1.dll"], ["D3D12.dll"])
+        self.assertEqual(core.pe_imports(game), ["kernel32.dll", "vulkan-1.dll", "d3d12.dll"])
+        x86 = write_pe_importing(self.folder / "x86.exe", ["USER32.dll"], x64=False)
+        self.assertEqual(core.pe_imports(x86), ["user32.dll"])
+        self.assertEqual(core.pe_imports(write_pe_importing(self.folder / "none.exe")), [])
+
+    def test_what_is_not_a_readable_pe_file_has_no_imports(self):
+        (self.folder / "text.exe").write_bytes(b"not an executable")
+        self.assertIsNone(core.pe_imports(self.folder / "text.exe"))
+        self.assertIsNone(core.pe_imports(self.folder / "absent.exe"))
+        # Headers only, as the other fixtures write them: no optional header to read.
+        self.assertIsNone(core.pe_imports(write_pe(self.folder / "headers.exe")))
+        whole = write_pe_importing(self.folder / "cut.exe", ["KERNEL32.dll"]).read_bytes()
+        (self.folder / "cut.exe").write_bytes(whole[:0x400 + 8])
+        self.assertEqual(core.pe_imports(self.folder / "cut.exe"), [])
+
+    def test_a_game_that_loads_the_loader_by_name_is_not_taken_for_a_launcher(self):
+        # Unreal loads vulkan-1.dll by a UTF-16 name, imported by nothing.
+        named = write_pe_importing(self.folder / "unreal" / "Game.exe", ["KERNEL32.dll"],
+                                   text="vulkan-1.dll".encode("utf-16-le"))
+        self.assertIsNone(core._vulkan_elsewhere(named))
+        ascii_named = write_pe_importing(self.folder / "ascii" / "Game.exe", ["KERNEL32.dll"], text=b"VULKAN-1.DLL")
+        self.assertIsNone(core._vulkan_elsewhere(ascii_named))
+        alone = write_pe_importing(self.folder / "alone" / "Game.exe", ["KERNEL32.dll"])
+        self.assertEqual(core._vulkan_elsewhere(alone), [])
+        self.assertIsNone(core._vulkan_elsewhere(write_pe(self.folder / "headers" / "Game.exe")))
 
 
 class CommandTests(unittest.TestCase):

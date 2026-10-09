@@ -3,8 +3,12 @@
 
 Each case loads it in a Python of its own, since its DllMain runs once a process, and the
 Python stands in for the game:
-- named in nr-env.txt, however spelt, the process gets the variables, the launch is recorded with its pid
-  and the daemon log's size, the folder it was started in is listed once, and Vulkan calls reach the loader;
+- named in nr-env.txt, however spelt, the process gets the variables, the launch is recorded with its pid,
+  its integrity level and the daemon log's size, the folder it was started in is listed once, and Vulkan
+  calls reach the loader;
+- the same at Low integrity, so the level recorded is the process's own: Windows' Vulkan loader ignores
+  VK_LAYER_PATH from High up, and setup warns from the record. High itself needs elevation, which a test
+  cannot give itself;
 - another executable in the same folder gets nothing, and Vulkan still works;
 - DISABLE_NR_PROXY=1 turns it all off;
 - NR_REAL_VULKAN sends the calls to the loader it names (a game's own copy, set aside).
@@ -14,6 +18,7 @@ Python stands in for the game:
 The DLL is work/nr_vulkan_proxy.dll, which build_win.bat builds. Exits 77, skipped, off
 Windows, from a 32-bit Python, or when the DLL is not built.
 """
+import ctypes
 import json
 import os
 import pathlib
@@ -26,13 +31,28 @@ import tempfile
 HERE = pathlib.Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 FAILURES = []
+LOW = 0x1000  # SECURITY_MANDATORY_LOW_RID
 CHILD = r'''
 import ctypes, json, os, pathlib, sys
 from ctypes import wintypes
 folder = pathlib.Path(sys.argv[1]); case = sys.argv[2]
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+advapi32 = ctypes.WinDLL("advapi32")
 psapi = ctypes.WinDLL("psapi")
 kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+advapi32.OpenProcessToken.argtypes = (wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE))
+advapi32.GetTokenInformation.argtypes = (wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
+                                         ctypes.POINTER(wintypes.DWORD))
+advapi32.GetSidSubAuthorityCount.restype = ctypes.POINTER(ctypes.c_ubyte)
+advapi32.GetSidSubAuthorityCount.argtypes = (ctypes.c_void_p,)
+advapi32.GetSidSubAuthority.restype = ctypes.POINTER(wintypes.DWORD)
+advapi32.GetSidSubAuthority.argtypes = (ctypes.c_void_p, wintypes.DWORD)
+# This process's integrity level as the proxy should record it: TokenIntegrityLevel's last RID.
+token = wintypes.HANDLE(); label = ctypes.create_string_buffer(128); size = wintypes.DWORD()
+advapi32.OpenProcessToken(kernel32.GetCurrentProcess(), 0x0008, ctypes.byref(token))
+advapi32.GetTokenInformation(token, 25, label, 128, ctypes.byref(size))
+sid = ctypes.cast(label, ctypes.POINTER(ctypes.c_void_p))[0]
+integrity = advapi32.GetSidSubAuthority(sid, advapi32.GetSidSubAuthorityCount(sid)[0] - 1)[0]
 kernel32.GetModuleFileNameW.argtypes = (wintypes.HMODULE, wintypes.LPWSTR, wintypes.DWORD)
 kernel32.GetEnvironmentVariableW.argtypes = (wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD)
 psapi.EnumProcessModules.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.HMODULE), wintypes.DWORD,
@@ -67,10 +87,13 @@ for module in modules[:needed.value // ctypes.sizeof(wintypes.HMODULE)]:
 # Where the proxy looks for the real loader: SysWOW64 for a 32-bit process, by redirection.
 system = ctypes.create_unicode_buffer(32768)
 kernel32.GetSystemDirectoryW(system, 32768)
-print(json.dumps({"exe": me, "pid": os.getpid(), "value": value.value if got else None,
-                  "from_system": any(os.path.samefile(path, os.path.join(system.value, "vulkan-1.dll"))
-                                     for path in loaded),
-                  "result": result, "version": version.value, "loaded": loaded}))
+seen = json.dumps({"exe": me, "pid": os.getpid(), "integrity": integrity, "value": value.value if got else None,
+                   "from_system": any(os.path.samefile(path, os.path.join(system.value, "vulkan-1.dll"))
+                                      for path in loaded),
+                   "result": result, "version": version.value, "loaded": loaded})
+print(seen)
+if len(sys.argv) > 3:  # a child started without pipes: its answer as a file
+    pathlib.Path(sys.argv[3]).write_text(seen, encoding="utf-8")
 '''
 
 
@@ -80,10 +103,90 @@ def check(name, ok, detail=""):
         FAILURES.append(name)
 
 
-def run(proxy, case, environment=None, runs=1):
+def start_low(arguments, cwd):
+    """Runs `arguments` at Low integrity, in this process's environment, and returns its exit
+    code. The token is this process's own, duplicated and labelled Low, which needs no privilege
+    a user lacks (Windows' sample for a low-integrity process does the same)."""
+    from ctypes import wintypes
+
+    class StartupInfo(ctypes.Structure):
+        _fields_ = [("cb", wintypes.DWORD), ("lpReserved", wintypes.LPWSTR), ("lpDesktop", wintypes.LPWSTR),
+                    ("lpTitle", wintypes.LPWSTR), ("dwX", wintypes.DWORD), ("dwY", wintypes.DWORD),
+                    ("dwXSize", wintypes.DWORD), ("dwYSize", wintypes.DWORD), ("dwXCountChars", wintypes.DWORD),
+                    ("dwYCountChars", wintypes.DWORD), ("dwFillAttribute", wintypes.DWORD),
+                    ("dwFlags", wintypes.DWORD), ("wShowWindow", wintypes.WORD), ("cbReserved2", wintypes.WORD),
+                    ("lpReserved2", ctypes.c_void_p), ("hStdInput", wintypes.HANDLE),
+                    ("hStdOutput", wintypes.HANDLE), ("hStdError", wintypes.HANDLE)]
+
+    class ProcessInformation(ctypes.Structure):
+        _fields_ = [("hProcess", wintypes.HANDLE), ("hThread", wintypes.HANDLE),
+                    ("dwProcessId", wintypes.DWORD), ("dwThreadId", wintypes.DWORD)]
+
+    class Label(ctypes.Structure):  # TOKEN_MANDATORY_LABEL: one SID_AND_ATTRIBUTES
+        _fields_ = [("Sid", ctypes.c_void_p), ("Attributes", wintypes.DWORD)]
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+    kernel32.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+    kernel32.TerminateProcess.argtypes = (wintypes.HANDLE, wintypes.UINT)
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel32.LocalFree.argtypes = (ctypes.c_void_p,)
+    advapi32.OpenProcessToken.argtypes = (wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE))
+    advapi32.DuplicateTokenEx.argtypes = (wintypes.HANDLE, wintypes.DWORD, ctypes.c_void_p, ctypes.c_int,
+                                          ctypes.c_int, ctypes.POINTER(wintypes.HANDLE))
+    advapi32.ConvertStringSidToSidW.argtypes = (wintypes.LPCWSTR, ctypes.POINTER(ctypes.c_void_p))
+    advapi32.GetLengthSid.argtypes = (ctypes.c_void_p,)
+    advapi32.SetTokenInformation.argtypes = (wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD)
+    advapi32.CreateProcessAsUserW.argtypes = (
+        wintypes.HANDLE, wintypes.LPCWSTR, wintypes.LPWSTR, ctypes.c_void_p, ctypes.c_void_p, wintypes.BOOL,
+        wintypes.DWORD, ctypes.c_void_p, wintypes.LPCWSTR, ctypes.POINTER(StartupInfo),
+        ctypes.POINTER(ProcessInformation))
+    token, low, sid = wintypes.HANDLE(), wintypes.HANDLE(), ctypes.c_void_p()
+    try:
+        # TOKEN_ASSIGN_PRIMARY | TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ADJUST_DEFAULT; a primary token
+        if not (advapi32.OpenProcessToken(kernel32.GetCurrentProcess(), 0x0001 | 0x0002 | 0x0008 | 0x0080,
+                                          ctypes.byref(token))
+                and advapi32.DuplicateTokenEx(token, 0, None, 2, 1, ctypes.byref(low))
+                and advapi32.ConvertStringSidToSidW("S-1-16-4096", ctypes.byref(sid))):
+            raise OSError(ctypes.get_last_error(), "no Low token")
+        label = Label(sid, 0x20)  # SE_GROUP_INTEGRITY
+        if not advapi32.SetTokenInformation(low, 25, ctypes.byref(label),  # TokenIntegrityLevel
+                                            ctypes.sizeof(label) + advapi32.GetLengthSid(sid)):
+            raise OSError(ctypes.get_last_error(), "the token kept its level")
+        startup, process = StartupInfo(), ProcessInformation()
+        startup.cb = ctypes.sizeof(startup)
+        command = ctypes.create_unicode_buffer(subprocess.list2cmdline(arguments))
+        if not advapi32.CreateProcessAsUserW(low, None, command, None, None, False, 0x08000000,  # no window
+                                             None, str(cwd), ctypes.byref(startup), ctypes.byref(process)):
+            raise OSError(ctypes.get_last_error(), "CreateProcessAsUserW")
+        try:
+            if kernel32.WaitForSingleObject(process.hProcess, 60000):
+                kernel32.TerminateProcess(process.hProcess, 1)
+                return "timed out"
+            code = wintypes.DWORD()
+            kernel32.GetExitCodeProcess(process.hProcess, ctypes.byref(code))
+            return code.value
+        finally:
+            kernel32.CloseHandle(process.hProcess)
+            kernel32.CloseHandle(process.hThread)
+    finally:
+        for handle in (low, token):
+            if handle:
+                kernel32.CloseHandle(handle)
+        if sid:
+            kernel32.LocalFree(sid)
+
+
+def run(proxy, case, environment=None, runs=1, low=False):
     """What the last of `runs` processes saw, its launch record, and for each folder listed in
-    start-folders.txt whether it is the one they were started in (None without the file)."""
-    folder = pathlib.Path(tempfile.mkdtemp(prefix="nr proxy (test) "))
+    start-folders.txt whether it is the one they were started in (None without the file).
+
+    `low` runs it at Low integrity, in this process's environment and in a folder under
+    LocalLow, the one place such a process may write."""
+    base = pathlib.Path(os.environ["USERPROFILE"]) / "AppData" / "LocalLow" if low else None
+    folder = pathlib.Path(tempfile.mkdtemp(prefix="nr proxy (test) ", dir=base))
     try:
         shutil.copyfile(proxy, folder / "vulkan-1.dll")
         (folder / "daemon.log").write_bytes(b"x" * 1234)
@@ -96,10 +199,18 @@ def run(proxy, case, environment=None, runs=1):
         env = dict(os.environ, **(environment or {}))
         env.pop("NR_TEST_VALUE", None)
         for _ in range(runs):
+            if low:
+                answer = folder / "seen.json"
+                code = start_low([sys.executable, "-c", CHILD, str(folder), case, str(answer)], started)
+                if code or not answer.exists():
+                    return {"error": f"exit code {code}, no answer"}, None, None
+                seen = json.loads(answer.read_text(encoding="utf-8"))
+                continue
             done = subprocess.run([sys.executable, "-c", CHILD, str(folder), case], env=env, cwd=started,
                                   capture_output=True, text=True, timeout=60)
             if done.returncode:
                 return {"error": done.stderr.strip()[-400:]}, None, None
+            seen = json.loads(done.stdout.strip().splitlines()[-1])
         state = folder / "launch-state.json"
         record = json.loads(state.read_text(encoding="utf-8")) if state.exists() else None
         listed = folder / "dlss-nr" / "start-folders.txt"
@@ -107,7 +218,7 @@ def run(proxy, case, environment=None, runs=1):
         folders = ([os.path.isdir(line) and os.path.samefile(line, started)
                     for line in listed.read_text(encoding="utf-8").splitlines()]
                    if listed.exists() else None)
-        return json.loads(done.stdout.strip().splitlines()[-1]), record, folders
+        return seen, record, folders
     finally:
         shutil.rmtree(folder, ignore_errors=True)
 
@@ -132,7 +243,16 @@ def main():
     check("the launch is recorded", record is not None and record.get("pid") == seen.get("pid")
           and record.get("daemon_start_bytes") == 1234 and record.get("exit_code") is None
           and record.get("game_exe") == seen.get("exe"), str(record))
+    check("with the process's integrity level", isinstance(seen.get("integrity"), int)
+          and record is not None and record.get("integrity") == seen.get("integrity"),
+          f"{record and record.get('integrity')} for {seen.get('integrity')}")
     check("the folder it was started in is listed, once", folders == [True], str(folders))
+
+    print("the game's own process at Low integrity:")
+    seen, record, folders = run(proxy, "game", low=True)
+    check("it ran at Low, with the variable", seen.get("integrity") == LOW and seen.get("value") == "it works été",
+          seen.get("error") or f"{seen.get('integrity')}, {seen.get('value')!r}")
+    check("the record says Low", record is not None and record.get("integrity") == LOW, str(record))
 
     print("the game's path spelt otherwise (upper case):")
     seen, record, folders = run(proxy, "spelling")

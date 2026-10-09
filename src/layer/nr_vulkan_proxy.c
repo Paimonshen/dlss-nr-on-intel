@@ -21,6 +21,11 @@
  *
  * The folder the game was started in goes into dlss-nr\start-folders.txt, for Remove NR: DXVK
  * opens its first log there before it loads this DLL, so before DXVK_LOG_PATH is set.
+ *
+ * The launch record carries the process's integrity level. Windows' Vulkan loader ignores
+ * VK_LAYER_PATH in a process at High integrity or above, as administrator or with UAC off
+ * (Vulkan-Loader's is_high_integrity): such a game gets these variables and never NR's layer,
+ * and setup's status says so.
  */
 #define WIN32_LEAN_AND_MEAN
 #define VK_USE_PLATFORM_WIN32_KHR
@@ -28,6 +33,9 @@
 #include <stdio.h>
 #include <wchar.h>
 #include <vulkan/vulkan.h> /* with its prototypes: the wrappers must match them */
+#ifdef _MSC_VER
+#pragma comment(lib, "advapi32.lib") /* the token: integrity_level */
+#endif
 
 static wchar_t real_path[MAX_PATH * 2];
 static HMODULE real_loader;
@@ -114,17 +122,40 @@ static const wchar_t *lookup(wchar_t **names, wchar_t **values, int count, const
 	return NULL;
 }
 
+/* This process's mandatory integrity level, the last part of its label's SID: 0x2000 medium,
+ * 0x3000 high, the loader's limit. -1 when the token cannot be read. */
+static long integrity_level(void)
+{
+	HANDLE token;
+	union {
+		TOKEN_MANDATORY_LABEL label;
+		BYTE bytes[sizeof(TOKEN_MANDATORY_LABEL) + SECURITY_MAX_SID_SIZE];
+	} buffer;
+	DWORD size = 0;
+	long level = -1;
+	if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return -1;
+	if (GetTokenInformation(token, TokenIntegrityLevel, &buffer, sizeof buffer, &size)) {
+		UCHAR count = *GetSidSubAuthorityCount(buffer.label.Label.Sid);
+		if (count) level = (long)*GetSidSubAuthority(buffer.label.Label.Sid, count - 1u);
+	}
+	CloseHandle(token);
+	return level;
+}
+
 /* What setup's status reads to tell a running game from an old log: this process, its game,
- * and how much of the daemon's log was there before it. Written beside, then moved over. */
+ * its integrity level, and how much of the daemon's log was there before it. Written beside,
+ * then moved over. */
 static void record_launch(const wchar_t *path, const wchar_t *root, const wchar_t *game,
 			  const wchar_t *log)
 {
 	static wchar_t text[8192];
-	wchar_t temporary[MAX_PATH * 2 + 16];
+	wchar_t temporary[MAX_PATH * 2 + 16], integrity[16] = L"null";
 	char bytes[24576];
 	unsigned long long offset = 0;
 	WIN32_FILE_ATTRIBUTE_DATA attributes;
 	SYSTEMTIME now;
+	long level = integrity_level();
+	if (level >= 0) swprintf(integrity, 16, L"%ld", level);
 	if (log && GetFileAttributesExW(log, GetFileExInfoStandard, &attributes))
 		offset = ((unsigned long long)attributes.nFileSizeHigh << 32) | attributes.nFileSizeLow;
 	GetSystemTime(&now);
@@ -134,9 +165,10 @@ static void record_launch(const wchar_t *path, const wchar_t *root, const wchar_
 	wcscat_s(text, 8192, L",\n  \"game_exe\": ");
 	json_string(text, 8192, game);
 	swprintf(text + wcslen(text), 8192 - wcslen(text),
-		 L",\n  \"pid\": %lu,\n  \"daemon_start_bytes\": %llu,\n  \"started_utc\": "
-		 L"\"%04u-%02u-%02uT%02u:%02u:%02u.%03u+00:00\",\n  \"exit_code\": null\n}\n",
-		 GetCurrentProcessId(), offset, now.wYear, now.wMonth, now.wDay, now.wHour,
+		 L",\n  \"pid\": %lu,\n  \"integrity\": %ls,\n  \"daemon_start_bytes\": %llu,\n"
+		 L"  \"started_utc\": \"%04u-%02u-%02uT%02u:%02u:%02u.%03u+00:00\",\n"
+		 L"  \"exit_code\": null\n}\n",
+		 GetCurrentProcessId(), integrity, offset, now.wYear, now.wMonth, now.wDay, now.wHour,
 		 now.wMinute, now.wSecond, now.wMilliseconds);
 	int length = WideCharToMultiByte(CP_UTF8, 0, text, -1, bytes, sizeof bytes, NULL, NULL);
 	if (length <= 1) return;

@@ -456,6 +456,12 @@ $script:Strings=@{
   InvalidSetting='Enter a finite number within the supported range.'; FrameReadout='Last neural frame: output {0}×{1}; network {3}×{4}; processing {2} ms. This is not game FPS.'
   PackagesLater='Python works. Install NR adds numpy and safetensors to a Python of its own.'
   GameWithoutNr='The game is running without NR. Restart it; if NR still does not appear, start it with Launch game.'
+  GameElevated='The game runs as administrator, and there the Windows Vulkan loader ignores where NR is, so NR cannot reach it. Close the game and start it without administrator rights, and Steam or the launcher that starts it too.'
+  GameElevatedUacOff='The game runs as administrator because UAC is off, and there the Windows Vulkan loader ignores where NR is, so NR cannot reach it. NR needs UAC on, as Windows has it by default.'
+  'Warn.vulkan_executable'='{0} does not load the Vulkan loader itself, and NR reaches only the .exe chosen here. If the game draws with Vulkan in another .exe, choose that one.'
+  'Warn.vulkan_executable_other'='{0} does not load the Vulkan loader itself, and NR reaches only the .exe chosen here. {1} beside it does: if the game draws with Vulkan there, choose it.'
+  'Warn.window_elevated'='This window runs as administrator, and so does a game started with Launch game: NR cannot reach a game that runs as administrator. Start the game, and Steam or the launcher that starts it, without administrator rights.'
+  'Warn.uac_off'='UAC is off, so Windows runs every program as administrator, and NR cannot reach a game that runs so. NR needs UAC on, as Windows has it by default.'
   'Loading.settings'='Loading NR settings…'; 'Loading.settings-save'='Saving NR controls…'; 'Loading.settings-reset'='Restoring NR defaults…'
   'Done.settings'='NR settings loaded.'; 'Done.settings-save'='NR settings saved.'; 'Done.settings-reset'='NR defaults restored.'
   'Knob.render_scale'='Render scale'; 'Knob.min_extent'='Minimum network side'; 'Knob.profile'='Profile'; 'Knob.intensity'='Intensity'
@@ -529,6 +535,12 @@ $script:Strings=@{
   InvalidSetting='Введите конечное число в допустимом диапазоне.'; FrameReadout='Последний нейронный кадр: выход {0}×{1}; сеть {3}×{4}; обработка {2} мс. Это не FPS игры.'
   PackagesLater='Python подходит. «Установить NR» сам поставит numpy и safetensors в свою копию Python.'
   GameWithoutNr='Игра запущена без NR. Перезапустите её; если NR так и не появится, запустите её кнопкой «Запустить игру».'
+  GameElevated='Игра запущена с правами администратора: в таком процессе загрузчик Vulkan в Windows не видит NR, и NR до игры не доходит. Закройте игру и запустите её без прав администратора, а также Steam или лаунчер, который её запускает.'
+  GameElevatedUacOff='Игра запущена с правами администратора, потому что UAC выключен: в таком процессе загрузчик Vulkan в Windows не видит NR, и NR до игры не доходит. NR нужен включённый UAC, как в Windows по умолчанию.'
+  'Warn.vulkan_executable'='{0} сам не загружает загрузчик Vulkan, а NR работает только в выбранном здесь .exe. Если игра рисует через Vulkan в другом .exe, выберите его.'
+  'Warn.vulkan_executable_other'='{0} сам не загружает загрузчик Vulkan, а NR работает только в выбранном здесь .exe. Рядом лежит {1}, который его загружает: если игра рисует через Vulkan там, выберите его.'
+  'Warn.window_elevated'='Это окно запущено с правами администратора, и игра, запущенная кнопкой «Запустить игру», тоже: до игры с такими правами NR не доходит. Запускайте игру, а также Steam или лаунчер, который её запускает, без прав администратора.'
+  'Warn.uac_off'='UAC выключен, поэтому Windows запускает все программы с правами администратора, и до игры с такими правами NR не доходит. NR нужен включённый UAC, как в Windows по умолчанию.'
   'Loading.settings'='Загружаем настройки NR…'; 'Loading.settings-save'='Сохраняем настройки NR…'; 'Loading.settings-reset'='Возвращаем настройки NR…'
   'Done.settings'='Настройки NR загружены.'; 'Done.settings-save'='Настройки NR сохранены.'; 'Done.settings-reset'='Настройки NR сброшены.'
   'Knob.render_scale'='Масштаб сети'; 'Knob.min_extent'='Минимальная сторона сети'; 'Knob.profile'='Профиль'; 'Knob.intensity'='Интенсивность'
@@ -602,6 +614,12 @@ $script:Strings=@{
   InvalidSetting='Escriba un número finito dentro del rango admitido.'; FrameReadout='Último fotograma neuronal: salida {0}×{1}; red {3}×{4}; procesamiento {2} ms. Esto no son los FPS del juego.'
   PackagesLater='Python sirve. Instalar NR añade numpy y safetensors a una copia propia de Python.'
   GameWithoutNr='El juego se está ejecutando sin NR. Reinícielo; si NR sigue sin aparecer, inícielo con Iniciar el juego.'
+  GameElevated='El juego se ejecuta como administrador, y ahí el cargador de Vulkan de Windows ignora dónde está NR, así que NR no llega a él. Cierre el juego e inícielo sin derechos de administrador, y también Steam o el lanzador que lo inicia.'
+  GameElevatedUacOff='El juego se ejecuta como administrador porque el UAC está desactivado, y ahí el cargador de Vulkan de Windows ignora dónde está NR, así que NR no llega a él. NR necesita el UAC activado, como viene en Windows.'
+  'Warn.vulkan_executable'='{0} no carga por sí mismo el cargador de Vulkan, y NR solo llega al .exe elegido aquí. Si el juego dibuja con Vulkan en otro .exe, elija ese.'
+  'Warn.vulkan_executable_other'='{0} no carga por sí mismo el cargador de Vulkan, y NR solo llega al .exe elegido aquí. {1}, a su lado, sí lo carga: si el juego dibuja con Vulkan allí, elíjalo.'
+  'Warn.window_elevated'='Esta ventana se ejecuta como administrador, y también un juego iniciado con Iniciar el juego: NR no llega a un juego que se ejecuta como administrador. Inicie el juego, y Steam o el lanzador que lo inicia, sin derechos de administrador.'
+  'Warn.uac_off'='El UAC está desactivado, así que Windows ejecuta todos los programas como administrador, y NR no llega a un juego que se ejecuta así. NR necesita el UAC activado, como viene en Windows.'
   'Loading.settings'='Cargando la configuración de NR…'; 'Loading.settings-save'='Guardando los controles de NR…'; 'Loading.settings-reset'='Restaurando los valores predeterminados de NR…'
   'Done.settings'='Configuración de NR cargada.'; 'Done.settings-save'='Configuración de NR guardada.'; 'Done.settings-reset'='Se restauraron los valores predeterminados de NR.'
   'Knob.render_scale'='Escala de renderizado'; 'Knob.min_extent'='Lado mínimo de la red'; 'Knob.profile'='Perfil'; 'Knob.intensity'='Intensidad'
@@ -883,6 +901,15 @@ function Set-EffectColour([bool]$Enabled) {
     $key=$(if($Enabled){'Good'}else{'Muted'})
     foreach($name in 'EffectState','ControlsEffectState') { $script:Ui[$name].SetResourceReference([Windows.Controls.TextBlock]::ForegroundProperty,$key) }
 }
+function Format-Warnings($Value) {
+    # Each in this language when it has a sentence here, else as the backend words it.
+    foreach($item in @($Value.warnings)) {
+        if(-not $item) { continue }
+        $key='Warn.'+[string]$item.name
+        if($script:Strings[$script:Language].ContainsKey($key)) { [string]::Format((T $key),[object[]]@($item.values)) }
+        else { [string]$item.detail }
+    }
+}
 function Show-Status($Value) {
     $enabled=[bool]$Value.trigger_exists
     if($null -ne $Value.effect_on) { $enabled=[bool]$Value.effect_on }
@@ -901,7 +928,10 @@ function Show-Status($Value) {
     $shape=''
     if($Value.network_shape -and $Value.network_shape.Count -eq 2) { $shape=[string]::Format((T 'Network'),$Value.network_shape[0],$Value.network_shape[1]) }
     $kind=$(if($Value.counts_complete -eq $false){T 'TailFrames'}else{T 'Frames'})
-    if($Value.fresh_frames -or $Value.game_connected) {
+    if($Value.game_elevated -and -not $Value.fresh_frames) {
+        # From the proxy's record: as administrator the game never loads NR's layer.
+        Set-RuntimeText $(if($Value.uac_enabled -eq $false){'GameElevatedUacOff'}else{'GameElevated'})
+    } elseif($Value.fresh_frames -or $Value.game_connected) {
         Set-RuntimeText 'Processing' @($kind,$count,$refused,$shape)
     } elseif([int]$count -gt 0) {
         Set-RuntimeText 'Historical' @($count,$refused)
@@ -938,6 +968,13 @@ function Finish-Bridge($Job,[bool]$Quiet) {
             Set-Progress ('Done.'+$Job.Action)
             if($Job.Action -in @('install','uninstall') -and $value.steam_restored) { Set-Progress ('Done.'+$Job.Action+'-steam') }
             if($Job.Action -eq 'on' -and $value.warning -eq 'game_without_nr') { Set-Progress 'GameWithoutNr' }
+            if($Job.Action -eq 'on' -and $value.warning -eq 'game_elevated') { Set-Progress $(if($value.uac_enabled -eq $false){'GameElevatedUacOff'}else{'GameElevated'}) }
+            if($Job.Action -in @('check','install')) {
+                # What would keep NR from the game without stopping the install, said here rather
+                # than left in the details.
+                $notes=@(Format-Warnings $value)
+                if($notes.Count) { $script:Ui.Progress.Text=$script:Ui.Progress.Text+' '+($notes -join ' ') }
+            }
             if($value.profile -and $Job.Action -in @('discover','dependencies','install')) { Apply-Profile $value.profile }
             if($Job.Action -eq 'discover' -and -not $value.profile -and $value.candidates.Count) { $script:Ui.PythonPath.Text=[string]$value.candidates[0] }
             if($Job.Action -eq 'install') { $script:Installed=$true }
@@ -1050,6 +1087,15 @@ if($SelfTest) {
         }
         Show-Status ([pscustomobject]@{trigger_exists=$true;processed=12;rejected=0;network_shape=@(320,320);fresh_frames=$true;counts_complete=$true})
         if($script:Ui.Toggle.Content -ne (T 'Disable') -or $script:Ui.RuntimeState.Text -notmatch '320×320') { throw 'Localized enabled status failed' }
+        Show-Status ([pscustomobject]@{trigger_exists=$true;processed=0;rejected=0;fresh_frames=$false;game_elevated=$true;uac_enabled=$true})
+        if($script:Ui.RuntimeState.Text -ne (T 'GameElevated')) { throw 'An elevated game was not said' }
+        Show-Status ([pscustomobject]@{trigger_exists=$true;processed=0;rejected=0;fresh_frames=$false;game_elevated=$true;uac_enabled=$false})
+        if($script:Ui.RuntimeState.Text -ne (T 'GameElevatedUacOff')) { throw 'An elevated game with UAC off was not said' }
+        foreach($key in @($script:Strings[$language].Keys | Where-Object { $_ -like 'Warn.*' })) { $null=[string]::Format((T $key),'A.exe','B.exe') }
+        $notes=@(Format-Warnings ([pscustomobject]@{warnings=@(
+            [pscustomobject]@{name='vulkan_executable_other';detail='';values=@('DOOMx64.exe','DOOMx64vk.exe')},
+            [pscustomobject]@{name='not_worded_here';detail='As the backend words it';values=@()})}))
+        if($notes.Count -ne 2 -or $notes[0] -notmatch 'DOOMx64\.exe' -or $notes[0] -notmatch 'DOOMx64vk\.exe' -or $notes[1] -ne 'As the backend words it') { throw 'Warnings were not worded' }
         Set-Language $(if($language -eq 'en'){'ru'}else{'en'})
         if($script:Ui.Toggle.Content -ne (T 'Disable')) { throw 'Language switch changed the displayed effect state' }
         Show-Status ([pscustomobject]@{trigger_exists=$false;processed=12;rejected=1;fresh_frames=$false})

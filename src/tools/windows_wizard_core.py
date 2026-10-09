@@ -477,6 +477,90 @@ def pe_architecture(path):
         return None
 
 
+def pe_imports(path):
+    """The DLLs an executable names in its import and delay-load tables, in lower case, read from
+    its headers and those tables alone; None when it is not a PE file this reads."""
+    try:
+        with Path(path).open("rb") as handle:
+            def read(offset, size):
+                handle.seek(offset)
+                return handle.read(size)
+
+            dos = read(0, 64)
+            if len(dos) != 64 or dos[:2] != b"MZ":
+                return None
+            pe = struct.unpack_from("<I", dos, 60)[0]
+            header = read(pe, 24)
+            if len(header) != 24 or header[:4] != b"PE\0\0":
+                return None
+            count = struct.unpack_from("<H", header, 6)[0]
+            optional_size = struct.unpack_from("<H", header, 20)[0]
+            optional = read(pe + 24, optional_size)
+            # The data directories follow NumberOfRvaAndSizes: at 96 in PE32, at 112 in PE32+.
+            first = {0x10B: 96, 0x20B: 112}.get(struct.unpack_from("<H", optional, 0)[0] if len(optional) >= 2 else 0)
+            if first is None or len(optional) < first:
+                return None
+            directories = struct.unpack_from("<I", optional, first - 4)[0]
+            table = read(pe + 24 + optional_size, 40 * count)
+            # Each section's VirtualSize, VirtualAddress, SizeOfRawData and PointerToRawData.
+            sections = [struct.unpack_from("<IIII", table, 40 * index + 8) for index in range(len(table) // 40)]
+
+            def offset(rva):
+                for size, address, raw_size, raw in sections:
+                    if address <= rva < address + max(size, raw_size):
+                        return raw + rva - address
+                return None
+
+            names = []
+            # Directory 1, imports: 20 bytes an entry, the name's address at 12. Directory 13,
+            # delay-loaded: 32 bytes, at 4. Each list ends with an entry of zeros.
+            for index, entry, at in ((1, 20, 12), (13, 32, 4)):
+                if directories <= index or len(optional) < first + 8 * index + 8:
+                    continue
+                rva = struct.unpack_from("<I", optional, first + 8 * index)[0]
+                start = offset(rva) if rva else None
+                for number in range(4096 if start is not None else 0):
+                    data = read(start + entry * number, entry)
+                    if len(data) != entry or not any(data):
+                        break
+                    name = offset(struct.unpack_from("<I", data, at)[0])
+                    if name is not None:
+                        names.append(read(name, 260).split(b"\0", 1)[0].decode("ascii", "replace").lower())
+            return names
+    except (OSError, struct.error):
+        return None
+
+
+def _mentions(path, needles):
+    """Whether a file holds any of `needles`, searched through a mapping rather than read in."""
+    import mmap
+    try:
+        with Path(path).open("rb") as handle, mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ) as data:
+            return any(data.find(needle) >= 0 for needle in needles)
+    except (OSError, ValueError):
+        return False
+
+
+# How an executable that loads the Vulkan loader by name, as Unreal's do, spells it.
+VULKAN_NAMES = tuple(spelling.encode(codec) for spelling in ("vulkan-1", "VULKAN-1", "Vulkan-1")
+                     for codec in ("ascii", "utf-16-le"))
+
+
+def _vulkan_elsewhere(game_exe):
+    """For a Vulkan game: None when its executable loads vulkan-1.dll itself, by import or by name;
+    else the executables beside it that import it, perhaps none.
+
+    The proxy acts only in the executable setup names, and some games draw with Vulkan in
+    another: Steam starts DOOM's DOOMx64.exe, which draws with OpenGL and starts DOOMx64vk.exe
+    for Vulkan. Chosen in setup, it gives a game without NR, and nothing said why."""
+    imports = pe_imports(game_exe)
+    if imports is None or "vulkan-1.dll" in imports or _mentions(game_exe, VULKAN_NAMES):
+        return None
+    return sorted(path.name for path in Path(game_exe).parent.glob("*.exe")
+                  if path.name.lower() != Path(game_exe).name.lower()
+                  and "vulkan-1.dll" in (pe_imports(path) or ()))
+
+
 def discover_python():
     """Prefer native CPython over the MinGW toolchain, within a ten-second budget."""
     deadline = time.monotonic() + 9.5
@@ -656,9 +740,15 @@ print(json.dumps(result))
 
 def validate(profile):
     checks = []
+    # What would keep NR from the game without stopping an installation; the window words each
+    # by its name, with `values` in its sentence.
+    warnings = []
 
     def check(name, ok, detail):
         checks.append({"name": name, "ok": bool(ok), "detail": str(detail)})
+
+    def warn(name, detail, *values):
+        warnings.append({"name": name, "detail": str(detail), "values": [str(value) for value in values]})
 
     check("release_root", profile.root.is_dir() and str(profile.root).isascii(),
           "The permanent release root must exist and use an ASCII path")
@@ -735,9 +825,28 @@ def validate(profile):
               else "The release's DXVK is missing or of another architecture: " + ", ".join(wrong))
     files_ok, files_detail = _game_files_check(profile, arch)
     check("game_files", files_ok, files_detail)
+    if profile.api == "vulkan" and arch in LAYERS:
+        others = _vulkan_elsewhere(profile.game_exe)
+        name = profile.game_exe.name
+        if others:
+            warn("vulkan_executable_other", f"{name} does not load the Vulkan loader itself, and NR reaches only "
+                 f"the executable chosen here. {', '.join(others)} beside it does: if the game draws with "
+                 "Vulkan there, choose that", name, ", ".join(others))
+        elif others is not None:
+            warn("vulkan_executable", f"{name} does not load the Vulkan loader itself, and NR reaches only the "
+                 "executable chosen here. If the game draws with Vulkan in another one, choose that", name)
+    # This window's level is what Launch game gives, and with UAC off what every program has.
+    if _high(_integrity()):
+        if _uac_enabled() is False:
+            warn("uac_off", "UAC is off, so Windows runs every program as administrator, and NR cannot reach "
+                 "a game that runs so. NR needs UAC on, as Windows has it by default")
+        else:
+            warn("window_elevated", "This window runs as administrator, and so does a game started with "
+                 "Launch game: NR cannot reach a game that runs so. Start the game, and Steam or the "
+                 "launcher that starts it, without administrator rights")
     ok = all(item["ok"] for item in checks)
     return {"ok": ok, "error": None if ok else "Preflight checks failed", "checks": checks,
-            "python_info": info, "weights": weights, "runtime_dependencies": dependency}
+            "warnings": warnings, "python_info": info, "weights": weights, "runtime_dependencies": dependency}
 
 
 def ensure_dependencies(profile, emit=None):
@@ -811,6 +920,48 @@ def _sha256(path):
 def _dxvk_logs(profile):
     """The logs DXVK writes into the folder a game was started in, without DXVK_LOG_PATH."""
     return [f"{profile.game_exe.stem}_{Path(module).stem}.log" for module in DXVK_FILES]
+
+
+DXVK_LOG_PART = 8 * 1024
+
+
+def _dxvk_log_report(profile):
+    """This game's DXVK logs, for Save report, wherever NR's launches leave them: the release's
+    work/logs, the game's folder and the folders the proxy saw it started in. Whether DXVK drew
+    the game at all is in them; a report without them could not tell (issue #12). Each log
+    whole, or its first and last DXVK_LOG_PART: the start names the GPU and the device."""
+    if profile.api != "dxvk":
+        return []
+    folders = [profile.root / "work/logs", profile.game_exe.parent]
+    try:
+        started = installed_path(profile) / START_FOLDERS
+        if started.is_file():
+            folders += [Path(line.strip()) for line in
+                        started.read_text(encoding="utf-8", errors="replace").splitlines() if line.strip()]
+    except OSError:
+        pass
+    logs, seen = [], set()
+    for folder in folders:
+        for name in _dxvk_logs(profile):
+            path = folder / name
+            try:
+                if not path.is_absolute() or path.is_symlink() or not path.is_file() or _canonical(path) in seen:
+                    continue
+                seen.add(_canonical(path))
+                stat = path.stat()
+                with path.open("rb") as handle:
+                    if stat.st_size <= 2 * DXVK_LOG_PART:
+                        text = handle.read(2 * DXVK_LOG_PART)
+                    else:
+                        text = handle.read(DXVK_LOG_PART)
+                        handle.seek(stat.st_size - DXVK_LOG_PART)
+                        text += b"\n[...]\n" + handle.read(DXVK_LOG_PART)
+                logs.append({"path": str(path), "size": stat.st_size,
+                             "modified_utc": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+                             "text": text.decode("utf-8", errors="replace")})
+            except OSError:
+                continue
+    return logs
 
 
 def _game_record(folder):
@@ -1094,6 +1245,65 @@ def _running_executable(pid):
         kernel32.CloseHandle(handle)
 
 
+# SECURITY_MANDATORY_HIGH_RID. From this integrity level up, Windows' Vulkan loader ignores
+# VK_LAYER_PATH, and HKCU's layers with it (Vulkan-Loader's is_high_integrity): a game run as
+# administrator, or any program with UAC off, gets the proxy's variables and never NR's layer.
+HIGH_INTEGRITY = 0x3000
+
+
+def _high(level):
+    return isinstance(level, int) and not isinstance(level, bool) and level >= HIGH_INTEGRITY
+
+
+def _integrity():
+    """This process's mandatory integrity level, as the proxy records a game's: 0x2000 medium,
+    0x3000 high. None off Windows or when the token cannot be read."""
+    if os.name != "nt":
+        return None
+    import ctypes
+    from ctypes import wintypes
+    kernel32 = ctypes.WinDLL("kernel32")
+    advapi32 = ctypes.WinDLL("advapi32")
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    advapi32.OpenProcessToken.argtypes = (wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE))
+    advapi32.GetTokenInformation.argtypes = (wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
+                                             ctypes.POINTER(wintypes.DWORD))
+    advapi32.GetSidSubAuthorityCount.restype = ctypes.POINTER(ctypes.c_ubyte)
+    advapi32.GetSidSubAuthorityCount.argtypes = (ctypes.c_void_p,)
+    advapi32.GetSidSubAuthority.restype = ctypes.POINTER(wintypes.DWORD)
+    advapi32.GetSidSubAuthority.argtypes = (ctypes.c_void_p, wintypes.DWORD)
+    token = wintypes.HANDLE()
+    if not advapi32.OpenProcessToken(kernel32.GetCurrentProcess(), 0x0008, ctypes.byref(token)):  # TOKEN_QUERY
+        return None
+    try:
+        # TOKEN_MANDATORY_LABEL, then its SID; the level is the SID's last part.
+        label, size = ctypes.create_string_buffer(128), wintypes.DWORD()
+        if not advapi32.GetTokenInformation(token, 25, label, 128, ctypes.byref(size)):  # TokenIntegrityLevel
+            return None
+        sid = ctypes.cast(label, ctypes.POINTER(ctypes.c_void_p))[0]
+        count = advapi32.GetSidSubAuthorityCount(sid)[0]
+        return int(advapi32.GetSidSubAuthority(sid, count - 1)[0]) if count else None
+    finally:
+        kernel32.CloseHandle(token)
+
+
+def _uac_enabled():
+    """Whether User Account Control is on; with it off an administrator's every program runs
+    elevated. None off Windows or when the policy cannot be read."""
+    if os.name != "nt":
+        return None
+    import winreg
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                            r"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System") as key:
+            return bool(winreg.QueryValueEx(key, "EnableLUA")[0])
+    except FileNotFoundError:
+        return True  # Windows' default
+    except OSError:
+        return None
+
+
 def _launch_state(profile):
     path = profile.root / "work/windows-wizard/launch-state.json"
     if not path.exists():
@@ -1230,7 +1440,8 @@ def install(profile, emit=None):
     if emit:
         emit("Installation complete; the effect is off\n")
     return {"ok": True, "error": None, "installed": str(destination), "root": str(profile.root),
-            "profile": profile.to_dict(), "commands": commands, "trigger_exists": False}
+            "profile": profile.to_dict(), "commands": commands, "trigger_exists": False,
+            "warnings": checked["warnings"]}
 
 
 def set_effect(profile, enabled):
@@ -1258,6 +1469,14 @@ def set_effect(profile, enabled):
                           detail="The game is running without NR's layer: it was started before NR "
                                  "was installed, or it does not load the Vulkan loader from its own "
                                  "folder. Restart it; if that does not help, use Launch game.")
+        elif enabled and _elevated_game(profile, launch):
+            uac = _uac_enabled()
+            result.update(warning="game_elevated", uac_enabled=uac,
+                          detail="The game runs as administrator, where Windows' Vulkan loader ignores "
+                                 "where NR's layer is. " + (
+                                     "UAC is off, so every program runs so: NR needs UAC on." if uac is False
+                                     else "Start it without administrator rights, and Steam or the "
+                                          "launcher that starts it too."))
         return result
     except (OSError, ValueError) as error:
         return {"ok": False, "error": str(error)}
@@ -1281,6 +1500,16 @@ def _game_running_without_nr(profile, launch):
         return False
     return any(item.get("ExecutablePath") and _canonical(item["ExecutablePath"]) == target
                for item in processes)
+
+
+def _elevated_game(profile, launch):
+    """Whether the launch the proxy recorded is this profile's game, still running, at High
+    integrity or above, where NR's layer never loads (HIGH_INTEGRITY)."""
+    if not _high(launch.get("integrity")) or not launch.get("game_exe") \
+            or _canonical(launch["game_exe"]) != _canonical(profile.game_exe):
+        return False
+    running = _running_executable(launch.get("pid"))
+    return bool(running) and _canonical(running) == _canonical(profile.game_exe)
 
 
 def _new_log_state(complete=True):
@@ -1435,7 +1664,12 @@ def status(profile):
             active = bool(running) and _canonical(running) == _canonical(profile.game_exe)
         except (OSError, ValueError):
             process_error = "The launch PID could not be verified"
+    # The game's integrity level, from the proxy's record: as administrator NR cannot reach it.
+    level = launch.get("integrity") if matching_launch else None
+    elevated = bool(active and _high(level))
     result.update(launch=context, active_game=active,
+                  game_integrity=level if isinstance(level, int) and not isinstance(level, bool) else None,
+                  game_elevated=elevated, uac_enabled=_uac_enabled() if elevated else None,
                   fresh_frames=bool(active and fresh_processed > 0 and mtime is not None
                                     and time.time() - mtime < 10))
     if process_error:
@@ -1501,19 +1735,25 @@ def export_report(profile, destination):
         # What Check says, so a report of a failed installation names the item that failed; the
         # DLL's version, and what the weight extractor said last (issue #12).
         try:
-            checks = validate(profile)["checks"]
+            checked = validate(profile)
+            checks, warnings = checked["checks"], checked["warnings"]
         except (OSError, ValueError) as error:
-            checks = [{"name": "validate", "ok": False, "detail": str(error)}]
+            checks, warnings = [{"name": "validate", "ok": False, "detail": str(error)}], []
         weights_log = profile.root / WEIGHTS_LOG
         weights_tail = (weights_log.read_bytes()[-MAX_LOG_TAIL:].decode("utf-8", errors="replace")
                         if weights_log.is_file() else "")
+        # Whether a game runs elevated is in the status, from the proxy's record; this window's
+        # own level is what Launch game gives, and with UAC off what every program has.
+        level = _integrity()
+        elevation = {"window_integrity": level, "window_elevated": _high(level), "uac_enabled": _uac_enabled()}
         report = {"schema_version": SCHEMA_VERSION, "created_utc": datetime.now(timezone.utc).isoformat(),
                   "release": metadata, "release_metadata_error": metadata_error,
                   "root": str(profile.root), "profile": profile.to_dict(),
                   "system": _system_metadata(), "python": _python_info(profile.python),
-                  "checks": checks, "dll": _dll_info(profile.dll), "weights_log_tail": weights_tail,
+                  "checks": checks, "warnings": warnings, "elevation": elevation,
+                  "dll": _dll_info(profile.dll), "weights_log_tail": weights_tail,
                   "settings": settings, "settings_error": settings_error,
-                  "status": observation, "daemon_log_tail": tail,
+                  "status": observation, "daemon_log_tail": tail, "dxvk_logs": _dxvk_log_report(profile),
                   "note": "Daemon timings and observed frame counts are not game FPS. No DLL or weights are included."}
         _atomic_json(destination, report)
         return {"ok": True, "error": None, "path": str(destination)}
