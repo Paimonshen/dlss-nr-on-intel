@@ -206,8 +206,10 @@ process at High integrity or above returns nothing (Vulkan-Loader's `is_high_int
 skips HKCU's layer keys then too, and reads `VK_INSTANCE_LAYERS` still, so the layer is asked for
 and not found. That is every program with UAC off, and every game a launcher running as
 administrator starts. The proxy records the game's integrity level in its launch record, and the
-setup window says when the game runs elevated. A tester's report from an Arc B580 (issue #12)
-fits it, the proxy's record and no daemon log at all, though the cause is not confirmed there.
+setup window says when the game runs elevated. vkcube through the proxy, from one folder: as the
+user 437 frames in 20 s, the record at integrity 8192; as administrator the record at 12288, and
+no daemon started. A tester's report from an Arc B580 (issue #12) fits it, the proxy's record and
+no daemon log at all, though the cause is not confirmed there.
 
 ## Shipping it to someone without a compiler
 

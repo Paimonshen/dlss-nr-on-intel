@@ -58,32 +58,52 @@ Vulkan-Loader's source (`main`, read on 10-09):
 
 So a game run as administrator gets the proxy and never the layer. So does every game when UAC is
 off, and every game started by a launcher that runs as administrator. The tester's account is
-named "Admin", on Windows 11 Pro build 28000. Not confirmed yet: asked in the issue at 11:40 UTC,
-with Task Manager's Elevated column to check. On Linux `secure_getenv` refuses only setuid and
-setgid processes, and games are neither.
+named "Admin", on Windows 11 Pro build 28000. Asked in the issue at 11:40 UTC, with Task
+Manager's Elevated column to check. On Linux `secure_getenv` refuses only setuid and setgid
+processes, and games are neither.
+
+**Confirmed here, with vkcube through the proxy** (`nr-game\elevated-test.ps1`, the release built
+from `644814b`). As the user: 437 frames answered in 20 s, the record at integrity 8192, the
+daemon gone with vkcube. As administrator, through one UAC prompt: the record at 12288, no daemon
+started and nothing in its log, and setup's backend, as the window's buttons call it, said the
+game runs elevated, in its status and at Enable NR (the window's words for it are in its
+self-test). The same files and the same folder both times. For the tester it is still a question.
 
 **And DOOM is set up through `DOOMx64vk.exe`**, with the game's API on Vulkan. The proxy acts only
 in the executable setup names, and Steam's `DOOMx64.exe` starts `DOOMx64vk.exe` only for Vulkan.
 Setup does not say so. Asked as well.
 
-**The owner's call (10-09): a warning, no registry for now.** Setup is to say when a game runs as
-administrator, and to say to start it, and the launcher that starts it, without administrator
-rights. Next on Windows, with it:
-1. The proxy puts the game's integrity level in its launch record, and Enable NR and Save report
-   say when a game runs elevated.
-2. For Vulkan, setup warns when the chosen executable does not import `vulkan-1.dll` itself, as a
-   launcher like `DOOMx64.exe` does not.
-3. Save report carries DXVK's logs, which would show whether DXVK drew the game at all. Need for
-   Speed Heat could have run DirectX 12, or loaded System32's `d3d11.dll`; nothing in its report
-   says which.
+**The owner's call (10-09): a warning, no registry for now.** `644814b`, with the quick start
+in `61e71a8`:
+1. The proxy puts the game's integrity level in its launch record. The status says when the game
+   runs elevated, and Enable NR warns: start it, and Steam or the launcher that starts it,
+   without administrator rights; with UAC off, that NR needs UAC on.
+2. Check and Install NR warn, without stopping an installation, when this window runs as
+   administrator or UAC is off; and, for a Vulkan game, when the chosen executable does not load
+   `vulkan-1.dll` itself, by import, delay-load or name, naming the one beside it that imports it.
+   On DOOM's own files: `DOOMx64.exe` is warned about and `DOOMx64vk.exe` named; `DOOMx64vk.exe`
+   is not.
+3. Save report carries the warnings, the window's level and UAC, and the game's DXVK logs from
+   `work/logs`, the game's folder and the folders it was started in, which would show whether
+   DXVK drew the game at all. Need for Speed Heat could have run DirectX 12, or loaded System32's
+   `d3d11.dll`; nothing in its report says which.
+
+Tested: `test_vulkan_proxy.py` with the child at Medium and at Low integrity (8192, 4096), the x86
+proxy through a 32-bit probe, 72 setup tests, the window's self-test (137 keys in three
+languages). From the release's ZIP, through Steam's Play button: Mortal Kombat 11 740 frames and
+Dead or Alive 5 850, none rejected, each record at 8192 with no warning, DXVK's logs in Save
+report, the folders as before after Remove NR. Not pushed and not released: the owner's word
+first.
 
 Kept for later: the layer's manifest under `HKLM\SOFTWARE\Khronos\Vulkan\ExplicitLayers`, removed
-by Remove NR, the one place an elevated process's loader still looks. An explicit layer loads only
-where it is asked for, but the key is machine-wide, needs administrator rights to write, and would
-load a file a user can change into elevated games: what the loader's check is there to prevent.
+by Remove NR, the one place an elevated process's loader still looks; with UAC off, the only way
+NR reaches a game at all. An explicit layer loads only where it is asked for, but the key is
+machine-wide, needs administrator rights to write, and would load a file a user can change into
+elevated games: what the loader's check is there to prevent.
 
 **Next on Linux:** the Windows tool suites at the head. `test_windows_wizard.py` changed again in
-`a243ef8`; its `_file_version` test skips off Windows. Nothing Linux builds or runs changed.
+`a243ef8` and `644814b`; its `_file_version`, integrity and UAC tests skip off Windows, and
+`test_vulkan_proxy.py` does entirely. Nothing Linux builds or runs changed.
 
 ## NR whatever starts the game: a vulkan-1.dll beside it, and the setup window without Steam (2026-10-09)
 
