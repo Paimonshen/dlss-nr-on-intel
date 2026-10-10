@@ -122,10 +122,17 @@ rem the daemon it talks to stays 64-bit, on the same pipe. The x86 cross tools c
 rem C++ workload; they run in a shell of their own so the x86 environment ends with them.
 echo [4/6] building nr_layer32.dll ...
 set "VCX86=%VCINSTALLDIR%Auxiliary\Build\vcvarsamd64_x86.bat"
-if not exist "%VCX86%" (
-  echo   skipped: no x86 tools ^(%VCX86%^)
-  goto :image
-)
+rem No parenthesised block here. `%VCX86%` holds the Visual Studio path, and on a machine
+rem where that path is "C:\Program Files (x86)\..." the value contains a `)`. cmd substitutes
+rem the variable into the block before parsing it, so that bracket closed the `if` early and
+rem the rest of the path was read as a command: "\Microsoft was unexpected at this time."
+rem The build stopped there, leaving the host-pass DLLs from the previous run in place - a
+rem stale libnr_image.dll with no error against it. Two labels instead of a block.
+if exist "%VCX86%" goto :have_x86
+echo   skipped: no x86 tools
+echo     %VCX86%
+goto :image
+:have_x86
 cmd /c ""%VCX86%" >nul && cl /nologo /O2 /TC /D_WIN32 /I"%VULKAN_SDK%\Include" /I"%REPO%\src\layer" /Fo:"%WORK%\nr_layer32.obj" /Fe:"%WORK%\nr_layer32.dll" /LD "%REPO%\src\layer\nr_layer.c" /link /DEF:"%REPO%\src\layer\nr_layer.def" /MACHINE:X86"
 if errorlevel 1 ( echo ERROR: nr_layer32.dll failed & exit /b 1 )
 echo   nr_layer32.dll
