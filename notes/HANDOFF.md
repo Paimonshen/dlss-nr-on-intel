@@ -1,6 +1,6 @@
 # HANDOFF — read this first
 
-State of the DLSS-NR on Intel Xe2 project as of **2026-10-09**. notes/CLAUDE.md holds the
+State of the DLSS-NR on Intel Xe2 project as of **2026-10-12**. notes/CLAUDE.md holds the
 original brief; **this file overrides it wherever they disagree**, and after
 2026-09-09 they disagree about something foundational.
 
@@ -8,6 +8,46 @@ original brief; **this file overrides it wherever they disagree**, and after
 you need the evidence behind a line in this file, rather than reading them in order.
 
 ---
+
+## Issue #12, further: the layer runs in the tester's DOOM and starts no daemon, silently (2026-10-12)
+
+The tester's game is not elevated, by Task Manager, and elevated it fails the same way; the report
+names `DOOMx64vk.exe`, the right executable. So the cause is not either one below. Windows' loader
+said what it did when asked: the game started from cmd with `VK_LOADER_DEBUG=error,warn,info,layer`
+and `2> file`, which works for a windowed game too (the loader links its C runtime statically, so
+its stderr is the handle the process starts with). Checked here on a console and a windowed probe
+(`nr-game\loader-log-test.ps1`, `loader-log-gui-test.ps1`). Their 6316 lines show:
+- loader 1.4.350 honours `VK_LAYER_PATH`, inserts `VK_LAYER_dlssnr_intel` into the instance and
+  the device, and the layer runs: `[nr_layer] active; socket=\\.\pipe\nr_windows_d716f055`, a
+  1920x1080 swapchain;
+- **no daemon was started and nothing said why.** Once `NR_LAYER_SPAWN` asks, `ensure_daemon` had
+  three quiet ways out: no `NR_LAYER_SOCKET` (it was there), an `NR_LAYER_SPAWNED` mark, or a
+  daemon already answering on the socket. No `no daemon at` lines: NR was off in that run;
+- above ours three implicit layers (two OBS hooks, WeGame's and GamePP's, and CapFrameX's
+  overlay), and broken ones: Epic's overlay, Bandicam's 32-bit one, and
+  `D:\DLSS5-Demo-Bundle`, geladons/DLSS5_INTEL in HKCU, whose library is under
+  `C:\Users\AI\Desktop\...`. That port talks to its daemon over TCP 47990 and never sets
+  `NR_LAYER_SPAWNED`.
+
+Asked the tester for `set NR` and `set VK` and whether a `python.exe` of ours runs (10-11).
+
+**`0a4ce03`, local:** each of the three ways out now says so on stderr (`[nr_layer] no daemon
+started: ...`), so the same capture names it; `NR_LAYER_SPAWN` unset stays silent. The proxy takes
+an inherited `NR_LAYER_SPAWNED` out of the game's own process. `VK_LAYER_PATH` names the manifest
+itself, and the loader stops reading the installation's records as manifests. Tests:
+`test_spawn_reasons.py` (new, CTest on Windows) makes one instance through the layer for each
+way out and for a start, with a stand-in daemon; `test_vulkan_proxy.py` checks the mark. From the
+release's ZIP: Mortal Kombat 11 539 frames and Dead or Alive 5 850 through Steam's Play button,
+none rejected, folders as before; the probe's loader log shows the one manifest searched.
+
+**Two things found on the way.** Mortal Kombat 11 showed four daemon processes on 10-09, likely
+two daemons, since a virtual environment's python.exe starts the interpreter as a second process.
+DXVK makes more than one instance, and one made before the first daemon's pipe exists would start
+its own. Not checked; both would end with the game, the second costing memory. And `D:` ran out of
+space mid-test: the release roots in `D:\NRonWindows\rel` each hold ~440 MB of extracted weights.
+
+**Next on Linux:** `make test` and CTest for the layer's new lines (`nr_layer.c`'s POSIX arm
+prints the same three reasons). Nothing else Linux runs changed.
 
 ## The first Windows releases, and a tester's game that got the proxy but never the layer (2026-10-09, later)
 
