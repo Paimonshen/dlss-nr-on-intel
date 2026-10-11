@@ -9,12 +9,58 @@ you need the evidence behind a line in this file, rather than reading them in or
 
 ---
 
+## The network's GPU, frame pacing in the window, and the daemon's queue (2026-10-12, later)
+
+At the owner's word ("можем пушить") `196c8d1..041ef3b` went to `windows` and `master`, after
+the Windows suites and the window's self-test ran again at the head. Then the first three steps
+toward more frames on desktop cards that the owner agreed to, from a look at the other ports
+(AMD's among them: the network before the upscaler, an asynchronous residual, the game's own
+device, a high-priority queue). Local, not pushed:
+
+- **`2658b24` The network runs on a GPU that can run it.** `xmx_init` took the loader's first
+  device. It now takes one with the float16 8x16x16 cooperative-matrix shape at subgroup scope
+  and `VK_KHR_workgroup_memory_explicit_layout`, a discrete card first; an older Intel iGPU, a
+  card of another vendor or a virtual device listed first is passed over. Frames reach the
+  daemon through host memory, so a game on another card can have its network on the Arc. With
+  none able, the loader's first non-CPU device, as before, and the log says what it lacks.
+  `XMX_DEVICE` names one, by index or part of its name; with several devices the daemon's log
+  lists them. `src/gpu/test_device_pick.py` puts sixteen machines in front of `xmx_pick_device`.
+- **`471de6e` Frame pacing in the setup window**: Asynchronous (`NR_LAYER_ASYNC`) and "Network
+  on" every 1st-4th frame (`NR_LAYER_LIVE`), on the NR controls tab. The profile keeps them; a
+  bridge action, `pacing`, rewrites only those two lines of an installed game's `nr-env.txt`,
+  which the layer reads when the game starts. vkcube's stderr shows the layer taking both.
+- **The daemon's queue**: `XMX_QUEUE_PRIORITY` (low to realtime, `VK_KHR_global_priority`) and
+  `XMX_QUEUE_FAMILY=compute` (the family without graphics: Intel's compute engine) or a number.
+  Off by default, since they bought nothing here: below.
+
+**Mortal Kombat 11 through Steam, 1280x720, render scale 0.4 (network 512x320), Arc 140V on
+mains, 101.9033, quiet before and after; processed frames a second over 40 s, two runs each,
+the configurations interleaved** (`nr-game\queue-game-series.ps1`):
+
+| | default | high | compute | compute + high |
+| --- | --- | --- | --- | --- |
+| in step | 19.75, 19.90 | 19.65, 19.22 | 19.59, 19.47 | 19.42, 19.79 |
+| asynchronous | 19.47, 19.72 | 19.05, 20.12 | 19.07, 19.12 | |
+
+Nothing outside the spread of single runs. The daemon's frame is 50 ms, 33 of them the network
+on the GPU and the rest host passes, and in step the game waits on the present rather than
+competing; asynchronous overlaps only the game's few milliseconds. Without a game the speed
+test gives the same times in all four queue configurations. A discrete card, where the game's
+frame and the network's are closer, is where asynchronous and the priority could show: the
+next measure belongs to a B580. (The daemon logs a frame's time to 10 ms, so its median reads
+40 or 50 for the same 45; the processed rate is the measure.)
+
+**Next on Linux:** `python3 src/gpu/test_device_pick.py` — ANV must report the shape (else the
+daemon now says "trying device 0 ... although it lacks"), an llvmpipe in the list is passed
+over, and above medium `XMX_QUEUE_PRIORITY` is likely refused without `CAP_SYS_NICE`, which the
+test accepts and the log says. `make test` for the rest. The window is Windows' alone.
+
 ## A speed test on a tester's first run, kept for their reports (2026-10-12)
 
 The owner asked for a short measure of frame time on a first run, saved where reports gather it,
 for the user to be told what NR does at best, at render scale 1.0 as well as 0.4, and for the
 window to say that capturing the frame and the rest take time too. `2afb9e8`, `7cc281e` and
-`c15f491`, local:
+`c15f491`, pushed 10-12:
 - `src/bench/speed_test.py` starts the daemon as the layer does and sends it synthetic frames,
   one connection a frame, at 640x360, 800x450, 1280x720 and 1920x1080, at 0.4 and at 1.0. For
   each it keeps the network's own time (the middle of the daemon's `gpu in+run+out`, from its
@@ -63,7 +109,7 @@ its stderr is the handle the process starts with). Checked here on a console and
 
 Asked the tester for `set NR` and `set VK` and whether a `python.exe` of ours runs (10-11).
 
-**`0a4ce03`, local:** each of the three ways out now says so on stderr (`[nr_layer] no daemon
+**`0a4ce03`, pushed 10-12:** each of the three ways out now says so on stderr (`[nr_layer] no daemon
 started: ...`), so the same capture names it; `NR_LAYER_SPAWN` unset stays silent. The proxy takes
 an inherited `NR_LAYER_SPAWNED` out of the game's own process. `VK_LAYER_PATH` names the manifest
 itself, and the loader stops reading the installation's records as manifests. Tests:

@@ -779,15 +779,85 @@ int xmx_init(const char *spv_path)
 	snprintf(g.name, sizeof g.name, "%s", props.deviceName);
 	g.discrete = props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
 
+	/* The queue family: the first with compute, which on Intel is the one the game draws on
+	 * too. XMX_QUEUE_FAMILY=compute takes the first without graphics instead (Intel's compute
+	 * engine), or a number names one. And its global priority (VK_KHR_global_priority, else
+	 * the EXT), XMX_QUEUE_PRIORITY=low, medium, high or realtime: what a GPU shared with a game
+	 * does first. Unset, or not offered for the family, the driver's default. */
 	uint32_t nq = 0;
-	vkGetPhysicalDeviceQueueFamilyProperties(g.pd, &nq, NULL);
-	VkQueueFamilyProperties *qf = calloc(nq, sizeof *qf);
-	vkGetPhysicalDeviceQueueFamilyProperties(g.pd, &nq, qf);
+	vkGetPhysicalDeviceQueueFamilyProperties2(g.pd, &nq, NULL);
+	VkQueueFamilyProperties2 *qf = calloc(nq ? nq : 1, sizeof *qf);
+	VkQueueFamilyGlobalPriorityPropertiesKHR *levels = calloc(nq ? nq : 1, sizeof *levels);
+	if (!qf || !levels) { free(qf); free(levels); FAIL("out of memory listing the queues", 0); }
+	const char *priority_extension = NULL;
+	int listed = 0;       /* the levels a family offers can be asked (KHR, or the EXT's query) */
+	{
+		uint32_t count = 0;
+		vkEnumerateDeviceExtensionProperties(g.pd, NULL, &count, NULL);
+		VkExtensionProperties *have = calloc(count ? count : 1, sizeof *have);
+		if (have && vkEnumerateDeviceExtensionProperties(g.pd, NULL, &count, have) >= 0)
+			for (uint32_t i = 0; i < count; i++) {
+				if (!strcmp(have[i].extensionName, VK_KHR_GLOBAL_PRIORITY_EXTENSION_NAME))
+					priority_extension = VK_KHR_GLOBAL_PRIORITY_EXTENSION_NAME;
+				else if (!strcmp(have[i].extensionName, VK_EXT_GLOBAL_PRIORITY_EXTENSION_NAME)
+					 && !priority_extension)
+					priority_extension = VK_EXT_GLOBAL_PRIORITY_EXTENSION_NAME;
+				listed |= !strcmp(have[i].extensionName, VK_KHR_GLOBAL_PRIORITY_EXTENSION_NAME)
+					  || !strcmp(have[i].extensionName,
+						     VK_EXT_GLOBAL_PRIORITY_QUERY_EXTENSION_NAME);
+			}
+		free(have);
+	}
+	for (uint32_t i = 0; i < nq; i++) {
+		qf[i].sType = VK_STRUCTURE_TYPE_QUEUE_FAMILY_PROPERTIES_2;
+		levels[i].sType = VK_STRUCTURE_TYPE_QUEUE_FAMILY_GLOBAL_PRIORITY_PROPERTIES_KHR;
+		qf[i].pNext = listed ? &levels[i] : NULL;
+	}
+	vkGetPhysicalDeviceQueueFamilyProperties2(g.pd, &nq, qf);
 	g.qi = UINT32_MAX;
-	for (uint32_t i = 0; i < nq; i++)
-		if (qf[i].queueFlags & VK_QUEUE_COMPUTE_BIT) { g.qi = i; break; }
-	free(qf);
-	if (g.qi == UINT32_MAX) FAIL("no compute queue", 0);
+	const char *family = getenv("XMX_QUEUE_FAMILY");
+	if (family && *family) {
+		char *end = NULL;
+		unsigned long index = strtoul(family, &end, 10);
+		for (uint32_t i = 0; i < nq && g.qi == UINT32_MAX; i++) {
+			VkQueueFlags flags = qf[i].queueFamilyProperties.queueFlags;
+			if (!(flags & VK_QUEUE_COMPUTE_BIT)) continue;
+			if (!strcmp(family, "compute") ? !(flags & VK_QUEUE_GRAPHICS_BIT)
+			    : !strcmp(family, "graphics") ? (flags & VK_QUEUE_GRAPHICS_BIT) != 0
+			    : end && end != family && !*end && index == i)
+				g.qi = i;
+		}
+		if (g.qi == UINT32_MAX)
+			fprintf(stderr, "libxmx: XMX_QUEUE_FAMILY=%s names no compute queue family here; "
+				"taking the first\n", family);
+	}
+	for (uint32_t i = 0; i < nq && g.qi == UINT32_MAX; i++)
+		if (qf[i].queueFamilyProperties.queueFlags & VK_QUEUE_COMPUTE_BIT) g.qi = i;
+	if (g.qi == UINT32_MAX) { free(qf); free(levels); FAIL("no compute queue", 0); }
+	static const struct { const char *name; VkQueueGlobalPriorityKHR level; } priorities[] = {
+		{ "low", VK_QUEUE_GLOBAL_PRIORITY_LOW_KHR }, { "medium", VK_QUEUE_GLOBAL_PRIORITY_MEDIUM_KHR },
+		{ "high", VK_QUEUE_GLOBAL_PRIORITY_HIGH_KHR },
+		{ "realtime", VK_QUEUE_GLOBAL_PRIORITY_REALTIME_KHR } };
+	VkDeviceQueueGlobalPriorityCreateInfoKHR priority = {
+		.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_GLOBAL_PRIORITY_CREATE_INFO_KHR };
+	const char *priority_name = getenv("XMX_QUEUE_PRIORITY");
+	if (priority_name && *priority_name) {
+		for (size_t i = 0; i < sizeof priorities / sizeof *priorities; i++)
+			if (!strcmp(priority_name, priorities[i].name)) priority.globalPriority = priorities[i].level;
+		int offered = 0;
+		for (uint32_t i = 0; i < levels[g.qi].priorityCount; i++)
+			offered |= levels[g.qi].priorities[i] == priority.globalPriority;
+		/* Without a list (the EXT alone) it is asked anyway, and a refusal handled below. */
+		if (!listed && priority_extension) offered = 1;
+		if (!priority.globalPriority || !priority_extension || !offered) {
+			fprintf(stderr, "libxmx: XMX_QUEUE_PRIORITY=%s %s; the driver's default\n", priority_name,
+				!priority.globalPriority ? "is none of low, medium, high, realtime"
+				: !priority_extension ? "needs VK_KHR_global_priority, which this device has not"
+				: "is not offered for this queue family");
+			priority.globalPriority = 0;
+		}
+	}
+	free(qf); free(levels);
 
 	VkPhysicalDeviceCooperativeMatrixFeaturesKHR cm = {
 		.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR, .cooperativeMatrix = VK_TRUE };
@@ -921,16 +991,32 @@ int xmx_init(const char *spv_path)
 					 .features.shaderInt64 = base.shaderInt64 };
 	float prio = 1.0f;
 	VkDeviceQueueCreateInfo qci = { .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+					.pNext = priority.globalPriority ? &priority : NULL,
 					.queueFamilyIndex = g.qi, .queueCount = 1, .pQueuePriorities = &prio };
-	const char *ext[] = { VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME,
-			      VK_KHR_WORKGROUP_MEMORY_EXPLICIT_LAYOUT_EXTENSION_NAME,
-			      VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME };
+	const char *ext[4];
+	uint32_t next = 0;
+	ext[next++] = VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME;
+	ext[next++] = VK_KHR_WORKGROUP_MEMORY_EXPLICIT_LAYOUT_EXTENSION_NAME;
+	if (stats) ext[next++] = VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME;
+	if (priority.globalPriority) ext[next++] = priority_extension;
 	VkDeviceCreateInfo dci = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &f2,
 				   .queueCreateInfoCount = 1, .pQueueCreateInfos = &qci,
-				   .enabledExtensionCount = sizeof ext / sizeof *ext - (stats ? 0 : 1),
-				   .ppEnabledExtensionNames = ext };
+				   .enabledExtensionCount = next, .ppEnabledExtensionNames = ext };
 	r = vkCreateDevice(g.pd, &dci, NULL, &g.dev);
+	if (priority.globalPriority && (r == VK_ERROR_NOT_PERMITTED_KHR || r == VK_ERROR_INITIALIZATION_FAILED)) {
+		/* Above medium can need a privilege (Linux: CAP_SYS_NICE): the default, said. */
+		fprintf(stderr, "libxmx: queue priority %s refused (%d); the driver's default\n",
+			priority_name, (int)r);
+		qci.pNext = NULL;
+		dci.enabledExtensionCount = next - 1;
+		r = vkCreateDevice(g.pd, &dci, NULL, &g.dev);
+		priority.globalPriority = 0;
+	}
 	if (r) FAIL("vkCreateDevice", r);
+	if (priority.globalPriority || g.qi || (family && *family))
+		fprintf(stderr, "libxmx: queue family %u%s%s\n", g.qi,
+			priority.globalPriority ? ", priority " : "",
+			priority.globalPriority ? priority_name : "");
 	vkGetDeviceQueue(g.dev, g.qi, 0, &g.q);
 	if (stats) {
 		g.stats_props = (PFN_vkGetPipelineExecutablePropertiesKHR)

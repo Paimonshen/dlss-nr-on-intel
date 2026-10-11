@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Which Vulkan device the network runs on: libxmx's xmx_pick_device and xmx_init.
+"""Which Vulkan device and queue the network runs on: libxmx's xmx_pick_device and xmx_init.
 
 The choice first, on machines this one is not: an older Intel iGPU before an Arc card,
 another vendor's card first, a virtual or a software device, XMX_DEVICE by index and by
 name. Then this machine's own devices through xmx_init, in a child process each, with
-XMX_DEVICE unset, naming device 0, and naming nothing here.
+XMX_DEVICE unset, naming device 0, and naming nothing here. Last the queue: each family
+XMX_QUEUE_FAMILY can name and each XMX_QUEUE_PRIORITY, a GEMM checked on every one.
 """
 import ctypes
 import os
@@ -78,17 +79,52 @@ def choices():
     check("XMX_DEVICE empty: as without it", pick(lib, [uhd, b580], ""), (1, ABLE))
 
 
-def start(device):
-    """xmx_init in a child, as the daemon runs it; its device name and libxmx's lines."""
-    env = {k: v for k, v in os.environ.items() if k != "XMX_DEVICE"}
+# The child's GEMM: a 64x96 by 96x80 product against NumPy's, its worst relative error printed
+# after the device's name.
+GEMM = ("import sys; sys.path.insert(0, sys.argv[1]); import numpy as np, xmx; "
+        "print(xmx.device_name(), flush=True); r = np.random.default_rng(3); "
+        "a = r.standard_normal((64, 96)).astype(np.float16); "
+        "b = r.standard_normal((96, 80)).astype(np.float16); "
+        "want = a.astype(np.float32) @ b.astype(np.float32); "
+        "print(float(np.abs(xmx.gemm(a, b) - want).max() / np.abs(want).max()), flush=True)")
+
+
+def start(device, **settings):
+    """xmx_init in a child, as the daemon runs it; its device name and libxmx's lines, and
+    with XMX_QUEUE_* settings the GEMM's error too."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("XMX_")}
     if device is not None:
         env["XMX_DEVICE"] = device
-    code = ("import sys; sys.path.insert(0, sys.argv[1]); import xmx; "
-            "print(xmx.device_name(), flush=True)")
+    env.update(settings)
+    code = GEMM if settings else ("import sys; sys.path.insert(0, sys.argv[1]); import xmx; "
+                                  "print(xmx.device_name(), flush=True)")
     got = subprocess.run([sys.executable, "-c", code, str(ROOT / "src" / "gpu")], env=env,
                          capture_output=True, text=True, timeout=300)
     lines = [line for line in got.stderr.splitlines() if line.startswith("libxmx: ")]
+    if settings:
+        out = got.stdout.split()
+        return got.returncode, float(out[-1]) if got.returncode == 0 else None, lines
     return got.returncode, got.stdout.strip(), lines
+
+
+def queues():
+    print("this machine's queues:")
+    # Above medium a driver may refuse without a privilege (Linux: CAP_SYS_NICE); then it says so
+    # and runs at its default. Intel's Windows driver takes every level.
+    high = (", priority high", "queue priority high refused")
+    for settings, said in (
+            ({"XMX_QUEUE_PRIORITY": "high"}, high),
+            ({"XMX_QUEUE_PRIORITY": "medium"}, ("libxmx: queue family 0, priority medium",)),
+            ({"XMX_QUEUE_FAMILY": "compute"}, ("libxmx: queue family ",)),
+            ({"XMX_QUEUE_FAMILY": "compute", "XMX_QUEUE_PRIORITY": "high"}, high),
+            ({"XMX_QUEUE_FAMILY": "graphics"}, ("libxmx: queue family 0",)),
+            ({"XMX_QUEUE_PRIORITY": "urgent"}, ("is none of low, medium, high, realtime",)),
+            ({"XMX_QUEUE_FAMILY": "99"}, ("names no compute queue family here",))):
+        code, error, lines = start(None, **settings)
+        name = " ".join(f"{k}={v}" for k, v in settings.items())
+        print(f"    {name}: " + " | ".join(line for line in lines if "queue" in line.lower()))
+        check(f"{name}: a correct GEMM", code == 0 and error is not None and error < 1e-2, True)
+        check(f"{name}: says so", any(part in line for line in lines for part in said), True)
 
 
 def this_machine():
@@ -118,5 +154,6 @@ def this_machine():
 
 choices()
 this_machine()
+queues()
 print("FAIL: " + ", ".join(failures) if failures else "all device choices OK")
 sys.exit(1 if failures else 0)
