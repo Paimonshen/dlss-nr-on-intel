@@ -466,8 +466,9 @@ $script:Strings=@{
   'Warn.uac_off'='UAC is off, so Windows runs every program as administrator, and NR cannot reach a game that runs so. NR needs UAC on, as Windows has it by default.'
   SpeedTest='Speed test'; SpeedTestTip='Measures NR alone on this GPU, without a game, at four window sizes: the best it can do here. Save report carries the result.'
   'Loading.speedtest'='Measuring NR on this GPU, without a game…'; 'Done.speedtest'='Speed test saved; Save report carries it.'
-  SpeedResult='At its best on this PC ({1}), NR alone: {0}. A game draws on the same GPU, so in a game it is slower.'
-  SpeedCase='{0}×{1} {2} ms, up to {3} fps'
+  SpeedHead='The network itself on this PC ({0}), per frame:'; SpeedScale='render scale {0}: {1}'
+  SpeedCase='{0}×{1} {2} ms (up to {3} fps)'
+  SpeedNote='Taking each frame from the game and giving it back takes time too, and the game draws on the same GPU: in a game the frame rate is lower than these.'
   'Loading.settings'='Loading NR settings…'; 'Loading.settings-save'='Saving NR controls…'; 'Loading.settings-reset'='Restoring NR defaults…'
   'Done.settings'='NR settings loaded.'; 'Done.settings-save'='NR settings saved.'; 'Done.settings-reset'='NR defaults restored.'
   'Knob.render_scale'='Render scale'; 'Knob.min_extent'='Minimum network side'; 'Knob.profile'='Profile'; 'Knob.intensity'='Intensity'
@@ -549,8 +550,9 @@ $script:Strings=@{
   'Warn.uac_off'='UAC выключен, поэтому Windows запускает все программы с правами администратора, и до игры с такими правами NR не доходит. NR нужен включённый UAC, как в Windows по умолчанию.'
   SpeedTest='Тест скорости'; SpeedTestTip='Измеряет NR на этой видеокарте без игры, при четырёх размерах окна: лучшее, на что он здесь способен. Результат попадает в отчёт.'
   'Loading.speedtest'='Измеряем NR на этой видеокарте, без игры…'; 'Done.speedtest'='Тест скорости сохранён и попадёт в отчёт.'
-  SpeedResult='В лучшем случае на этом ПК ({1}) NR сам по себе: {0}. Игра рисует на той же видеокарте, поэтому в игре будет медленнее.'
-  SpeedCase='{0}×{1} — {2} мс, до {3} fps'
+  SpeedHead='Сама нейросеть на этом ПК ({0}) тратит на кадр:'; SpeedScale='масштаб рендера {0}: {1}'
+  SpeedCase='{0}×{1} — {2} мс (до {3} fps)'
+  SpeedNote='Захват кадра из игры и его возврат тоже занимают время, а игра рисует на той же видеокарте, поэтому fps в игре будет ниже этих значений.'
   'Loading.settings'='Загружаем настройки NR…'; 'Loading.settings-save'='Сохраняем настройки NR…'; 'Loading.settings-reset'='Возвращаем настройки NR…'
   'Done.settings'='Настройки NR загружены.'; 'Done.settings-save'='Настройки NR сохранены.'; 'Done.settings-reset'='Настройки NR сброшены.'
   'Knob.render_scale'='Масштаб сети'; 'Knob.min_extent'='Минимальная сторона сети'; 'Knob.profile'='Профиль'; 'Knob.intensity'='Интенсивность'
@@ -632,8 +634,9 @@ $script:Strings=@{
   'Warn.uac_off'='El UAC está desactivado, así que Windows ejecuta todos los programas como administrador, y NR no llega a un juego que se ejecuta así. NR necesita el UAC activado, como viene en Windows.'
   SpeedTest='Prueba de velocidad'; SpeedTestTip='Mide NR solo en esta GPU, sin juego, con cuatro tamaños de ventana: lo mejor que puede hacer aquí. El informe incluye el resultado.'
   'Loading.speedtest'='Midiendo NR en esta GPU, sin juego…'; 'Done.speedtest'='Prueba de velocidad guardada; el informe la incluye.'
-  SpeedResult='En el mejor caso en este PC ({1}), NR solo: {0}. Un juego dibuja en la misma GPU, así que en un juego va más lento.'
-  SpeedCase='{0}×{1} {2} ms, hasta {3} fps'
+  SpeedHead='La red neuronal por sí sola en este PC ({0}), por fotograma:'; SpeedScale='escala de renderizado {0}: {1}'
+  SpeedCase='{0}×{1} {2} ms (hasta {3} fps)'
+  SpeedNote='Tomar cada fotograma del juego y devolverlo también lleva tiempo, y el juego dibuja en la misma GPU: en un juego los FPS son más bajos que estos.'
   'Loading.settings'='Cargando la configuración de NR…'; 'Loading.settings-save'='Guardando los controles de NR…'; 'Loading.settings-reset'='Restaurando los valores predeterminados de NR…'
   'Done.settings'='Configuración de NR cargada.'; 'Done.settings-save'='Configuración de NR guardada.'; 'Done.settings-reset'='Se restauraron los valores predeterminados de NR.'
   'Knob.render_scale'='Escala de renderizado'; 'Knob.min_extent'='Lado mínimo de la red'; 'Knob.profile'='Perfil'; 'Knob.intensity'='Intensidad'
@@ -926,12 +929,20 @@ function Format-Warnings($Value) {
     }
 }
 function Show-Speed($Value) {
-    # The last speed test: NR alone on this PC, each window size's frame and its best frame rate.
+    # The last speed test: the network's own time for a frame at each size and render scale, the
+    # frame rate that time allows, and why a game's stays below it.
     $script:LastSpeed=$Value
-    if(-not $Value -or -not @($Value.cases).Count) { $script:Ui.SpeedState.Text=''; return }
-    $cases=@($Value.cases | Where-Object { $_ -and $_.median_ms } | ForEach-Object {
-        [string]::Format((T 'SpeedCase'),$_.width,$_.height,[Math]::Round([double]$_.median_ms),[Math]::Floor([double]$_.fps)) })
-    $script:Ui.SpeedState.Text=[string]::Format((T 'SpeedResult'),($cases -join '; '),[string]$Value.device)
+    $cases=@($Value.cases | Where-Object { $_ -and ($_.network_ms -or $_.round_trip_ms) })
+    if(-not $cases.Count) { $script:Ui.SpeedState.Text=''; return }
+    $lines=@([string]::Format((T 'SpeedHead'),[string]$Value.device))
+    foreach($scale in @($cases | ForEach-Object { [double]$_.render_scale } | Select-Object -Unique)) {
+        $items=@($cases | Where-Object { [double]$_.render_scale -eq $scale } | ForEach-Object {
+            $ms=$(if($_.network_ms){[double]$_.network_ms}else{[double]$_.round_trip_ms})
+            [string]::Format((T 'SpeedCase'),$_.width,$_.height,[Math]::Round($ms),[Math]::Floor(1000/$ms)) })
+        $lines+=[string]::Format((T 'SpeedScale'),$scale.ToString('0.0#',[Globalization.CultureInfo]::InvariantCulture),($items -join '; '))
+    }
+    $lines+=(T 'SpeedNote')
+    $script:Ui.SpeedState.Text=($lines -join "`n")
 }
 function Show-Status($Value) {
     $enabled=[bool]$Value.trigger_exists
@@ -995,7 +1006,7 @@ function Finish-Bridge($Job,[bool]$Quiet) {
             if($Job.Action -eq 'on' -and $value.warning -eq 'game_elevated') { Set-Progress $(if($value.uac_enabled -eq $false){'GameElevatedUacOff'}else{'GameElevated'}) }
             if($Job.Action -eq 'speedtest') {
                 Show-Speed $value.speed_test
-                $script:Ui.Progress.Text=(T 'Done.speedtest')+' '+$script:Ui.SpeedState.Text
+                $script:Ui.Progress.Text=(T 'Done.speedtest')+"`n"+$script:Ui.SpeedState.Text
             }
             if($Job.Action -in @('check','install')) {
                 # What would keep NR from the game without stopping the install, said here rather
@@ -1128,10 +1139,11 @@ if($SelfTest) {
             [pscustomobject]@{name='not_worded_here';detail='As the backend words it';values=@()})}))
         if($notes.Count -ne 2 -or $notes[0] -notmatch 'DOOMx64\.exe' -or $notes[0] -notmatch 'DOOMx64vk\.exe' -or $notes[1] -ne 'As the backend words it') { throw 'Warnings were not worded' }
         Show-Speed ([pscustomobject]@{device='Fixture GPU';cases=@(
-            [pscustomobject]@{width=640;height=360;median_ms=27.1;fps=36.9},
-            [pscustomobject]@{width=1920;height=1080;median_ms=74.3;fps=13.5})})
+            [pscustomobject]@{width=640;height=360;render_scale=0.4;network_ms=23;round_trip_ms=26.9},
+            [pscustomobject]@{width=1920;height=1080;render_scale=1.0;network_ms=384;round_trip_ms=408.6})})
         $speed=$script:Ui.SpeedState.Text
-        if($speed -notmatch '640×360' -or $speed -notmatch '\b27\b' -or $speed -notmatch '\b36\b' -or $speed -notmatch '\b13\b' -or $speed -notmatch 'Fixture GPU') { throw "The speed test was not worded: $speed" }
+        $missing=@('640×360','\b23\b','\b43\b','\b384\b','0\.4','1\.0','Fixture GPU' | Where-Object { $speed -notmatch $_ })
+        if($missing.Count -or -not $speed.EndsWith((T 'SpeedNote'))) { throw "The speed test was not worded ($($missing -join ', ')): $speed" }
         Show-Speed $null
         if($script:Ui.SpeedState.Text) { throw 'No speed test left words behind' }
         Set-Language $(if($language -eq 'en'){'ru'}else{'en'})

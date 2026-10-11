@@ -2,23 +2,27 @@
 """NR's own speed on this PC: the setup window's speed test, and what Save report carries of it.
 
 The daemon is started as the layer starts it and handed synthetic frames over its own transport,
-one connection a frame as nr_layer.c makes them, at a few window sizes and the render scale a
-release starts at. The time is the round trip a game waits for: the frame there and back, the
-host passes around the network, and the network. No game runs, so this is the best NR does on
-this PC; in a game the GPU is the game's too.
+one connection a frame as nr_layer.c makes them, at four window sizes, at the render scale a
+release starts at (0.4) and at full scale (1.0). Two times for each:
+- the network's, as the daemon reports it (the middle of its `gpu in+run+out` split): what the
+  network itself takes for a frame;
+- the round trip a game waits for: the frame there and back, the host passes around the network,
+  and the network.
+No game runs, so these are the best NR does on this PC. In a game the layer also captures each
+frame and writes the answer back, and the game draws on the same GPU, so its frame rate is lower.
 
     python src/bench/speed_test.py [--root RELEASE] [--json FILE]
 
-Writes JSON: the GPU the daemon took and how long it took to load, and for each size the
-network's field and the median, fastest and slowest frame. A named pipe on Windows, a Unix
-socket elsewhere. live_rates.py is the README table's measure, with its own plan; this one is
-short enough to run on a tester's first install.
+Writes JSON: the GPU the daemon took and how long it took to load, and for each case the
+network's field and both times. A named pipe on Windows, a Unix socket elsewhere. live_rates.py
+is the README table's measure, with its own plan; this one is short enough for a first install.
 """
 import argparse
 import json
 import os
 import pathlib
 import re
+import statistics
 import struct
 import subprocess
 import sys
@@ -32,13 +36,17 @@ HERE = pathlib.Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 MAGIC = 0x304E524E
 FORMAT_B8G8R8A8 = 44
-# Where a release starts (windows_wizard_core.install): these numbers are comparable from
-# one PC to the next only if every PC measures them alike.
-SETTINGS = {"render_scale": 0.4, "min_extent": 320}
+# Where a release starts (windows_wizard_core.install), then full scale, for comparison: the
+# numbers are comparable from one PC to the next only if every PC measures them alike.
+MIN_EXTENT = 320
+SCALES = (0.4, 1.0)
 SIZES = ((640, 360), (800, 450), (1280, 720), (1920, 1080))
 # More than live_rates.py's nine and three: through the setup window, with the window itself on
-# screen, nine put 1280x720 at 38 ms in one run and 50 in the next. A few seconds more.
+# screen, nine put 1280x720 at 38 ms in one run and 50 in the next.
 FRAMES, WARMUP = 15, 5
+# The daemon's line for each frame (nr_daemon.process_connection).
+LINE = re.compile(r"^(\d+)x(\d+) \S+ in [0-9.]+s .*?gpu (\d+)\+(\d+)\+(\d+)ms.*?"
+                  r"network (\d+)x(\d+) scale ([0-9.]+)", re.M)
 
 
 def frames(width, height, count=3):
@@ -112,6 +120,31 @@ def tail(path, size=4000):
         return ""
 
 
+def measure(endpoint, log, width, height, scale, count, warmup):
+    """One case: the round trips, and the daemon's own lines for the same frames."""
+    header = struct.pack("<4I", MAGIC, width, height, FORMAT_B8G8R8A8)
+    made, want = frames(width, height), 4 * width * height
+    start = log.stat().st_size
+    times = []
+    for i in range(warmup + count):
+        took = round_trip(endpoint, header, made[i % len(made)], want)
+        if i >= warmup:
+            times.append(took)
+    with log.open("rb") as handle:
+        handle.seek(start)
+        text = handle.read().decode("utf-8", errors="replace")
+    lines = [found for found in LINE.findall(text)
+             if (int(found[0]), int(found[1])) == (width, height) and float(found[7]) == scale][-count:]
+    network_ms = statistics.median(int(found[3]) for found in lines) if lines else None
+    times.sort()
+    middle = times[len(times) // 2]
+    return {"width": width, "height": height, "render_scale": scale,
+            "network": [int(lines[-1][5]), int(lines[-1][6])] if lines else None,
+            "network_ms": network_ms, "network_fps": round(1000 / network_ms, 1) if network_ms else None,
+            "round_trip_ms": round(1000 * middle, 1), "round_trip_min_ms": round(1000 * times[0], 1),
+            "round_trip_max_ms": round(1000 * times[-1], 1), "round_trip_fps": round(1 / middle, 1)}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--root", type=pathlib.Path, default=ROOT, help="the release or checkout")
@@ -120,8 +153,8 @@ def main():
     parser.add_argument("--warmup", type=int, default=WARMUP)
     args = parser.parse_args()
     root = args.root.resolve()
-    result = {"ok": False, "error": None, "settings": SETTINGS, "frames": args.frames,
-              "warmup": args.warmup, "python": sys.version.split()[0], "cases": []}
+    result = {"ok": False, "error": None, "min_extent": MIN_EXTENT, "scales": list(SCALES),
+              "frames": args.frames, "warmup": args.warmup, "python": sys.version.split()[0], "cases": []}
     # The daemon's log and settings stay in the release, overwritten by the next test. On
     # Windows a virtual environment's python.exe starts the interpreter as a child, which ends
     # with this test (NR_LAYER_SPAWNED below) and holds its log open until then.
@@ -129,7 +162,7 @@ def main():
     room.mkdir(parents=True, exist_ok=True)
     log = room / "daemon.log"
     settings = room / "settings.json"
-    settings.write_text(json.dumps(SETTINGS), encoding="utf-8")
+    settings.write_text(json.dumps({"render_scale": SCALES[0], "min_extent": MIN_EXTENT}), encoding="utf-8")
     if os.name == "nt":
         endpoint = rf"\\.\pipe\nr_speed_test_{uuid.uuid4().hex[:12]}"
     else:
@@ -165,21 +198,14 @@ def main():
         memory = re.search(r"buffers in (.+)", text)
         if memory:
             result["memory"] = memory.group(1).strip()
-        for width, height in SIZES:
-            header = struct.pack("<4I", MAGIC, width, height, FORMAT_B8G8R8A8)
-            made, want = frames(width, height), 4 * width * height
-            times = [round_trip(endpoint, header, made[i % len(made)], want)
-                     for i in range(args.warmup + args.frames)][args.warmup:]
-            times.sort()
-            median = times[len(times) // 2]
-            field = re.findall(rf"^{width}x{height} .*?network (\d+)x(\d+)", tail(log, 1 << 20), re.M)
-            case = {"width": width, "height": height, "render_scale": SETTINGS["render_scale"],
-                    "network": [int(field[-1][0]), int(field[-1][1])] if field else None,
-                    "median_ms": round(1000 * median, 1), "min_ms": round(1000 * times[0], 1),
-                    "max_ms": round(1000 * times[-1], 1), "fps": round(1 / median, 1)}
-            result["cases"].append(case)
-            print(f"{width}x{height}: {case['median_ms']} ms ({case['fps']} fps), network "
-                  f"{case['network']}", file=sys.stderr, flush=True)
+        for scale in SCALES:
+            # The daemon reads its settings between frames; the warm-up frames take the change.
+            settings.write_text(json.dumps({"render_scale": scale, "min_extent": MIN_EXTENT}), encoding="utf-8")
+            for width, height in SIZES:
+                case = measure(endpoint, log, width, height, scale, args.frames, args.warmup)
+                result["cases"].append(case)
+                print(f"{width}x{height} at {scale:g}: network {case['network_ms']} ms, round trip "
+                      f"{case['round_trip_ms']} ms, field {case['network']}", file=sys.stderr, flush=True)
         result["ok"] = True
     except (OSError, RuntimeError) as error:
         result["error"] = str(error)

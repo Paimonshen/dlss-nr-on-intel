@@ -1685,11 +1685,13 @@ def status(profile):
 
 
 def _speed_summary(profile):
-    """The last speed test as the window shows it: the GPU, when, and each size's frame."""
+    """The last speed test as the window shows it: the GPU, when, and for each size and render
+    scale the network's own time for a frame and the round trip a game waits for."""
     try:
         measured = _read_json(profile.root / SPEED_TEST, limit=256 * 1024)
         return {"device": measured.get("device"), "created_utc": measured.get("created_utc"),
-                "cases": [{name: case.get(name) for name in ("width", "height", "median_ms", "fps")}
+                "cases": [{name: case.get(name) for name in ("width", "height", "render_scale", "network_ms",
+                                                             "network_fps", "round_trip_ms", "round_trip_fps")}
                           for case in measured.get("cases", [])]}
     except (OSError, ValueError, AttributeError, TypeError):
         return None

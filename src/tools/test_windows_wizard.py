@@ -1000,8 +1000,9 @@ class WizardFixture(unittest.TestCase):
         # NR alone on this PC, saved with the PC for Save report: testers' reports gather it.
         script = self.speed_script()
         measured = {"ok": True, "error": None, "device": "Fixture GPU", "model_ready_s": 1.0,
-                    "cases": [{"width": 640, "height": 360, "network": [320, 320], "median_ms": 27.1,
-                               "min_ms": 26.0, "max_ms": 29.0, "fps": 36.9}]}
+                    "cases": [{"width": 640, "height": 360, "render_scale": 0.4, "network": [320, 320],
+                               "network_ms": 23, "network_fps": 43.5, "round_trip_ms": 26.9,
+                               "round_trip_min_ms": 25.0, "round_trip_max_ms": 29.0, "round_trip_fps": 37.2}]}
 
         def run(command, timeout=10, env=None, emit=None, cwd=None):
             command = [str(part) for part in command]
@@ -1024,7 +1025,8 @@ class WizardFixture(unittest.TestCase):
         self.assertIn("created_utc", saved)
         # The window's status line takes a summary; Save report takes the whole.
         self.assertEqual(core.status(self.profile)["speed_test"]["cases"],
-                         [{"width": 640, "height": 360, "median_ms": 27.1, "fps": 36.9}])
+                         [{"width": 640, "height": 360, "render_scale": 0.4, "network_ms": 23, "network_fps": 43.5,
+                           "round_trip_ms": 26.9, "round_trip_fps": 37.2}])
         report = self.base / "speed report.json"
         with patch.object(core, "_system_metadata", return_value={}):
             self.assertTrue(core.export_report(self.profile, report)["ok"])
