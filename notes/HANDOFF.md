@@ -126,6 +126,62 @@ GPU contention from a game running beside them).
 
 ---
 
+## 性能测量规范 (2026-10-10)
+
+**This section is the contract for any performance number quoted from this repository.** It
+exists because two rounds of measurements on this machine disagreed by 12-26 % and the cause
+turned out to be the measurement, not the code. Read it before quoting a frame time, and quote
+the five declarations with it.
+
+### Every performance number must declare these five
+
+| # | What | Why it changes the answer |
+|---|---|---|
+| 1 | **`--dump` on or off** | On, the dump was 287 ms a frame against a 70 ms frame -- a 4x error. Now 4.6-6.7 ms serial, zero on the median. |
+| 2 | **Machine otherwise idle** | One round of agent measurements ate 40 % of GPU contention from a game running beside them. |
+| 3 | **Resolution AND render scale, and the network extent the daemon reported** | Scale is the only lever that changes the frame rate; the same 1280x720 at 0.5 and 1.0 differ 3x. The daemon prints `network WxH scale S`. |
+| 4 | **`NR_LAYER_ASYNC` state** | On, the cycle becomes `max(G, D)` instead of `G + D`. A different quantity, not a faster one. |
+| 5 | **The scene: game, where in it, and how long** | Animated menus and static splashes give different distributions. Thirty seconds minimum, and see the warm-up rule below. |
+
+### Baselines must carry the distribution, not just the rate
+
+A baseline is **median frame time, p95, p99 and the sample count** -- taken from the daemon's own
+`in X s`, not from `frames / wall_seconds`. A rate alone cannot be compared with another rate,
+because it silently includes whatever startup the window happened to contain.
+
+| quantity | 2026-10-10, Arc B580 |
+|---|---|
+| steady-state median frame, 1280x720, scale 1.0, sync, Desk Job splash | **70 ms** |
+| p95 / p99 | 90 ms / 110-150 ms |
+| sample count behind it | 9 runs over 3 sessions, 175-479 frames each |
+
+### Rules, each of which was broken at least once here
+
+1. **Discard the first ~10 frames, or warm up first.** The first frame is 0.75-1.09 s -- 11-16x
+   the median (model load, first pipeline builds, the half-rounding probe), and the first five
+   average 0.22-0.48 s. A 14 s window that keeps them reports 11.57 fps where the steady state is
+   12.50; a 30 s window with an 8 s warm-up reports 14.57 for the same code. **The difference was
+   the window, not the program.**
+2. **Do not compare `fps` between two runs that processed different numbers of frames.** The
+   `--dump` groups made this vivid: the old path processed 101 frames in 30 s and the new one 371,
+   so their fps were never comparable even though both were true. Compare median frame times.
+3. **Do not put measurement overhead and real performance in one table.** "The frame takes 70 ms"
+   and "the dump adds 210 ms" are different claims about different things. State which each row is.
+4. **Never quote a number without the five declarations above.** If a past measurement lacks them,
+   it is not a baseline -- re-measure it.
+5. **Say when a number is a projection.** A quantity derived from other measurements (the disk a
+   `--dump-every 10` session will write, say) is not measured, and must be marked as derived.
+
+### Two live traps on this platform
+
+- **`image_io.save` spawns ImageMagick (143 ms a 1280x720 image).** Never call it from anything
+  being timed. `image_io.save_raw` is the same pixels at 2.3-3.3 ms; convert afterwards with
+  `src/tools/dump_to_png.py`.
+- **`image_io.save_raw` reuses a module-level scratch buffer** and is therefore not reentrant.
+  Fine for the daemon, which serves one connection at a time; not fine from a thread pool.
+
+---
+
 ## The first Windows releases, and a tester's game that got the proxy but never the layer (2026-10-09, later)
 
 **Released at the owner's word**, under versions the owner named; neither carries the NVIDIA DLL

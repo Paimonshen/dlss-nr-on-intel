@@ -813,10 +813,23 @@ def process_connection(connection, backend, args):
         try:
             destination = pathlib.Path(args.dump)
             destination.mkdir(parents=True, exist_ok=True)
-            # Numbered, so walking through a game and pressing the trigger repeatedly
-            # keeps every shot instead of overwriting the last one.
-            index = 1 + max((int(path.stem.split("_")[0]) for path in destination.glob("*_in.raw")
-                             if path.stem.split("_")[0].isdigit()), default=0)
+            # Numbered, so walking through a game and pressing the trigger repeatedly keeps
+            # every shot instead of overwriting the last one, and so a restarted daemon
+            # continues where the last one stopped. The number is the frame's position in the
+            # dump, not a file counter -- which is what makes --dump-every legible: N=10 writes
+            # 010, 020, 030, and the gaps are the frames it skipped.
+            step = max(1, int(getattr(args, "dump_every", 1) or 1))
+            if getattr(args, "dump_seq", None) is None:
+                args.dump_seq = max((int(path.stem.split("_")[0])
+                                     for path in destination.glob("*_in.*")
+                                     if path.stem.split("_")[0].isdigit()), default=0)
+                args.dump_written = 0
+                args.dump_skipped = 0
+            args.dump_seq += 1
+            index = args.dump_seq
+            wanted = (index % step == 0)
+            if not wanted:
+                args.dump_skipped += 1
             shown = full
             if shown is None and boxed:
                 shown = whole.copy()
@@ -832,19 +845,27 @@ def process_connection(connection, backend, args):
             slow = os.environ.get("NR_DUMP_SLOW") == "1"
             write = image_io.save if slow else image_io.save_raw
             suffix = "png" if slow else "raw"
-            write(whole, destination / f"{index:03d}_in.{suffix}")
-            write(shown if shown is not None else active,
-                  destination / f"{index:03d}_out.{suffix}")
-            if not slow:
-                # The geometry, once, so a reader needs only the directory.
-                meta = destination / "dump.json"
-                if not meta.exists():
-                    meta.write_text(
-                        _json.dumps({"width": width, "height": height, "channels": 3,
-                                     "dtype": "uint8", "layout": "hwc"}) + "\n",
-                        encoding="utf-8")
-            print(f"  -> {destination}/{index:03d}_{{in,out}}.{suffix}"
-                  + ("" if slow else "  (convert with tools/dump_to_png.py)"), flush=True)
+            if wanted:
+                args.dump_written += 1
+                write(whole, destination / f"{index:03d}_in.{suffix}")
+                write(shown if shown is not None else active,
+                      destination / f"{index:03d}_out.{suffix}")
+            if not slow and wanted:
+                # The geometry, plus how much of the session this dump holds. Written only on
+                # a frame that is actually written -- a few hundred bytes against the two
+                # 2.64 MiB images beside it -- so the cost inside the timed region stays O(1)
+                # and does not grow with the sampling step.
+                (destination / "dump.json").write_text(
+                    _json.dumps({"width": width, "height": height, "channels": 3,
+                                 "dtype": "uint8", "layout": "hwc",
+                                 "sample_step": step,
+                                 "frames_written": args.dump_written,
+                                 "frames_skipped": args.dump_skipped,
+                                 "last_frame_seq": index}) + "\n",
+                    encoding="utf-8")
+            if wanted:
+                print(f"  -> {destination}/{index:03d}_{{in,out}}.{suffix}"
+                      + ("" if slow else "  (convert with tools/dump_to_png.py)"), flush=True)
         except (OSError, subprocess.CalledProcessError, ValueError) as error:
             print(f"frame returned, but dump failed: {error}", flush=True)
     if args.meter is not None:
@@ -1068,7 +1089,14 @@ def main():
                              "taken to have cut and the history is dropped")
     parser.add_argument("--max-pixels", type=int, default=1 << 22,
                         help="refuse frames larger than this, rather than thrash")
-    parser.add_argument("--dump", help="write each frame in and out as PNG, for a look")
+    parser.add_argument("--dump", help="write frames in and out as raw, for a look; "
+                                       "convert with src/tools/dump_to_png.py")
+    parser.add_argument("--dump-every", type=int, default=1, metavar="N",
+                        help="write only every Nth processed frame (default 1, every frame). "
+                             "Raw does not compress: 2.64 MiB an image at 1280x720, 5.27 MiB a "
+                             "frame, so a few minutes of play is gigabytes. The frames written "
+                             "keep their own sequence numbers, so N=10 writes 010, 020, 030 and "
+                             "the gaps are visible in the names.")
     parser.add_argument("--meter", action="store_true",
                         help="report, every frame, how much the network invents over "
                              "pixels the game did not move; costs about 5 ms")
