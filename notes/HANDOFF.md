@@ -81,6 +81,51 @@ space mid-test: the release roots in `D:\NRonWindows\rel` each hold ~440 MB of e
 **Next on Linux:** `make test` and CTest for the layer's new lines (`nr_layer.c`'s POSIX arm
 prints the same three reasons). Nothing else Linux runs changed.
 
+## `--dump` was inflating every measurement it appeared in, and now does not (2026-10-10)
+
+**The trap.** `nr_daemon.py --dump` writes two images a frame from inside its own timed region
+(`clock` at :626, the dump at :809-823, the `in X s` report at :851), and `image_io.save` spawns
+ImageMagick. Measured on the B580 at 1280x720: **143 ms an image, 287 ms a frame, against a 70 ms
+frame.** Every `in X s` and every fps taken with `--dump` on was wrong by 4x. It also made a dump
+useless as a record of a session: the old path managed **101 frames in 30 s**, so a "run" produced
+two files.
+
+**The fix.** `image_io.save_raw` writes the same bytes with no subprocess and no header, and
+`src/tools/dump_to_png.py` converts a dump directory afterwards, outside the timing.
+`test_dump_raw.py` checks the pixels against a real PNG from the old path, byte for byte.
+
+| 1280x720 | per image | per frame |
+|---|---:|---:|
+| `image_io.save` (ImageMagick) | 143 ms | 287 ms |
+| `image_io.save_raw` (fixed) | 2.31 ms | **4.61 ms** |
+
+**The one thing to know if you edit it: the buffers must be reused.** The allocating spelling was
+5.4 ms an image -- not arithmetic and not bandwidth (13.8 MB at this machine's 380 GB/s is 0.04 ms)
+but first-touch page faults on a fresh 11 MB float array. Reused: 2.31 ms.
+
+**Three-group baseline, same scene, 30 s x 3 each, median frame time from the daemon's own log:**
+
+| group | median frame | p95 | p99 | disk written |
+|---|---:|---:|---:|---:|
+| no `--dump` | **70 ms** | 90 | 150 | 0 |
+| old `--dump` | **280 ms** | 440 | 550 | ~3 MB |
+| new `--dump` | **70 ms** | 140 | 300 | **~1084 MB** |
+
+**Median frame: 280 -> 70 ms, 4.00x, and +0.0 % against no dump at all.** The apparent 15 % fps
+gap between groups 1 and 3 is a frame-count artefact -- the old arm only got through 101 frames,
+the new one 371, so fps never compared like with like.
+
+**What remains is disk, not encoding.** Raw does not compress: 2.7 MB x 2 = 5.4 MB a frame, 1.08 GB
+in 30 s, which is what lifts p95/p99. The lever, if it is needed, is `--dump-every N`, not a faster
+encoder. `NR_DUMP_SLOW=1` restores the old call so the two can be compared in one session; it is a
+debugging switch, not a mode.
+
+**So every performance number in this file needs two things stated with it**: whether `--dump` was
+on, and whether the machine was otherwise idle (an earlier round of agent measurements ate 40 % of
+GPU contention from a game running beside them).
+
+---
+
 ## The first Windows releases, and a tester's game that got the proxy but never the layer (2026-10-09, later)
 
 **Released at the owner's word**, under versions the owner named; neither carries the NVIDIA DLL

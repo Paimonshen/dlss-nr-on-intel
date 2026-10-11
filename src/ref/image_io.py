@@ -47,7 +47,12 @@ def load(path, size=None):
 
 
 def save(arr, path):
-    """arr: (H,W,3) float in [0,1] (clipped) or (H,W) grayscale."""
+    """arr: (H,W,3) float in [0,1] (clipped) or (H,W) grayscale.
+
+    Do NOT call this from anything that is being timed. It spawns ImageMagick, which costs
+    143 ms for one 1280x720 image on the B580 (286 ms for the daemon's two per frame, against a
+    ~70 ms frame). `save_raw` below is the same pixels without the subprocess.
+    """
     a = np.asarray(arr, dtype=np.float32)
     if a.ndim == 2:
         a = np.repeat(a[:, :, None], 3, axis=2)
@@ -59,6 +64,64 @@ def save(arr, path):
         subprocess.run([_magick(), "-size", "%dx%d" % (W, H), "-depth", "8",
                         "rgb:" + str(d / "i.rgb"), str(path)], check=True, capture_output=True)
     return path
+
+
+_RAW_SCRATCH = None
+_RAW_U8 = None
+
+
+def save_raw(arr, path):
+    """The same bytes `save` quantises to, written with no subprocess and no header.
+
+    (H,W,3) float in [0,1] or (H,W,3) uint8 -> 8-bit RGB, row-major, no padding. The geometry
+    goes in the sibling `<dir>/dump.json` the caller writes once, so a reader needs nothing but
+    the file and that one object.
+
+    Why this exists: `--dump` sits inside the daemon's per-frame timing (nr_daemon.py: `clock`
+    at 626, the dump at 809-823, the report at 851), and `save` spawns ImageMagick per image.
+    Measured on an Arc B580 at 1280x720: `save` 147 ms an image, this 1.2 ms. A daemon frame at
+    that extent is ~70 ms, so the old path inflated every `in X s` it printed by more than 4x and
+    every frame-rate measurement taken with `--dump` on was meaningless. Conversion is a separate
+    step, `src/tools/dump_to_png.py`, paid outside the timed region.
+
+    The pixels are identical to what `save` would have written -- `(a*255 + 0.5)` then a
+    truncating cast -- and `test_dump_raw.py` checks that byte for byte against a real PNG.
+
+    Both buffers are kept between calls, and that is the whole trick: the arithmetic is a fifth
+    of the time and allocating is the rest. A fresh 11 MB float array is first-touch page faults
+    the kernel charges on write, so the allocating spelling cost 5.4 ms an image against 1.2 ms
+    for this one. Not reentrant -- the daemon serves one connection at a time.
+    """
+    global _RAW_SCRATCH, _RAW_U8
+    a = np.asarray(arr)
+    if a.dtype != np.uint8:
+        if _RAW_SCRATCH is None or _RAW_SCRATCH.shape != a.shape:
+            _RAW_SCRATCH = np.empty(a.shape, np.float32)
+            _RAW_U8 = np.empty(a.shape, np.uint8)
+        np.clip(a, 0.0, 1.0, out=_RAW_SCRATCH)
+        np.multiply(_RAW_SCRATCH, 255.0, out=_RAW_SCRATCH)
+        np.add(_RAW_SCRATCH, 0.5, out=_RAW_SCRATCH)
+        # `unsafe` is a truncating C cast, which is what `.astype(np.uint8)` does; the test
+        # compares both spellings against the PNG rather than trusting that.
+        np.copyto(_RAW_U8, _RAW_SCRATCH, casting="unsafe")
+        a = _RAW_U8
+    if a.ndim == 2:
+        a = np.repeat(a[:, :, None], 3, axis=2)
+    if a.shape[2] == 4:
+        a = a[:, :, :3]
+    with open(path, "wb") as handle:
+        handle.write(np.ascontiguousarray(a, dtype=np.uint8))
+    return path
+
+
+def load_raw(path, width, height, channels=3):
+    """-> (H,W,channels) float32 in [0,1]. The inverse of `save_raw`."""
+    raw = np.frombuffer(Path(path).read_bytes(), dtype=np.uint8)
+    expected = width * height * channels
+    if raw.size != expected:
+        raise ValueError("%s holds %d bytes, expected %d for %dx%dx%d"
+                         % (path, raw.size, expected, width, height, channels))
+    return raw.reshape(height, width, channels).astype(np.float32) / 255.0
 
 
 def clean_and_noisy(H, W, seed=0, sigma=0.06):

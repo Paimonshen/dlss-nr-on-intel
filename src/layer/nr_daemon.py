@@ -807,22 +807,44 @@ def process_connection(connection, backend, args):
         # 1280x720.
         args.history.keep(shot, neural, inner, colour)
     if args.dump:
+        import json as _json
+
         import image_io
         try:
             destination = pathlib.Path(args.dump)
             destination.mkdir(parents=True, exist_ok=True)
             # Numbered, so walking through a game and pressing the trigger repeatedly
             # keeps every shot instead of overwriting the last one.
-            index = 1 + max((int(path.stem.split("_")[0]) for path in destination.glob("*_in.png")
+            index = 1 + max((int(path.stem.split("_")[0]) for path in destination.glob("*_in.raw")
                              if path.stem.split("_")[0].isdigit()), default=0)
             shown = full
             if shown is None and boxed:
                 shown = whole.copy()
                 shown[top:bottom, left:right] = active
-            image_io.save(whole, destination / f"{index:03d}_in.png")
-            image_io.save(shown if shown is not None else active,
-                          destination / f"{index:03d}_out.png")
-            print(f"  -> {destination}/{index:03d}_{{in,out}}.png", flush=True)
+            # Raw, not PNG: this block is inside the timed region (clock at :626, the report at
+            # :851) and `image_io.save` spawns ImageMagick, 147 ms an image at 1280x720. Two of
+            # those made every `in X s` and every fps taken with --dump on meaningless. See
+            # `image_io.save_raw`; convert with `src/tools/dump_to_png.py`, outside the timing.
+            #
+            # NR_DUMP_SLOW=1 restores the old call, and exists only so the two can be measured
+            # against each other in one session (`analysis_e/_team/dump修复与基线重建.md`).
+            # It is a debugging switch, not a supported mode.
+            slow = os.environ.get("NR_DUMP_SLOW") == "1"
+            write = image_io.save if slow else image_io.save_raw
+            suffix = "png" if slow else "raw"
+            write(whole, destination / f"{index:03d}_in.{suffix}")
+            write(shown if shown is not None else active,
+                  destination / f"{index:03d}_out.{suffix}")
+            if not slow:
+                # The geometry, once, so a reader needs only the directory.
+                meta = destination / "dump.json"
+                if not meta.exists():
+                    meta.write_text(
+                        _json.dumps({"width": width, "height": height, "channels": 3,
+                                     "dtype": "uint8", "layout": "hwc"}) + "\n",
+                        encoding="utf-8")
+            print(f"  -> {destination}/{index:03d}_{{in,out}}.{suffix}"
+                  + ("" if slow else "  (convert with tools/dump_to_png.py)"), flush=True)
         except (OSError, subprocess.CalledProcessError, ValueError) as error:
             print(f"frame returned, but dump failed: {error}", flush=True)
     if args.meter is not None:
