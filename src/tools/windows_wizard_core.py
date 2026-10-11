@@ -320,7 +320,9 @@ def layer_environment(profile):
         "NR_LAYER_TRIGGER": str(work / "nr_trigger"),
         "NR_LAYER_SOCKET": rf"\\.\pipe\nr_windows_{token}",
         "NR_LAYER_LIVE": "1", "NR_LAYER_SPAWN": "1", "NR_KEEP_BLOCKS": "1",
-        "ENABLE_NR_LAYER": "1", "VK_LAYER_PATH": str(installed_path(profile)),
+        # The manifest itself, not its folder: the loader reads every .json in a folder it is
+        # given, and warned that the installation's own records are not layer manifests.
+        "ENABLE_NR_LAYER": "1", "VK_LAYER_PATH": str(installed_path(profile) / "VkLayer_dlss_nr.json"),
         "VK_INSTANCE_LAYERS": "VK_LAYER_dlssnr_intel",
         "PYTHONUTF8": "1", "PYTHONDONTWRITEBYTECODE": "1",
         # DXVK logs into the folder the game was started in unless told otherwise. Through

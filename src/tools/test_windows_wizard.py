@@ -184,7 +184,8 @@ class WizardFixture(unittest.TestCase):
         self.assertEqual({key.upper(): value for key, value in env.items()}["STEAMAPPID"], "2280")
         for name in ("XMX_TEST", "VK_DEVICE_LAYERS", "DISABLE_NR_LAYER"):
             self.assertNotIn(name, env)
-        self.assertEqual(env["VK_LAYER_PATH"], str(self.game.parent / "dlss-nr"))
+        # The manifest itself: given the folder, the loader read the installation's records too.
+        self.assertEqual(env["VK_LAYER_PATH"], str(self.game.parent / "dlss-nr" / "VkLayer_dlss_nr.json"))
         self.assertNotEqual(env["NR_LAYER_SOCKET"], core.runtime_env(replace(self.profile, root=self.base / "other"))["NR_LAYER_SOCKET"])
         self.assertEqual(env["NR_LAYER_SOCKET"], core.runtime_env(self.profile)["NR_LAYER_SOCKET"])
         self.assertNotIn("DISABLE_VK_LAYER_VALVE_steam_overlay_1", env)

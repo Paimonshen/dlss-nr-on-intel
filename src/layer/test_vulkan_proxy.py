@@ -10,6 +10,7 @@ Python stands in for the game:
   VK_LAYER_PATH from High up, and setup warns from the record. High itself needs elevation, which a test
   cannot give itself;
 - another executable in the same folder gets nothing, and Vulkan still works;
+- an NR_LAYER_SPAWNED the game inherited is taken away, and another executable keeps its own;
 - DISABLE_NR_PROXY=1 turns it all off;
 - NR_REAL_VULKAN sends the calls to the loader it names (a game's own copy, set aside).
 
@@ -73,6 +74,8 @@ if case == "real":
 proxy = ctypes.WinDLL(str(folder / "vulkan-1.dll"))
 value = ctypes.create_unicode_buffer(256)
 got = kernel32.GetEnvironmentVariableW("NR_TEST_VALUE", value, 256)
+marker = ctypes.create_unicode_buffer(256)
+spawned = marker.value if kernel32.GetEnvironmentVariableW("NR_LAYER_SPAWNED", marker, 256) else None
 version = ctypes.c_uint32(0)
 result = proxy.vkEnumerateInstanceVersion(ctypes.byref(version))
 # Every vulkan-1.dll in the process: the proxy, and the loader it passes calls to.
@@ -88,6 +91,7 @@ for module in modules[:needed.value // ctypes.sizeof(wintypes.HMODULE)]:
 system = ctypes.create_unicode_buffer(32768)
 kernel32.GetSystemDirectoryW(system, 32768)
 seen = json.dumps({"exe": me, "pid": os.getpid(), "integrity": integrity, "value": value.value if got else None,
+                   "spawned": spawned,
                    "from_system": any(os.path.samefile(path, os.path.join(system.value, "vulkan-1.dll"))
                                       for path in loaded),
                    "result": result, "version": version.value, "loaded": loaded})
@@ -264,6 +268,14 @@ def main():
     check("nothing is set", "error" not in seen and seen.get("value") is None, str(seen.get("value")))
     check("Vulkan still works", seen.get("result") == 0)
     check("no launch is recorded, no folder listed", record is None and folders is None)
+
+    # The mark of a daemon NR started: inherited by a game, it kept the layer from starting one.
+    print("NR_LAYER_SPAWNED inherited:")
+    seen, record, folders = run(proxy, "game", {"NR_LAYER_SPAWNED": "4242"})
+    check("the game's process loses it", "error" not in seen and seen.get("spawned") is None
+          and seen.get("value") == "it works été", seen.get("error") or str(seen.get("spawned")))
+    seen, record, folders = run(proxy, "other", {"NR_LAYER_SPAWNED": "4242"})
+    check("another executable keeps it", seen.get("spawned") == "4242", seen.get("error") or str(seen.get("spawned")))
 
     print("DISABLE_NR_PROXY=1:")
     seen, record, folders = run(proxy, "game", {"DISABLE_NR_PROXY": "1"})

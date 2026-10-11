@@ -12,7 +12,8 @@
  * loader: System32's, or the game's own copy if it brought one (setup sets that aside).
  *
  * Only in the process of the game named in nr-env.txt: a launcher or a crash reporter in the
- * same folder gets the plain loader. DISABLE_NR_PROXY=1 turns all of it off.
+ * same folder gets the plain loader. DISABLE_NR_PROXY=1 turns all of it off. In the game's
+ * process an inherited NR_LAYER_SPAWNED, the mark of a daemon NR started, is taken away.
  *
  * nr-env.txt is UTF-8, one NAME=value a line. Three names are the proxy's own and are not set:
  *   NR_GAME_EXE      the executable whose process this is for
@@ -262,6 +263,9 @@ static void apply_environment(HINSTANCE self)
 
 	const wchar_t *loader = lookup(names, values, lines, L"NR_REAL_VULKAN");
 	if (loader && *loader) lstrcpynW(real_path, loader, MAX_PATH * 2);
+	/* The game is never a daemon NR started: NR_LAYER_SPAWNED marks one, and inherited from
+	 * wherever, it would keep the layer from starting the game's daemon. */
+	SetEnvironmentVariableW(L"NR_LAYER_SPAWNED", NULL);
 	for (int i = 0; i < lines; i++) {
 		if (CompareStringOrdinal(names[i], -1, L"NR_GAME_EXE", -1, TRUE) == CSTR_EQUAL
 		    || CompareStringOrdinal(names[i], -1, L"NR_REAL_VULKAN", -1, TRUE) == CSTR_EQUAL

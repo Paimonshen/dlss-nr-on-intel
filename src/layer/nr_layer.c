@@ -456,13 +456,25 @@ static void ensure_daemon(void)
 	/* Opt-in, and silent when off: most processes that load the layer (vulkaninfo,
 	 * a compositor) must not start a daemon and must not print anything either. */
 	if (!getenv("NR_LAYER_SPAWN")) return;
+	/* Asked to start one, so from here every way out says why: a tester's game loaded the
+	 * layer and started no daemon, with nothing said (issue #12). Its stderr is where the
+	 * loader's own log goes under VK_LOADER_DEBUG, so one capture holds both. */
 	/* Nothing to talk to without an endpoint: spawning a daemon nobody uses costs
 	 * ~3 GiB. */
-	if (!socket_path) return;
+	if (!socket_path) {
+		fprintf(stderr, "[nr_layer] no daemon started: NR_LAYER_SPAWN is set and "
+			"NR_LAYER_SOCKET is not\n");
+		return;
+	}
 	/* Do not re-spawn from inside a daemon we started: it inherits VK_INSTANCE_LAYERS
 	 * and would load this layer again, recursing until the OOM killer arrives. The
 	 * child is marked NR_LAYER_SPAWNED, so its own layer sees this and steps back. */
-	if (getenv("NR_LAYER_SPAWNED")) return;
+	const char *spawned = getenv("NR_LAYER_SPAWNED");
+	if (spawned) {
+		fprintf(stderr, "[nr_layer] no daemon started: NR_LAYER_SPAWNED=%s marks this "
+			"process as one NR started\n", spawned);
+		return;
+	}
 
 	/* Already up? Then leave it. A one-shot probe, not a blocking connect: waiting
 	 * would stall every game load. */
@@ -484,7 +496,11 @@ static void ensure_daemon(void)
 			close(fd);
 		}
 #endif
-		if (alive) return;
+		if (alive) {
+			fprintf(stderr, "[nr_layer] no daemon started: one already answers on %s\n",
+				socket_path);
+			return;
+		}
 	}
 
 	const char *py = getenv("NR_PYTHON");
