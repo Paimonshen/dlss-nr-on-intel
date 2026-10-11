@@ -36,8 +36,9 @@ FORMAT_B8G8R8A8 = 44
 # one PC to the next only if every PC measures them alike.
 SETTINGS = {"render_scale": 0.4, "min_extent": 320}
 SIZES = ((640, 360), (800, 450), (1280, 720), (1920, 1080))
-# live_rates.py's nine and three: fewer put one 1080p case 30 % off, run to run.
-FRAMES, WARMUP = 9, 3
+# More than live_rates.py's nine and three: through the setup window, with the window itself on
+# screen, nine put 1280x720 at 38 ms in one run and 50 in the next. A few seconds more.
+FRAMES, WARMUP = 15, 5
 
 
 def frames(width, height, count=3):

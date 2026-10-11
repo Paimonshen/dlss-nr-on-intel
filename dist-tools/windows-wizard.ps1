@@ -20,6 +20,7 @@ $script:KnobUi = @{}
 $script:PendingSettings = @{}
 $script:LoadingSettings = $false
 $script:SettingsReload = $false
+$script:SpeedTestDue = $false
 $script:SettingsDue = [DateTime]::MaxValue
 $script:SettingsStateKey = 'SettingsLoading'
 
@@ -1037,8 +1038,9 @@ function Finish-Bridge($Job,[bool]$Quiet) {
     }
     $script:Busy=$null; Set-Busy $false
     if($Job.Action -eq 'discover') { $script:Ui.MainScroll.ScrollToTop() }
-    # A first installation is followed by the speed test, once: what NR does here at its best.
-    if($Job.Action -eq 'install' -and $value -and $value.ok -and $value.speed_test_due) { Start-Bridge 'speedtest' }
+    # A first installation is followed by the speed test, once: what NR does here at its best. The
+    # timer starts it after the settings the installation reloads, so its words are the last.
+    if($Job.Action -eq 'install' -and $value -and $value.ok -and $value.speed_test_due) { $script:SpeedTestDue=$true }
 }
 function Pick-File([string]$Title,[string]$Filter,$Control) {
     $dialog=[Microsoft.Win32.OpenFileDialog]::new(); $dialog.Title=$Title; $dialog.Filter=$Filter
@@ -1180,6 +1182,7 @@ $script:Timer.Add_Tick({
         if($script:Busy -and $script:Busy.Process.HasExited) { Finish-Bridge $script:Busy $false }
         if($script:StatusJob -and $script:StatusJob.Process.HasExited) { Finish-Bridge $script:StatusJob $true }
         if(-not $script:Busy -and $script:SettingsReload) { $script:SettingsReload=$false; Start-Bridge 'settings' }
+        if(-not $script:Busy -and -not $script:SettingsReload -and $script:SpeedTestDue) { $script:SpeedTestDue=$false; Start-Bridge 'speedtest' }
         if(-not $script:Busy -and $script:PendingSettings.Count -and [DateTime]::UtcNow -ge $script:SettingsDue) {
             $dragging=$false
             foreach($row in $script:KnobUi.Values) { if($row.Slider -and $row.Slider.IsMouseCaptureWithin) { $dragging=$true; break } }
