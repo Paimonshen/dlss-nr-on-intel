@@ -297,10 +297,11 @@ $script:SettingsStateKey = 'SettingsLoading'
       <Border Style="{StaticResource CardBox}">
        <StackPanel>
         <TextBlock x:Name="CompareHeading" Style="{StaticResource Heading}"/>
-        <WrapPanel><Button x:Name="Launch"/><Button x:Name="Toggle"/></WrapPanel>
+        <WrapPanel><Button x:Name="Launch"/><Button x:Name="Toggle"/><Button x:Name="SpeedTest"/></WrapPanel>
         <TextBlock x:Name="EffectState" Text="" FontWeight="SemiBold" Margin="0,4,0,2"/>
         <TextBlock x:Name="RuntimeState" Text="" Style="{StaticResource Note}" FontSize="13"/>
         <TextBlock x:Name="FpsHint" Style="{StaticResource Note}" Margin="0,6,0,0"/>
+        <TextBlock x:Name="SpeedState" Style="{StaticResource Note}" Margin="0,6,0,0"/>
        </StackPanel>
       </Border>
       <Border Style="{StaticResource CardBox}">
@@ -345,7 +346,7 @@ $script:SettingsStateKey = 'SettingsLoading'
 '@
 $script:Window = [Windows.Markup.XamlReader]::Load([Xml.XmlNodeReader]::new($xaml))
 $script:Ui = @{}
-foreach($name in @('DllPath','GamePath','PythonPath','BrowseDll','BrowseGame','BrowsePython','FindPython','GetPython','Api','GameArgs','Fossilize','Check','Dependencies','Install','Uninstall','Launch','Toggle','EffectState','RuntimeState','Report','Progress','Spinner','Details','CheckDetails','MainScroll','Subtitle','FilesHeading','DllLabel','GameLabel','PythonLabel','ConnectHeading','ApiLabel','ApiVulkan','ApiDxvk','LaunchOptions','ArgsLabel','FirstTestHint','CompareHeading','FpsHint','Language','Theme')) {
+foreach($name in @('DllPath','GamePath','PythonPath','BrowseDll','BrowseGame','BrowsePython','FindPython','GetPython','Api','GameArgs','Fossilize','Check','Dependencies','Install','Uninstall','Launch','Toggle','SpeedTest','EffectState','RuntimeState','Report','Progress','Spinner','Details','CheckDetails','MainScroll','Subtitle','FilesHeading','DllLabel','GameLabel','PythonLabel','ConnectHeading','ApiLabel','ApiVulkan','ApiDxvk','LaunchOptions','ArgsLabel','FirstTestHint','CompareHeading','FpsHint','SpeedState','Language','Theme')) {
     $script:Ui[$name] = $script:Window.FindName($name)
     if($null -eq $script:Ui[$name]) { throw "Missing control $name" }
 }
@@ -462,6 +463,10 @@ $script:Strings=@{
   'Warn.vulkan_executable_other'='{0} does not load the Vulkan loader itself, and NR reaches only the .exe chosen here. {1} beside it does: if the game draws with Vulkan there, choose it.'
   'Warn.window_elevated'='This window runs as administrator, and so does a game started with Launch game: NR cannot reach a game that runs as administrator. Start the game, and Steam or the launcher that starts it, without administrator rights.'
   'Warn.uac_off'='UAC is off, so Windows runs every program as administrator, and NR cannot reach a game that runs so. NR needs UAC on, as Windows has it by default.'
+  SpeedTest='Speed test'; SpeedTestTip='Measures NR alone on this GPU, without a game, at four window sizes: the best it can do here. Save report carries the result.'
+  'Loading.speedtest'='Measuring NR on this GPU, without a game…'; 'Done.speedtest'='Speed test saved; Save report carries it.'
+  SpeedResult='At its best on this PC ({1}), NR alone: {0}. A game draws on the same GPU, so in a game it is slower.'
+  SpeedCase='{0}×{1} {2} ms, up to {3} fps'
   'Loading.settings'='Loading NR settings…'; 'Loading.settings-save'='Saving NR controls…'; 'Loading.settings-reset'='Restoring NR defaults…'
   'Done.settings'='NR settings loaded.'; 'Done.settings-save'='NR settings saved.'; 'Done.settings-reset'='NR defaults restored.'
   'Knob.render_scale'='Render scale'; 'Knob.min_extent'='Minimum network side'; 'Knob.profile'='Profile'; 'Knob.intensity'='Intensity'
@@ -541,6 +546,10 @@ $script:Strings=@{
   'Warn.vulkan_executable_other'='{0} сам не загружает загрузчик Vulkan, а NR работает только в выбранном здесь .exe. Рядом лежит {1}, который его загружает: если игра рисует через Vulkan там, выберите его.'
   'Warn.window_elevated'='Это окно запущено с правами администратора, и игра, запущенная кнопкой «Запустить игру», тоже: до игры с такими правами NR не доходит. Запускайте игру, а также Steam или лаунчер, который её запускает, без прав администратора.'
   'Warn.uac_off'='UAC выключен, поэтому Windows запускает все программы с правами администратора, и до игры с такими правами NR не доходит. NR нужен включённый UAC, как в Windows по умолчанию.'
+  SpeedTest='Тест скорости'; SpeedTestTip='Измеряет NR на этой видеокарте без игры, при четырёх размерах окна: лучшее, на что он здесь способен. Результат попадает в отчёт.'
+  'Loading.speedtest'='Измеряем NR на этой видеокарте, без игры…'; 'Done.speedtest'='Тест скорости сохранён и попадёт в отчёт.'
+  SpeedResult='В лучшем случае на этом ПК ({1}) NR сам по себе: {0}. Игра рисует на той же видеокарте, поэтому в игре будет медленнее.'
+  SpeedCase='{0}×{1} — {2} мс, до {3} fps'
   'Loading.settings'='Загружаем настройки NR…'; 'Loading.settings-save'='Сохраняем настройки NR…'; 'Loading.settings-reset'='Возвращаем настройки NR…'
   'Done.settings'='Настройки NR загружены.'; 'Done.settings-save'='Настройки NR сохранены.'; 'Done.settings-reset'='Настройки NR сброшены.'
   'Knob.render_scale'='Масштаб сети'; 'Knob.min_extent'='Минимальная сторона сети'; 'Knob.profile'='Профиль'; 'Knob.intensity'='Интенсивность'
@@ -620,6 +629,10 @@ $script:Strings=@{
   'Warn.vulkan_executable_other'='{0} no carga por sí mismo el cargador de Vulkan, y NR solo llega al .exe elegido aquí. {1}, a su lado, sí lo carga: si el juego dibuja con Vulkan allí, elíjalo.'
   'Warn.window_elevated'='Esta ventana se ejecuta como administrador, y también un juego iniciado con Iniciar el juego: NR no llega a un juego que se ejecuta como administrador. Inicie el juego, y Steam o el lanzador que lo inicia, sin derechos de administrador.'
   'Warn.uac_off'='El UAC está desactivado, así que Windows ejecuta todos los programas como administrador, y NR no llega a un juego que se ejecuta así. NR necesita el UAC activado, como viene en Windows.'
+  SpeedTest='Prueba de velocidad'; SpeedTestTip='Mide NR solo en esta GPU, sin juego, con cuatro tamaños de ventana: lo mejor que puede hacer aquí. El informe incluye el resultado.'
+  'Loading.speedtest'='Midiendo NR en esta GPU, sin juego…'; 'Done.speedtest'='Prueba de velocidad guardada; el informe la incluye.'
+  SpeedResult='En el mejor caso en este PC ({1}), NR solo: {0}. Un juego dibuja en la misma GPU, así que en un juego va más lento.'
+  SpeedCase='{0}×{1} {2} ms, hasta {3} fps'
   'Loading.settings'='Cargando la configuración de NR…'; 'Loading.settings-save'='Guardando los controles de NR…'; 'Loading.settings-reset'='Restaurando los valores predeterminados de NR…'
   'Done.settings'='Configuración de NR cargada.'; 'Done.settings-save'='Configuración de NR guardada.'; 'Done.settings-reset'='Se restauraron los valores predeterminados de NR.'
   'Knob.render_scale'='Escala de renderizado'; 'Knob.min_extent'='Lado mínimo de la red'; 'Knob.profile'='Perfil'; 'Knob.intensity'='Intensidad'
@@ -651,11 +664,11 @@ $script:ContentBindings=@{
  BrowseDll='Browse'; BrowseGame='Browse'; BrowsePython='Browse'; FindPython='FindPython'; GetPython='GetPython'
  ApiVulkan='ApiVulkan'; ApiDxvk='ApiDxvk'; Fossilize='Fossilize'
  Check='Check'; Dependencies='Dependencies'; Install='Install'; Uninstall='Uninstall'; Launch='Launch'
- Report='Report'; ControlsLaunch='Launch'; ResetSettings='ResetSettings'
+ Report='Report'; ControlsLaunch='Launch'; ResetSettings='ResetSettings'; SpeedTest='SpeedTest'
 }
 $script:HeaderBindings=@{LaunchOptions='LaunchOptions'; CheckDetails='CheckDetails';SetupTab='SetupTab';ControlsTab='ControlsTab';MoreSettings='MoreSettings'}
 $script:TipBindings=@{DllPath='DllTip'; GamePath='GameTip'; PythonPath='PythonTip'; GameArgs='ArgsTip'; Fossilize='FossilizeTip'; Language='LanguageTip'
- PythonLabel='PythonHint'; ControlsHeading='ControlsHint'; Theme='ThemeTip'}
+ PythonLabel='PythonHint'; ControlsHeading='ControlsHint'; Theme='ThemeTip'; SpeedTest='SpeedTestTip'}
 function T([string]$Key) {
     if(-not $script:Strings[$script:Language].ContainsKey($Key)) { throw "Missing translation: $Key" }
     return [string]$script:Strings[$script:Language][$Key]
@@ -831,6 +844,7 @@ function Set-Language([string]$Language) {
             Set-EffectColour $false
             Set-RuntimeText $runtimeKey $script:RuntimeValues
         }
+        Show-Speed $script:LastSpeed
     } finally { $script:ChangingLanguage=$false }
 }
 
@@ -860,7 +874,7 @@ function Apply-Profile($Profile) {
     if($Profile.game_args) { $script:Ui.GameArgs.Text=(@($Profile.game_args | ForEach-Object { Quote-Argument ([string]$_) }) -join ' ') }
 }
 function Set-Busy([bool]$Busy) {
-    foreach($name in @('DllPath','GamePath','PythonPath','Api','GameArgs','Fossilize','BrowseDll','BrowseGame','BrowsePython','FindPython','Check','Dependencies','Install','Uninstall','Launch','Toggle','Report','ControlsToggle','ControlsLaunch','ResetSettings')) { $script:Ui[$name].IsEnabled=-not $Busy }
+    foreach($name in @('DllPath','GamePath','PythonPath','Api','GameArgs','Fossilize','BrowseDll','BrowseGame','BrowsePython','FindPython','Check','Dependencies','Install','Uninstall','Launch','Toggle','SpeedTest','Report','ControlsToggle','ControlsLaunch','ResetSettings')) { $script:Ui[$name].IsEnabled=-not $Busy }
     $script:Ui.KnobRows.IsEnabled=(-not $Busy -or ($script:Busy -and $script:Busy.Action -eq 'settings-save'))
     # An indeterminate ProgressBar animates while collapsed too: 6 % of a core, the window idle.
     $script:Ui.Spinner.IsIndeterminate=$Busy
@@ -910,6 +924,14 @@ function Format-Warnings($Value) {
         else { [string]$item.detail }
     }
 }
+function Show-Speed($Value) {
+    # The last speed test: NR alone on this PC, each window size's frame and its best frame rate.
+    $script:LastSpeed=$Value
+    if(-not $Value -or -not @($Value.cases).Count) { $script:Ui.SpeedState.Text=''; return }
+    $cases=@($Value.cases | Where-Object { $_ -and $_.median_ms } | ForEach-Object {
+        [string]::Format((T 'SpeedCase'),$_.width,$_.height,[Math]::Round([double]$_.median_ms),[Math]::Floor([double]$_.fps)) })
+    $script:Ui.SpeedState.Text=[string]::Format((T 'SpeedResult'),($cases -join '; '),[string]$Value.device)
+}
 function Show-Status($Value) {
     $enabled=[bool]$Value.trigger_exists
     if($null -ne $Value.effect_on) { $enabled=[bool]$Value.effect_on }
@@ -936,6 +958,7 @@ function Show-Status($Value) {
     } elseif([int]$count -gt 0) {
         Set-RuntimeText 'Historical' @($count,$refused)
     } else { Set-RuntimeText 'WaitingFrames' }
+    if($Value.PSObject.Properties['speed_test']) { Show-Speed $Value.speed_test }
     $script:Ui.FrameReadout.Text=''
     if($Value.last_frame -and $Value.network_shape -and $Value.network_shape.Count -eq 2) {
         $frame=$Value.last_frame
@@ -969,6 +992,10 @@ function Finish-Bridge($Job,[bool]$Quiet) {
             if($Job.Action -in @('install','uninstall') -and $value.steam_restored) { Set-Progress ('Done.'+$Job.Action+'-steam') }
             if($Job.Action -eq 'on' -and $value.warning -eq 'game_without_nr') { Set-Progress 'GameWithoutNr' }
             if($Job.Action -eq 'on' -and $value.warning -eq 'game_elevated') { Set-Progress $(if($value.uac_enabled -eq $false){'GameElevatedUacOff'}else{'GameElevated'}) }
+            if($Job.Action -eq 'speedtest') {
+                Show-Speed $value.speed_test
+                $script:Ui.Progress.Text=(T 'Done.speedtest')+' '+$script:Ui.SpeedState.Text
+            }
             if($Job.Action -in @('check','install')) {
                 # What would keep NR from the game without stopping the install, said here rather
                 # than left in the details.
@@ -1010,6 +1037,8 @@ function Finish-Bridge($Job,[bool]$Quiet) {
     }
     $script:Busy=$null; Set-Busy $false
     if($Job.Action -eq 'discover') { $script:Ui.MainScroll.ScrollToTop() }
+    # A first installation is followed by the speed test, once: what NR does here at its best.
+    if($Job.Action -eq 'install' -and $value -and $value.ok -and $value.speed_test_due) { Start-Bridge 'speedtest' }
 }
 function Pick-File([string]$Title,[string]$Filter,$Control) {
     $dialog=[Microsoft.Win32.OpenFileDialog]::new(); $dialog.Title=$Title; $dialog.Filter=$Filter
@@ -1096,6 +1125,13 @@ if($SelfTest) {
             [pscustomobject]@{name='vulkan_executable_other';detail='';values=@('DOOMx64.exe','DOOMx64vk.exe')},
             [pscustomobject]@{name='not_worded_here';detail='As the backend words it';values=@()})}))
         if($notes.Count -ne 2 -or $notes[0] -notmatch 'DOOMx64\.exe' -or $notes[0] -notmatch 'DOOMx64vk\.exe' -or $notes[1] -ne 'As the backend words it') { throw 'Warnings were not worded' }
+        Show-Speed ([pscustomobject]@{device='Fixture GPU';cases=@(
+            [pscustomobject]@{width=640;height=360;median_ms=27.1;fps=36.9},
+            [pscustomobject]@{width=1920;height=1080;median_ms=74.3;fps=13.5})})
+        $speed=$script:Ui.SpeedState.Text
+        if($speed -notmatch '640×360' -or $speed -notmatch '\b27\b' -or $speed -notmatch '\b36\b' -or $speed -notmatch '\b13\b' -or $speed -notmatch 'Fixture GPU') { throw "The speed test was not worded: $speed" }
+        Show-Speed $null
+        if($script:Ui.SpeedState.Text) { throw 'No speed test left words behind' }
         Set-Language $(if($language -eq 'en'){'ru'}else{'en'})
         if($script:Ui.Toggle.Content -ne (T 'Disable')) { throw 'Language switch changed the displayed effect state' }
         Show-Status ([pscustomobject]@{trigger_exists=$false;processed=12;rejected=1;fresh_frames=$false})
@@ -1124,6 +1160,7 @@ $script:Ui.Uninstall.Add_Click({
     if([Windows.MessageBox]::Show($script:Window,(T 'UninstallConfirm'),(T 'Uninstall'),'OKCancel','Question') -eq 'OK') { Start-Bridge 'uninstall' }
 })
 $script:Ui.Launch.Add_Click({ Start-Bridge 'launch' })
+$script:Ui.SpeedTest.Add_Click({ Start-Bridge 'speedtest' })
 $script:Ui.Toggle.Add_Click({ $action=$(if($script:Ui.Toggle.Content -eq (T 'Disable')){'off'}else{'on'}); Start-Bridge $action })
 $script:Ui.ControlsToggle.Add_Click({ $action=$(if($script:Ui.ControlsToggle.Content -eq (T 'Disable')){'off'}else{'on'}); Start-Bridge $action })
 $script:Ui.ControlsLaunch.Add_Click({ Start-Bridge 'launch' })

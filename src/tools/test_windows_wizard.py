@@ -990,6 +990,74 @@ class WizardFixture(unittest.TestCase):
         self.assertTrue(long.startswith("head ") and long.endswith(" tail") and "[...]" in long, long[:40])
         self.assertLess(len(long), 2 * core.DXVK_LOG_PART + 16)
 
+    def speed_script(self):
+        script = self.root / "src/bench/speed_test.py"
+        script.parent.mkdir(parents=True, exist_ok=True)
+        script.write_text("# release fixture\n", encoding="utf-8")
+        return script
+
+    def test_the_speed_test_runs_the_releases_script_and_keeps_its_result(self):
+        # NR alone on this PC, saved with the PC for Save report: testers' reports gather it.
+        script = self.speed_script()
+        measured = {"ok": True, "error": None, "device": "Fixture GPU", "model_ready_s": 1.0,
+                    "cases": [{"width": 640, "height": 360, "network": [320, 320], "median_ms": 27.1,
+                               "min_ms": 26.0, "max_ms": 29.0, "fps": 36.9}]}
+
+        def run(command, timeout=10, env=None, emit=None, cwd=None):
+            command = [str(part) for part in command]
+            self.assertEqual(command[:3], [str(self.python), "-I", str(script)])
+            self.assertEqual(command[command.index("--root") + 1], str(self.root))
+            target = Path(command[command.index("--json") + 1])
+            target.write_text(json.dumps(measured), encoding="utf-8")
+            return {"command": command, "returncode": 0, "stdout": "", "stderr": "", "output": "",
+                    "timed_out": False}
+
+        self.assertIsNone(core.status(self.profile)["speed_test"])
+        self.assertTrue(core.install(self.profile)["speed_test_due"])
+        with patch.object(core, "_run", side_effect=run), \
+                patch.object(core, "_system_metadata", return_value={"gpu": [{"Name": "fixture"}]}):
+            result = core.speed_test(self.profile)
+        self.assertTrue(result["ok"], result)
+        saved = core._read_json(self.root / core.SPEED_TEST)
+        self.assertEqual((saved["device"], saved["cases"]), ("Fixture GPU", measured["cases"]))
+        self.assertEqual(saved["system"], {"gpu": [{"Name": "fixture"}]})
+        self.assertIn("created_utc", saved)
+        # The window's status line takes a summary; Save report takes the whole.
+        self.assertEqual(core.status(self.profile)["speed_test"]["cases"],
+                         [{"width": 640, "height": 360, "median_ms": 27.1, "fps": 36.9}])
+        report = self.base / "speed report.json"
+        with patch.object(core, "_system_metadata", return_value={}):
+            self.assertTrue(core.export_report(self.profile, report)["ok"])
+        self.assertEqual(core._read_json(report)["speed_test"]["device"], "Fixture GPU")
+        # Run once after a first installation: the next one is not due.
+        self.assertFalse(core.install(self.profile)["speed_test_due"])
+
+    def test_the_speed_test_needs_the_weights_and_the_gpu_to_itself_and_says_what_failed(self):
+        self.speed_script()
+        self.weights.unlink()
+        self.assertIn("Install NR first", core.speed_test(self.profile)["error"])
+        write_weights(self.weights)
+        self.launch_state(pid=77)
+        self.assertIn("Close the game first", core.speed_test(self.profile)["error"])
+        self.running.side_effect = None
+
+        def failing(command, timeout=10, env=None, emit=None, cwd=None):
+            command = [str(part) for part in command]
+            Path(command[command.index("--json") + 1]).write_text(json.dumps(
+                {"ok": False, "error": "the daemon ended (code 1) before it listened"}), encoding="utf-8")
+            return {"command": command, "returncode": 1, "stdout": "", "stderr": "", "output": "",
+                    "timed_out": False}
+
+        with patch.object(core, "_run", side_effect=failing):
+            result = core.speed_test(self.profile)
+        self.assertFalse(result["ok"])
+        self.assertIn("before it listened", result["error"])
+        self.assertFalse((self.root / core.SPEED_TEST).exists())
+        with patch.object(core, "_run", return_value={"command": [], "returncode": None, "stdout": "",
+                                                      "stderr": "", "output": "", "timed_out": True}):
+            self.assertIn("no answer in 900 s", core.speed_test(self.profile)["error"])
+        self.assertFalse((self.root / core.SPEED_TEST).exists())
+
     def test_a_python_or_a_library_that_fails_says_why_in_its_check(self):
         self.native.return_value = python_info(probe_ok=False, probe_error="no answer in 30 s")
         self.assertIn("did not answer: no answer in 30 s", self.checks()["python_native_x64"]["detail"])

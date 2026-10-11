@@ -1,0 +1,207 @@
+#!/usr/bin/env python3
+"""NR's own speed on this PC: the setup window's speed test, and what Save report carries of it.
+
+The daemon is started as the layer starts it and handed synthetic frames over its own transport,
+one connection a frame as nr_layer.c makes them, at a few window sizes and the render scale a
+release starts at. The time is the round trip a game waits for: the frame there and back, the
+host passes around the network, and the network. No game runs, so this is the best NR does on
+this PC; in a game the GPU is the game's too.
+
+    python src/bench/speed_test.py [--root RELEASE] [--json FILE]
+
+Writes JSON: the GPU the daemon took and how long it took to load, and for each size the
+network's field and the median, fastest and slowest frame. A named pipe on Windows, a Unix
+socket elsewhere. live_rates.py is the README table's measure, with its own plan; this one is
+short enough to run on a tester's first install.
+"""
+import argparse
+import json
+import os
+import pathlib
+import re
+import struct
+import subprocess
+import sys
+import tempfile
+import time
+import uuid
+
+import numpy as np
+
+HERE = pathlib.Path(__file__).resolve().parent
+ROOT = HERE.parent.parent
+MAGIC = 0x304E524E
+FORMAT_B8G8R8A8 = 44
+# Where a release starts (windows_wizard_core.install): these numbers are comparable from
+# one PC to the next only if every PC measures them alike.
+SETTINGS = {"render_scale": 0.4, "min_extent": 320}
+SIZES = ((640, 360), (800, 450), (1280, 720), (1920, 1080))
+# live_rates.py's nine and three: fewer put one 1080p case 30 % off, run to run.
+FRAMES, WARMUP = 9, 3
+
+
+def frames(width, height, count=3):
+    """A few different frames of noise with structure at several scales (live_rates.frame),
+    so each is a fresh frame, as in a game that moves, and no bars are found."""
+    made = []
+    for seed in range(count):
+        rng = np.random.default_rng(seed)
+        small = rng.random((max(2, -(-height // 16)), max(2, -(-width // 16)), 3))
+        coarse = np.repeat(np.repeat(small, 16, axis=0), 16, axis=1)[:height, :width]
+        image = np.clip(coarse * 0.7 + rng.random((height, width, 3)) * 0.3, 0, 1)
+        out = np.empty((height, width, 4), np.uint8)
+        out[..., :3] = (image * 255).astype(np.uint8)
+        out[..., 3] = 255
+        made.append(out.tobytes())
+    return made
+
+
+def connect(endpoint, deadline):
+    """One connection to the daemon, as the layer opens one for each frame."""
+    while True:
+        try:
+            if os.name == "nt":
+                return open(endpoint, "r+b", buffering=0)
+            import socket
+            client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            client.settimeout(600)
+            client.connect(endpoint)
+            return client
+        except OSError as error:
+            # All of the pipe's instances busy, or not made yet: the layer waits too.
+            if time.monotonic() > deadline:
+                raise RuntimeError(f"no answer on {endpoint}: {error}") from error
+            time.sleep(0.05)
+
+
+def round_trip(endpoint, header, payload, want):
+    started = time.perf_counter()
+    link = connect(endpoint, time.monotonic() + 60)
+    try:
+        data = memoryview(header + payload)
+        if os.name == "nt":
+            while data:
+                data = data[link.write(data):]
+            got = 0
+            while got < want:
+                piece = link.read(want - got)
+                if not piece:
+                    break
+                got += len(piece)
+        else:
+            link.sendall(data)
+            got = 0
+            while got < want:
+                piece = link.recv(want - got)
+                if not piece:
+                    break
+                got += len(piece)
+    finally:
+        link.close()
+    if got != want:
+        raise RuntimeError(f"the daemon answered {got} of {want} bytes: it refused the frame, "
+                           "and its log says why")
+    return time.perf_counter() - started
+
+
+def tail(path, size=4000):
+    try:
+        return path.read_bytes()[-size:].decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--root", type=pathlib.Path, default=ROOT, help="the release or checkout")
+    parser.add_argument("--json", type=pathlib.Path, help="write the result here as well as to stdout")
+    parser.add_argument("--frames", type=int, default=FRAMES)
+    parser.add_argument("--warmup", type=int, default=WARMUP)
+    args = parser.parse_args()
+    root = args.root.resolve()
+    result = {"ok": False, "error": None, "settings": SETTINGS, "frames": args.frames,
+              "warmup": args.warmup, "python": sys.version.split()[0], "cases": []}
+    # The daemon's log and settings stay in the release, overwritten by the next test. On
+    # Windows a virtual environment's python.exe starts the interpreter as a child, which ends
+    # with this test (NR_LAYER_SPAWNED below) and holds its log open until then.
+    room = root / "work" / "speed-test"
+    room.mkdir(parents=True, exist_ok=True)
+    log = room / "daemon.log"
+    settings = room / "settings.json"
+    settings.write_text(json.dumps(SETTINGS), encoding="utf-8")
+    if os.name == "nt":
+        endpoint = rf"\\.\pipe\nr_speed_test_{uuid.uuid4().hex[:12]}"
+    else:
+        endpoint = str(pathlib.Path(tempfile.gettempdir()) / f"nr-speed-test-{uuid.uuid4().hex[:12]}.sock")
+    # The daemon as the layer starts it: its keeping of NumPy's blocks, without the layer named
+    # in its own Vulkan instance, and marked with this process, so it ends with this test.
+    environment = {key: value for key, value in os.environ.items()
+                   if not key.upper().startswith("NR_") and key.upper() != "VK_INSTANCE_LAYERS"}
+    environment.update(NR_KEEP_BLOCKS="1", PYTHONUTF8="1", PYTHONDONTWRITEBYTECODE="1",
+                       NR_LAYER_SPAWNED=str(os.getpid()))
+    hidden = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
+    started = time.perf_counter()
+    with log.open("wb") as output:
+        daemon = subprocess.Popen(
+            [sys.executable, str(root / "src/layer/nr_daemon.py"), "--socket", endpoint,
+             "--settings", str(settings), "--root", str(root)],
+            stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT, env=environment,
+            cwd=root, **hidden)
+    try:
+        # Ready once it listens: the model loads first, and the first start on a PC also builds
+        # the driver's shader cache.
+        while "listening on" not in tail(log, 1 << 16):
+            if daemon.poll() is not None:
+                raise RuntimeError(f"the daemon ended (code {daemon.returncode}) before it listened")
+            if time.perf_counter() - started > 600:
+                raise RuntimeError("the daemon did not listen within 600 s")
+            time.sleep(0.2)
+        result["daemon_ready_s"] = round(time.perf_counter() - started, 1)
+        text = tail(log, 1 << 16)
+        ready = re.search(r"model ready in ([0-9.]+)s on (.+)", text)
+        if ready:
+            result["model_ready_s"], result["device"] = float(ready.group(1)), ready.group(2).strip()
+        memory = re.search(r"buffers in (.+)", text)
+        if memory:
+            result["memory"] = memory.group(1).strip()
+        for width, height in SIZES:
+            header = struct.pack("<4I", MAGIC, width, height, FORMAT_B8G8R8A8)
+            made, want = frames(width, height), 4 * width * height
+            times = [round_trip(endpoint, header, made[i % len(made)], want)
+                     for i in range(args.warmup + args.frames)][args.warmup:]
+            times.sort()
+            median = times[len(times) // 2]
+            field = re.findall(rf"^{width}x{height} .*?network (\d+)x(\d+)", tail(log, 1 << 20), re.M)
+            case = {"width": width, "height": height, "render_scale": SETTINGS["render_scale"],
+                    "network": [int(field[-1][0]), int(field[-1][1])] if field else None,
+                    "median_ms": round(1000 * median, 1), "min_ms": round(1000 * times[0], 1),
+                    "max_ms": round(1000 * times[-1], 1), "fps": round(1 / median, 1)}
+            result["cases"].append(case)
+            print(f"{width}x{height}: {case['median_ms']} ms ({case['fps']} fps), network "
+                  f"{case['network']}", file=sys.stderr, flush=True)
+        result["ok"] = True
+    except (OSError, RuntimeError) as error:
+        result["error"] = str(error)
+        result["daemon_log_tail"] = tail(log)
+    finally:
+        daemon.terminate()
+        try:
+            daemon.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            daemon.kill()
+        result["seconds"] = round(time.perf_counter() - started, 1)
+        if os.name != "nt":
+            try:
+                os.unlink(endpoint)
+            except OSError:
+                pass
+    text = json.dumps(result, indent=2)
+    if args.json:
+        args.json.parent.mkdir(parents=True, exist_ok=True)
+        args.json.write_text(text, encoding="utf-8")
+    print(text)
+    return 0 if result["ok"] else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

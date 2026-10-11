@@ -663,6 +663,8 @@ def _owned_installation(profile):
 
 
 VC_REDIST = "https://learn.microsoft.com/cpp/windows/latest-supported-vc-redist"
+# What the speed test measured, for Save report: src/bench/speed_test.py's result, with the PC.
+SPEED_TEST = "work/speed-test.json"
 # The DLL every test here extracted its weights from (notes/CLAUDE.md, Phase 0).
 TESTED_DLL_VERSION = "310.8.0.0"
 TESTED_DLL_SHA256 = "e16bcf15e16e13f527491cdf7845b2fe6521a738d8f7c9c721866a8496e1fc8e"
@@ -1443,7 +1445,9 @@ def install(profile, emit=None):
         emit("Installation complete; the effect is off\n")
     return {"ok": True, "error": None, "installed": str(destination), "root": str(profile.root),
             "profile": profile.to_dict(), "commands": commands, "trigger_exists": False,
-            "warnings": checked["warnings"]}
+            "warnings": checked["warnings"],
+            # The window runs the speed test after a first installation, once.
+            "speed_test_due": not (profile.root / SPEED_TEST).is_file()}
 
 
 def set_effect(profile, enabled):
@@ -1673,10 +1677,74 @@ def status(profile):
                   game_integrity=level if isinstance(level, int) and not isinstance(level, bool) else None,
                   game_elevated=elevated, uac_enabled=_uac_enabled() if elevated else None,
                   fresh_frames=bool(active and fresh_processed > 0 and mtime is not None
-                                    and time.time() - mtime < 10))
+                                    and time.time() - mtime < 10),
+                  speed_test=_speed_summary(profile))
     if process_error:
         result["process_observation_error"] = process_error
     return result
+
+
+def _speed_summary(profile):
+    """The last speed test as the window shows it: the GPU, when, and each size's frame."""
+    try:
+        measured = _read_json(profile.root / SPEED_TEST, limit=256 * 1024)
+        return {"device": measured.get("device"), "created_utc": measured.get("created_utc"),
+                "cases": [{name: case.get(name) for name in ("width", "height", "median_ms", "fps")}
+                          for case in measured.get("cases", [])]}
+    except (OSError, ValueError, AttributeError, TypeError):
+        return None
+
+
+def _daemon_answering(profile):
+    """Whether this release's daemon is up: its pipe is listed, which asks nothing of it."""
+    if os.name != "nt":
+        return False
+    name = runtime_env(profile)["NR_LAYER_SOCKET"].rsplit("\\", 1)[-1]
+    try:
+        return name in os.listdir("\\\\.\\pipe\\")
+    except OSError:
+        return False
+
+
+def speed_test(profile, emit=None):
+    """NR's own speed on this PC, the daemon alone with no game, at the settings a release starts
+    at: src/bench/speed_test.py with the release's Python. Kept in SPEED_TEST, with the PC, for
+    Save report, so testers' reports say what each GPU does at its best."""
+    if not _weights_state(profile)["ready"]:
+        return {"ok": False, "error": "Install NR first: the speed test runs the model it extracts"}
+    script = profile.root / "src/bench/speed_test.py"
+    if not script.is_file():
+        return {"ok": False, "error": f"This release has no speed test: {script} is missing"}
+    try:
+        launch = _launch_state(profile)
+    except (OSError, ValueError):
+        launch = {}
+    if launch.get("game_exe") and launch.get("exit_code") is None and _running_executable(launch.get("pid")):
+        return {"ok": False, "error": "Close the game first: the speed test needs the GPU to itself"}
+    if _daemon_answering(profile):
+        return {"ok": False, "error": "NR's daemon still runs for a game that is closing; try again in a moment"}
+    if emit:
+        emit("Measuring NR on this GPU, without a game\n")
+    run = profile.root / "work/windows-wizard/speed-test-run.json"
+    run.unlink(missing_ok=True)
+    got = _run([profile.python, "-I", script, "--root", profile.root, "--json", run],
+               timeout=900, emit=emit, cwd=profile.root)
+    try:
+        measured = _read_json(run, limit=256 * 1024)
+    except (OSError, ValueError):
+        measured = {}
+    if got["timed_out"] or not measured.get("ok"):
+        why = measured.get("error") or ("no answer in 900 s" if got["timed_out"]
+                                        else got["output"].strip()[-300:] or f"exit code {got['returncode']}")
+        return {"ok": False, "error": "The speed test did not finish: " + why, "speed_test": measured or None}
+    try:
+        release = _read_json(profile.root / "release-metadata.json", limit=64 * 1024)
+    except (OSError, ValueError):
+        release = None
+    result = dict(measured, schema_version=SCHEMA_VERSION, created_utc=datetime.now(timezone.utc).isoformat(),
+                  release=release, system=_system_metadata())
+    _atomic_json(profile.root / SPEED_TEST, result)
+    return {"ok": True, "error": None, "speed_test": result}
 
 
 def _system_metadata():
@@ -1689,7 +1757,11 @@ $null = [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 $ErrorActionPreference = 'Stop'
 $os = Get-CimInstance Win32_OperatingSystem | Select-Object Caption,Version,BuildNumber,OSArchitecture
 $gpu = @(Get-CimInstance Win32_VideoController | Select-Object Name,DriverVersion,DriverDate,PNPDeviceID)
-@{windows=$os;gpu=$gpu} | ConvertTo-Json -Depth 5 -Compress
+$cpu = Get-CimInstance Win32_Processor | Select-Object -First 1 Name,NumberOfCores,NumberOfLogicalProcessors,MaxClockSpeed
+$memory = (Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory
+# BatteryStatus 1 is on battery, 2 on mains: a laptop on battery is slower.
+$battery = @(Get-CimInstance Win32_Battery | Select-Object BatteryStatus,EstimatedChargeRemaining)
+@{windows=$os;gpu=$gpu;cpu=$cpu;memory_bytes=$memory;battery=$battery} | ConvertTo-Json -Depth 5 -Compress
 """
     command = "powershell.exe"
     system_root = os.environ.get("SystemRoot")
@@ -1748,6 +1820,11 @@ def export_report(profile, destination):
         # own level is what Launch game gives, and with UAC off what every program has.
         level = _integrity()
         elevation = {"window_integrity": level, "window_elevated": _high(level), "uac_enabled": _uac_enabled()}
+        # The speed test, whole: what NR does at its best on this PC, gathered from testers' reports.
+        try:
+            speed = _read_json(profile.root / SPEED_TEST, limit=256 * 1024)
+        except (OSError, ValueError):
+            speed = None
         report = {"schema_version": SCHEMA_VERSION, "created_utc": datetime.now(timezone.utc).isoformat(),
                   "release": metadata, "release_metadata_error": metadata_error,
                   "root": str(profile.root), "profile": profile.to_dict(),
@@ -1756,6 +1833,7 @@ def export_report(profile, destination):
                   "dll": _dll_info(profile.dll), "weights_log_tail": weights_tail,
                   "settings": settings, "settings_error": settings_error,
                   "status": observation, "daemon_log_tail": tail, "dxvk_logs": _dxvk_log_report(profile),
+                  "speed_test": speed,
                   "note": "Daemon timings and observed frame counts are not game FPS. No DLL or weights are included."}
         _atomic_json(destination, report)
         return {"ok": True, "error": None, "path": str(destination)}
