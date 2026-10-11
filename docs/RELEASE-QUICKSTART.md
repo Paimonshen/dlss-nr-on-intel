@@ -56,6 +56,13 @@ launcher that starts it, without administrator rights. With UAC off, Windows run
 program as administrator, and NR needs UAC on. The status says when a game runs as
 administrator, and **Check** when this window does.
 
+**Speed test.** After the first installation the window measures NR alone on this PC, with no
+game: four window sizes, 640×360 to 1920×1080, at the render scale a release starts at (0.4),
+in about ten seconds. It shows each size's frame time and the frame rate NR alone reaches
+there, which is the best it does here: a game draws on the same GPU, so in a game it is lower.
+**Speed test** runs it again, with no game running. **Save report** carries the result with the
+GPU, driver, CPU, memory and power, so reports from testers say what each GPU does.
+
 Set the game itself to an 800×450 window for the first comparison. NR starts off;
 **Enable/disable NR** changes it while the game runs. If the game was already running
 when NR was installed, restart it. The status distinguishes a model that is loaded from
@@ -80,8 +87,8 @@ Under **Launch options**, the optional Fossilize workaround turns off Steam's Fo
 layer in this game while NR is installed; it does not disable Steam Overlay or modify the
 global shader-cache setting. The game arguments there are for **Launch game**.
 
-**Save report** exports settings, version/driver information, what **Check** says, the
-game's DXVK logs and diagnostic log data without NVIDIA DLLs or weights. The release's private profile and extracted
+**Save report** exports settings, version/driver information, what **Check** says, the speed
+test, the game's DXVK logs and diagnostic log data without NVIDIA DLLs or weights. The release's private profile and extracted
 weights stay on this PC and must not be added to a distributable.
 The window supports English, Russian and Spanish, chooses its initial language from
 Windows, and has a language selector at the top. The manual setup below remains available.

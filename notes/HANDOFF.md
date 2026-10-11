@@ -9,6 +9,27 @@ you need the evidence behind a line in this file, rather than reading them in or
 
 ---
 
+## A speed test on a tester's first run, kept for their reports (2026-10-12)
+
+The owner asked for a short measure of frame time on a first run, saved where reports gather it,
+and for the user to be told what NR does at best. `2afb9e8` and `7cc281e`, local:
+- `src/bench/speed_test.py` starts the daemon as the layer does and sends it synthetic frames,
+  one connection a frame, at 640x360, 800x450, 1280x720 and 1920x1080 and the release's render
+  scale 0.4. What it times is the round trip a game waits for, without the game. Fifteen frames
+  after five a size: nine after three left 1280x720 at 38 ms in one run and 50 in the next.
+- The setup window runs it after a first installation, and from a **Speed test** button. It is
+  refused while a game with NR runs. The window says each size's frame and best frame rate, in
+  three languages, and that a game is slower on the same GPU.
+- `work/speed-test.json` holds it with the GPU, driver, CPU, memory and power; Save report
+  carries it whole, and the status a summary.
+
+On the Arc 140V, on mains, three runs in a row: 27.0-27.7, 27.7-28.2, 36.7-39.4 and
+69.9-73.9 ms, about 6 s each. Through the window by UI Automation, from a release built at
+`2afb9e8`: Install NR, then the test, then its line in the window.
+
+**Next on Linux:** `speed_test.py`'s Unix-socket arm has never run. One `python3
+src/bench/speed_test.py` in a checkout with weights, set beside `live_rates.py`'s table.
+
 ## Issue #12, further: the layer runs in the tester's DOOM and starts no daemon, silently (2026-10-12)
 
 The tester's game is not elevated, by Task Manager, and elevated it fails the same way; the report
