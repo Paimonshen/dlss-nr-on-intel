@@ -8,6 +8,7 @@
  *
  * Build: cc -O2 -shared -fPIC -I<vulkan headers> -o libxmx.so libxmx.c -lvulkan
  */
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -614,6 +615,117 @@ int xmx_half_by_cast(void) { return g.half_by_cast; }
 /* Whether the device is a card with memory of its own rather than the host's (memtype). */
 int xmx_discrete(void) { return g.discrete; }
 
+/* Which Vulkan device runs the network. The loader's first is not necessarily one that can:
+ * a desktop can have an older Intel iGPU beside its Arc card, a card of another vendor, or a
+ * software or virtual device, and since frames reach the daemon through host memory the
+ * network can run on any card in the machine, not only the game's. The kernels need the
+ * cooperative-matrix shape they are written for, float16 8x16 by 16x16 into float32 at
+ * subgroup scope (Xe2's), and the workgroup-memory layouts gemm_staged declares. */
+static const char *device_lacks(VkInstance inst, VkPhysicalDevice pd)
+{
+	uint32_t n = 0;
+	if (vkEnumerateDeviceExtensionProperties(pd, NULL, &n, NULL) < 0)
+		return "a list of its extensions";
+	VkExtensionProperties *have = calloc(n ? n : 1, sizeof *have);
+	int coop = 0, layout = 0;
+	if (have && vkEnumerateDeviceExtensionProperties(pd, NULL, &n, have) >= 0)
+		for (uint32_t i = 0; i < n; i++) {
+			coop |= !strcmp(have[i].extensionName, VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME);
+			layout |= !strcmp(have[i].extensionName,
+					  VK_KHR_WORKGROUP_MEMORY_EXPLICIT_LAYOUT_EXTENSION_NAME);
+		}
+	free(have);
+	if (!coop) return VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME;
+	if (!layout) return VK_KHR_WORKGROUP_MEMORY_EXPLICIT_LAYOUT_EXTENSION_NAME;
+	PFN_vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR shapes_of =
+		(PFN_vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR)
+		vkGetInstanceProcAddr(inst, "vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR");
+	n = 0;
+	if (!shapes_of || shapes_of(pd, &n, NULL) < 0 || !n)
+		return "any cooperative-matrix shape";
+	VkCooperativeMatrixPropertiesKHR *shapes = calloc(n, sizeof *shapes);
+	int found = 0;
+	if (shapes) {
+		for (uint32_t i = 0; i < n; i++)
+			shapes[i].sType = VK_STRUCTURE_TYPE_COOPERATIVE_MATRIX_PROPERTIES_KHR;
+		if (shapes_of(pd, &n, shapes) >= 0)
+			for (uint32_t i = 0; i < n; i++)
+				found |= shapes[i].MSize == 8 && shapes[i].NSize == 16
+					 && shapes[i].KSize == 16
+					 && shapes[i].AType == VK_COMPONENT_TYPE_FLOAT16_KHR
+					 && shapes[i].BType == VK_COMPONENT_TYPE_FLOAT16_KHR
+					 && shapes[i].CType == VK_COMPONENT_TYPE_FLOAT32_KHR
+					 && shapes[i].ResultType == VK_COMPONENT_TYPE_FLOAT32_KHR
+					 && shapes[i].scope == VK_SCOPE_SUBGROUP_KHR;
+	}
+	free(shapes);
+	return found ? NULL : "the float16 8x16x16 cooperative-matrix shape";
+}
+
+static const char *device_kind(int type)
+{
+	switch (type) {
+	case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU: return "discrete";
+	case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU: return "integrated";
+	case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU: return "virtual";
+	case VK_PHYSICAL_DEVICE_TYPE_CPU: return "CPU";
+	default: return "other";
+	}
+}
+
+/* The choice itself, kept apart from Vulkan so a test can put any machine in front of it.
+ * Device i is of VkPhysicalDeviceType `types[i]`, named `names[i]`, and `able[i]` when it
+ * has what the network needs. Among those a discrete card comes first, then an integrated
+ * one, then the rest, each in the loader's order. When none is able, the loader's first
+ * device that is not a CPU is tried, as before this choice existed. `want` (XMX_DEVICE)
+ * names one instead: its index in the loader's list, or a case-insensitive part of its
+ * name ("B580"; digits are an index up to 99, a part of the name like "770" from three
+ * on); one that names nothing leaves the choice as without it. `how` says which of these
+ * happened (XMX_PICK_*). */
+enum { XMX_PICK_ABLE, XMX_PICK_NONE_ABLE, XMX_PICK_ASKED, XMX_PICK_UNMATCHED };
+
+static int contains_folded(const char *text, const char *part)
+{
+	for (; *text; text++) {
+		size_t i = 0;
+		while (part[i] && tolower((unsigned char)text[i]) == tolower((unsigned char)part[i]))
+			i++;
+		if (!part[i]) return 1;
+	}
+	return 0;
+}
+
+int xmx_pick_device(unsigned n, const int *types, const int *able, const char *const *names,
+		    const char *want, int *how)
+{
+	int unmatched = 0;
+	if (want && *want) {
+		const char *p = want;
+		while (*p >= '0' && *p <= '9') p++;
+		if (!*p && p - want < 3) {          /* an index; three digits on are a model number */
+			unsigned long index = strtoul(want, NULL, 10);
+			if (index < n) { *how = XMX_PICK_ASKED; return (int)index; }
+		} else {
+			for (unsigned i = 0; i < n; i++)
+				if (contains_folded(names[i], want)) { *how = XMX_PICK_ASKED; return (int)i; }
+		}
+		unmatched = 1;
+	}
+	int best = -1, best_rank = -1;
+	for (unsigned i = 0; i < n; i++) {
+		if (!able[i]) continue;
+		int rank = types[i] == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU ? 3
+			 : types[i] == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ? 2
+			 : types[i] == VK_PHYSICAL_DEVICE_TYPE_CPU ? 0 : 1;
+		if (rank > best_rank) { best = (int)i; best_rank = rank; }
+	}
+	if (best >= 0) { *how = unmatched ? XMX_PICK_UNMATCHED : XMX_PICK_ABLE; return best; }
+	*how = unmatched ? XMX_PICK_UNMATCHED : XMX_PICK_NONE_ABLE;
+	for (unsigned i = 0; i < n; i++)
+		if (types[i] != VK_PHYSICAL_DEVICE_TYPE_CPU) return (int)i;
+	return 0;
+}
+
 int xmx_init(const char *spv_path)
 {
 	if (g.ready) return 0;
@@ -627,11 +739,43 @@ int xmx_init(const char *spv_path)
 	vkEnumeratePhysicalDevices(g.inst, &n, NULL);
 	if (!n) FAIL("no physical device", 0);
 	VkPhysicalDevice *pds = calloc(n, sizeof *pds);
+	VkPhysicalDeviceProperties *all = calloc(n, sizeof *all);
+	const char **lacks = calloc(n, sizeof *lacks);
+	const char **names = calloc(n, sizeof *names);
+	int *types = calloc(n, sizeof *types), *able = calloc(n, sizeof *able);
+	if (!pds || !all || !lacks || !names || !types || !able) {
+		free(pds); free(all); free(lacks); free(names); free(types); free(able);
+		FAIL("out of memory listing the devices", 0);
+	}
 	vkEnumeratePhysicalDevices(g.inst, &n, pds);
-	g.pd = pds[0];
-	free(pds);
-	VkPhysicalDeviceProperties props;
-	vkGetPhysicalDeviceProperties(g.pd, &props);
+	for (uint32_t i = 0; i < n; i++) {
+		vkGetPhysicalDeviceProperties(pds[i], &all[i]);
+		lacks[i] = device_lacks(g.inst, pds[i]);
+		names[i] = all[i].deviceName;
+		types[i] = all[i].deviceType;
+		able[i] = !lacks[i];
+	}
+	const char *want = getenv("XMX_DEVICE");
+	int how, chosen = xmx_pick_device(n, types, able, names, want, &how);
+	/* Said whenever there was a choice to make, or the one made is not a good one: which
+	 * GPU the network runs on is the first question about a slow or failed daemon. */
+	if (n > 1 || how != XMX_PICK_ABLE)
+		for (uint32_t i = 0; i < n; i++)
+			fprintf(stderr, "libxmx: device %u: %s, %s, %s%s\n", i, names[i],
+				device_kind(types[i]), lacks[i] ? "lacks " : "can run the network",
+				lacks[i] ? lacks[i] : "");
+	if (how == XMX_PICK_UNMATCHED)
+		fprintf(stderr, "libxmx: XMX_DEVICE=%s matches no device here; choosing as without it\n",
+			want);
+	if (lacks[chosen])
+		fprintf(stderr, "libxmx: trying device %d, %s, although it lacks %s\n",
+			chosen, names[chosen], lacks[chosen]);
+	else if (n > 1)
+		fprintf(stderr, "libxmx: the network runs on device %d, %s%s\n", chosen,
+			names[chosen], how == XMX_PICK_ASKED ? ", as XMX_DEVICE asks" : "");
+	g.pd = pds[chosen];
+	VkPhysicalDeviceProperties props = all[chosen];
+	free(pds); free(all); free(lacks); free(names); free(types); free(able);
 	snprintf(g.name, sizeof g.name, "%s", props.deviceName);
 	g.discrete = props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
 
