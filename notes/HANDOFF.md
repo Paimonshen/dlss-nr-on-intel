@@ -12,20 +12,31 @@ you need the evidence behind a line in this file, rather than reading them in or
 ## A speed test on a tester's first run, kept for their reports (2026-10-12)
 
 The owner asked for a short measure of frame time on a first run, saved where reports gather it,
-and for the user to be told what NR does at best. `2afb9e8` and `7cc281e`, local:
+for the user to be told what NR does at best, at render scale 1.0 as well as 0.4, and for the
+window to say that capturing the frame and the rest take time too. `2afb9e8`, `7cc281e` and
+`c15f491`, local:
 - `src/bench/speed_test.py` starts the daemon as the layer does and sends it synthetic frames,
-  one connection a frame, at 640x360, 800x450, 1280x720 and 1920x1080 and the release's render
-  scale 0.4. What it times is the round trip a game waits for, without the game. Fifteen frames
-  after five a size: nine after three left 1280x720 at 38 ms in one run and 50 in the next.
+  one connection a frame, at 640x360, 800x450, 1280x720 and 1920x1080, at 0.4 and at 1.0. For
+  each it keeps the network's own time (the middle of the daemon's `gpu in+run+out`, from its
+  log for the same frames) and the round trip a game waits for. Fifteen frames after five a
+  case: nine after three left 1280x720 at 38 ms in one run and 50 in the next.
 - The setup window runs it after a first installation, and from a **Speed test** button. It is
-  refused while a game with NR runs. The window says each size's frame and best frame rate, in
-  three languages, and that a game is slower on the same GPU.
+  refused while a game with NR runs. The window shows the network's time and the frame rate it
+  allows, a line a render scale, in three languages, and why a game's frame rate is lower.
 - `work/speed-test.json` holds it with the GPU, driver, CPU, memory and power; Save report
-  carries it whole, and the status a summary.
+  carries it whole, round trips included, and the status a summary.
 
-On the Arc 140V, on mains, three runs in a row: 27.0-27.7, 27.7-28.2, 36.7-39.4 and
-69.9-73.9 ms, about 6 s each. Through the window by UI Automation, from a release built at
-`2afb9e8`: Install NR, then the test, then its line in the window.
+On the Arc 140V, on mains, network and round trip, ms:
+
+| window | 0.4 | 1.0 |
+| --- | --- | --- |
+| 640x360 | 23 / 26.9 | 41 / 44.5 |
+| 800x450 | 24 / 28.2 | 66 / 71.4 |
+| 1280x720 | 31 / 39.1 | 170 / 182.4 |
+| 1920x1080 | 54 / 69.8 | 384 / 408.6 |
+
+About 22 s; at 0.4 alone three runs in a row stayed within 5 %. Through the window by UI
+Automation, from a release built at `c15f491`: Install NR, then the test, then its lines.
 
 **Next on Linux:** `speed_test.py`'s Unix-socket arm has never run. One `python3
 src/bench/speed_test.py` in a checkout with weights, set beside `live_rates.py`'s table.

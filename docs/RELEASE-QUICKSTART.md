@@ -57,11 +57,13 @@ program as administrator, and NR needs UAC on. The status says when a game runs 
 administrator, and **Check** when this window does.
 
 **Speed test.** After the first installation the window measures NR alone on this PC, with no
-game: four window sizes, 640×360 to 1920×1080, at the render scale a release starts at (0.4),
-in about ten seconds. It shows each size's frame time and the frame rate NR alone reaches
-there, which is the best it does here: a game draws on the same GPU, so in a game it is lower.
-**Speed test** runs it again, with no game running. **Save report** carries the result with the
-GPU, driver, CPU, memory and power, so reports from testers say what each GPU does.
+game: four window sizes, 640×360 to 1920×1080, at the render scale a release starts at (0.4)
+and at full scale (1.0), in about half a minute. It shows what the network itself takes for a
+frame at each, and the frame rate that time allows. Capturing each frame from the game and
+giving it back takes time as well, and the game draws on the same GPU, so in a game the frame
+rate is lower than these. **Speed test** runs it again, with no game running. **Save report**
+carries the result, the whole round trip too, with the GPU, driver, CPU, memory and power, so
+reports from testers say what each GPU does.
 
 Set the game itself to an 800×450 window for the first comparison. NR starts off;
 **Enable/disable NR** changes it while the game runs. If the game was already running
