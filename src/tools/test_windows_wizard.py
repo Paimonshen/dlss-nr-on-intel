@@ -339,6 +339,61 @@ class WizardFixture(unittest.TestCase):
         self.assertTrue(core.uninstall(self.profile)["ok"])
         self.assertEqual(sorted(path.name for path in game.iterdir()), [self.game.name])
 
+    def test_pacing_in_the_profile_the_environment_and_an_installed_game(self):
+        # Asynchronous mode and every Nth frame: kept in the profile, set for the layer either
+        # way, and written into an installed game's ENV_FILE without its other lines moving.
+        self.assertEqual((self.profile.nr_async, self.profile.nr_every), (False, 1))
+        env = core.layer_environment(self.profile)
+        self.assertEqual((env["NR_LAYER_LIVE"], env["NR_LAYER_ASYNC"]), ("1", "0"))
+        paced = replace(self.profile, nr_async=True, nr_every=2)
+        env = core.runtime_env(paced)
+        self.assertEqual((env["NR_LAYER_LIVE"], env["NR_LAYER_ASYNC"]), ("2", "1"))
+        self.assertEqual(core.Profile.from_dict(paced.to_dict()), paced)
+        earlier = self.profile.to_dict()
+        del earlier["nr_async"], earlier["nr_every"]
+        self.assertEqual(core.Profile.from_dict(earlier), self.profile)
+        for bad in ({"nr_async": "yes"}, {"nr_every": 0}, {"nr_every": core.MAX_EVERY + 1},
+                    {"nr_every": True}, {"nr_every": 1.5}, {"nr_every": "2"}):
+            with self.assertRaises(ValueError, msg=bad):
+                core.Profile.from_dict({**self.profile.to_dict(), **bad})
+
+        # Not installed: kept in the profile, and nothing else written.
+        result = core.set_pacing(paced)
+        self.assertEqual((result["ok"], result["applied"]), (True, False))
+        self.assertEqual(core.load_profile(self.root), paced)
+        self.assertFalse(core.installed_path(paced).exists())
+
+        def written():
+            lines = env_file.read_text(encoding="utf-8").splitlines()
+            return lines, dict(line.split("=", 1) for line in lines
+                               if "=" in line and not line.startswith("#"))
+
+        self.assertTrue(core.install(self.profile)["ok"])
+        env_file = core.installed_path(self.profile) / core.ENV_FILE
+        before, values = written()
+        self.assertEqual((values["NR_LAYER_LIVE"], values["NR_LAYER_ASYNC"]), ("1", "0"))
+        # Installed: the two lines change, the rest stays as Install NR wrote it, even with
+        # another Python in the window that Install NR has not checked.
+        result = core.set_pacing(replace(paced, python=self.base / "unchecked" / "python.exe"))
+        self.assertEqual((result["ok"], result["applied"]), (True, True))
+        after, values = written()
+        self.assertEqual((values["NR_LAYER_LIVE"], values["NR_LAYER_ASYNC"]), ("2", "1"))
+        self.assertEqual(values["NR_PYTHON"], str(self.python))
+        others = [line for line in before if line.split("=", 1)[0] not in core.PACING]
+        self.assertEqual([line for line in after if line.split("=", 1)[0] not in core.PACING], others)
+        self.assertEqual(len(after), len(before))
+        core.set_pacing(self.profile)
+        after, values = written()
+        self.assertEqual((values["NR_LAYER_LIVE"], values["NR_LAYER_ASYNC"]), ("1", "0"))
+        self.assertFalse(env_file.with_name(core.ENV_FILE + ".new").exists())
+        # Another release's installation is left alone.
+        other = replace(self.profile, root=self.base / "another release", nr_every=3)
+        (self.base / "another release" / "work").mkdir(parents=True)
+        result = core.set_pacing(other)
+        self.assertEqual((result["ok"], result["applied"]), (True, False))
+        self.assertEqual(written()[0], after)
+        self.assertTrue(core.uninstall(self.profile)["ok"])
+
     def test_remove_takes_dxvks_first_log_from_the_folders_the_game_started_in(self):
         # DXVK opens its first log before it loads the proxy, so in the folder the game was
         # started in: Steam starts Mortal Kombat 11 in its root, above the executable.

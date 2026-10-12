@@ -107,6 +107,27 @@ output bytes. Rebuild both `libxmx` and the three staged shaders
 in the checkout named by the game's `NR_ROOT`; changing another checkout does not update
 an already running daemon or a separate MSVC build.
 
+**Which GPU runs the network.** libxmx no longer takes the first Vulkan device the loader
+lists: it takes one with the cooperative-matrix shape the kernels are written for (float16
+8x16 by 16x16 into float32, Xe2's) and `VK_KHR_workgroup_memory_explicit_layout`, a discrete
+card before an integrated one. A desktop's older Intel iGPU, a card of another vendor or a
+virtual device is passed over, and since frames reach the daemon through host memory, a game
+on another card can have its network on the Arc. With more than one device, the daemon's log
+lists them, what each lacks, and the one chosen. `XMX_DEVICE` names another: its index in
+that list, or part of its name (`B580`). `src/gpu/test_device_pick.py` checks the choice on
+machines this one is not, and this machine's own devices through `xmx_init`.
+
+**Its queue.** `XMX_QUEUE_PRIORITY=low|medium|high|realtime` asks for that global priority on
+the daemon's queue (`VK_KHR_global_priority`; Intel's driver takes all four, Linux may refuse
+above medium without `CAP_SYS_NICE`, and the daemon then says so and runs at the default).
+`XMX_QUEUE_FAMILY=compute` puts the queue on a family without graphics, Intel's compute engine,
+instead of the one the game draws on; a number names a family. Neither is set by default: in
+Mortal Kombat 11 on the Arc 140V (1280x720, render scale 0.4, driver 101.9033) each
+combination averaged 19.1-19.8 processed frames a second over two runs, in step and
+asynchronous alike, inside the spread of single runs (19.05-20.12). The network's own 33 ms
+are most of the frame there, and in step the game waits rather than competes. They are left
+for a discrete card.
+
 On Intel's driver, leave `gpu_window_attention` out: `ctest --test-dir work/cmake -E
 gpu_window_attention`. Its unmerged variant, which the graph does not use by default, hangs the
 engine from 32 windows up (phase71). Everything else passes, now that libxmx declares

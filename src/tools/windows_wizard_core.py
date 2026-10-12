@@ -49,6 +49,10 @@ DXVK_FILES = ("d3d8.dll", "d3d9.dll", "d3d10core.dll", "d3d11.dll", "dxgi.dll")
 PROXIES = {"x64": "nr_vulkan_proxy.dll", "x86": "nr_vulkan_proxy32.dll"}
 PROXY_NAME = "vulkan-1.dll"
 ENV_FILE = "nr-env.txt"
+# The pacing variables (Profile.nr_async, nr_every) set_pacing rewrites in ENV_FILE, and the
+# most presents one network frame may cover in the window.
+PACING = ("NR_LAYER_LIVE", "NR_LAYER_ASYNC")
+MAX_EVERY = 4
 # Where the proxy lists the folders the game was started in, for DXVK's first log there.
 START_FOLDERS = "start-folders.txt"
 # In the game's dlss-nr folder: what NR put beside the game, and the game's own files it set
@@ -83,6 +87,11 @@ class Profile:
     disable_fossilize: bool = True
     launch_mode: str = "direct"
     steam_app_id: str = ""
+    # How frames go through the network, read by the layer when the game starts:
+    # NR_LAYER_ASYNC, the network working while the game draws its next frame, and
+    # NR_LAYER_LIVE, every how many presents one goes through it.
+    nr_async: bool = False
+    nr_every: int = 1
 
     def __post_init__(self):
         self.root = Path(self.root).expanduser().resolve()
@@ -96,7 +105,8 @@ class Profile:
                 "game_exe": str(self.game_exe), "dll": str(self.dll) if self.dll else None,
                 "api": self.api, "game_args": list(self.game_args),
                 "disable_fossilize": self.disable_fossilize,
-                "launch_mode": self.launch_mode, "steam_app_id": self.steam_app_id}
+                "launch_mode": self.launch_mode, "steam_app_id": self.steam_app_id,
+                "nr_async": self.nr_async, "nr_every": self.nr_every}
 
     @classmethod
     def from_dict(cls, values):
@@ -108,13 +118,20 @@ class Profile:
         fossilize = values.get("disable_fossilize", True)
         if not isinstance(fossilize, bool):
             raise ValueError("disable_fossilize must be a boolean")
+        pipelined = values.get("nr_async", False)
+        if not isinstance(pipelined, bool):
+            raise ValueError("nr_async must be a boolean")
+        every = values.get("nr_every", 1)
+        if isinstance(every, bool) or not isinstance(every, int) or not 1 <= every <= MAX_EVERY:
+            raise ValueError(f"nr_every must be a whole number from 1 to {MAX_EVERY}")
         return cls(root=Path(values.get("root") or Path(__file__).resolve().parents[2]),
                    python=Path(values.get("python") or sys.executable),
                    game_exe=Path(values.get("game_exe") or "."),
                    dll=Path(values["dll"]) if values.get("dll") else None,
                    api=values.get("api", "vulkan"), game_args=arguments,
                    disable_fossilize=fossilize, launch_mode=values.get("launch_mode", "direct"),
-                   steam_app_id=str(values.get("steam_app_id") or ""))
+                   steam_app_id=str(values.get("steam_app_id") or ""),
+                   nr_async=pipelined, nr_every=every)
 
 
 def profile_path(root):
@@ -319,7 +336,7 @@ def layer_environment(profile):
         "NR_LAYER_LOG": str(work / "nr_daemon.log"),
         "NR_LAYER_TRIGGER": str(work / "nr_trigger"),
         "NR_LAYER_SOCKET": rf"\\.\pipe\nr_windows_{token}",
-        "NR_LAYER_LIVE": "1", "NR_LAYER_SPAWN": "1", "NR_KEEP_BLOCKS": "1",
+        "NR_LAYER_LIVE": str(profile.nr_every), "NR_LAYER_SPAWN": "1", "NR_KEEP_BLOCKS": "1",
         # The manifest itself, not its folder: the loader reads every .json in a folder it is
         # given, and warned that the installation's own records are not layer manifests.
         "ENABLE_NR_LAYER": "1", "VK_LAYER_PATH": str(installed_path(profile) / "VkLayer_dlss_nr.json"),
@@ -331,6 +348,8 @@ def layer_environment(profile):
     }
     if profile.disable_fossilize:
         values["DISABLE_VK_LAYER_VALVE_steam_fossilize_1"] = "1"
+    # Said either way, so an NR_LAYER_ASYNC the game inherits cannot decide it.
+    values["NR_LAYER_ASYNC"] = "1" if profile.nr_async else "0"
     return values
 
 
@@ -1448,6 +1467,28 @@ def install(profile, emit=None):
             "warnings": checked["warnings"],
             # The window runs the speed test after a first installation, once.
             "speed_test_due": not (profile.root / SPEED_TEST).is_file()}
+
+
+def set_pacing(profile):
+    """Keep how frames go through the network (Profile.nr_async, nr_every) in the profile, and
+    where NR is installed in this game from this release, in the proxy's ENV_FILE as well. The
+    layer reads them when the game starts, so a running game keeps the pacing it started with.
+    Only the PACING lines change: the rest of the file stays as Install NR wrote it, with the
+    Python and paths it checked."""
+    save_profile(profile)
+    folder = installed_path(profile)
+    owns, _ = _owned_installation(profile)
+    env_file = folder / ENV_FILE
+    applied = owns and (folder / OWNER_NAME).is_file() and env_file.is_file()
+    if applied:
+        lines = [line for line in env_file.read_text(encoding="utf-8").splitlines()
+                 if line.split("=", 1)[0] not in PACING]
+        lines += [f"{name}={value}" for name, value in layer_environment(profile).items()
+                  if name in PACING]
+        temporary = env_file.with_name(ENV_FILE + ".new")
+        temporary.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+        os.replace(temporary, env_file)
+    return {"ok": True, "error": None, "applied": bool(applied), "profile": profile.to_dict()}
 
 
 def set_effect(profile, enabled):

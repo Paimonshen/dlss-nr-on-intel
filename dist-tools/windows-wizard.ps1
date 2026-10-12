@@ -21,6 +21,8 @@ $script:PendingSettings = @{}
 $script:LoadingSettings = $false
 $script:SettingsReload = $false
 $script:SpeedTestDue = $false
+$script:PacingDue = $false
+$script:ApplyingProfile = $false
 $script:SettingsDue = [DateTime]::MaxValue
 $script:SettingsStateKey = 'SettingsLoading'
 
@@ -338,6 +340,17 @@ $script:SettingsStateKey = 'SettingsLoading'
         <Expander x:Name="MoreSettings" Header="" Margin="0,6,0,0"><StackPanel x:Name="MoreKnobRows"/></Expander>
        </StackPanel>
       </Border>
+      <Border Style="{StaticResource CardBox}">
+       <StackPanel>
+        <TextBlock x:Name="PacingHeading" Style="{StaticResource Heading}"/>
+        <CheckBox x:Name="AsyncMode" Content="" ToolTip=""/>
+        <Grid Margin="0,8,0,0"><Grid.ColumnDefinitions><ColumnDefinition Width="170"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+         <TextBlock x:Name="EveryLabel" VerticalAlignment="Center" ToolTip=""/>
+         <ComboBox x:Name="EveryFrame" Grid.Column="1" Margin="8,0,0,0" SelectedIndex="0" ToolTip=""><ComboBoxItem x:Name="Every1" Tag="1" Content=""/><ComboBoxItem x:Name="Every2" Tag="2" Content=""/><ComboBoxItem x:Name="Every3" Tag="3" Content=""/><ComboBoxItem x:Name="Every4" Tag="4" Content=""/></ComboBox>
+        </Grid>
+        <TextBlock x:Name="PacingNote" Style="{StaticResource Note}" Margin="0,8,0,0"/>
+       </StackPanel>
+      </Border>
      </StackPanel>
     </ScrollViewer>
    </TabItem>
@@ -351,7 +364,7 @@ foreach($name in @('DllPath','GamePath','PythonPath','BrowseDll','BrowseGame','B
     $script:Ui[$name] = $script:Window.FindName($name)
     if($null -eq $script:Ui[$name]) { throw "Missing control $name" }
 }
-foreach($name in @('Pages','SetupTab','ControlsTab','ControlsHeading','ControlsToggle','ControlsLaunch','ResetSettings','ControlsEffectState','ControlsRuntimeState','FrameReadout','SettingsState','KnobRows','MoreSettings','MoreKnobRows')) {
+foreach($name in @('Pages','SetupTab','ControlsTab','ControlsHeading','ControlsToggle','ControlsLaunch','ResetSettings','ControlsEffectState','ControlsRuntimeState','FrameReadout','SettingsState','KnobRows','MoreSettings','MoreKnobRows','PacingHeading','AsyncMode','EveryLabel','EveryFrame','Every1','Every2','Every3','Every4','PacingNote')) {
     $script:Ui[$name]=$script:Window.FindName($name)
     if($null -eq $script:Ui[$name]) { throw "Missing control $name" }
 }
@@ -469,6 +482,13 @@ $script:Strings=@{
   SpeedHead='The network itself on this PC ({0}), per frame:'; SpeedScale='render scale {0}: {1}'
   SpeedCase='{0}×{1} {2} ms (up to {3} fps)'
   SpeedNote='Taking each frame from the game and giving it back takes time too, and the game draws on the same GPU: in a game the frame rate is lower than these.'
+  PacingHeading='Frame pacing'; PacingNote='Takes effect when the game starts next.'
+  AsyncMode='Asynchronous: the network works while the game draws its next frame'
+  AsyncModeTip='More frames a second, and what is on screen is one processed frame behind.'
+  EveryLabel='Network on'; EveryTip='The frames between repeat the last result: the game runs faster, and the picture changes only on the network''s frames.'
+  Every1='every frame'; Every2='every 2nd frame'; Every3='every 3rd frame'; Every4='every 4th frame'
+  'Loading.pacing'='Saving frame pacing…'; 'Done.pacing'='Frame pacing saved; it takes effect when the game starts next.'
+  'Done.pacing-later'='Frame pacing saved; Install NR gives it to the game.'
   'Loading.settings'='Loading NR settings…'; 'Loading.settings-save'='Saving NR controls…'; 'Loading.settings-reset'='Restoring NR defaults…'
   'Done.settings'='NR settings loaded.'; 'Done.settings-save'='NR settings saved.'; 'Done.settings-reset'='NR defaults restored.'
   'Knob.render_scale'='Render scale'; 'Knob.min_extent'='Minimum network side'; 'Knob.profile'='Profile'; 'Knob.intensity'='Intensity'
@@ -553,6 +573,13 @@ $script:Strings=@{
   SpeedHead='Сама нейросеть на этом ПК ({0}) тратит на кадр:'; SpeedScale='масштаб рендера {0}: {1}'
   SpeedCase='{0}×{1} — {2} мс (до {3} fps)'
   SpeedNote='Захват кадра из игры и его возврат тоже занимают время, а игра рисует на той же видеокарте, поэтому fps в игре будет ниже этих значений.'
+  PacingHeading='Подача кадров'; PacingNote='Применится при следующем запуске игры.'
+  AsyncMode='Асинхронно: сеть работает, пока игра рисует следующий кадр'
+  AsyncModeTip='Больше кадров в секунду, а на экране результат на один обработанный кадр позже.'
+  EveryLabel='Сеть на'; EveryTip='Кадры между ними повторяют последний результат: игра идёт быстрее, а картинка меняется только на кадрах сети.'
+  Every1='каждом кадре'; Every2='каждом 2-м кадре'; Every3='каждом 3-м кадре'; Every4='каждом 4-м кадре'
+  'Loading.pacing'='Сохраняем подачу кадров…'; 'Done.pacing'='Подача кадров сохранена и применится при следующем запуске игры.'
+  'Done.pacing-later'='Подача кадров сохранена; «Установить NR» передаст её игре.'
   'Loading.settings'='Загружаем настройки NR…'; 'Loading.settings-save'='Сохраняем настройки NR…'; 'Loading.settings-reset'='Возвращаем настройки NR…'
   'Done.settings'='Настройки NR загружены.'; 'Done.settings-save'='Настройки NR сохранены.'; 'Done.settings-reset'='Настройки NR сброшены.'
   'Knob.render_scale'='Масштаб сети'; 'Knob.min_extent'='Минимальная сторона сети'; 'Knob.profile'='Профиль'; 'Knob.intensity'='Интенсивность'
@@ -637,6 +664,13 @@ $script:Strings=@{
   SpeedHead='La red neuronal por sí sola en este PC ({0}), por fotograma:'; SpeedScale='escala de renderizado {0}: {1}'
   SpeedCase='{0}×{1} {2} ms (hasta {3} fps)'
   SpeedNote='Tomar cada fotograma del juego y devolverlo también lleva tiempo, y el juego dibuja en la misma GPU: en un juego los FPS son más bajos que estos.'
+  PacingHeading='Ritmo de fotogramas'; PacingNote='Se aplica la próxima vez que se inicie el juego.'
+  AsyncMode='Asíncrono: la red trabaja mientras el juego dibuja el siguiente fotograma'
+  AsyncModeTip='Más fotogramas por segundo, y lo que se ve va un fotograma procesado por detrás.'
+  EveryLabel='Red en'; EveryTip='Los fotogramas intermedios repiten el último resultado: el juego va más rápido, y la imagen cambia solo en los fotogramas de la red.'
+  Every1='cada fotograma'; Every2='uno de cada 2 fotogramas'; Every3='uno de cada 3 fotogramas'; Every4='uno de cada 4 fotogramas'
+  'Loading.pacing'='Guardando el ritmo de fotogramas…'; 'Done.pacing'='Ritmo de fotogramas guardado; se aplica la próxima vez que se inicie el juego.'
+  'Done.pacing-later'='Ritmo de fotogramas guardado; Instalar NR se lo pasa al juego.'
   'Loading.settings'='Cargando la configuración de NR…'; 'Loading.settings-save'='Guardando los controles de NR…'; 'Loading.settings-reset'='Restaurando los valores predeterminados de NR…'
   'Done.settings'='Configuración de NR cargada.'; 'Done.settings-save'='Configuración de NR guardada.'; 'Done.settings-reset'='Se restauraron los valores predeterminados de NR.'
   'Knob.render_scale'='Escala de renderizado'; 'Knob.min_extent'='Lado mínimo de la red'; 'Knob.profile'='Perfil'; 'Knob.intensity'='Intensidad'
@@ -663,16 +697,19 @@ $script:TextBindings=@{
  ConnectHeading='ConnectHeading'; ApiLabel='ApiLabel'
  ArgsLabel='ArgsLabel'; FirstTestHint='FirstTestHint'; CompareHeading='CompareHeading'
  FpsHint='FpsHint'; ControlsHeading='ControlsHeading'
+ PacingHeading='PacingHeading'; EveryLabel='EveryLabel'; PacingNote='PacingNote'
 }
 $script:ContentBindings=@{
  BrowseDll='Browse'; BrowseGame='Browse'; BrowsePython='Browse'; FindPython='FindPython'; GetPython='GetPython'
  ApiVulkan='ApiVulkan'; ApiDxvk='ApiDxvk'; Fossilize='Fossilize'
  Check='Check'; Dependencies='Dependencies'; Install='Install'; Uninstall='Uninstall'; Launch='Launch'
  Report='Report'; ControlsLaunch='Launch'; ResetSettings='ResetSettings'; SpeedTest='SpeedTest'
+ AsyncMode='AsyncMode'; Every1='Every1'; Every2='Every2'; Every3='Every3'; Every4='Every4'
 }
 $script:HeaderBindings=@{LaunchOptions='LaunchOptions'; CheckDetails='CheckDetails';SetupTab='SetupTab';ControlsTab='ControlsTab';MoreSettings='MoreSettings'}
 $script:TipBindings=@{DllPath='DllTip'; GamePath='GameTip'; PythonPath='PythonTip'; GameArgs='ArgsTip'; Fossilize='FossilizeTip'; Language='LanguageTip'
- PythonLabel='PythonHint'; ControlsHeading='ControlsHint'; Theme='ThemeTip'; SpeedTest='SpeedTestTip'}
+ PythonLabel='PythonHint'; ControlsHeading='ControlsHint'; Theme='ThemeTip'; SpeedTest='SpeedTestTip'
+ AsyncMode='AsyncModeTip'; EveryLabel='EveryTip'; EveryFrame='EveryTip'}
 function T([string]$Key) {
     if(-not $script:Strings[$script:Language].ContainsKey($Key)) { throw "Missing translation: $Key" }
     return [string]$script:Strings[$script:Language][$Key]
@@ -865,7 +902,8 @@ function Write-Json([string]$Path, $Value) {
 }
 function Profile-FromWindow {
     $dll = $script:Ui.DllPath.Text.Trim()
-    return [ordered]@{root=$script:Root; python=$script:Ui.PythonPath.Text.Trim(); game_exe=$script:Ui.GamePath.Text.Trim(); dll=$(if($dll){$dll}else{$null}); api=$(if($script:Ui.Api.SelectedIndex -eq 1){'dxvk'}else{'vulkan'}); game_args_raw=$script:Ui.GameArgs.Text; disable_fossilize=[bool]$script:Ui.Fossilize.IsChecked}
+    return [ordered]@{root=$script:Root; python=$script:Ui.PythonPath.Text.Trim(); game_exe=$script:Ui.GamePath.Text.Trim(); dll=$(if($dll){$dll}else{$null}); api=$(if($script:Ui.Api.SelectedIndex -eq 1){'dxvk'}else{'vulkan'}); game_args_raw=$script:Ui.GameArgs.Text; disable_fossilize=[bool]$script:Ui.Fossilize.IsChecked
+        nr_async=[bool]$script:Ui.AsyncMode.IsChecked; nr_every=[int]$script:Ui.EveryFrame.SelectedItem.Tag}
 }
 function Apply-Profile($Profile) {
     if($null -eq $Profile) { return }
@@ -876,9 +914,22 @@ function Apply-Profile($Profile) {
     $script:Ui.Api.SelectedIndex=$(if($Profile.api -eq 'dxvk'){1}else{0})
     $script:Ui.Fossilize.IsChecked=[bool]$Profile.disable_fossilize
     if($Profile.game_args) { $script:Ui.GameArgs.Text=(@($Profile.game_args | ForEach-Object { Quote-Argument ([string]$_) }) -join ' ') }
+    # A profile from before frame pacing has neither: every frame, in step with the game.
+    $script:ApplyingProfile=$true
+    try {
+        $script:Ui.AsyncMode.IsChecked=[bool]$Profile.nr_async
+        $every=[int]$Profile.nr_every
+        $script:Ui.EveryFrame.SelectedIndex=$(if($every -ge 1 -and $every -le $script:Ui.EveryFrame.Items.Count){$every-1}else{0})
+    } finally { $script:ApplyingProfile=$false }
+}
+# Asynchronous mode and every Nth frame are read by the layer when the game starts: a change
+# is saved at once, into the installed game's nr-env.txt too, and waits for a running action.
+function Request-Pacing {
+    if($script:ApplyingProfile) { return }
+    if($script:Busy) { $script:PacingDue=$true } else { $script:PacingDue=$false; Start-Bridge 'pacing' }
 }
 function Set-Busy([bool]$Busy) {
-    foreach($name in @('DllPath','GamePath','PythonPath','Api','GameArgs','Fossilize','BrowseDll','BrowseGame','BrowsePython','FindPython','Check','Dependencies','Install','Uninstall','Launch','Toggle','SpeedTest','Report','ControlsToggle','ControlsLaunch','ResetSettings')) { $script:Ui[$name].IsEnabled=-not $Busy }
+    foreach($name in @('DllPath','GamePath','PythonPath','Api','GameArgs','Fossilize','BrowseDll','BrowseGame','BrowsePython','FindPython','Check','Dependencies','Install','Uninstall','Launch','Toggle','SpeedTest','Report','ControlsToggle','ControlsLaunch','ResetSettings','AsyncMode','EveryFrame')) { $script:Ui[$name].IsEnabled=-not $Busy }
     $script:Ui.KnobRows.IsEnabled=(-not $Busy -or ($script:Busy -and $script:Busy.Action -eq 'settings-save'))
     # An indeterminate ProgressBar animates while collapsed too: 6 % of a core, the window idle.
     $script:Ui.Spinner.IsIndeterminate=$Busy
@@ -1004,6 +1055,7 @@ function Finish-Bridge($Job,[bool]$Quiet) {
             if($Job.Action -in @('install','uninstall') -and $value.steam_restored) { Set-Progress ('Done.'+$Job.Action+'-steam') }
             if($Job.Action -eq 'on' -and $value.warning -eq 'game_without_nr') { Set-Progress 'GameWithoutNr' }
             if($Job.Action -eq 'on' -and $value.warning -eq 'game_elevated') { Set-Progress $(if($value.uac_enabled -eq $false){'GameElevatedUacOff'}else{'GameElevated'}) }
+            if($Job.Action -eq 'pacing' -and -not $value.applied) { Set-Progress 'Done.pacing-later' }
             if($Job.Action -eq 'speedtest') {
                 Show-Speed $value.speed_test
                 $script:Ui.Progress.Text=(T 'Done.speedtest')+"`n"+$script:Ui.SpeedState.Text
@@ -1146,6 +1198,23 @@ if($SelfTest) {
         if($missing.Count -or -not $speed.EndsWith((T 'SpeedNote'))) { throw "The speed test was not worded ($($missing -join ', ')): $speed" }
         Show-Speed $null
         if($script:Ui.SpeedState.Text) { throw 'No speed test left words behind' }
+        # Frame pacing reaches the backend, a profile without it is every frame in step, and
+        # neither a profile applied to the window nor a change during an action starts a save.
+        Apply-Profile ([pscustomobject]@{python='fixture';game_exe='fixture.exe';api='vulkan';disable_fossilize=$true;nr_async=$true;nr_every=3})
+        $sent=Profile-FromWindow
+        if(-not $sent.nr_async -or $sent.nr_every -ne 3 -or $script:PacingDue) { throw 'Frame pacing did not reach the profile' }
+        Apply-Profile ([pscustomobject]@{python='fixture';game_exe='fixture.exe';api='vulkan';disable_fossilize=$true})
+        $sent=Profile-FromWindow
+        if($sent.nr_async -or $sent.nr_every -ne 1) { throw 'A profile without frame pacing was not every frame, in step' }
+        Set-Progress 'ChooseFiles'
+        $script:ApplyingProfile=$true; Request-Pacing; $script:ApplyingProfile=$false
+        if($script:PacingDue -or $script:ProgressKey -ne 'ChooseFiles') { throw 'Applying a profile asked to save frame pacing' }
+        $script:Busy=[pscustomobject]@{Action='check'}; Request-Pacing; $script:Busy=$null
+        if(-not $script:PacingDue) { throw 'Frame pacing changed during an action was not kept for later' }
+        # Free, it goes to the bridge at once: here with no Python behind the fixture's path.
+        Request-Pacing
+        if($script:PacingDue -or $script:ProgressKey -ne 'PythonMissing') { throw 'Frame pacing was not saved when free' }
+        foreach($item in $script:Ui.EveryFrame.Items) { if(-not $item.Content) { throw 'Untranslated frame pacing choice' } }
         Set-Language $(if($language -eq 'en'){'ru'}else{'en'})
         if($script:Ui.Toggle.Content -ne (T 'Disable')) { throw 'Language switch changed the displayed effect state' }
         Show-Status ([pscustomobject]@{trigger_exists=$false;processed=12;rejected=1;fresh_frames=$false})
@@ -1179,6 +1248,11 @@ $script:Ui.Toggle.Add_Click({ $action=$(if($script:Ui.Toggle.Content -eq (T 'Dis
 $script:Ui.ControlsToggle.Add_Click({ $action=$(if($script:Ui.ControlsToggle.Content -eq (T 'Disable')){'off'}else{'on'}); Start-Bridge $action })
 $script:Ui.ControlsLaunch.Add_Click({ Start-Bridge 'launch' })
 $script:Ui.ResetSettings.Add_Click({ Reset-NrSettings })
+# Checked and Unchecked rather than Click: UI Automation's Toggle, which screen readers use,
+# changes the box without a click.
+$script:Ui.AsyncMode.Add_Checked({ Request-Pacing })
+$script:Ui.AsyncMode.Add_Unchecked({ Request-Pacing })
+$script:Ui.EveryFrame.Add_SelectionChanged({ Request-Pacing })
 $script:Ui.Theme.Add_Click({
     Set-Theme $(if($script:Theme -eq 'dark'){'light'}else{'dark'})
     try { [IO.Directory]::CreateDirectory($script:Work) | Out-Null; Write-Json $script:UiPrefs @{theme=$script:Theme} } catch { }
@@ -1195,6 +1269,7 @@ $script:Timer.Add_Tick({
         if($script:StatusJob -and $script:StatusJob.Process.HasExited) { Finish-Bridge $script:StatusJob $true }
         if(-not $script:Busy -and $script:SettingsReload) { $script:SettingsReload=$false; Start-Bridge 'settings' }
         if(-not $script:Busy -and -not $script:SettingsReload -and $script:SpeedTestDue) { $script:SpeedTestDue=$false; Start-Bridge 'speedtest' }
+        if(-not $script:Busy -and $script:PacingDue) { Request-Pacing }
         if(-not $script:Busy -and $script:PendingSettings.Count -and [DateTime]::UtcNow -ge $script:SettingsDue) {
             $dragging=$false
             foreach($row in $script:KnobUi.Values) { if($row.Slider -and $row.Slider.IsMouseCaptureWithin) { $dragging=$true; break } }

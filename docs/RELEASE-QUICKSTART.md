@@ -79,6 +79,17 @@ without a game restart. Changing scale can rebuild the network's working buffers
 a drag is saved after release. The readout shows actual network dimensions separately
 from requested scale; minimum padding may keep the same size at several scales.
 
+**Frame pacing**, below them, is read by NR when the game starts. **Asynchronous** lets the
+network work on one frame while the game draws the next: more frames a second, and what is on
+screen is one processed frame behind. **Network on** every 2nd, 3rd or 4th frame repeats the
+last result on the frames between: the game runs faster, and the picture changes only on the
+network's frames. A change is saved at once, into the installed game as well, and takes effect
+when the game starts next. On the Arc 140V neither raised the frame rate much (Mortal Kombat 11
+at 1280×720, render scale 0.4: 19.3 processed frames a second in step, 19.7 asynchronous):
+there the network's own time is most of every frame. Asynchronous should gain more where the
+game's frame and the network's take similar time, as on a discrete card; that is not measured
+yet.
+
 The button beside a control returns it to its default; **Reset all** writes the
 daemon's defaults, including render scale **1.0**. The release starts at **0.4** for
 a lighter first test. Reinstallation preserves chosen settings. Existing advanced

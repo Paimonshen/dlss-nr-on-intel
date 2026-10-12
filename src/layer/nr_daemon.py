@@ -1133,8 +1133,8 @@ def main():
     # built below and picks its shader then.
     check_half_rounding()
     backend = nr_frame.ResidentBackend()
-    # which GPU, because the library takes the first Vulkan device and a machine can
-    # have more than one, or a different one than the person assumes
+    # which GPU: a machine can have more than one, or a different one than the person
+    # assumes. libxmx chooses one that can run the network (XMX_DEVICE names another).
     print(f"model ready in {time.perf_counter() - started:.1f}s"
           f" on {xmx.device_name()}", flush=True)
     print(f"buffers in {xmx.memory_note()}", flush=True)
