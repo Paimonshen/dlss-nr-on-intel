@@ -151,17 +151,41 @@ because it silently includes whatever startup the window happened to contain.
 
 | quantity | 2026-10-10, Arc B580 |
 |---|---|
-| steady-state median frame, 1280x720, scale 1.0, sync, Desk Job splash | **70 ms** |
+| steady-state median frame, 1280x720, scale 1.0, sync, **in a game** | **70 ms** |
+| the same frame with **only the daemon running** (no game contending) | **56 ms** |
 | p95 / p99 | 90 ms / 110-150 ms |
 | sample count behind it | 9 runs over 3 sessions, 175-479 frames each |
 
+**The two figures differ by ~14 ms and both are real** -- state which one a number is. With a game
+running, its previously submitted work is still executing on the GPU while the neural pass runs, so
+the pass is slower than it is alone. The 70 ms is what a player sees; the 56 ms is what the daemon
+costs in isolation, and it decomposes as **44 ms GPU (40 of it the graph) + 11.5 ms host + 0.7 ms
+unattributed**, each segment measured (`analysis_e/_team/干净逐pass剖面.md`).
+
 ### Rules, each of which was broken at least once here
 
-1. **Discard the first ~10 frames, or warm up first.** The first frame is 0.75-1.09 s -- 11-16x
-   the median (model load, first pipeline builds, the half-rounding probe), and the first five
-   average 0.22-0.48 s. A 14 s window that keeps them reports 11.57 fps where the steady state is
-   12.50; a 30 s window with an 8 s warm-up reports 14.57 for the same code. **The difference was
-   the window, not the program.**
+1. **Discard the first 25 frames, or warm up first.** Two separate startup costs, both large.
+   The first frame is 0.75-1.09 s -- 11-16x the median (model load, first pipeline builds, the
+   half-rounding probe), and the first five average 0.22-0.48 s. And the GPU itself ramps:
+   measured 2026-10-10 over 50 consecutive frames, the graph's own cost (`split[1]`, what the
+   daemon logs as `gpu N+M+Kms`) **decays monotonically from 72 ms to 40 ms** --
+
+   ```
+   gpu_run ms, frame order:  72.4 75.0 74.9 74.8 74.6 75.0 67.7 62.2 62.2 60.5
+                             56.9 53.7 50.7 50.0 48.0 45.6 45.8 43.6 43.8 43.4
+                             43.7 43.3 42.1 41.8 40.2 40.1 40.4 39.7 39.9 39.8  ... 39.5-40.2
+   ```
+
+   It settles after about 20 frames. **A 10-frame warm-up therefore reports `gpu_run` at 52 ms
+   where the steady state is 40 -- a 12 ms error, 21 % of the whole frame.** Ten is not enough;
+   twenty-five is the number this repository uses.
+   The window-length point stands too: a 14 s window that keeps the startup reports 11.57 fps
+   where the steady state is 12.50, and a 30 s window with an 8 s warm-up reports 14.57 for the
+   same code -- **the difference was the window, not the program.**
+   **Two tools in this repository used to default below it:** `src/bench/daemon_stages.py`
+   (was 4) and `src/bench/live_rates.py` (was 3). Both now default to 25, so their numbers are
+   steady-state without a flag. Anything older than 2026-10-10 that quotes those tools is a
+   startup measurement.
 2. **Do not compare `fps` between two runs that processed different numbers of frames.** The
    `--dump` groups made this vivid: the old path processed 101 frames in 30 s and the new one 371,
    so their fps were never comparable even though both were true. Compare median frame times.

@@ -210,8 +210,11 @@ def main():
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("cases", nargs="+", metavar="WxH@scale")
     parser.add_argument("--frames", type=int, default=15, help="timed frames a case and kind")
-    parser.add_argument("--warmup", type=int, default=4,
-                        help="frames left out first, while the extent's buffers are built")
+    parser.add_argument("--warmup", type=int, default=25,
+                        help="frames left out first: the extent's buffers are built, and the GPU "
+                             "ramps. Its own cost decays from ~72 to ~40 ms over about 20 frames, "
+                             "so anything less than 25 leaves the measurement in the ramp "
+                             "(notes/HANDOFF.md, 性能测量规范)")
     parser.add_argument("--out", type=pathlib.Path, help="also write the table here")
     args = parser.parse_args()
     plan = []
