@@ -39,7 +39,17 @@ BUDGET_MS_REGRESSION = 20.0     # per image: well under `save`'s 137-143 ms, wel
 
 def main():
     failures = []
-    temporary = pathlib.Path(tempfile.mkdtemp(prefix="test_dump_raw_"))
+    # A run writes about 8 MB, and the directory is removed on the way out whichever way it
+    # leaves - including an early `return` on a failure and an exception from the writer under
+    # test. `TemporaryDirectory` is used rather than `mkdtemp` for that reason: the plain form
+    # leaked 134 MB across 17 runs before anyone looked, because every path out of this
+    # function skipped the cleanup that was never written.
+    with tempfile.TemporaryDirectory(prefix="test_dump_raw_") as scratch:
+        temporary = pathlib.Path(scratch)
+        return _run(temporary, failures)
+
+
+def _run(temporary, failures):
     rng = np.random.default_rng(7)
 
     cases = {
