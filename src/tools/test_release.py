@@ -28,7 +28,8 @@ class ReleaseTests(unittest.TestCase):
         self.target = self.base / "package (release)"
         # Minimal input tree with the real runtime's shader inventory and scripts.
         paths = ["src/gpu/libxmx.c", "src/gpu/xmx.py", "src/gpu/xmxres.py",
-                 "src/layer/VkLayer_dlss_nr.json", "src/layer/nr_knobs.py", "scripts/get_weights.py",
+                 "src/layer/VkLayer_dlss_nr.json", "src/layer/nr_knobs.py",
+                 "src/layer/nr_setup_proxy.py", "scripts/get_weights.py",
                  "scripts/build_release.py", "tools/deploy.sh", "dist-tools/setup.sh",
                  "dist-tools/setup.bat", "docs/RELEASE-QUICKSTART.md", "LICENSE", "NOTICE"]
         paths += ["dist-tools/" + name for name in release.WINDOWS_UI]

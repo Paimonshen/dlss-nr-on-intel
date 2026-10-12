@@ -1,5 +1,5 @@
 @echo off
-setlocal
+setlocal DisableDelayedExpansion
 rem ===========================================================================
 rem  setup.bat  -  configure a DLSS-NR release to run a game (Windows)
 rem
@@ -26,6 +26,7 @@ rem    setup.bat --game "C:\Games\MyGame"
 rem    setup.bat --game ... --dll X:\path\nvngx_dlssnr.dll
 rem    setup.bat --game ... --name nr_layer.dll
 rem    setup.bat --game ... --skip-weights
+rem    setup.bat --game ... --exe MyGame.exe
 rem ===========================================================================
 
 set "GAME="
@@ -33,6 +34,10 @@ set "DLL="
 set "NAME=nr_layer.dll"
 set "SKIP_WEIGHTS=0"
 set "DRY_RUN=0"
+set "GAME_EXE_ARG="
+set "PY="
+set "PYTHONUTF8=1"
+set "PYTHONDONTWRITEBYTECODE=1"
 rem The script directory is the release root, and it must be captured before any
 rem shift moves %0.
 set "HERE=%~dp0"
@@ -41,6 +46,7 @@ if "%HERE:~-1%"=="\" set "HERE=%HERE:~0,-1%"
 :parse
 if "%~1"=="" goto :done_parse
 if /i "%~1"=="--game"         ( set "GAME=%~2" & shift & shift & goto :parse )
+if /i "%~1"=="--exe"          ( set "GAME_EXE_ARG=%~2" & shift & shift & goto :parse )
 if /i "%~1"=="--dll"          ( set "DLL=%~2"  & shift & shift & goto :parse )
 if /i "%~1"=="--name"         ( set "NAME=%~2" & shift & shift & goto :parse )
 if /i "%~1"=="--skip-weights" ( set "SKIP_WEIGHTS=1" & shift & goto :parse )
@@ -205,6 +211,9 @@ if not exist "%HERE%\work\mlxw\dlssnr-logical.safetensors" (
 echo.
 
 :after_dll
+rem Already-extracted weights still need a working interpreter for the daemon and
+rem for the standard-library installer helper. Probe it before touching a game.
+call :runtime_python || exit /b 3
 rem ---- 3. where is the game ----
 if not "%GAME%"=="" goto :have_game
 echo == Which game? Drag its folder here (the one with the .exe) and press Enter.
@@ -220,6 +229,10 @@ if not exist "%GAME%" (
   echo ERROR: game folder not found: "%GAME%"
   exit /b 2
 )
+set "NR_SETUP_ROOT=%HERE%"
+set "NR_SETUP_GAME=%GAME%"
+set "NR_SETUP_GAME_EXE=%GAME_EXE_ARG%"
+call :proxy_helper check || exit /b 3
 
 rem ---- 4. install ----
 rem Everything above this point only reads; everything below writes into the game folder.
@@ -272,6 +285,9 @@ if errorlevel 1 (
   echo ERROR: required runtime directory is missing: "%HERE%\work\mlx-dlss"
   exit /b 3
 )
+rem Claim only a new directory or an installation already owned by this release.
+rem The helper checks every proxy/backup collision before any runtime is copied.
+call :proxy_helper prepare || goto :install_failed
 call :ensure_directory "%DEST%" || goto :install_failed
 call :ensure_directory "%DEST%\work" || goto :install_failed
 if exist "%DEST%\%NAME%" (
@@ -333,16 +349,40 @@ rem outer CMD echo group. %%~fF removes the FOR item's quotes before assignment.
 >> "%LAUNCH%" echo set "NR_LAYER_LOG=%HERE%\work\nr_daemon.log" || goto :install_failed
 >> "%LAUNCH%" echo set "NR_LAYER_TRIGGER=%HERE%\work\nr_trigger" || goto :install_failed
 >> "%LAUNCH%" echo set "GAME_EXE=" || goto :install_failed
+if defined GAME_EXE_ARG >> "%LAUNCH%" echo set "GAME_EXE=%GAME%\%GAME_EXE_ARG%" || goto :install_failed
 >> "%LAUNCH%" echo for %%%%F in ^("%GAME%\*.exe"^) do if not defined GAME_EXE set "GAME_EXE=%%%%~fF" || goto :install_failed
 >> "%LAUNCH%" echo if not defined GAME_EXE ^( echo No .exe in "%GAME%" ^& exit /b 1 ^) || goto :install_failed
 >> "%LAUNCH%" echo cd /d "%GAME%" ^|^| exit /b 1 || goto :install_failed
 >> "%LAUNCH%" echo start "" "%%GAME_EXE%%" %%* || goto :install_failed
 echo   launcher:   "%LAUNCH%"
 
+rem ---- 5. the proxy, so the game's own Play button works ----
+rem The launcher above sets VK_LAYER_PATH for a game started through it. A game started the
+rem way the README tells a user to - Steam's Play button, a desktop shortcut, the EA app -
+rem gets none of that, and without the proxy it never loads the layer. `nr_vulkan_proxy.dll`
+rem beside the game as vulkan-1.dll sets the same environment from dlss-nr\nr-env.txt in the
+rem game's own process, whatever started it.
+rem
+rem This is the step the setup WINDOW has always done and this script did not, which is why a
+rem command-line install looked complete and did nothing in the game (issue #12: the proxy
+rem loaded, the layer never did, and there was no daemon log at all). The proxy returns
+rem without setting anything when nr-env.txt is missing - `if (handle == INVALID_HANDLE_VALUE)
+rem return;` in nr_vulkan_proxy.c - so a missing file here is silent, not an error.
+rem
+rem The file names the game it is for and the proxy checks it: the same dlss-nr folder can
+rem sit beside several executables, and only the one this setup was run for is given NR's
+rem environment. NR_LAYER_SPAWNED is deliberately absent - the proxy clears any it inherits,
+rem and the layer must be free to start the daemon.
+call :install_proxy || goto :install_failed
+echo   proxy:      "%GAME%\vulkan-1.dll"
+echo   env:        "%DEST%\nr-env.txt"
+
 echo.
 echo Done.
-echo   Run the game through "%LAUNCH%"
-echo   Weights stayed in "%HERE%\work\mlxw"; the launcher points NR_ROOT there.
+echo   Start the game the way you usually do - the proxy in the game folder loads NR.
+echo   "%LAUNCH%" also works and is useful when the game has several executables.
+echo   Weights stayed in "%HERE%\work\mlxw"; the proxy and the launcher point NR_ROOT there.
+echo   Remove NR in NR-Setup.exe restores the game's original Vulkan loader.
 echo.
 echo COMPLIANCE: nothing NVIDIA's is redistributed by this script. The DLL it read is
 echo yours, the weights came from it, and both stay on this machine.
@@ -435,3 +475,36 @@ if exist "%NR_CANDIDATE%" (
 )
 echo   "%NR_CANDIDATE%" does not exist.
 exit /b 1
+
+rem Proxy placement, ownership records and UTF-8 environment use the very same
+rem Python functions as the setup window. Passing paths through the environment
+rem keeps &, ! and non-ASCII names out of CMD's echo/parser rules.
+:install_proxy
+call :proxy_helper install
+exit /b %errorlevel%
+
+:proxy_helper
+if not exist "%HERE%\src\layer\nr_setup_proxy.py" (
+  echo ERROR: the release is missing src\layer\nr_setup_proxy.py.
+  exit /b 1
+)
+"%PY%" "%HERE%\src\layer\nr_setup_proxy.py" %1
+exit /b %errorlevel%
+
+:runtime_python
+if defined PY goto :check_runtime_python
+if defined NR_PYTHON set "PY=%NR_PYTHON%"
+if not defined PY ( where /q py && set "PY=py" )
+if not defined PY ( where /q python && set "PY=python" )
+if not defined PY ( where /q python3 && set "PY=python3" )
+if not defined PY (
+  echo ERROR: Python 3 was not found. Set NR_PYTHON to a native x64 interpreter.
+  exit /b 1
+)
+:check_runtime_python
+"%PY%" -c "import struct, numpy, safetensors; assert struct.calcsize('P') == 8" >nul 2>&1
+if errorlevel 1 (
+  echo ERROR: choose native x64 Python with NumPy and safetensors using NR_PYTHON.
+  exit /b 1
+)
+exit /b 0

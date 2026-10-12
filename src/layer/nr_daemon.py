@@ -807,22 +807,65 @@ def process_connection(connection, backend, args):
         # 1280x720.
         args.history.keep(shot, neural, inner, colour)
     if args.dump:
+        import json as _json
+
         import image_io
         try:
             destination = pathlib.Path(args.dump)
             destination.mkdir(parents=True, exist_ok=True)
-            # Numbered, so walking through a game and pressing the trigger repeatedly
-            # keeps every shot instead of overwriting the last one.
-            index = 1 + max((int(path.stem.split("_")[0]) for path in destination.glob("*_in.png")
-                             if path.stem.split("_")[0].isdigit()), default=0)
-            shown = full
-            if shown is None and boxed:
-                shown = whole.copy()
-                shown[top:bottom, left:right] = active
-            image_io.save(whole, destination / f"{index:03d}_in.png")
-            image_io.save(shown if shown is not None else active,
-                          destination / f"{index:03d}_out.png")
-            print(f"  -> {destination}/{index:03d}_{{in,out}}.png", flush=True)
+            # Numbered, so walking through a game and pressing the trigger repeatedly keeps
+            # every shot instead of overwriting the last one, and so a restarted daemon
+            # continues where the last one stopped. The number is the frame's position in the
+            # dump, not a file counter -- which is what makes --dump-every legible: N=10 writes
+            # 010, 020, 030, and the gaps are the frames it skipped.
+            step = max(1, int(getattr(args, "dump_every", 1) or 1))
+            if getattr(args, "dump_seq", None) is None:
+                args.dump_seq = max((int(path.stem.split("_")[0])
+                                     for path in destination.glob("*_in.*")
+                                     if path.stem.split("_")[0].isdigit()), default=0)
+                args.dump_written = 0
+                args.dump_skipped = 0
+            args.dump_seq += 1
+            index = args.dump_seq
+            wanted = (index % step == 0)
+            if not wanted:
+                args.dump_skipped += 1
+            # Raw, not PNG: this block is inside the timed region (clock at :626, the report at
+            # :851) and `image_io.save` spawns ImageMagick, 147 ms an image at 1280x720. Two of
+            # those made every `in X s` and every fps taken with --dump on meaningless. See
+            # `image_io.save_raw`; convert with `src/tools/dump_to_png.py`, outside the timing.
+            #
+            # NR_DUMP_SLOW=1 restores the old call, and exists only so the two can be measured
+            # against each other in one session (`analysis_e/_team/dump修复与基线重建.md`).
+            # It is a debugging switch, not a supported mode.
+            slow = os.environ.get("NR_DUMP_SLOW") == "1"
+            write = image_io.save if slow else image_io.save_raw
+            suffix = "png" if slow else "raw"
+            if wanted:
+                shown = full
+                if shown is None and boxed:
+                    shown = whole.copy()
+                    shown[top:bottom, left:right] = active
+                options = {} if slow else {"metadata": True}
+                write(whole, destination / f"{index:03d}_in.{suffix}", **options)
+                write(shown if shown is not None else active,
+                      destination / f"{index:03d}_out.{suffix}", **options)
+                args.dump_written += 1
+            if not slow and wanted:
+                # This is a session summary. Each raw has its own geometry sidecar: a window
+                # resize must not reinterpret all earlier frames using these latest sizes.
+                (destination / "dump.json").write_text(
+                    _json.dumps({"width": width, "height": height, "channels": 3,
+                                 "dtype": "uint8", "layout": "hwc",
+                                 "per_frame_geometry": True,
+                                 "sample_step": step,
+                                 "frames_written": args.dump_written,
+                                 "frames_skipped": args.dump_skipped,
+                                 "last_frame_seq": index}) + "\n",
+                    encoding="utf-8")
+            if wanted:
+                print(f"  -> {destination}/{index:03d}_{{in,out}}.{suffix}"
+                      + ("" if slow else "  (convert with tools/dump_to_png.py)"), flush=True)
         except (OSError, subprocess.CalledProcessError, ValueError) as error:
             print(f"frame returned, but dump failed: {error}", flush=True)
     if args.meter is not None:
@@ -1046,7 +1089,14 @@ def main():
                              "taken to have cut and the history is dropped")
     parser.add_argument("--max-pixels", type=int, default=1 << 22,
                         help="refuse frames larger than this, rather than thrash")
-    parser.add_argument("--dump", help="write each frame in and out as PNG, for a look")
+    parser.add_argument("--dump", help="write frames in and out as raw, for a look; "
+                                       "convert with src/tools/dump_to_png.py")
+    parser.add_argument("--dump-every", type=int, default=1, metavar="N",
+                        help="write only every Nth processed frame (default 1, every frame). "
+                             "Raw does not compress: 2.64 MiB an image at 1280x720, 5.27 MiB a "
+                             "frame, so a few minutes of play is gigabytes. The frames written "
+                             "keep their own sequence numbers, so N=10 writes 010, 020, 030 and "
+                             "the gaps are visible in the names.")
     parser.add_argument("--meter", action="store_true",
                         help="report, every frame, how much the network invents over "
                              "pixels the game did not move; costs about 5 ms")

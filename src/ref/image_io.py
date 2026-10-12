@@ -7,6 +7,8 @@ network fed an image returns a recognisable image, a wrong one returns noise.
 That is a test that needs no reference activations, which is the one thing this
 project cannot obtain.
 """
+import json
+import os
 import subprocess
 import tempfile
 from pathlib import Path
@@ -47,7 +49,12 @@ def load(path, size=None):
 
 
 def save(arr, path):
-    """arr: (H,W,3) float in [0,1] (clipped) or (H,W) grayscale."""
+    """arr: (H,W,3) float in [0,1] (clipped) or (H,W) grayscale.
+
+    Do NOT call this from anything that is being timed. It spawns ImageMagick, which costs
+    143 ms for one 1280x720 image on the B580 (286 ms for the daemon's two per frame, against a
+    ~70 ms frame). `save_raw` below is the same pixels without the subprocess.
+    """
     a = np.asarray(arr, dtype=np.float32)
     if a.ndim == 2:
         a = np.repeat(a[:, :, None], 3, axis=2)
@@ -59,6 +66,146 @@ def save(arr, path):
         subprocess.run([_magick(), "-size", "%dx%d" % (W, H), "-depth", "8",
                         "rgb:" + str(d / "i.rgb"), str(path)], check=True, capture_output=True)
     return path
+
+
+_RAW_SCRATCH = None
+_RAW_U8 = None
+
+
+def save_raw(arr, path, *, metadata=False):
+    """The same bytes `save` quantises to, written with no subprocess and no header.
+
+    (H,W,3) float in [0,1] or (H,W,3) uint8 -> 8-bit RGB, row-major, no padding. The geometry
+    With `metadata=True`, geometry goes in `<file>.raw.json`, so resizing a game window does
+    not change the interpretation of earlier frames. Without it, the caller supplies geometry
+    to `load_raw`, as before.
+
+    Why this exists: `--dump` sits inside the daemon's per-frame timing (nr_daemon.py: `clock`
+    at 626, the dump at 809-823, the report at 851), and `save` spawns ImageMagick per image.
+    Measured on an Arc B580 at 1280x720: `save` 147 ms an image, this 1.2 ms. A daemon frame at
+    that extent is ~70 ms, so the old path inflated every `in X s` it printed by more than 4x and
+    every frame-rate measurement taken with `--dump` on was meaningless. Conversion is a separate
+    step, `src/tools/dump_to_png.py`, paid outside the timed region.
+
+    The pixels are identical to what `save` would have written -- `(a*255 + 0.5)` then a
+    truncating cast -- and `test_dump_raw.py` checks that byte for byte against a real PNG.
+
+    Both buffers are kept between calls, and that is the whole trick: the arithmetic is a fifth
+    of the time and allocating is the rest. A fresh 11 MB float array is first-touch page faults
+    the kernel charges on write, so the allocating spelling cost 5.4 ms an image against 1.2 ms
+    for this one. Not reentrant -- the daemon serves one connection at a time.
+    """
+    global _RAW_SCRATCH, _RAW_U8
+    a = np.asarray(arr)
+    if a.ndim not in (2, 3) or (a.ndim == 3 and a.shape[2] not in (3, 4)):
+        raise ValueError("raw images must be grayscale, RGB or RGBA")
+    if a.dtype != np.uint8:
+        if _RAW_SCRATCH is None or _RAW_SCRATCH.shape != a.shape:
+            _RAW_SCRATCH = np.empty(a.shape, np.float32)
+            _RAW_U8 = np.empty(a.shape, np.uint8)
+        np.clip(a, 0.0, 1.0, out=_RAW_SCRATCH)
+        np.multiply(_RAW_SCRATCH, 255.0, out=_RAW_SCRATCH)
+        np.add(_RAW_SCRATCH, 0.5, out=_RAW_SCRATCH)
+        # `unsafe` is a truncating C cast, which is what `.astype(np.uint8)` does; the test
+        # compares both spellings against the PNG rather than trusting that.
+        np.copyto(_RAW_U8, _RAW_SCRATCH, casting="unsafe")
+        a = _RAW_U8
+    if a.ndim == 2:
+        a = np.repeat(a[:, :, None], 3, axis=2)
+    if a.shape[2] == 4:
+        a = a[:, :, :3]
+    pixels = np.ascontiguousarray(a, dtype=np.uint8)
+    if not metadata:
+        with open(path, "wb") as handle:
+            handle.write(pixels)
+        return path
+
+    path = Path(path)
+    sidecar = raw_metadata_path(path)
+    marker = raw_metadata_pending_path(path)
+    pending = []
+    try:
+        # Finish both files before replacing either. If interrupted between replacements,
+        # a missing sidecar is detectable; an old shape must never describe new pixels.
+        with tempfile.NamedTemporaryFile(dir=path.parent, suffix=".raw.tmp", delete=False) as handle:
+            raw_pending = Path(handle.name)
+            pending.append(raw_pending)
+            handle.write(pixels)
+        with tempfile.NamedTemporaryFile(dir=path.parent, suffix=".json.tmp", mode="w",
+                                         encoding="utf-8", delete=False) as handle:
+            meta_pending = Path(handle.name)
+            pending.append(meta_pending)
+            json.dump({"width": a.shape[1], "height": a.shape[0], "channels": 3,
+                       "dtype": "uint8", "layout": "hwc"}, handle)
+            handle.write("\n")
+        # Legacy directories still have usable dump.json geometry. Leave a detectable
+        # marker BEFORE publishing new bytes, so a failed sidecar replacement cannot make
+        # a reader interpret them using that stale geometry, even at equal pixel counts.
+        marker.write_text("raw geometry update pending\n", encoding="utf-8")
+        if sidecar.exists():
+            sidecar.unlink()
+        os.replace(raw_pending, path)
+        os.replace(meta_pending, sidecar)
+        marker.unlink()
+    finally:
+        for temporary in pending:
+            if temporary.exists():
+                temporary.unlink()
+    return path
+
+
+def raw_metadata_path(path):
+    """The geometry belonging to these bytes, rather than the dump's latest frame."""
+    path = Path(path)
+    return path.with_name(path.name + ".json")
+
+
+def raw_metadata_pending_path(path):
+    sidecar = raw_metadata_path(path)
+    return sidecar.with_name(sidecar.name + ".pending")
+
+
+def raw_geometry(path):
+    """Per-file geometry, falling back to an old directory-level dump.json.
+
+    A malformed sidecar is an error, not a reason to guess from the latest frame. New dumps
+    mark their summary as per-frame, so an interrupted write with no sidecar is also refused.
+    """
+    path = Path(path)
+    marker = raw_metadata_pending_path(path)
+    if marker.exists():
+        raise ValueError(f"raw geometry update is pending at {marker}; raw retained")
+    sidecar = raw_metadata_path(path)
+    meta_path = sidecar if sidecar.exists() else path.parent / "dump.json"
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        if not isinstance(meta, dict):
+            raise ValueError("geometry must be an object")
+        if meta_path != sidecar and meta.get("per_frame_geometry"):
+            raise ValueError(f"missing per-frame geometry {sidecar}")
+        dimensions = (meta["width"], meta["height"], meta.get("channels", 3))
+        if any(type(value) is not int or value <= 0 for value in dimensions):
+            raise ValueError("width, height and channels must be positive integers")
+        if dimensions[2] != 3 or meta.get("dtype", "uint8") != "uint8" \
+                or meta.get("layout", "hwc") != "hwc":
+            raise ValueError("only uint8 RGB in hwc layout is supported")
+        return dimensions
+    except (OSError, KeyError, TypeError, ValueError) as error:
+        raise ValueError(f"cannot read raw geometry at {meta_path}: {error}") from error
+
+
+def load_raw(path, width=None, height=None, channels=3):
+    """-> (H,W,channels) float32 in [0,1]. Omit dimensions to read dump metadata."""
+    if width is None and height is None:
+        width, height, channels = raw_geometry(path)
+    elif width is None or height is None:
+        raise ValueError("supply both width and height, or neither")
+    raw = np.frombuffer(Path(path).read_bytes(), dtype=np.uint8)
+    expected = width * height * channels
+    if raw.size != expected:
+        raise ValueError("%s holds %d bytes, expected %d for %dx%dx%d"
+                         % (path, raw.size, expected, width, height, channels))
+    return raw.reshape(height, width, channels).astype(np.float32) / 255.0
 
 
 def clean_and_noisy(H, W, seed=0, sigma=0.06):

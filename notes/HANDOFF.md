@@ -1,6 +1,6 @@
 # HANDOFF — read this first
 
-State of the DLSS-NR on Intel Xe2 project as of **2026-10-12**. notes/CLAUDE.md holds the
+State of the DLSS-NR on Intel Xe2 project as of **2026-10-13**. notes/CLAUDE.md holds the
 original brief; **this file overrides it wherever they disagree**, and after
 2026-09-09 they disagree about something foundational.
 
@@ -8,6 +8,27 @@ original brief; **this file overrides it wherever they disagree**, and after
 you need the evidence behind a line in this file, rather than reading them in order.
 
 ---
+
+## PR #13 reviewed on Windows (2026-10-13)
+
+The continuation reviewed `Paimonshen/perf-recheck` at `1fc7aa7`, rebased onto `041ef3b`.
+The MSVC build reaches all six stages. The raw writer avoids per-image ImageMagick and
+supports sampling; its measured overhead must still be reported separately from inference.
+
+Two corrections were required before integration:
+- raw images now carry their own geometry. Readers reject interrupted metadata publication,
+  including a same-area resize in a legacy dump directory. PNG conversion verifies the image
+  before removing raw data, and retains legacy sources whose original geometry is ambiguous;
+- CLI proxy installation reuses the window's ownership, placement, rollback and UTF-8
+  environment functions. Reinstallation preserves the original loader, foreign or changed
+  files are refused, and GUI Remove NR recognises the CLI installation. Multiple executables
+  require `--exe`; 32-bit games use the window.
+
+Checked in an independent checkout: full MSVC build and 44 CTest entries; the documented
+`gpu_window_attention` driver hang is excluded as `docs/WINDOWS.md` requires. MinGW builds
+successfully, and seven relevant native/GPU/installer CTest entries pass. The final metadata
+failure regression and raw PNG checks were repeated after the last correction. No game or
+inference-speed benchmark is claimed by these regression tests.
 
 ## A speed test on a tester's first run, kept for their reports (2026-10-12)
 
@@ -80,6 +101,15 @@ space mid-test: the release roots in `D:\NRonWindows\rel` each hold ~440 MB of e
 
 **Next on Linux:** `make test` and CTest for the layer's new lines (`nr_layer.c`'s POSIX arm
 prints the same three reasons). Nothing else Linux runs changed.
+
+## Raw dumps and performance measurements (2026-10-10; reviewed 2026-10-13)
+
+PR #13 replaces per-frame ImageMagick encoding with raw RGB capture, adds sampling and
+converts captures afterwards. The original measurements and their methodology are in
+[windows-dump-measurements-20261010.md](windows-dump-measurements-20261010.md). Equal rounded
+medians cannot establish zero dump overhead; compare throughput over matched steady-state
+intervals and report frame-time percentiles. The review adds per-frame geometry so resizing
+cannot silently reshape older raw captures, and validates PNGs before removing raw files.
 
 ## The first Windows releases, and a tester's game that got the proxy but never the layer (2026-10-09, later)
 

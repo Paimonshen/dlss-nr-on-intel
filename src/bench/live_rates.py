@@ -84,8 +84,11 @@ def main():
     # Nine and three, not five and two: on 2026-09-23 five frames after two put the 1080p
     # case at 467 ms (451-518) and nine after three at 354 (327-358), run to run.
     parser.add_argument("--frames", type=int, default=9, help="timed frames per case")
-    parser.add_argument("--warmup", type=int, default=3,
-                        help="frames to discard while the extent's buffers are built")
+    parser.add_argument("--warmup", type=int, default=25,
+                        help="frames to discard: the extent's buffers are built, and the GPU "
+                             "ramps. Its own cost decays from ~72 to ~40 ms over about 20 frames, "
+                             "so anything less than 25 leaves the measurement in the ramp "
+                             "(notes/HANDOFF.md, 性能测量规范)")
     parser.add_argument("--set", action="append", default=[], metavar="KNOB=VALUE",
                         help="any other setting for the daemon, e.g. min_extent=128")
     args = parser.parse_args()

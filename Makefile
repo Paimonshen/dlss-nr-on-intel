@@ -171,6 +171,7 @@ test: all work/attention_ab.spv work/test_exchange work/test_settled work/test_p
 	python3 src/tools/claims_check.py
 	python3 src/tools/build_check.py
 	python3 src/tools/test_release.py
+	python3 src/tools/test_setup_proxy.py
 	python3 src/bench/frame_profile.py --tables
 	python3 src/gpu/test_gemm_int8.py
 	python3 src/gpu/test_gemm_int8_staged.py
@@ -198,6 +199,8 @@ test: all work/attention_ab.spv work/test_exchange work/test_settled work/test_p
 	python3 src/ref/test_native_image.py
 	python3 src/ref/test_nr_model.py
 	python3 src/ref/test_temporal_controls.py
+	python3 src/ref/test_dump_raw.py
+	python3 src/ref/test_dump_geometry.py
 
 # Focused checks for the FFN schedule, including a complete frame with both variants.
 # Repeat with XMX_STAGING=1 to cover device buffers without host mappings.

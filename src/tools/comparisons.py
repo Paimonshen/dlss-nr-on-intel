@@ -61,10 +61,25 @@ LABEL = ["-font", "Adwaita-Sans", "-pointsize", "26", "-fill", "white", "-underc
 GAP = "#e8e8e8"
 
 
+def _frame(folder, frame, side):
+    """`NNN_<side>.png`, or the same frame as a raw dump with its own geometry.
+
+    `nr_daemon.py --dump` writes raw now (see `image_io.save_raw`), so a folder straight out of a
+    game session has `.raw` and no `.png`. Reading it here means the comparison tools work on a
+    fresh dump without a conversion step in between.
+    """
+    png = folder / f"{frame:03d}_{side}.png"
+    if png.exists():
+        return image_io.load(png)
+    raw = folder / f"{frame:03d}_{side}.raw"
+    if not raw.exists():
+        raise SystemExit(f"neither {png} nor {raw} exists")
+    return image_io.load_raw(raw)
+
+
 def pair(folders, game, frame):
     folder = folders[game]
-    return (image_io.load(folder / f"{frame:03d}_in.png"),
-            image_io.load(folder / f"{frame:03d}_out.png"))
+    return _frame(folder, frame, "in"), _frame(folder, frame, "out")
 
 
 def cut(image, crop, enlarge=1):
