@@ -339,10 +339,32 @@ rem outer CMD echo group. %%~fF removes the FOR item's quotes before assignment.
 >> "%LAUNCH%" echo start "" "%%GAME_EXE%%" %%* || goto :install_failed
 echo   launcher:   "%LAUNCH%"
 
+rem ---- 5. the proxy, so the game's own Play button works ----
+rem The launcher above sets VK_LAYER_PATH for a game started through it. A game started the
+rem way the README tells a user to - Steam's Play button, a desktop shortcut, the EA app -
+rem gets none of that, and without the proxy it never loads the layer. `nr_vulkan_proxy.dll`
+rem beside the game as vulkan-1.dll sets the same environment from dlss-nr\nr-env.txt in the
+rem game's own process, whatever started it.
+rem
+rem This is the step the setup WINDOW has always done and this script did not, which is why a
+rem command-line install looked complete and did nothing in the game (issue #12: the proxy
+rem loaded, the layer never did, and there was no daemon log at all). The proxy returns
+rem without setting anything when nr-env.txt is missing - `if (handle == INVALID_HANDLE_VALUE)
+rem return;` in nr_vulkan_proxy.c - so a missing file here is silent, not an error.
+rem
+rem The file names the game it is for and the proxy checks it: the same dlss-nr folder can
+rem sit beside several executables, and only the one this setup was run for is given NR's
+rem environment. NR_LAYER_SPAWNED is deliberately absent - the proxy clears any it inherits,
+rem and the layer must be free to start the daemon.
+call :install_proxy || goto :install_failed
+echo   proxy:      "%GAME%\vulkan-1.dll"
+echo   env:        "%DEST%\nr-env.txt"
+
 echo.
 echo Done.
-echo   Run the game through "%LAUNCH%"
-echo   Weights stayed in "%HERE%\work\mlxw"; the launcher points NR_ROOT there.
+echo   Start the game the way you usually do - the proxy in the game folder loads NR.
+echo   "%LAUNCH%" also works and is useful when the game has several executables.
+echo   Weights stayed in "%HERE%\work\mlxw"; the proxy and the launcher point NR_ROOT there.
 echo.
 echo COMPLIANCE: nothing NVIDIA's is redistributed by this script. The DLL it read is
 echo yours, the weights came from it, and both stay on this machine.
@@ -435,3 +457,112 @@ if exist "%NR_CANDIDATE%" (
 )
 echo   "%NR_CANDIDATE%" does not exist.
 exit /b 1
+
+rem ==== :install_proxy - vulkan-1.dll beside the game, and dlss-nr\nr-env.txt ====
+rem The same two steps the setup window takes (`windows_wizard_core._place_game_files` and
+rem `_write_proxy_environment`), so a command-line install and a window install leave the game
+rem folder in the same state. Kept in step by hand: the variable list below is the one
+rem `layer_environment()` writes, and the file's first two lines are the two the proxy needs
+rem to decide the file is for this game.
+rem
+rem Anything already called vulkan-1.dll is set aside first, not overwritten: a game that
+rem brought its own loader must still find it, and the proxy points at it through
+rem NR_REAL_VULKAN. Uninstall puts it back.
+:install_proxy
+set "PROXY_SRC=%HERE%\nr_vulkan_proxy.dll"
+call :require_file "%PROXY_SRC%" || (
+  echo ERROR: "%PROXY_SRC%" is missing from the release.
+  echo        Without it a game started from Steam or a shortcut never loads NR.
+  exit /b 1
+)
+set "GAME_EXE="
+for %%F in ("%GAME%\*.exe") do if not defined GAME_EXE set "GAME_EXE=%%~fF"
+if not defined GAME_EXE (
+  echo ERROR: no .exe in "%GAME%"; the proxy needs the game's own executable.
+  exit /b 1
+)
+
+rem Never overwrite a loader the game brought: keep it under dlss-nr\game-backup\.
+rem A previous run's backup is left alone rather than replaced, so one uninstall restores the
+rem file the game shipped with.
+set "NR_SETUP_REAL="
+if exist "%GAME%\vulkan-1.dll" (
+  call :ensure_directory "%DEST%\game-backup"
+  if not exist "%DEST%\game-backup\vulkan-1.dll" (
+    move /Y "%GAME%\vulkan-1.dll" "%DEST%\game-backup\vulkan-1.dll" >nul || (
+      echo ERROR: could not set aside "%GAME%\vulkan-1.dll".
+      exit /b 1
+    )
+  ) else (
+    del /Q "%GAME%\vulkan-1.dll" >nul 2>&1
+  )
+  set "NR_SETUP_REAL=%DEST%\game-backup\vulkan-1.dll"
+)
+copy /Y "%PROXY_SRC%" "%GAME%\vulkan-1.dll" >nul || (
+  echo ERROR: could not write "%GAME%\vulkan-1.dll".
+  exit /b 1
+)
+
+rem nr-env.txt: one NAME=VALUE a line, which is what the proxy parses.
+rem
+rem Written with the same `>>` echo pattern as the launcher above rather than one PowerShell
+rem -Command string. A single long -Command was tried first and produced a file that looked
+rem plausible and set nothing: the array it built came out stringified - the first three
+rem entries split across two lines each, and the remaining sixteen joined by spaces onto one
+rem line - so the proxy read names that no line had. The escaping an array needs to survive
+rem cmd's own quoting is the fragile part, and the launcher's pattern needs none of it.
+rem
+rem The one value cmd cannot compute is the socket token. `windows_wizard_core` derives it as
+rem the first eight hex digits of SHA-256 over the lowercased installation root with forward
+rem slashes, so a game folder moved between machines gets a fresh pipe. Same derivation here,
+rem in its own short command where quoting cannot reach the rest of the file.
+rem
+rem `--skip-weights` jumps past :find_python, so PY can still be empty here. NR_PYTHON does not
+rem have to be the interpreter that extracted the weights - the daemon only needs *a* Python 3 -
+rem but it must not be blank, because the layer passes it straight to CreateProcessA. Resolved
+rem again when it is empty; a machine with no Python at all is reported rather than written.
+if not defined PY (
+  if defined NR_PYTHON set "PY=%NR_PYTHON%"
+  if not defined PY ( where /q py && set "PY=py" )
+  if not defined PY ( where /q python3 && set "PY=python3" )
+  if not defined PY ( where /q python && set "PY=python" )
+)
+if not defined PY (
+  echo ERROR: no Python 3 on PATH, so the daemon could not be started by the game.
+  echo        Install it from python.org and run this again.
+  exit /b 1
+)
+set "NR_SETUP_ENV=%DEST%\nr-env.txt"
+set "NR_SETUP_CANON=%HERE%"
+set "NR_SETUP_TOKEN="
+for /f "usebackq delims=" %%T in (`powershell -NoProfile -Command "$p = $env:NR_SETUP_CANON; $c = $p.Replace('\','/').ToLower().TrimEnd('/'); $h = [Security.Cryptography.SHA256]::Create(); ([BitConverter]::ToString($h.ComputeHash([Text.Encoding]::UTF8.GetBytes($c))) -replace '-','').Substring(0,8).ToLower()"`) do set "NR_SETUP_TOKEN=%%T"
+if not defined NR_SETUP_TOKEN (
+  echo ERROR: could not derive the daemon's pipe name for "%HERE%".
+  exit /b 1
+)
+
+> "%NR_SETUP_ENV%" echo # Read by vulkan-1.dll beside the game ^(nr_vulkan_proxy.c^) in the game's own process. || exit /b 1
+>> "%NR_SETUP_ENV%" echo NR_GAME_EXE=%GAME_EXE% || exit /b 1
+>> "%NR_SETUP_ENV%" echo NR_LAUNCH_STATE=%HERE%\work\windows-wizard\launch-state.json || exit /b 1
+if defined NR_SETUP_REAL >> "%NR_SETUP_ENV%" echo NR_REAL_VULKAN=%NR_SETUP_REAL%
+>> "%NR_SETUP_ENV%" echo NR_ROOT=%HERE% || exit /b 1
+>> "%NR_SETUP_ENV%" echo NR_PYTHON=%PY% || exit /b 1
+>> "%NR_SETUP_ENV%" echo NR_DAEMON=%HERE%\src\layer\nr_daemon.py || exit /b 1
+>> "%NR_SETUP_ENV%" echo NR_SETTINGS=%HERE%\work\nr_settings.json || exit /b 1
+>> "%NR_SETUP_ENV%" echo NR_LAYER_LOG=%HERE%\work\nr_daemon.log || exit /b 1
+>> "%NR_SETUP_ENV%" echo NR_LAYER_TRIGGER=%HERE%\work\nr_trigger || exit /b 1
+>> "%NR_SETUP_ENV%" echo NR_LAYER_SOCKET=\\.\pipe\nr_windows_%NR_SETUP_TOKEN% || exit /b 1
+>> "%NR_SETUP_ENV%" echo NR_LAYER_LIVE=1 || exit /b 1
+>> "%NR_SETUP_ENV%" echo NR_LAYER_SPAWN=1 || exit /b 1
+>> "%NR_SETUP_ENV%" echo NR_KEEP_BLOCKS=1 || exit /b 1
+>> "%NR_SETUP_ENV%" echo ENABLE_NR_LAYER=1 || exit /b 1
+>> "%NR_SETUP_ENV%" echo VK_LAYER_PATH=%DEST%\VkLayer_dlss_nr.json || exit /b 1
+>> "%NR_SETUP_ENV%" echo VK_INSTANCE_LAYERS=VK_LAYER_dlssnr_intel || exit /b 1
+>> "%NR_SETUP_ENV%" echo PYTHONUTF8=1 || exit /b 1
+>> "%NR_SETUP_ENV%" echo PYTHONDONTWRITEBYTECODE=1 || exit /b 1
+>> "%NR_SETUP_ENV%" echo DXVK_LOG_PATH=%HERE%\work\logs || exit /b 1
+call :require_file "%NR_SETUP_ENV%" || (
+  echo ERROR: "%NR_SETUP_ENV%" was not written.
+  exit /b 1
+)
+exit /b 0
