@@ -36,6 +36,26 @@ class BridgeTests(unittest.TestCase):
             self.assertIn('Missing allocator', data['checks'][0]['detail'])
             self.assertFalse(result.with_suffix('.new').exists())
 
+    def test_pacing_bridge_keeps_gpu_image_choice_and_requested_pacing(self):
+        with tempfile.TemporaryDirectory(prefix='nr gpu profile bridge ') as room:
+            root = Path(room)
+            request = root / 'request.json'
+            result = root / 'result.json'
+            request.write_text(json.dumps({'python': sys.executable,
+                'game_exe': str(root / 'game.exe'), 'gpu_image_path': True,
+                'nr_async': True, 'nr_every': 3}), encoding='utf-8')
+            with mock.patch.object(bridge.core, 'set_pacing', return_value={
+                    'ok': True, 'applied': False}) as pacing, \
+                 mock.patch.object(sys, 'argv', ['wizard', 'pacing', '--root', str(root),
+                    '--input', str(request), '--output', str(result)]):
+                self.assertEqual(bridge.main(), 0)
+            profile = pacing.call_args.args[0]
+            self.assertTrue(profile.gpu_image_path)
+            self.assertEqual((profile.nr_async, profile.nr_every), (True, 3))
+            data = json.loads(result.read_text(encoding='utf-8'))
+            self.assertTrue(data['profile']['gpu_image_path'])
+            self.assertEqual((data['profile']['nr_async'], data['profile']['nr_every']), (True, 3))
+
     def test_no_profile_failure_is_reported_instead_of_silent_console_exit(self):
         with tempfile.TemporaryDirectory(prefix='nr no profile ') as room:
             output = Path(room) / 'result.json'

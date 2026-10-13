@@ -1,0 +1,169 @@
+#version 450
+/* SDR composition, preserving the CPU contract's FP32 operation order. The
+ * input head and neural history stay on the device. The original alpha and
+ * pixels outside the active rectangle are copied without conversion. */
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+layout(local_size_x = 256) in;
+layout(buffer_reference, scalar, buffer_reference_align = 4) buffer FloatBuf { float v[]; };
+layout(buffer_reference, scalar, buffer_reference_align = 4) buffer UintBuf { uint v[]; };
+layout(push_constant, scalar) uniform Push {
+    uint64_t a, b, c, d, e, f, g, h;
+    uint p[16];
+} pc;
+
+/* p: frame width,height, left,top, active width,height, valid head width,height,
+ * padded head row width, head channels, flags. h: intensity, confidence, gate
+ * scale, hold, hold slope, release slope, exposure, contrast, saturation,
+ * x ratio,y ratio (FP32), then padding through element 15, byte decode LUT256,
+ * then the 65536-entry
+ * exact NumPy gate table. Flags: BGRA=1 HISTORY=2 PREVIOUS=4 KEEP=8 GRADE=16. */
+float unit(float v) { return v < 0.0 ? 0.0 : v > 1.0 ? 1.0 : v; }
+/* Intel's native FDiv is approximate. One residual correction recovers the
+ * correctly-rounded scalar division used by the CPU colour grade. Explicit fma
+ * here measures the quotient's residual; the surrounding grade stays precise. */
+float divide(float a, float b) {
+    precise float q = a / b;
+    precise float error = fma(-q, b, a);
+    precise float refined = q + error / b;
+    return refined;
+}
+float half_round(float v) { return float(float16_t(v)); }
+float trunc_half(float v) {
+    uint bits = floatBitsToUint(v);
+    float kept = uintBitsToFloat(bits & 0xffffe000u);
+    float small = floor(abs(v) * 16777216.0) * (1.0 / 16777216.0);
+    small = v < 0.0 ? -small : small;
+    return (bits & 0x7fffffffu) >= 0x38800000u ? kept : small;
+}
+float hue_channel(float p, float q, float t) {
+    precise float rising, falling;
+    t = t < 0.0 ? t + 1.0 : t;
+    t = t > 1.0 ? t - 1.0 : t;
+    rising = p + t * ((q - p) * 6.0);
+    falling = p + (2.0 / 3.0 - t) * (q - p) * 6.0;
+    return t < 1.0 / 6.0 ? rising : t < 0.5 ? q : t < 2.0 / 3.0 ? falling : p;
+}
+vec3 grade(vec3 c, FloatBuf settings) {
+    precise vec3 rgb = c;
+    for (uint i = 0u; i < 3u; ++i) {
+        precise float v = unit(unit(rgb[i]) * settings.v[6]);
+        rgb[i] = unit(v + settings.v[7] * (v * v * (3.0 - (v + v)) - v));
+    }
+    precise float hi = max(max(rgb.r, rgb.g), rgb.b);
+    precise float lo = min(min(rgb.r, rgb.g), rgb.b);
+    precise float light = (hi + lo) * 0.5;
+    precise float delta = hi - lo;
+    bool grey = !(hi > lo);
+    float spread = grey ? 1.0 : delta;
+    precise float bright = (2.0 - hi) - lo, dark = hi + lo;
+    precise float chroma = light > 0.5 ? divide(delta, grey ? 1.0 : bright)
+                                     : divide(delta, grey ? 1.0 : dark);
+    /* Keep the divisor runtime-visible: Intel's constant-divisor folding can
+     * replace the corrected divide by a reciprocal multiplication. */
+    precise float hr = divide(divide(rgb.g - rgb.b, spread) + (rgb.g < rgb.b ? 6.0 : 0.0), settings.v[11]);
+    precise float hg = divide(divide(rgb.b - rgb.r, spread) + 2.0, settings.v[11]);
+    precise float hb = divide(divide(rgb.r - rgb.g, spread) + 4.0, settings.v[11]);
+    float hue = grey ? 0.0 : hi == rgb.r ? hr : hi == rgb.g ? hg : hb;
+    chroma = unit((grey ? 0.0 : chroma) * settings.v[8]);
+    precise float q = light < 0.5 ? light * (chroma + 1.0) : (light + chroma) - light * chroma;
+    precise float p = (light + light) - q;
+    if (chroma <= 0.0) return vec3(unit(light));
+    return vec3(unit(hue_channel(p, q, hue + 1.0 / 3.0)),
+                unit(hue_channel(p, q, hue)),
+                unit(hue_channel(p, q, hue - 1.0 / 3.0)));
+}
+void axis(uint dest, uint src_extent, uint dest_extent, float ratio,
+          out uint lo, out uint hi, out float weight) {
+    if (src_extent == dest_extent) { lo = dest; hi = dest; weight = 0.0; return; }
+    precise float centre = (float(dest) + 0.5) * ratio - 0.5;
+    lo = uint(clamp(floor(centre), 0.0, float(src_extent - 1u)));
+    hi = min(lo + 1u, src_extent - 1u);
+    weight = clamp(centre - float(lo), 0.0, 1.0);
+}
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    uint frame_width = pc.p[0], frame_height = pc.p[1];
+    if (index >= frame_width * frame_height) return;
+    uint x = index % frame_width, y = index / frame_width;
+    uint raw = UintBuf(pc.a).v[index];
+    UintBuf output_pixels = UintBuf(pc.e);
+    uint left = pc.p[2], top = pc.p[3], width = pc.p[4], height = pc.p[5];
+    if (x < left || x >= left + width || y < top || y >= top + height) {
+        output_pixels.v[index] = raw;
+        return;
+    }
+    x -= left; y -= top;
+    uint pixel = y * width + x, flags = pc.p[10];
+    FloatBuf settings = FloatBuf(pc.h);
+    bool bgra = (flags & 1u) != 0u;
+    /* A hardware reciprocal of 255 differs by one ULP on Intel. Input colour
+     * must use the CPU's exact float32 values, especially near FP16 ties. */
+    precise vec3 rgb = vec3(settings.v[16u + ((raw >> (bgra ? 16u : 0u)) & 255u)],
+                           settings.v[16u + ((raw >> 8u) & 255u)],
+                           settings.v[16u + ((raw >> (bgra ? 0u : 16u)) & 255u)]);
+    uint xlo, xhi, ylo, yhi; float wx, wy;
+    axis(x, pc.p[6], width, settings.v[9], xlo, xhi, wx);
+    axis(y, pc.p[7], height, settings.v[10], ylo, yhi, wy);
+    FloatBuf head = FloatBuf(pc.b);
+    uint channels = pc.p[9], row = pc.p[8] * channels;
+    precise vec4 h;
+    for (uint c = 0u; c < 4u; ++c) {
+        /* Resampling is rows then columns with an FP32 rounding after each
+         * axis, as nr_daemon.resample and native nr_compose_encode. */
+        precise float a = head.v[ylo * row + xlo * channels + c];
+        precise float b = head.v[ylo * row + xhi * channels + c];
+        if (pc.p[7] != height) {
+            a = a * (1.0 - wy) + head.v[yhi * row + xlo * channels + c] * wy;
+            b = b * (1.0 - wy) + head.v[yhi * row + xhi * channels + c] * wy;
+        }
+        h[c] = pc.p[6] == width ? a : a * (1.0 - wx) + b * wx;
+    }
+    precise vec3 predicted;
+    for (uint c = 0u; c < 3u; ++c) predicted[c] = unit(rgb[c] + half_round(h[c]) * 0.25);
+    bool temporal = (flags & 2u) != 0u;
+    if (temporal) {
+        /* packHalf is only asked to encode an already-exact FP16 value. The
+         * rounding is float16_t, matching the runtime's tested half path. */
+        uint bits = packHalf2x16(vec2(half_round(h.w), 0.0)) & 65535u;
+        precise float alpha = settings.v[272u + bits] * settings.v[1];
+        if ((flags & 4u) != 0u) {
+            FloatBuf previous = FloatBuf(pc.d);
+            precise vec3 step = abs(rgb - vec3(previous.v[3u * pixel], previous.v[3u * pixel + 1u],
+                                              previous.v[3u * pixel + 2u]));
+            float moved = max(max(step.r, step.g), step.b);
+            if (settings.v[5] != 0.0) alpha *= unit(moved * settings.v[5] + 1.0);
+            precise float floor_value = moved * settings.v[4] + settings.v[3];
+            floor_value = min(min(max(floor_value, 0.0), settings.v[3]), 1.0);
+            floor_value *= settings.v[2];
+            alpha = max(alpha, floor_value);
+        }
+        FloatBuf history = FloatBuf(pc.c);
+        for (uint c = 0u; c < 3u; ++c)
+            predicted[c] += alpha * (history.v[3u * pixel + c] - predicted[c]);
+    }
+    if ((flags & (8u | 16u)) != 0u) {
+        vec3 kept;
+        for (uint c = 0u; c < 3u; ++c) kept[c] = trunc_half(predicted[c]);
+        if ((flags & 8u) != 0u) {
+            FloatBuf neural = FloatBuf(pc.f);
+            for (uint c = 0u; c < 3u; ++c) neural.v[3u * pixel + c] = kept[c];
+        }
+        if ((flags & 16u) != 0u) predicted = grade(kept, settings);
+    }
+    float intensity = settings.v[0];
+    float blend = temporal || intensity > 1.0 ? intensity : unit(intensity);
+    FloatBuf composition = FloatBuf(pc.g);
+    uint packed = raw & 0xff000000u;
+    for (uint c = 0u; c < 3u; ++c) {
+        precise float v = unit(rgb[c] + blend * (predicted[c] - rgb[c]));
+        composition.v[3u * pixel + c] = v;
+        float safe = isnan(v) ? 0.0 : unit(v);
+        uint byte_value = uint(safe * 255.0 + 0.5);
+        packed |= byte_value << ((bgra ? 2u - c : c) * 8u);
+    }
+    output_pixels.v[index] = packed;
+}

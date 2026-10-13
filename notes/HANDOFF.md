@@ -1,6 +1,6 @@
 # HANDOFF — read this first
 
-State of the DLSS-NR on Intel Xe2 project as of **2026-10-13**. notes/CLAUDE.md holds the
+State of the DLSS-NR on Intel Xe2 project as of **2026-10-14**. notes/CLAUDE.md holds the
 original brief; **this file overrides it wherever they disagree**, and after
 2026-09-09 they disagree about something foundational.
 
@@ -8,6 +8,37 @@ original brief; **this file overrides it wherever they disagree**, and after
 you need the evidence behind a line in this file, rather than reading them in order.
 
 ---
+
+## Local GPU frame path and Windows E4M3 check (2026-10-13, later)
+
+The continuation is on local `codex/gpu-frame-path`, based on `7abed9d`.
+GPU preparation/composition/history and authenticated shared Vulkan resources
+are implemented behind an experimental window option, off by default. The same
+Arc SDR every-frame synchronous path passed actual Win32 swapchain/full-model
+smoke on **101.9150** for API 1.1 and 1.3: 24 presents, 22 GPU frames, resize,
+trigger and scale controls, zero synchronization-validation errors. Correct
+private command-buffer loader dispatch initialization was required. Owner lock,
+primary surface policy, transfer reuse and timeout-safe cleanup have CPU tests.
+No commit publication, tag, release or real-game FPS gain is claimed.
+
+`notes/gpu-frame-path-20261013.md` records the limits and remaining checks.
+Current-driver image parity passes; rotating 25-warm/30-sample benchmarks now
+cover full 1080p/1440p. At 1440p/0.4 CPU/GPU-host medians are 179.59/122.14 ms;
+at full 1440p, 786.39/743.07 ms. These exclude game capture/IPC/return and are
+not FPS. Unchanged settings uploads are cached. Forced-fence full-image smoke
+also passes with controls and synchronization validation. A paired memory-policy
+probe found cached DEVICE memory slower; that experiment was removed. The full-
+resolution network gap remains unexplained. Final daemon outage/restart passed:
+original frame retained, then host-image fallback, zero sync errors. Shared mode
+renegotiates after device/game restart. Next: real game A/B and B580 measurement.
+
+Separately checked remote `improve-e4m3` at `40cb8e5` on 101.9150: zero mismatches
+over 1,114,875 inputs, exact full/changed network heads, GEMM/frame regressions
+pass. Alternating warmed contexts showed about 9.6% slower paired time at 320
+and neutral 720p. Full 1080p/1440p remain exact but are about 10.1%/22.4% slower.
+Keep its compile-time experiment off; it is not merged here.
+
+The user requires explicit confirmation before future push/merge/release.
 
 ## PR #13 reviewed on Windows (2026-10-13)
 

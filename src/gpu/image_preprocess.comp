@@ -1,0 +1,153 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_16bit_storage : require
+
+// Device pixels -> NHWC16 features, without a host image or feature tensor.
+// The operation order is nr_decode8 / nr_daemon.resample / nr_features_half.
+// Noise is a persistent exact reference table, uploaded once for each extent and
+// frame index. Shader log/sin/cos do not reproduce NumPy's half bits reliably.
+#include "publish.glsl"
+
+layout(local_size_x = 64) in;
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer Raw {
+    uint v[];
+};
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer RGB {
+    float v[];
+};
+layout(buffer_reference, std430, buffer_reference_align = 2) readonly buffer Noise {
+    float16_t v[];
+};
+layout(buffer_reference, std430, buffer_reference_align = 2) writeonly buffer Features {
+    float16_t v[];
+};
+layout(buffer_reference, std430, buffer_reference_align = 4) writeonly buffer RGBOutput {
+    float v[];
+};
+
+// 96 bytes. Explicit scalar members keep the C ABI independent of vec3 padding.
+layout(push_constant, std430) uniform Push {
+    uint64_t raw, history, features, noise;
+    uint source_w, source_h, left, top, active_w, active_h, inner_w, inner_h;
+    uint network_w, network_h, flags;
+    float ratio_y;
+    float style, tone, structure, ratio_x;
+} p;
+
+float decoded_byte(uint value) {
+    // Vulkan OpFDiv permits a small error even with precise. For the 256 codec
+    // values build the correctly rounded FP32 significand using exact integers.
+    // n<<shift fits uint32; /255 has no tie because its denominator is odd.
+    if (value == 0u) return 0.0;
+    uint highest = uint(findMSB(value));
+    uint numerator = value << (31u - highest);
+    uint mantissa = numerator / 255u + ((numerator % 255u) >= 128u ? 1u : 0u);
+    return uintBitsToFloat(((highest + 119u) << 23u) + (mantissa - 0x800000u));
+}
+
+float source_at(uint y, uint x, uint c) {
+    if ((p.flags & 4u) != 0u)
+        return RGB(p.raw).v[((p.top + y) * p.source_w + p.left + x) * 3u + c];
+    uint word = Raw(p.raw).v[(p.top + y) * p.source_w + p.left + x];
+    uint channel = ((p.flags & 1u) != 0u) ? 2u - c : c;
+    return decoded_byte((word >> (channel * 8u)) & 255u);
+}
+
+// A separable bilinear resize rounds to float32 between the axes. In particular,
+// never replace these two multiplies plus add with mix() or a contracted FMA.
+float row_sample(uint y, uint x, uint c) {
+    if (p.active_h == p.inner_h) return source_at(y, x, c);
+    precise float ratio = p.ratio_y;
+    precise float centre = (float(y) + 0.5) * ratio - 0.5;
+    uint low = uint(clamp(floor(centre), 0.0, float(p.active_h - 1u)));
+    uint high = min(low + 1u, p.active_h - 1u);
+    precise float weight = clamp(centre - float(low), 0.0, 1.0);
+    precise float other = 1.0 - weight;
+    precise float a = source_at(low, x, c) * other;
+    precise float b = source_at(high, x, c) * weight;
+    precise float result = a + b;
+    return result;
+}
+
+float area_divide(float total, float count) {
+    // OpFDiv may be one ULP off on Intel. A fused residual refines the quotient
+    // back to the native CPU result. Count stays runtime-visible from extents;
+    // constant-divisor folding can otherwise defeat this correction.
+    precise float quotient = total / count;
+    precise float error = fma(-quotient, count, total);
+    precise float refined = quotient + error / count;
+    return refined;
+}
+
+float inner_at(uint y, uint x, uint c) {
+    if (p.active_h == p.inner_h && p.active_w == p.inner_w)
+        return source_at(y, x, c);
+    if (p.active_h > p.inner_h && p.active_w > p.inner_w &&
+        p.active_h % p.inner_h == 0u && p.active_w % p.inner_w == 0u) {
+        uint fy = p.active_h / p.inner_h, fx = p.active_w / p.inner_w;
+        precise float total = source_at(y * fy, x * fx, c);
+        for (uint dy = 0u; dy < fy; ++dy)
+            for (uint dx = 0u; dx < fx; ++dx)
+                if (dy != 0u || dx != 0u)
+                    total = total + source_at(y * fy + dy, x * fx + dx, c);
+        precise float result = area_divide(total, float(fy * fx));
+        return result;
+    }
+    if (p.active_w == p.inner_w) return row_sample(y, x, c);
+    precise float ratio = p.ratio_x;
+    precise float centre = (float(x) + 0.5) * ratio - 0.5;
+    uint low = uint(clamp(floor(centre), 0.0, float(p.active_w - 1u)));
+    uint high = min(low + 1u, p.active_w - 1u);
+    precise float weight = clamp(centre - float(low), 0.0, 1.0);
+    precise float other = 1.0 - weight;
+    precise float a = row_sample(y, low, c) * other;
+    precise float b = row_sample(y, high, c) * weight;
+    precise float result = a + b;
+    return result;
+}
+
+uint source_index(uint index, uint extent) {
+    // The vendor's extension is one reflection, then clamped at the origin. A
+    // periodic mirror would change tiny frames padded beyond twice their extent.
+    return index < extent ? index : uint(max(0, 2 * int(extent) - 2 - int(index)));
+}
+
+float scaled_colour(float value) {
+    precise float sampled = half_round(value);
+    precise float centred = half_round(sampled - 0.5);
+    precise float scaled = half_round(centred * 0.125);
+    return scaled;
+}
+
+void main() {
+    uint pixel = gl_GlobalInvocationID.x;
+    if (pixel >= p.network_w * p.network_h) return;
+    uint y = source_index(pixel / p.network_w, p.inner_h);
+    uint x = source_index(pixel % p.network_w, p.inner_w);
+    if ((p.flags & 8u) != 0u) {
+        RGBOutput output_colour = RGBOutput(p.features);
+        for (uint c = 0u; c < 3u; ++c)
+            output_colour.v[pixel * 3u + c] = inner_at(y, x, c);
+        return;
+    }
+    Features output_features = Features(p.features);
+    Noise noise = Noise(p.noise);
+    for (uint c = 0u; c < 3u; ++c) {
+        float scaled = scaled_colour(inner_at(y, x, c));
+        output_features.v[pixel * 16u + c] = noise.v[pixel * 3u + c];
+        output_features.v[pixel * 16u + 4u + c] = float16_t(scaled);
+        float old = (p.flags & 2u) != 0u
+            ? scaled_colour(RGB(p.history).v[(y * p.inner_w + x) * 3u + c]) : scaled;
+        output_features.v[pixel * 16u + 7u + c] = float16_t(old);
+    }
+    output_features.v[pixel * 16u + 3u] = float16_t(1.0);
+    output_features.v[pixel * 16u + 10u] = float16_t(p.style);
+    output_features.v[pixel * 16u + 11u] = float16_t(p.tone);
+    output_features.v[pixel * 16u + 12u] = float16_t(p.structure);
+    output_features.v[pixel * 16u + 13u] = float16_t(-1.0);
+    output_features.v[pixel * 16u + 14u] = float16_t(-1.0);
+    output_features.v[pixel * 16u + 15u] = float16_t(0.0);
+}

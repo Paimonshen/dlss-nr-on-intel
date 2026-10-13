@@ -13,6 +13,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stddef.h>
+#ifdef _WIN32
+#define VK_USE_PLATFORM_WIN32_KHR
+#include <windows.h>
+#ifdef small
+#undef small /* Windows RPC headers define this token; GEMM uses a local name. */
+#endif
+#endif
 #include <vulkan/vulkan.h>
 
 /* A lost device is recorded as well as described: it is the one failure after which nothing
@@ -56,7 +63,8 @@ static struct {
 	 * ts[i+1]-ts[i]; the barrier between passes makes that attribution exact. */
 	VkQueryPool qpool; unsigned prof, prof_n; float ts_period;
 	char name[256]; char err[256]; char memory[256]; char memory_read[256];
-	int ready, lost, discrete, unmapped;
+	int ready, lost, discrete, unmapped, external, external_semaphore, external_pending, resident_pending, transfer_pending;
+	unsigned char device_uuid[VK_UUID_SIZE], driver_uuid[VK_UUID_SIZE];
 	int pin32;                /* pipelines require 32-lane subgroups (build_pipeline_spec) */
 	int half_by_cast;         /* half_round's spelling, constant 1 on every pipeline (xmx_init) */
 	int staged_packed;        /* raw 128-bit staged operand copies, constant 2 (xmx_init) */
@@ -77,6 +85,11 @@ static struct {
 	VkPipeline pipeline;
 } specialized[MAX_SPECIALIZED];
 static unsigned specialized_count;
+
+/* Image passes share the resident device and its recorded command stream. Their
+ * push layouts are shader-specific, bounded by the same 128-byte Vulkan floor. */
+#define MAX_IMAGE_PIPELINES 16
+static struct { VkPipeline pipeline; char *path; } image_pipelines[MAX_IMAGE_PIPELINES];
 
 #define MAX_GRAPHS 128
 static struct { VkCommandBuffer commands; int passes; unsigned stamps; unsigned char *kinds; }
@@ -993,11 +1006,30 @@ int xmx_init(const char *spv_path)
 	VkDeviceQueueCreateInfo qci = { .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
 					.pNext = priority.globalPriority ? &priority : NULL,
 					.queueFamilyIndex = g.qi, .queueCount = 1, .pQueuePriorities = &prio };
-	const char *ext[4];
+	const char *ext[6];
 	uint32_t next = 0;
 	ext[next++] = VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME;
 	ext[next++] = VK_KHR_WORKGROUP_MEMORY_EXPLICIT_LAYOUT_EXTENSION_NAME;
 	if (stats) ext[next++] = VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME;
+#ifdef _WIN32
+	{
+		uint32_t count=0; int memory=0,semaphore=0;
+		vkEnumerateDeviceExtensionProperties(g.pd,NULL,&count,NULL);
+		VkExtensionProperties *have=calloc(count?count:1,sizeof *have);
+		if(have && vkEnumerateDeviceExtensionProperties(g.pd,NULL,&count,have)>=0)
+			for(uint32_t i=0;i<count;i++) {
+				memory |= !strcmp(have[i].extensionName,VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME);
+				semaphore |= !strcmp(have[i].extensionName,VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME);
+			}
+		free(have);
+		g.external=memory;
+		g.external_semaphore=memory && semaphore;
+		if(g.external) {
+			ext[next++]=VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME;
+			if(semaphore) ext[next++]=VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME;
+		}
+	}
+#endif
 	if (priority.globalPriority) ext[next++] = priority_extension;
 	VkDeviceCreateInfo dci = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &f2,
 				   .queueCreateInfoCount = 1, .pQueueCreateInfos = &qci,
@@ -1013,6 +1045,13 @@ int xmx_init(const char *spv_path)
 		priority.globalPriority = 0;
 	}
 	if (r) FAIL("vkCreateDevice", r);
+	{
+		VkPhysicalDeviceIDProperties id={.sType=VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES};
+		VkPhysicalDeviceProperties2 props={.sType=VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,.pNext=&id};
+		vkGetPhysicalDeviceProperties2(g.pd,&props);
+		memcpy(g.device_uuid,id.deviceUUID,VK_UUID_SIZE);
+		memcpy(g.driver_uuid,id.driverUUID,VK_UUID_SIZE);
+	}
 	if (priority.globalPriority || g.qi || (family && *family))
 		fprintf(stderr, "libxmx: queue family %u%s%s\n", g.qi,
 			priority.globalPriority ? ", priority " : "",
@@ -1266,6 +1305,7 @@ int xmx_res_init(const char *gemm_spv, const char *unary_spv, const char *row_sp
 int xmx_buf_create_kind(unsigned long long bytes, int kind)
 {
 	if (!g.rready) FAIL("resident runtime not initialised", 0);
+	if (kind < 0 || kind > 3) FAIL("invalid resident buffer kind", 0);
 	int id = -1;
 	for (int i = 0; i < MAX_RBUF; i++)
 		if (!rbufs[i].live) { id = i; break; }
@@ -1279,7 +1319,7 @@ int xmx_buf_create_kind(unsigned long long bytes, int kind)
 	if (r) FAIL("vkCreateBuffer (resident)", r);
 	VkMemoryRequirements mr;
 	vkGetBufferMemoryRequirements(g.dev, rb->b, &mr);
-	int unmapped = kind == 0 && g.unmapped;
+	int unmapped = kind == 3 || (kind == 0 && g.unmapped);
 	const char *failure = unmapped ? "no device-local memory type"
 				       : "no host-visible memory type";
 	uint32_t mt = unmapped ? memtype_device(mr.memoryTypeBits)
@@ -1337,13 +1377,18 @@ static int submit_transfer(void)
 	VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1,
 			    .pCommandBuffers = &g.tcb };
 	if ((r = vkQueueSubmit(g.q, 1, &si, g.tfence))) FAIL("transfer submit", r);
-	if ((r = vkWaitForFences(g.dev, 1, &g.tfence, VK_TRUE, 60ull * 1000000000ull)))
+	g.transfer_pending = 1;
+	if ((r = vkWaitForFences(g.dev, 1, &g.tfence, VK_TRUE, 60ull * 1000000000ull))) {
+		g.lost = 1; /* A timeout leaves live addresses: stop this runtime too. */
 		FAIL("transfer fence", r);
+	}
+	g.transfer_pending = 0;
 	return 0;
 }
 
 static int begin_transfer(void)
 {
+	if (g.lost) FAIL("transfer device unavailable", VK_ERROR_DEVICE_LOST);
 	VkCommandBufferBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
 					.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT };
 	vkResetCommandBuffer(g.tcb, 0);
@@ -1467,6 +1512,10 @@ unsigned long long xmx_buf_bytes(int id)
 
 int xmx_buf_destroy(int id)
 {
+	/* A timed-out external submission can still reference imported and graph buffers.
+	 * Keep them pinned until process teardown rather than freeing live GPU addresses. */
+	if (g.external_pending || g.resident_pending || g.transfer_pending)
+		FAIL("GPU submission still pending; buffer retained", -1);
 	if (id < 0 || id >= MAX_RBUF || !rbufs[id].live) return 0;
 	if (rbufs[id].mapped) vkUnmapMemory(g.dev, rbufs[id].m);
 	vkDestroyBuffer(g.dev, rbufs[id].b, NULL);
@@ -1494,6 +1543,7 @@ static void stamp(unsigned family, unsigned subkind)
 int xmx_begin(void)
 {
 	if (!g.rready) FAIL("resident runtime not initialised", 0);
+	if (g.lost) FAIL("resident device unavailable", VK_ERROR_DEVICE_LOST);
 	if (g.recording) FAIL("already recording", 0);
 	vkResetCommandBuffer(g.rcb, 0);
 	/* Captured graphs are replayed, so ONE_TIME_SUBMIT is deliberately absent. */
@@ -1533,6 +1583,52 @@ static void barrier(void)
 			       .dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT };
 	vkCmdPipelineBarrier(g.rcb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
 			     VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+}
+
+unsigned long long xmx_buf_address(int id)
+{
+	return (unsigned long long)addr_of(id);
+}
+
+int xmx_image_pipeline_init(const char *path)
+{
+	if (!g.rready || !path || !*path) FAIL("image pipeline needs resident runtime and path", 0);
+	if (g.recording) FAIL("cannot create image pipeline while recording", 0);
+	for (int i = 0; i < MAX_IMAGE_PIPELINES; i++)
+		if (image_pipelines[i].path && !strcmp(image_pipelines[i].path, path)) return i;
+	for (int i = 0; i < MAX_IMAGE_PIPELINES; i++) {
+		if (image_pipelines[i].pipeline) continue;
+		VkPipeline pipeline = VK_NULL_HANDLE;
+		if (build_pipeline(path, g.rpl, &pipeline)) return -1;
+		char *copy = strdup(path);
+		if (!copy) { vkDestroyPipeline(g.dev, pipeline, NULL); FAIL("image pipeline path", 0); }
+		image_pipelines[i].pipeline = pipeline;
+		image_pipelines[i].path = copy;
+		return i;
+	}
+	FAIL("out of image pipeline slots", 0);
+}
+
+int xmx_rec_image_pipeline(int id, const void *push, unsigned bytes,
+			   unsigned gx, unsigned gy, unsigned gz)
+{
+	if (!g.recording) FAIL("image pass is not recording", 0);
+	if (id < 0 || id >= MAX_IMAGE_PIPELINES || !image_pipelines[id].pipeline)
+		FAIL("image pipeline is not live", 0);
+	if (!push || !bytes || bytes > sizeof(struct push) || (bytes & 3) || !gx || !gy || !gz)
+		FAIL("invalid image push constants or dispatch", 0);
+	VkPhysicalDeviceProperties props;
+	vkGetPhysicalDeviceProperties(g.pd, &props);
+	if (gx > props.limits.maxComputeWorkGroupCount[0] ||
+	    gy > props.limits.maxComputeWorkGroupCount[1] ||
+	    gz > props.limits.maxComputeWorkGroupCount[2]) FAIL("image dispatch exceeds device limits", 0);
+	barrier();
+	vkCmdBindPipeline(g.rcb, VK_PIPELINE_BIND_POINT_COMPUTE, image_pipelines[id].pipeline);
+	vkCmdPushConstants(g.rcb, g.rpl, VK_SHADER_STAGE_COMPUTE_BIT, 0, bytes, push);
+	vkCmdDispatch(g.rcb, gx, gy, gz);
+	stamp(PK_ROW, 31);
+	g.recorded++;
+	return 0;
 }
 
 /* Copy a skip without a host fence. Both barriers cover execution dependencies
@@ -2260,13 +2356,18 @@ static void collect(unsigned stamps, const unsigned char *kinds)
 
 static int submit_commands(VkCommandBuffer commands, int passes)
 {
+	if (g.lost) FAIL("resident device unavailable", VK_ERROR_DEVICE_LOST);
 	VkResult r = vkResetFences(g.dev, 1, &g.rfence);
 	if (r) FAIL("reset resident fence", r);
 	VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1,
 			    .pCommandBuffers = &commands };
 	if ((r = vkQueueSubmit(g.q, 1, &si, g.rfence))) FAIL("resident submit", r);
-	if ((r = vkWaitForFences(g.dev, 1, &g.rfence, VK_TRUE, 60ull * 1000000000ull)))
+	g.resident_pending = 1;
+	if ((r = vkWaitForFences(g.dev, 1, &g.rfence, VK_TRUE, 60ull * 1000000000ull))) {
+		g.lost = 1;
 		FAIL("resident fence wait", r);
+	}
+	g.resident_pending = 0;
 	return passes;
 }
 
@@ -2380,8 +2481,187 @@ unsigned xmx_profile_count(unsigned kind)
 	return kind < PROF_KINDS ? prof_hits[kind] : 0u;
 }
 
+int xmx_external_available(void) { return g.ready && g.external; }
+
+int xmx_device_ids(void *output)
+{
+	if (!g.ready || !output) FAIL("device identity unavailable", 0);
+	memcpy(output,g.device_uuid,VK_UUID_SIZE);
+	memcpy((unsigned char *)output+VK_UUID_SIZE,g.driver_uuid,VK_UUID_SIZE);
+	return 0;
+}
+
+#ifdef _WIN32
+#define MAX_EXTERNAL_SEMAPHORES 32
+static VkSemaphore external_semaphores[MAX_EXTERNAL_SEMAPHORES];
+
+static HANDLE duplicate_gpu_handle(unsigned pid, unsigned long long value)
+{
+	if(!pid || !value) return NULL;
+	HANDLE process=OpenProcess(PROCESS_DUP_HANDLE,FALSE,pid),copy=NULL;
+	if(!process) return NULL;
+	BOOL ok=DuplicateHandle(process,(HANDLE)(uintptr_t)value,GetCurrentProcess(),&copy,
+				0,FALSE,DUPLICATE_SAME_ACCESS);
+	CloseHandle(process);
+	return ok?copy:NULL;
+}
+#endif
+
+int xmx_buf_import_win32(unsigned pid, unsigned long long handle,
+	unsigned long long bytes, unsigned long long allocation_size, unsigned memory_type)
+{
+#ifdef _WIN32
+	if(!g.rready || !g.external || g.recording) FAIL("GPU import is unavailable while recording",0);
+	if(!bytes || bytes>allocation_size || allocation_size>(1ull<<30)) FAIL("invalid GPU import size",0);
+	VkPhysicalDeviceMemoryProperties mp;
+	vkGetPhysicalDeviceMemoryProperties(g.pd,&mp);
+	if(memory_type>=mp.memoryTypeCount ||
+	   !(mp.memoryTypes[memory_type].propertyFlags&VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))
+		FAIL("GPU import is not device-local memory",0);
+	int id=-1;
+	for(int i=0;i<MAX_RBUF;i++) if(!rbufs[i].live){id=i;break;}
+	if(id<0) FAIL("out of GPU import buffer slots",0);
+	HANDLE copy=duplicate_gpu_handle(pid,handle);
+	if(!copy) FAIL("DuplicateHandle for GPU memory",GetLastError());
+	struct rbuf *rb=&rbufs[id];
+	VkExternalMemoryBufferCreateInfo external={.sType=VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO,
+		.handleTypes=VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT};
+	VkBufferCreateInfo bi={.sType=VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,.pNext=&external,.size=bytes,
+		.usage=VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_TRANSFER_SRC_BIT|
+		       VK_BUFFER_USAGE_TRANSFER_DST_BIT|VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT};
+	VkResult r=vkCreateBuffer(g.dev,&bi,NULL,&rb->b);
+	const char *failure="create imported GPU buffer";
+	if(r) goto import_failed;
+	VkMemoryRequirements mr;
+	vkGetBufferMemoryRequirements(g.dev,rb->b,&mr);
+	if(mr.size>allocation_size || !(mr.memoryTypeBits&(1u<<memory_type))) {
+		failure="incompatible exported GPU allocation";r=VK_ERROR_INVALID_EXTERNAL_HANDLE;goto import_failed;
+	}
+	VkMemoryDedicatedAllocateInfo dedicated={.sType=VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO,.buffer=rb->b};
+	VkImportMemoryWin32HandleInfoKHR imported={.sType=VK_STRUCTURE_TYPE_IMPORT_MEMORY_WIN32_HANDLE_INFO_KHR,
+		.pNext=&dedicated,.handleType=VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT,.handle=copy};
+	VkMemoryAllocateFlagsInfo flags={.sType=VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO,
+		.pNext=&imported,.flags=VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT};
+	VkMemoryAllocateInfo ai={.sType=VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,.pNext=&flags,
+		.allocationSize=allocation_size,.memoryTypeIndex=memory_type};
+	failure="import Win32 GPU memory";
+	if((r=vkAllocateMemory(g.dev,&ai,NULL,&rb->m))) goto import_failed;
+	failure="bind imported GPU memory";
+	if((r=vkBindBufferMemory(g.dev,rb->b,rb->m,0))) goto import_failed;
+	VkBufferDeviceAddressInfo address={.sType=VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,.buffer=rb->b};
+	rb->addr=vkGetBufferDeviceAddress(g.dev,&address);
+	if(!rb->addr){failure="imported buffer has no device address";r=VK_ERROR_UNKNOWN;goto import_failed;}
+	rb->size=bytes;rb->mapped=0;rb->live=1;
+	CloseHandle(copy);
+	return id;
+import_failed:
+	CloseHandle(copy);
+	if(rb->b) vkDestroyBuffer(g.dev,rb->b,NULL);
+	if(rb->m) vkFreeMemory(g.dev,rb->m,NULL);
+	*rb=(struct rbuf){0};
+	FAIL(failure,r);
+#else
+	(void)pid;(void)handle;(void)bytes;(void)allocation_size;(void)memory_type;
+	FAIL("Win32 GPU memory import is unavailable",0);
+#endif
+}
+
+int xmx_sem_import_win32(unsigned pid, unsigned long long handle)
+{
+#ifdef _WIN32
+	if(!g.rready || !g.external_semaphore || g.recording) FAIL("GPU semaphore import unavailable",0);
+	int id=-1;
+	for(int i=0;i<MAX_EXTERNAL_SEMAPHORES;i++) if(!external_semaphores[i]){id=i;break;}
+	if(id<0) FAIL("out of imported GPU semaphore slots",0);
+	HANDLE copy=duplicate_gpu_handle(pid,handle);
+	if(!copy) FAIL("DuplicateHandle for GPU semaphore",GetLastError());
+	VkSemaphoreCreateInfo si={.sType=VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+	VkResult r=vkCreateSemaphore(g.dev,&si,NULL,&external_semaphores[id]);
+	PFN_vkImportSemaphoreWin32HandleKHR import_sem=(PFN_vkImportSemaphoreWin32HandleKHR)
+		vkGetDeviceProcAddr(g.dev,"vkImportSemaphoreWin32HandleKHR");
+	if(!r && import_sem) {
+		VkImportSemaphoreWin32HandleInfoKHR info={.sType=VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_WIN32_HANDLE_INFO_KHR,
+			.semaphore=external_semaphores[id],.handleType=VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_WIN32_BIT,
+			.handle=copy};
+		r=import_sem(g.dev,&info);
+	} else if(!r) r=VK_ERROR_EXTENSION_NOT_PRESENT;
+	CloseHandle(copy);
+	if(r) {
+		if(external_semaphores[id]) vkDestroySemaphore(g.dev,external_semaphores[id],NULL);
+		external_semaphores[id]=VK_NULL_HANDLE;FAIL("import Win32 GPU semaphore",r);
+	}
+	return id;
+#else
+	(void)pid;(void)handle;FAIL("Win32 GPU semaphore import is unavailable",0);
+#endif
+}
+
+int xmx_sem_destroy(int id)
+{
+#ifdef _WIN32
+	if(id<0 || id>=MAX_EXTERNAL_SEMAPHORES) return 0;
+	if(g.recording || g.lost) FAIL("cannot destroy external semaphore with pending/lost device",0);
+	if(external_semaphores[id]) vkDestroySemaphore(g.dev,external_semaphores[id],NULL);
+	external_semaphores[id]=VK_NULL_HANDLE;
+	return 0;
+#else
+	(void)id;return 0;
+#endif
+}
+
+/* The private transfer fence bounds lifetime. No pixels are mapped/read by the host.
+ * Semaphore -1 is protocol v2: the caller establishes release-before-acquire
+ * execution ordering with completed private fences and the control-channel ACK. */
+static int external_ownership(int a,int b,int semaphore,int release)
+{
+#ifdef _WIN32
+	if(g.recording || g.lost || !g.external || !addr_of(a) || !addr_of(b) || a==b ||
+	   semaphore < -1 || semaphore>=MAX_EXTERNAL_SEMAPHORES ||
+	   (semaphore >= 0 && !external_semaphores[semaphore]))
+		FAIL("invalid external ownership operation",0);
+	VkResult r=vkResetCommandBuffer(g.tcb,0);
+	if(r) FAIL("external command reset",r);
+	VkCommandBufferBeginInfo begin={.sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+		.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
+	if((r=vkBeginCommandBuffer(g.tcb,&begin))) FAIL("external command begin",r);
+	VkBufferMemoryBarrier barriers[2];
+	int ids[]={a,b};
+	for(int i=0;i<2;i++) barriers[i]=(VkBufferMemoryBarrier){.sType=VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+		.srcAccessMask=release?(VK_ACCESS_SHADER_READ_BIT|VK_ACCESS_SHADER_WRITE_BIT|
+			VK_ACCESS_TRANSFER_READ_BIT|VK_ACCESS_TRANSFER_WRITE_BIT):0,
+		.dstAccessMask=release?0:(VK_ACCESS_SHADER_READ_BIT|VK_ACCESS_SHADER_WRITE_BIT|
+			VK_ACCESS_TRANSFER_READ_BIT|VK_ACCESS_TRANSFER_WRITE_BIT),
+		.srcQueueFamilyIndex=release?g.qi:VK_QUEUE_FAMILY_EXTERNAL,
+		.dstQueueFamilyIndex=release?VK_QUEUE_FAMILY_EXTERNAL:g.qi,
+		.buffer=rbufs[ids[i]].b,.offset=0,.size=VK_WHOLE_SIZE};
+	vkCmdPipelineBarrier(g.tcb,release?VK_PIPELINE_STAGE_ALL_COMMANDS_BIT:VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+		release?VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT:VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+		0,0,NULL,2,barriers,0,NULL);
+	if((r=vkEndCommandBuffer(g.tcb))) FAIL("external command end",r);
+	if((r=vkResetFences(g.dev,1,&g.tfence))) FAIL("external fence reset",r);
+	VkPipelineStageFlags stage=VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+	VkSemaphore sem=semaphore >= 0 ? external_semaphores[semaphore] : VK_NULL_HANDLE;
+	VkSubmitInfo submit={.sType=VK_STRUCTURE_TYPE_SUBMIT_INFO,.commandBufferCount=1,.pCommandBuffers=&g.tcb,
+		.waitSemaphoreCount=!release && sem ? 1 : 0,.pWaitSemaphores=!release && sem ? &sem : NULL,
+		.pWaitDstStageMask=!release && sem ? &stage : NULL,.signalSemaphoreCount=release && sem ? 1 : 0,
+		.pSignalSemaphores=release && sem ? &sem : NULL};
+	if((r=vkQueueSubmit(g.q,1,&submit,g.tfence))) FAIL("external queue submit",r);
+	g.external_pending=1;
+	r=vkWaitForFences(g.dev,1,&g.tfence,VK_TRUE,10000000000ull);
+	if(r) { g.lost=1; FAIL("external ownership wait failed; resources pinned",r); }
+	g.external_pending=0;
+	return 0;
+#else
+	(void)a;(void)b;(void)semaphore;(void)release;FAIL("Win32 external ownership unavailable",0);
+#endif
+}
+
+int xmx_external_acquire(int a,int b,int ready) { return external_ownership(a,b,ready,0); }
+int xmx_external_release(int a,int b,int done) { return external_ownership(a,b,done,1); }
+
 int xmx_graph_destroy(int id)
 {
+	if (g.resident_pending) FAIL("resident submit still pending; graph retained", -1);
 	if (id < 0 || id >= MAX_GRAPHS || !graphs[id].commands) return 0;
 	vkFreeCommandBuffers(g.dev, g.cpool, 1, &graphs[id].commands);
 	graphs[id].commands = VK_NULL_HANDLE;

@@ -61,6 +61,7 @@ except ImportError:  # pragma: no cover - the NumPy path is the fallback
 MAGIC = 0x304E524E
 MASK_COVERAGE_LIMIT = 0.55   # above this the mask is the scene, not the interface
 MAGIC_MASKED = 0x314E524E     # the same, with a one-byte-per-pixel interface mask after the colour
+MAGIC_GPU = 0x3147524E       # control metadata for same-device external GPU resources
 
 # The swapchain formats a compositor or VKD3D actually hands out. A game writes
 # sRGB-encoded values into a UNORM swapchain just as it does into an SRGB one, so both
@@ -608,6 +609,28 @@ def process_connection(connection, backend, args):
     if header is None:
         return
     magic, width, height, vk_format = struct.unpack("<4I", header)
+    shared = getattr(args, "gpu_transport", None)
+    if shared is not None:
+        shared.cleanup_stale()
+    if magic == MAGIC_GPU:
+        import nr_gpu_transport
+        args.live.refresh()
+        transport = getattr(args, "gpu_transport", None)
+        if transport is None:
+            enabled = (os.environ.get("NR_GPU_IMAGE") == "1" and
+                       os.environ.get("NR_GPU_TRANSPORT") == "1")
+            transport = args.gpu_transport = nr_gpu_transport.GPUSharedTransport(
+                backend, args.max_pixels, enabled=enabled)
+        if getattr(args, "image_transport", None) != "gpu-shared":
+            transport.reset_history()
+        metrics = transport.handle(connection, width, height, vk_format, receive, args.live,
+                                   diagnostic=bool(args.dump or args.meter))
+        if metrics:
+            args.history = History()
+            args.image_transport = "gpu-shared"
+            mode = "gpu-shared-fence" if metrics.get("sync") == "fence" else "gpu-shared"
+            print_gpu_frame(width, height, vk_format, args.live, metrics, mode)
+        return
     if magic not in (MAGIC, MAGIC_MASKED):
         raise ValueError(f"bad magic {magic:#x}")
     if not width or not height or width * height > args.max_pixels:
@@ -623,6 +646,33 @@ def process_connection(connection, backend, args):
 
     live = args.live
     live.refresh()
+    if os.environ.get("NR_GPU_IMAGE") == "1":
+        from gpu_image_pipeline import GPUImagePipeline
+        engine = getattr(args, "gpu_images", None)
+        if engine is None:
+            engine = args.gpu_images = GPUImagePipeline(backend)
+        reason = engine.supported(width, height, vk_format, live, interface=interface is not None,
+                                  diagnostic=bool(args.dump or args.meter))
+        if reason is None:
+            if getattr(args, "image_transport", None) != "gpu-image-host":
+                engine.reset_history()
+                args.history = History()
+                print("GPU image path ready: transport=gpu-image-host", flush=True)
+            args.image_transport = "gpu-image-host"
+            started = time.perf_counter()
+            answer = engine.process_host(payload, width, height, vk_format, live)
+            connection.sendall(answer)
+            metrics = {**engine.last, "total_seconds": time.perf_counter() - started}
+            print_gpu_frame(width, height, vk_format, live, metrics, "gpu-image-host")
+            return
+        if getattr(args, "gpu_fallback", None) != reason:
+            print("GPU image fallback: " + reason, flush=True)
+            args.gpu_fallback = reason
+        engine.reset_history()
+    if getattr(args, "image_transport", None) not in (None, "cpu"):
+        args.history = History()
+        args.letterbox = Letterbox()
+    args.image_transport = "cpu"
     clock = time.perf_counter()
     whole = decode(payload, width, height, vk_format)
     # A letterboxed game — DoA5's smallest window is 1024x768 with 16:9 inside it — leaves
@@ -1052,6 +1102,15 @@ def end_with_game():
     return thread
 
 
+def print_gpu_frame(width, height, vk_format, live, metrics, transport):
+    nw, nh = metrics["network"]
+    print(f"{width}x{height} {FORMATS[vk_format][1]} in {metrics['total_seconds']:.3f}s  "
+          f"change {metrics['change']:.5f}  cut {metrics['cut']:.4f}  "
+          f"gpu 0+{metrics['network_ms']:.0f}+0ms  network {nw}x{nh} scale {live.render_scale:g} "
+          f"transport={transport} image prep={metrics['preprocess_ms']:.3f}ms "
+          f"compose={metrics['compose_ms']:.3f}ms", flush=True)
+
+
 def main():
     if len(sys.argv) == 2 and sys.argv[1] == "--half-probe":
         sys.exit(half_probe_child())
@@ -1114,6 +1173,19 @@ def main():
         parser.error("--release must be between 0 and 255")
     if not 128.0 <= args.min_extent <= 4096.0:
         parser.error("--min-extent must be between 128 and 4096")
+    from nr_daemon_owner import EndpointOwner
+    owner = EndpointOwner(args.socket)
+    if not owner.acquire():
+        print(f"no daemon started: an owner already reserves {args.socket}", flush=True)
+        return 0
+    print("daemon session " + json.dumps(owner.metadata()), flush=True)
+    try:
+        return run_owned(args)
+    finally:
+        owner.release()
+
+
+def run_owned(args):
     # Before the model loads: a game that is closed during the load takes the daemon with it.
     end_with_game()
     args.live = Settings(args)
@@ -1170,6 +1242,7 @@ def main():
             pass
         finally:
             server.close()
+            close_gpu_images(args)
             backend.close()
         return
 
@@ -1197,9 +1270,18 @@ def main():
         pass
     finally:
         server.close()
+        close_gpu_images(args)
         backend.close()
         if os.path.exists(args.socket):
             os.unlink(args.socket)
+
+
+def close_gpu_images(args):
+    for name in ("gpu_images", "gpu_transport"):
+        resource = getattr(args, name, None)
+        if resource is not None:
+            resource.close()
+            setattr(args, name, None)
 
 
 if __name__ == "__main__":

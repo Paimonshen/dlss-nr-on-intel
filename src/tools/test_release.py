@@ -119,6 +119,49 @@ class ReleaseTests(unittest.TestCase):
         self.assertFalse((self.target / "work/windows-profile.json").exists())
         self.assertFalse((self.target / "work/windows-wizard").exists())
 
+    def git(self, root, *arguments):
+        result = subprocess.run(["git", "-C", str(root), "-c", "user.name=NR release test",
+                                 "-c", "user.email=noreply@github.com", *arguments],
+                                capture_output=True, text=True, encoding="utf-8", timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return result.stdout.strip()
+
+    @unittest.skipUnless(shutil.which("git"), "provenance regression requires Git")
+    def test_nested_source_tree_does_not_inherit_parent_repository_commit(self):
+        self.git(self.base, "init", "-q")
+        self.git(self.base, "commit", "-q", "--allow-empty", "-m", "parent checkout fixture")
+        parent_commit = self.git(self.base, "rev-parse", "HEAD")
+        self.assertEqual(release.source_commit(self.base), parent_commit)
+        self.assertFalse((self.root / ".git").exists())
+        self.assertEqual(self.git(self.root, "rev-parse", "HEAD"), parent_commit)
+        release.assemble(self.root, self.target, "windows")
+        metadata = json.loads((self.target / "release-metadata.json").read_text())
+        self.assertIsNone(metadata["source_commit"])
+
+    @unittest.skipUnless(shutil.which("git"), "provenance regression requires Git")
+    def test_source_repository_records_its_own_commit(self):
+        self.git(self.root, "init", "-q")
+        self.git(self.root, "commit", "-q", "--allow-empty", "-m", "source checkout fixture")
+        commit = self.git(self.root, "rev-parse", "HEAD")
+        release.assemble(self.root, self.target, "windows")
+        metadata = json.loads((self.target / "release-metadata.json").read_text())
+        self.assertEqual(metadata["source_commit"], commit)
+
+    @unittest.skipUnless(shutil.which("git"), "linked worktree regression requires Git")
+    def test_linked_worktree_git_file_records_its_own_commit(self):
+        owner = self.base / "git owner"
+        owner.mkdir()
+        self.git(owner, "init", "-q")
+        self.git(owner, "commit", "-q", "--allow-empty", "-m", "worktree owner fixture")
+        worktree = self.base / "linked source"
+        self.git(owner, "worktree", "add", "-q", "--detach", str(worktree), "HEAD")
+        self.assertTrue((worktree / ".git").is_file())
+        shutil.copytree(self.root, worktree, dirs_exist_ok=True)
+        commit = self.git(worktree, "rev-parse", "HEAD")
+        release.assemble(worktree, self.target, "windows")
+        metadata = json.loads((self.target / "release-metadata.json").read_text())
+        self.assertEqual(metadata["source_commit"], commit)
+
     def test_windows_release_needs_dxvk_and_the_32bit_layer(self):
         for name in ("work/dxvk/x64/dxgi.dll", "work/nr_layer32.dll", "work/dxvk/LICENSE",
                      "work/nr_vulkan_proxy.dll", "work/nr_vulkan_proxy32.dll"):

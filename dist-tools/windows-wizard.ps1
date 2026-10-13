@@ -344,6 +344,8 @@ $script:SettingsStateKey = 'SettingsLoading'
        <StackPanel>
         <TextBlock x:Name="PacingHeading" Style="{StaticResource Heading}"/>
         <CheckBox x:Name="AsyncMode" Content="" ToolTip=""/>
+        <CheckBox x:Name="GpuImagePath" Content="" ToolTip="" Margin="0,8,0,0"/>
+        <TextBlock x:Name="GpuImageNote" Style="{StaticResource Note}" Margin="0,4,0,0"/>
         <Grid Margin="0,8,0,0"><Grid.ColumnDefinitions><ColumnDefinition Width="170"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
          <TextBlock x:Name="EveryLabel" VerticalAlignment="Center" ToolTip=""/>
          <ComboBox x:Name="EveryFrame" Grid.Column="1" Margin="8,0,0,0" SelectedIndex="0" ToolTip=""><ComboBoxItem x:Name="Every1" Tag="1" Content=""/><ComboBoxItem x:Name="Every2" Tag="2" Content=""/><ComboBoxItem x:Name="Every3" Tag="3" Content=""/><ComboBoxItem x:Name="Every4" Tag="4" Content=""/></ComboBox>
@@ -364,7 +366,7 @@ foreach($name in @('DllPath','GamePath','PythonPath','BrowseDll','BrowseGame','B
     $script:Ui[$name] = $script:Window.FindName($name)
     if($null -eq $script:Ui[$name]) { throw "Missing control $name" }
 }
-foreach($name in @('Pages','SetupTab','ControlsTab','ControlsHeading','ControlsToggle','ControlsLaunch','ResetSettings','ControlsEffectState','ControlsRuntimeState','FrameReadout','SettingsState','KnobRows','MoreSettings','MoreKnobRows','PacingHeading','AsyncMode','EveryLabel','EveryFrame','Every1','Every2','Every3','Every4','PacingNote')) {
+foreach($name in @('Pages','SetupTab','ControlsTab','ControlsHeading','ControlsToggle','ControlsLaunch','ResetSettings','ControlsEffectState','ControlsRuntimeState','FrameReadout','SettingsState','KnobRows','MoreSettings','MoreKnobRows','PacingHeading','AsyncMode','GpuImagePath','GpuImageNote','EveryLabel','EveryFrame','Every1','Every2','Every3','Every4','PacingNote')) {
     $script:Ui[$name]=$script:Window.FindName($name)
     if($null -eq $script:Ui[$name]) { throw "Missing control $name" }
 }
@@ -485,6 +487,9 @@ $script:Strings=@{
   PacingHeading='Frame pacing'; PacingNote='Takes effect when the game starts next.'
   AsyncMode='Asynchronous: the network works while the game draws its next frame'
   AsyncModeTip='More frames a second, and what is on screen is one processed frame behind.'
+  GpuImagePath='Experimental: process images on the GPU'
+  GpuImagePathTip='Prepares and composes frames on the GPU. Shared GPU transport requires the game and network on the same Arc, asynchronous off and every frame; otherwise the compatible transport is used.'
+  GpuImageNote='Takes effect at the next game start. Shared transport currently supports synchronous processing of every frame on the same Arc.'
   EveryLabel='Network on'; EveryTip='The frames between repeat the last result: the game runs faster, and the picture changes only on the network''s frames.'
   Every1='every frame'; Every2='every 2nd frame'; Every3='every 3rd frame'; Every4='every 4th frame'
   'Loading.pacing'='Saving frame pacing…'; 'Done.pacing'='Frame pacing saved; it takes effect when the game starts next.'
@@ -576,6 +581,9 @@ $script:Strings=@{
   PacingHeading='Подача кадров'; PacingNote='Применится при следующем запуске игры.'
   AsyncMode='Асинхронно: сеть работает, пока игра рисует следующий кадр'
   AsyncModeTip='Больше кадров в секунду, а на экране результат на один обработанный кадр позже.'
+  GpuImagePath='Экспериментально: обработка изображения на GPU'
+  GpuImagePathTip='Подготовка и сборка кадра на GPU. Общая GPU-память требует игры и сети на одной Arc, выключенного асинхронного режима и обработки каждого кадра; иначе используется совместимый транспорт.'
+  GpuImageNote='Применится при следующем запуске игры. Общая GPU-память пока работает с каждым кадром синхронно на одной Arc.'
   EveryLabel='Сеть на'; EveryTip='Кадры между ними повторяют последний результат: игра идёт быстрее, а картинка меняется только на кадрах сети.'
   Every1='каждом кадре'; Every2='каждом 2-м кадре'; Every3='каждом 3-м кадре'; Every4='каждом 4-м кадре'
   'Loading.pacing'='Сохраняем подачу кадров…'; 'Done.pacing'='Подача кадров сохранена и применится при следующем запуске игры.'
@@ -667,6 +675,9 @@ $script:Strings=@{
   PacingHeading='Ritmo de fotogramas'; PacingNote='Se aplica la próxima vez que se inicie el juego.'
   AsyncMode='Asíncrono: la red trabaja mientras el juego dibuja el siguiente fotograma'
   AsyncModeTip='Más fotogramas por segundo, y lo que se ve va un fotograma procesado por detrás.'
+  GpuImagePath='Experimental: procesar imágenes en la GPU'
+  GpuImagePathTip='Prepara y compone fotogramas en la GPU. La memoria GPU compartida requiere el juego y la red en la misma Arc, modo asíncrono desactivado y todos los fotogramas; de lo contrario se usa el transporte compatible.'
+  GpuImageNote='Se aplica al próximo inicio del juego. El transporte compartido admite por ahora todos los fotogramas de forma síncrona en la misma Arc.'
   EveryLabel='Red en'; EveryTip='Los fotogramas intermedios repiten el último resultado: el juego va más rápido, y la imagen cambia solo en los fotogramas de la red.'
   Every1='cada fotograma'; Every2='uno de cada 2 fotogramas'; Every3='uno de cada 3 fotogramas'; Every4='uno de cada 4 fotogramas'
   'Loading.pacing'='Guardando el ritmo de fotogramas…'; 'Done.pacing'='Ritmo de fotogramas guardado; se aplica la próxima vez que se inicie el juego.'
@@ -697,19 +708,19 @@ $script:TextBindings=@{
  ConnectHeading='ConnectHeading'; ApiLabel='ApiLabel'
  ArgsLabel='ArgsLabel'; FirstTestHint='FirstTestHint'; CompareHeading='CompareHeading'
  FpsHint='FpsHint'; ControlsHeading='ControlsHeading'
- PacingHeading='PacingHeading'; EveryLabel='EveryLabel'; PacingNote='PacingNote'
+ PacingHeading='PacingHeading'; EveryLabel='EveryLabel'; PacingNote='PacingNote'; GpuImageNote='GpuImageNote'
 }
 $script:ContentBindings=@{
  BrowseDll='Browse'; BrowseGame='Browse'; BrowsePython='Browse'; FindPython='FindPython'; GetPython='GetPython'
  ApiVulkan='ApiVulkan'; ApiDxvk='ApiDxvk'; Fossilize='Fossilize'
  Check='Check'; Dependencies='Dependencies'; Install='Install'; Uninstall='Uninstall'; Launch='Launch'
  Report='Report'; ControlsLaunch='Launch'; ResetSettings='ResetSettings'; SpeedTest='SpeedTest'
- AsyncMode='AsyncMode'; Every1='Every1'; Every2='Every2'; Every3='Every3'; Every4='Every4'
+ AsyncMode='AsyncMode'; GpuImagePath='GpuImagePath'; Every1='Every1'; Every2='Every2'; Every3='Every3'; Every4='Every4'
 }
 $script:HeaderBindings=@{LaunchOptions='LaunchOptions'; CheckDetails='CheckDetails';SetupTab='SetupTab';ControlsTab='ControlsTab';MoreSettings='MoreSettings'}
 $script:TipBindings=@{DllPath='DllTip'; GamePath='GameTip'; PythonPath='PythonTip'; GameArgs='ArgsTip'; Fossilize='FossilizeTip'; Language='LanguageTip'
  PythonLabel='PythonHint'; ControlsHeading='ControlsHint'; Theme='ThemeTip'; SpeedTest='SpeedTestTip'
- AsyncMode='AsyncModeTip'; EveryLabel='EveryTip'; EveryFrame='EveryTip'}
+ AsyncMode='AsyncModeTip'; GpuImagePath='GpuImagePathTip'; EveryLabel='EveryTip'; EveryFrame='EveryTip'}
 function T([string]$Key) {
     if(-not $script:Strings[$script:Language].ContainsKey($Key)) { throw "Missing translation: $Key" }
     return [string]$script:Strings[$script:Language][$Key]
@@ -903,7 +914,8 @@ function Write-Json([string]$Path, $Value) {
 function Profile-FromWindow {
     $dll = $script:Ui.DllPath.Text.Trim()
     return [ordered]@{root=$script:Root; python=$script:Ui.PythonPath.Text.Trim(); game_exe=$script:Ui.GamePath.Text.Trim(); dll=$(if($dll){$dll}else{$null}); api=$(if($script:Ui.Api.SelectedIndex -eq 1){'dxvk'}else{'vulkan'}); game_args_raw=$script:Ui.GameArgs.Text; disable_fossilize=[bool]$script:Ui.Fossilize.IsChecked
-        nr_async=[bool]$script:Ui.AsyncMode.IsChecked; nr_every=[int]$script:Ui.EveryFrame.SelectedItem.Tag}
+        nr_async=[bool]$script:Ui.AsyncMode.IsChecked; nr_every=[int]$script:Ui.EveryFrame.SelectedItem.Tag;
+        gpu_image_path=[bool]$script:Ui.GpuImagePath.IsChecked}
 }
 function Apply-Profile($Profile) {
     if($null -eq $Profile) { return }
@@ -918,6 +930,7 @@ function Apply-Profile($Profile) {
     $script:ApplyingProfile=$true
     try {
         $script:Ui.AsyncMode.IsChecked=[bool]$Profile.nr_async
+        $script:Ui.GpuImagePath.IsChecked=[bool]$Profile.gpu_image_path
         $every=[int]$Profile.nr_every
         $script:Ui.EveryFrame.SelectedIndex=$(if($every -ge 1 -and $every -le $script:Ui.EveryFrame.Items.Count){$every-1}else{0})
     } finally { $script:ApplyingProfile=$false }
@@ -929,7 +942,7 @@ function Request-Pacing {
     if($script:Busy) { $script:PacingDue=$true } else { $script:PacingDue=$false; Start-Bridge 'pacing' }
 }
 function Set-Busy([bool]$Busy) {
-    foreach($name in @('DllPath','GamePath','PythonPath','Api','GameArgs','Fossilize','BrowseDll','BrowseGame','BrowsePython','FindPython','Check','Dependencies','Install','Uninstall','Launch','Toggle','SpeedTest','Report','ControlsToggle','ControlsLaunch','ResetSettings','AsyncMode','EveryFrame')) { $script:Ui[$name].IsEnabled=-not $Busy }
+    foreach($name in @('DllPath','GamePath','PythonPath','Api','GameArgs','Fossilize','BrowseDll','BrowseGame','BrowsePython','FindPython','Check','Dependencies','Install','Uninstall','Launch','Toggle','SpeedTest','Report','ControlsToggle','ControlsLaunch','ResetSettings','AsyncMode','GpuImagePath','EveryFrame')) { $script:Ui[$name].IsEnabled=-not $Busy }
     $script:Ui.KnobRows.IsEnabled=(-not $Busy -or ($script:Busy -and $script:Busy.Action -eq 'settings-save'))
     # An indeterminate ProgressBar animates while collapsed too: 6 % of a core, the window idle.
     $script:Ui.Spinner.IsIndeterminate=$Busy
@@ -1200,12 +1213,12 @@ if($SelfTest) {
         if($script:Ui.SpeedState.Text) { throw 'No speed test left words behind' }
         # Frame pacing reaches the backend, a profile without it is every frame in step, and
         # neither a profile applied to the window nor a change during an action starts a save.
-        Apply-Profile ([pscustomobject]@{python='fixture';game_exe='fixture.exe';api='vulkan';disable_fossilize=$true;nr_async=$true;nr_every=3})
+        Apply-Profile ([pscustomobject]@{python='fixture';game_exe='fixture.exe';api='vulkan';disable_fossilize=$true;nr_async=$true;nr_every=3;gpu_image_path=$true})
         $sent=Profile-FromWindow
-        if(-not $sent.nr_async -or $sent.nr_every -ne 3 -or $script:PacingDue) { throw 'Frame pacing did not reach the profile' }
+        if(-not $sent.nr_async -or $sent.nr_every -ne 3 -or -not $sent.gpu_image_path -or $script:PacingDue) { throw 'Frame pacing and GPU image choice did not reach the profile' }
         Apply-Profile ([pscustomobject]@{python='fixture';game_exe='fixture.exe';api='vulkan';disable_fossilize=$true})
         $sent=Profile-FromWindow
-        if($sent.nr_async -or $sent.nr_every -ne 1) { throw 'A profile without frame pacing was not every frame, in step' }
+        if($sent.nr_async -or $sent.nr_every -ne 1 -or $sent.gpu_image_path) { throw 'An older profile was not every frame, in step, with GPU image path off' }
         Set-Progress 'ChooseFiles'
         $script:ApplyingProfile=$true; Request-Pacing; $script:ApplyingProfile=$false
         if($script:PacingDue -or $script:ProgressKey -ne 'ChooseFiles') { throw 'Applying a profile asked to save frame pacing' }
@@ -1252,6 +1265,8 @@ $script:Ui.ResetSettings.Add_Click({ Reset-NrSettings })
 # changes the box without a click.
 $script:Ui.AsyncMode.Add_Checked({ Request-Pacing })
 $script:Ui.AsyncMode.Add_Unchecked({ Request-Pacing })
+$script:Ui.GpuImagePath.Add_Checked({ Request-Pacing })
+$script:Ui.GpuImagePath.Add_Unchecked({ Request-Pacing })
 $script:Ui.EveryFrame.Add_SelectionChanged({ Request-Pacing })
 $script:Ui.Theme.Add_Click({
     Set-Theme $(if($script:Theme -eq 'dark'){'light'}else{'dark'})

@@ -4,6 +4,14 @@ For installation and a first game test, start with the
 [Windows user quick start](WINDOWS-QUICKSTART.md). This file records the port's
 status, driver findings and alternative build paths.
 
+Local 0.0.1.3 preparation adds an opt-in same-Arc GPU image path, still off by
+default. Full-model swapchain smoke passed on Intel 101.9150 with resize, effect
+and scale changes, and synchronization validation. Warm image-processing
+measurements are recorded through full 1440p; actual game/desktop measurements
+remain pending. This is not a released game-FPS claim.
+See [the continuation evidence](../notes/gpu-frame-path-20261013.md) and
+[the benchmark scopes](../notes/gpu-frame-stages-20261013.md).
+
 **Experimental; first run on Windows on 2026-09-29/30** (Arc 140V, Intel's driver 101.8991,
 then 101.9033). The compute side builds and runs there, and since PR #3 joined (2026-10-02) the
 layer and the daemon do too, from an MSVC build (`docs/WINDOWS-PORT.md`). What

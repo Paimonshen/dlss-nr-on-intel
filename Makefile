@@ -15,7 +15,7 @@ SHADERS := work/gemm_resident.spv work/gemm_tiled.spv work/gemm_staged.spv \
            work/history.spv work/gemm_coopmat.spv work/gemm_batched.spv \
            work/gemm_f16acc.spv work/gemm_coopmat_int8.spv work/gemm_staged_int8.spv \
            work/window_attention.spv work/window_block.spv work/global_attention.spv \
-           work/ffn_fused.spv
+           work/ffn_fused.spv work/image_preprocess.spv work/image_compose.spv work/image_stats.spv
 
 # half_probe.spv is built by `all` because the daemon needs it: check_half_rounding()
 # runs it at start-up and refuses to run the graph if the driver's float16 conversion is
@@ -40,7 +40,7 @@ work:
 	mkdir -p $@
 
 $(SHADERS) work/libxmx.so work/libnr_layer.so work/half_probe.spv work/attention_ab.spv: | work
-work/libnr_image.so work/test_exchange work/test_settled work/libnr_layer32.so work/test_layer_loader work/test_present work/test_layer_loader32: | work
+work/libnr_image.so work/test_exchange work/test_settled work/libnr_layer32.so work/test_layer_loader work/test_present work/test_layer_loader32 work/test_surface_policy work/test_transfer_resources: | work
 
 work/libxmx.so: src/gpu/libxmx.c
 	$(CC) $(CFLAGS) -shared -o $@ $< -lvulkan
@@ -64,10 +64,12 @@ work/libnr_image.so: src/ref/nr_image.c Makefile work/nr_image.arch | work
 	      -fno-trapping-math -fopenmp -shared -o $@ $< -lm
 
 # The Vulkan layer that puts the pass inside a running game.
-work/libnr_layer.so: src/layer/nr_layer.c src/layer/nr_transport.h
+LAYER_HEADERS := src/layer/nr_transport.h src/layer/nr_surface_policy.h src/layer/nr_layer_stats.h \
+                 src/layer/nr_gpu_bridge.h src/layer/nr_gpu_rpc.h
+work/libnr_layer.so: src/layer/nr_layer.c $(LAYER_HEADERS)
 	$(CC) $(CFLAGS) -shared -o $@ $< -lvulkan
 
-work/libnr_layer32.so: src/layer/nr_layer.c src/layer/nr_transport.h
+work/libnr_layer32.so: src/layer/nr_layer.c $(LAYER_HEADERS)
 	$(CC) $(CFLAGS) -m32 -shared -o $@ $< -lvulkan
 
 work/test_layer_loader: src/layer/test_layer_loader.c
@@ -79,11 +81,17 @@ work/test_present: src/layer/test_present.c
 work/test_layer_loader32: src/layer/test_layer_loader.c
 	$(CC) $(CFLAGS) -m32 -o $@ $< -lvulkan
 
-work/test_settled: src/layer/test_settled.c src/layer/nr_layer.c src/layer/nr_transport.h
+work/test_settled: src/layer/test_settled.c src/layer/nr_layer.c $(LAYER_HEADERS)
 	$(CC) $(CFLAGS) -Isrc/layer -o $@ $< -lvulkan
 
-work/test_exchange: src/layer/test_exchange.c src/layer/nr_layer.c src/layer/nr_transport.h
+work/test_exchange: src/layer/test_exchange.c src/layer/nr_layer.c $(LAYER_HEADERS)
 	$(CC) $(CFLAGS) -o $@ $< -lvulkan -lpthread
+
+work/test_surface_policy: src/layer/test_surface_policy.c src/layer/nr_surface_policy.h
+	$(CC) $(CFLAGS) -UNDEBUG -o $@ $<
+
+work/test_transfer_resources: src/layer/test_transfer_resources.c src/layer/nr_layer.c $(LAYER_HEADERS)
+	$(CC) $(CFLAGS) -UNDEBUG -o $@ $< -lvulkan -lpthread
 
 GEMM_GLSL := src/gpu/publish.glsl src/gpu/specialize.glsl src/gpu/residual_epilogue.glsl \
              src/gpu/cosine_tree.glsl src/gpu/qkv_epilogue.glsl
@@ -135,6 +143,13 @@ work/gemm_runner: src/gpu/gemm_runner.c | work
 work/ffn_fused.spv: src/gpu/ffn_fused.comp $(GEMM_GLSL)
 	$(GLSL) -o $@ $<
 
+work/image_preprocess.spv: src/gpu/image_preprocess.comp
+	$(GLSL) -o $@ $<
+work/image_compose.spv: src/gpu/image_compose.comp
+	$(GLSL) -o $@ $<
+work/image_stats.spv: src/gpu/image_stats.comp
+	$(GLSL) -o $@ $<
+
 # Window attention's QK^T, softmax and PV in one pass (ProjectsCodex's phase42).
 work/window_attention.spv: src/gpu/window_attention.comp src/gpu/publish.glsl
 	$(GLSL) -o $@ $<
@@ -153,7 +168,7 @@ bench: all work/half_probe.spv
 	python3 src/bench/half_probe.py
 	python3 src/bench/split_cost.py
 
-test: all work/attention_ab.spv work/test_exchange work/test_settled work/test_present
+test: all work/attention_ab.spv work/test_exchange work/test_settled work/test_present work/test_surface_policy work/test_transfer_resources
 	python3 src/gpu/test_ffn_batch.py --gpu
 	python3 src/gpu/test_device_pick.py
 	python3 src/gpu/test_gemm_contract.py
@@ -162,6 +177,10 @@ test: all work/attention_ab.spv work/test_exchange work/test_settled work/test_p
 	python3 src/gpu/test_compact_head.py
 	python3 src/gpu/test_joint_qkv.py
 	python3 src/layer/test_daemon.py
+	python3 src/layer/test_daemon_owner.py
+	python3 src/layer/test_gpu_transport.py
+	work/test_surface_policy
+	work/test_transfer_resources
 	work/test_settled
 	python3 src/layer/test_ui_mask.py
 	python3 src/layer/test_present.py
@@ -195,6 +214,10 @@ test: all work/attention_ab.spv work/test_exchange work/test_settled work/test_p
 	python3 src/gpu/test_scratch_arena.py
 	python3 src/gpu/test_graph.py
 	python3 src/gpu/test_frame_execution.py
+	python3 src/gpu/test_image_preprocess.py
+	python3 src/gpu/test_image_compose.py
+	python3 src/gpu/test_image_stats.py
+	python3 src/gpu/test_image_pipeline.py --full-model
 	python3 src/gpu/test_resident.py
 	python3 src/ref/test_frame_cache.py
 	python3 src/ref/test_native_image.py
@@ -202,6 +225,20 @@ test: all work/attention_ab.spv work/test_exchange work/test_settled work/test_p
 	python3 src/ref/test_temporal_controls.py
 	python3 src/ref/test_dump_raw.py
 	python3 src/ref/test_dump_geometry.py
+
+# Small GPU image checks can be run independently of the full matrix suite.
+test-image: all
+	python3 src/gpu/test_image_preprocess.py
+	python3 src/gpu/test_image_compose.py
+	python3 src/gpu/test_image_stats.py
+	python3 src/gpu/test_image_pipeline.py --full-model
+
+# Recorder, metadata and lifecycle contracts without a Vulkan device.
+test-image-host:
+	python3 src/gpu/test_image_preprocess.py --cpu-only
+	python3 src/gpu/test_image_compose.py --host-only
+	python3 src/gpu/test_image_stats.py --host-only
+	python3 src/gpu/test_image_pipeline.py --host-only
 
 # Focused checks for the FFN schedule, including a complete frame with both variants.
 # Repeat with XMX_STAGING=1 to cover device buffers without host mappings.
@@ -220,4 +257,4 @@ test-proton: all work/libnr_layer32.so work/test_layer_loader work/test_layer_lo
 publish-check:
 	python3 src/tools/publish_check.py --history
 
-.PHONY: all test test-ffn test-proton bench publish-check
+.PHONY: all test test-image test-image-host test-ffn test-proton bench publish-check

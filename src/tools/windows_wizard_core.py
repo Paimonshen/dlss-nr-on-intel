@@ -36,7 +36,8 @@ SHADERS = frozenset((
     "gemm_coopmat.spv", "gemm_resident.spv", "gemm_staged.spv", "gemm_staged32.spv",
     "gemm_staged32_deep.spv", "gemm_staged_int8.spv", "gemm_tiled.spv",
     "global_attention.spv", "half_probe.spv", "history.spv", "resident.spv",
-    "window_attention.spv", "window_block.spv",
+    "window_attention.spv", "window_block.spv", "image_preprocess.spv",
+    "image_compose.spv", "image_stats.spv",
 ))
 SOURCE_DIRS = ("layer", "ref", "gpu", "bench")
 # The layer the game's own architecture loads; the daemon and its libraries are always x64.
@@ -51,7 +52,7 @@ PROXY_NAME = "vulkan-1.dll"
 ENV_FILE = "nr-env.txt"
 # The pacing variables (Profile.nr_async, nr_every) set_pacing rewrites in ENV_FILE, and the
 # most presents one network frame may cover in the window.
-PACING = ("NR_LAYER_LIVE", "NR_LAYER_ASYNC")
+PACING = ("NR_LAYER_LIVE", "NR_LAYER_ASYNC", "NR_GPU_IMAGE", "NR_GPU_TRANSPORT")
 MAX_EVERY = 4
 # Where the proxy lists the folders the game was started in, for DXVK's first log there.
 START_FOLDERS = "start-folders.txt"
@@ -62,8 +63,11 @@ GAME_BACKUP = "game-backup"
 RUNTIME_MODULES = (
     "src/layer/nr_daemon.py", "src/layer/nr_alloc.py", "src/layer/nr_pipe.py",
     "src/layer/nr_paths.py", "src/layer/nr_knobs.py", "src/ref/nr_frame.py",
+    "src/layer/nr_daemon_owner.py", "src/layer/nr_gpu_transport.py",
     "src/ref/nr_model.py", "src/ref/nr_image.py", "src/ref/image_io.py",
     "src/gpu/xmx.py", "src/gpu/xmxres.py", "scripts/get_weights.py",
+    "src/gpu/gpu_image_pipeline.py", "src/gpu/gpu_image_preprocess.py",
+    "src/gpu/gpu_image_compose.py", "src/gpu/gpu_image_stats.py",
     "work/mlx-dlss/python/mlxdlss/features.py",
     "work/mlx-dlss/python/mlxdlss/tools/extract_dlssnr_weights.py",
     "work/mlx-dlss/python/mlxdlss/tools/unpack_dlssnr_weights.py",
@@ -92,6 +96,7 @@ class Profile:
     # NR_LAYER_LIVE, every how many presents one goes through it.
     nr_async: bool = False
     nr_every: int = 1
+    gpu_image_path: bool = False
 
     def __post_init__(self):
         self.root = Path(self.root).expanduser().resolve()
@@ -106,7 +111,8 @@ class Profile:
                 "api": self.api, "game_args": list(self.game_args),
                 "disable_fossilize": self.disable_fossilize,
                 "launch_mode": self.launch_mode, "steam_app_id": self.steam_app_id,
-                "nr_async": self.nr_async, "nr_every": self.nr_every}
+                "nr_async": self.nr_async, "nr_every": self.nr_every,
+                "gpu_image_path": self.gpu_image_path}
 
     @classmethod
     def from_dict(cls, values):
@@ -121,6 +127,9 @@ class Profile:
         pipelined = values.get("nr_async", False)
         if not isinstance(pipelined, bool):
             raise ValueError("nr_async must be a boolean")
+        gpu_image_path = values.get("gpu_image_path", False)
+        if not isinstance(gpu_image_path, bool):
+            raise ValueError("gpu_image_path must be a boolean")
         every = values.get("nr_every", 1)
         if isinstance(every, bool) or not isinstance(every, int) or not 1 <= every <= MAX_EVERY:
             raise ValueError(f"nr_every must be a whole number from 1 to {MAX_EVERY}")
@@ -131,7 +140,7 @@ class Profile:
                    api=values.get("api", "vulkan"), game_args=arguments,
                    disable_fossilize=fossilize, launch_mode=values.get("launch_mode", "direct"),
                    steam_app_id=str(values.get("steam_app_id") or ""),
-                   nr_async=pipelined, nr_every=every)
+                   nr_async=pipelined, nr_every=every, gpu_image_path=gpu_image_path)
 
 
 def profile_path(root):
@@ -350,6 +359,11 @@ def layer_environment(profile):
         values["DISABLE_VK_LAYER_VALVE_steam_fossilize_1"] = "1"
     # Said either way, so an NR_LAYER_ASYNC the game inherits cannot decide it.
     values["NR_LAYER_ASYNC"] = "1" if profile.nr_async else "0"
+    # Explicit zeroes also clear the option when rewriting an installed profile.
+    # Async/every-N remain the requested settings; the layer selects a supported
+    # fallback if shared GPU transport cannot run with them.
+    values["NR_GPU_IMAGE"] = "1" if profile.gpu_image_path else "0"
+    values["NR_GPU_TRANSPORT"] = "1" if profile.gpu_image_path else "0"
     return values
 
 
@@ -1470,7 +1484,7 @@ def install(profile, emit=None):
 
 
 def set_pacing(profile):
-    """Keep how frames go through the network (Profile.nr_async, nr_every) in the profile, and
+    """Keep frame pacing and the experimental GPU path in the profile, and
     where NR is installed in this game from this release, in the proxy's ENV_FILE as well. The
     layer reads them when the game starts, so a running game keeps the pacing it started with.
     Only the PACING lines change: the rest of the file stays as Install NR wrote it, with the
@@ -1563,14 +1577,27 @@ def _new_log_state(complete=True):
     return {"offset": 0, "pending": b"", "identity": None, "prefix": None,
             "processed": 0, "rejected": 0, "errors": 0, "error_tail": deque(maxlen=30),
             "last_frame": None, "network_shape": None, "half_probe": None, "allocator": False,
-            "model_ready": None, "session": 0, "counts_complete": complete}
+            "model_ready": None, "session": 0, "counts_complete": complete,
+            "daemon_session": None, "gpu_fallbacks": []}
 
 
 def _parse_log_line(state, line):
+    if line.startswith("daemon session "):
+        try:
+            session = json.loads(line[len("daemon session "):])
+        except (ValueError, TypeError):
+            session = None
+        if isinstance(session, dict):
+            previous_session = state["session"]
+            for name, value in _new_log_state().items():
+                if name not in ("offset", "pending", "identity", "prefix"):
+                    state[name] = value
+            state["session"] = previous_session + 1
+            state["daemon_session"] = session
     if line.startswith("half rounding:"):
         previous_session = state["session"]
         for name, value in _new_log_state().items():
-            if name not in ("offset", "pending", "identity", "prefix"):
+            if name not in ("offset", "pending", "identity", "prefix", "daemon_session"):
                 state[name] = value
         state["session"] = previous_session + 1
         state["half_probe"] = {"checked": "NOT CHECKED" not in line, "ok": None, "detail": line}
@@ -1580,7 +1607,7 @@ def _parse_log_line(state, line):
         if state["model_ready"]:
             previous_session = state["session"]
             for name, value in _new_log_state().items():
-                if name not in ("offset", "pending", "identity", "prefix"):
+                if name not in ("offset", "pending", "identity", "prefix", "daemon_session"):
                     state[name] = value
             state["session"] = previous_session + 1
         state["model_ready"] = line
@@ -1589,6 +1616,8 @@ def _parse_log_line(state, line):
             state["half_probe"]["ok"] = True
     if "keeping NumPy's large blocks" in line:
         state["allocator"] = True
+    if line.startswith(("GPU image fallback:", "GPU shared transport fallback:")):
+        state["gpu_fallbacks"] = (state["gpu_fallbacks"] + [line[:1000]])[-30:]
     if line.startswith("frame rejected/failed") or "unsupported VkFormat" in line:
         state["rejected"] += 1
     if any(word in line for word in ("frame rejected/failed", "GPU lost", "Traceback", "FAIL:", "ERROR", "unsupported VkFormat")):
@@ -1603,6 +1632,12 @@ def _parse_log_line(state, line):
         state["network_shape"] = [int(value) for value in network.groups()] if network else None
         state["last_frame"] = {"width": int(match[1]), "height": int(match[2]),
                                "seconds": float(match[3]), "change": match[4], "line": line[:1000]}
+        transport = re.search(r"\btransport=([a-z0-9-]+)\b", line)
+        image = re.search(r"\bimage prep=(\d+(?:\.\d+)?)ms compose=(\d+(?:\.\d+)?)ms", line)
+        if transport:
+            state["last_frame"]["transport"] = transport[1]
+        if image:
+            state["last_frame"].update(prep_ms=float(image[1]), compose_ms=float(image[2]))
         if match[4].lower() in ("nan", "inf", "-inf"):
             state["errors"] += 1
             state["error_tail"].append("Non-finite image change: " + line[:400])
@@ -1633,6 +1668,8 @@ def status(profile):
                 saved = _read_json(observer, limit=256 * 1024)
                 if saved.get("schema_version") == SCHEMA_VERSION and saved.get("context_key") == context_key:
                     state = saved["state"]
+                    for name, value in _new_log_state().items():
+                        state.setdefault(name, value)
                     state["pending"] = base64.b64decode(state["pending"])
                     state["prefix"] = bytes.fromhex(state["prefix"]) if state["prefix"] is not None else None
                     state["identity"] = tuple(state["identity"]) if state["identity"] else None
@@ -1821,6 +1858,45 @@ $battery = @(Get-CimInstance Win32_Battery | Select-Object BatteryStatus,Estimat
     return values
 
 
+def _layer_timing_report(profile):
+    """Include existing opt-in measurements; exporting never enables profiling.
+
+    Read a bounded tail only. A partial first line, malformed record or an
+    unfinished final line cannot be mistaken for a frame measurement.
+    """
+    path = profile.root / "work/logs/layer-timing.jsonl"
+    if not path.is_file():
+        return None
+    try:
+        with path.open("rb") as handle:
+            size = path.stat().st_size
+            start = max(0, size - MAX_LOG_TAIL)
+            handle.seek(start)
+            content = handle.read(MAX_LOG_TAIL)
+        lines = content.split(b"\n")
+        lines.pop()  # only newline-terminated records
+        if start:
+            lines = lines[1:]
+        records = []
+        malformed = 0
+        for line in lines:
+            try:
+                record = json.loads(line.decode("utf-8"))
+            except (ValueError, UnicodeError):
+                malformed += 1
+                continue
+            if isinstance(record, dict):
+                records.append(record)
+            else:
+                malformed += 1
+        return {"path": str(path), "records": records[-128:], "size": size,
+                "truncated": bool(start or len(records) > 128),
+                "malformed_records": malformed,
+                "note": "Opt-in layer measurements; not game FPS. Records may cover multiple launches."}
+    except OSError as error:
+        return {"path": str(path), "records": [], "error": str(error)}
+
+
 def export_report(profile, destination):
     destination = Path(destination)
     if destination.is_dir():
@@ -1876,6 +1952,7 @@ def export_report(profile, destination):
                   "dll": _dll_info(profile.dll), "weights_log_tail": weights_tail,
                   "settings": settings, "settings_error": settings_error,
                   "status": observation, "daemon_log_tail": tail, "dxvk_logs": _dxvk_log_report(profile),
+                  "layer_timings": _layer_timing_report(profile),
                   "speed_test": speed,
                   "note": "Daemon timings and observed frame counts are not game FPS. No DLL or weights are included."}
         _atomic_json(destination, report)

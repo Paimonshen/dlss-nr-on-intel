@@ -30,6 +30,7 @@ import pathlib
 import numpy as np
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
+IMAGE_SHADERS = ("image_preprocess.spv", "image_compose.spv", "image_stats.spv")
 TM, TN, TK = 8, 16, 16
 
 (E4M3, GATE, HALF, TO_HALF, SCALE, RESIDUAL, FROM_HALF, PARTITION, REVERSE, ADD_BIAS,
@@ -85,6 +86,16 @@ def _load():
             ("xmx_buf_create", [ctypes.c_ulonglong]),
             ("xmx_buf_create_kind", [ctypes.c_ulonglong, ctypes.c_int]),
             ("xmx_buf_host_visible", [ctypes.c_int]),
+            ("xmx_external_available", []),
+            ("xmx_device_ids", [ctypes.c_void_p]),
+            ("xmx_buf_import_win32", [ctypes.c_uint, ctypes.c_ulonglong,
+                                     ctypes.c_ulonglong, ctypes.c_ulonglong, ctypes.c_uint]),
+            ("xmx_sem_import_win32", [ctypes.c_uint, ctypes.c_ulonglong]),
+            ("xmx_sem_destroy", [ctypes.c_int]),
+            ("xmx_external_acquire", [ctypes.c_int] * 3),
+            ("xmx_external_release", [ctypes.c_int] * 3),
+            ("xmx_image_pipeline_init", [ctypes.c_char_p]),
+            ("xmx_rec_image_pipeline", [ctypes.c_int, ctypes.c_void_p] + [ctypes.c_uint] * 4),
             ("xmx_buf_zero", [ctypes.c_int]),
             ("xmx_staging_mode", []),
             ("xmx_buf_upload", [ctypes.c_int, ctypes.c_void_p,
@@ -141,6 +152,8 @@ def _load():
         getattr(lib, name).restype = ctypes.c_int
     lib.xmx_buf_ptr.argtypes = [ctypes.c_int]
     lib.xmx_buf_ptr.restype = ctypes.c_void_p
+    lib.xmx_buf_address.argtypes = [ctypes.c_int]
+    lib.xmx_buf_address.restype = ctypes.c_ulonglong
     lib.xmx_buf_bytes.argtypes = [ctypes.c_int]
     lib.xmx_buf_bytes.restype = ctypes.c_ulonglong
     lib.xmx_buf_total_bytes.argtypes = []
@@ -186,6 +199,7 @@ def align(value, multiple):
 
 # what a buffer is for, which decides where it lives
 GRAPH, HOST_READ, HOST_WRITE = 0, 1, 2
+DEVICE = 3  # device-local and deliberately unmapped, including on shared-memory GPUs
 
 
 class Buffer:
@@ -216,6 +230,25 @@ class Buffer:
     def mapped(self):
         return bool(self._lib.xmx_buf_host_visible(self.id))
 
+    @classmethod
+    def import_win32(cls, pid, handle, nbytes, allocation_size, memory_type):
+        """Import a same-device dedicated GPU allocation; ownership stays explicit."""
+        obj=cls.__new__(cls)
+        obj._lib=_load()
+        obj.nbytes,obj.kind=int(nbytes),DEVICE
+        obj.id=obj._lib.xmx_buf_import_win32(int(pid),int(handle),int(nbytes),
+                                            int(allocation_size),int(memory_type))
+        if obj.id<0: raise failure(obj._lib,"xmx_buf_import_win32")
+        return obj
+
+    @property
+    def address(self):
+        """Device address for GPU-only image passes; this never maps pixels on the host."""
+        address = self._lib.xmx_buf_address(self.id)
+        if not address:
+            raise RuntimeError("device buffer is not live")
+        return address
+
     def view(self, dtype=np.float32, shape=None):
         pointer = self._lib.xmx_buf_ptr(self.id)
         if not pointer:
@@ -244,6 +277,19 @@ class Buffer:
             raise failure(self._lib, "xmx_buf_download")
         return out
 
+    def download_into(self, target, offset=0):
+        """Read final wire bytes into a reusable writable buffer, without another image copy."""
+        view = memoryview(target).cast("B")
+        if view.readonly or not view.contiguous or not len(view):
+            raise ValueError("download target must be nonempty writable contiguous bytes")
+        if offset < 0 or offset > self.nbytes or len(view) > self.nbytes - offset:
+            raise ValueError("download range exceeds device buffer")
+        storage = (ctypes.c_uint8 * len(view)).from_buffer(view)
+        if self._lib.xmx_buf_download(self.id, ctypes.cast(storage, ctypes.c_void_p),
+                                     int(offset), len(view)):
+            raise failure(self._lib, "xmx_buf_download")
+        return view
+
     def zero(self):
         # the library decides how: a memset when mapped, a recorded fill when not, because
         # the scratch arena clears roles in the middle of the recording that will use them
@@ -253,7 +299,8 @@ class Buffer:
 
     def free(self):
         if self.id >= 0:
-            self._lib.xmx_buf_destroy(self.id)
+            if self._lib.xmx_buf_destroy(self.id):
+                raise failure(self._lib, "xmx_buf_destroy")
             self.id = -1
 
     def __del__(self):
@@ -294,6 +341,32 @@ def host_write(buffer, array, rows=None):
     return buffer.upload(array)
 
 
+class ImagePipeline:
+    """A cached image compute pipeline on the resident device.
+
+    Call record between Runtime.begin and submit/capture. Buffer addresses and their
+    layouts belong to the typed image wrappers; referenced buffers must remain alive.
+    Pipelines are cached for the lifetime of the shared resident runtime.
+    """
+
+    def __init__(self, path):
+        self._lib = _load()
+        self.id = self._lib.xmx_image_pipeline_init(os.fsencode(path))
+        if self.id < 0:
+            raise failure(self._lib, "xmx_image_pipeline_init")
+
+    def record(self, push, gx, gy=1, gz=1):
+        if isinstance(push, (bytes, bytearray, memoryview)):
+            data = bytes(push)
+            storage = ctypes.create_string_buffer(data)
+            pointer, count = ctypes.cast(storage, ctypes.c_void_p), len(data)
+        else:
+            storage = push
+            pointer, count = ctypes.cast(ctypes.byref(storage), ctypes.c_void_p), ctypes.sizeof(storage)
+        if self._lib.xmx_rec_image_pipeline(self.id, pointer, count, int(gx), int(gy), int(gz)):
+            raise failure(self._lib, "xmx_rec_image_pipeline")
+
+
 class CommandGraph:
     """Replayable commands. Referenced buffers must outlive this object."""
 
@@ -311,7 +384,8 @@ class CommandGraph:
 
     def free(self):
         if self.id >= 0:
-            self._lib.xmx_graph_destroy(self.id)
+            if self._lib.xmx_graph_destroy(self.id):
+                raise failure(self._lib, "xmx_graph_destroy")
             self.id = -1
 
     def __del__(self):

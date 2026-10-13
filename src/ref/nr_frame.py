@@ -475,8 +475,10 @@ class ResidentBackend:
         self.split = (0.0, 0.0, 0.0)
         self.max_cached_frames = max_cached_frames
 
-    def frame(self, height, width):
-        key = (height, width)
+    def frame(self, height, width, *, device_image_io=False):
+        key = (height, width, bool(device_image_io))
+        if key in self._frames and self._frames[key]._closed:
+            del self._frames[key]
         if key in self._frames:
             frame = self._frames.pop(key)
         else:
@@ -485,7 +487,7 @@ class ResidentBackend:
             if self.device_weights is None:
                 self.device_weights = self._module.DeviceWeights(self.runtime, self.weights)
             frame = self._module.ResidentFrame(self.runtime, self.device_weights,
-                                               height, width)
+                                               height, width, device_image_io=device_image_io)
         self._frames[key] = frame
         return frame
 

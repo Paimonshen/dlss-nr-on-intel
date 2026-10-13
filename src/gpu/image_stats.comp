@@ -1,0 +1,64 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+layout(local_size_x=256) in;
+layout(buffer_reference,scalar,buffer_reference_align=4) readonly buffer U { uint v[]; };
+layout(buffer_reference,scalar,buffer_reference_align=4) readonly buffer F { float v[]; };
+layout(buffer_reference,scalar,buffer_reference_align=4) buffer O { uint v[]; };
+layout(push_constant,scalar) uniform P {
+    uint64_t a,b,outbuf;
+    uint width,height,mode,channels;
+    uint top,bottom,left,right;
+} p;
+shared float sums[256];
+void main() {
+    uint lane=gl_LocalInvocationID.x;
+    if(p.mode==0u||p.mode==3u) {
+        uint line=gl_GlobalInvocationID.x;
+        bool row=true;
+        uint coordinate=0u;
+        if(p.mode==0u) {
+            if(line>=p.width+p.height) return;
+            row=line<p.height;
+            coordinate=row?line:line-p.height;
+        } else {
+            if(line>=8u) return;
+            bool absent=(line==0u&&p.top==0u)||(line==1u&&p.bottom==p.height)||
+                        (line==2u&&p.left==0u)||(line==3u&&p.right==p.width);
+            if(absent) { O(p.outbuf).v[line]=0xffffffffu;return; }
+            row=line==0u||line==1u||line==4u||line==5u;
+            coordinate=line==0u?p.top-1u:line==1u?p.bottom:
+                       line==2u?p.left-1u:line==3u?p.right:
+                       line==4u?p.top:line==5u?p.bottom-1u:
+                       line==6u?p.left:p.right-1u;
+        }
+        uint largest=0u;
+        uint count=row?p.width:p.height;
+        for(uint k=0u;k<count;k++) {
+            uint at=row?coordinate*p.width+k:k*p.width+coordinate;
+            uint pixel=U(p.a).v[at];
+            largest=max(largest,max(pixel&255u,max((pixel>>8u)&255u,(pixel>>16u)&255u)));
+        }
+        O(p.outbuf).v[line]=largest;
+        return;
+    }
+    uint count=p.width*p.height*p.channels;
+    uint start=gl_WorkGroupID.x*1024u+lane;
+    precise float value=0.0;
+    for(uint k=0u;k<4u;k++) {
+        uint at=start+k*256u;
+        if(at<count) {
+            float x=F(p.a).v[at];
+            if(p.mode==2u) value+=isnan(x)||isinf(x)?1.0:0.0;
+            else value+=abs(x-F(p.b).v[at]);
+        }
+    }
+    sums[lane]=value;
+    barrier();
+    for(uint step=128u;step>0u;step>>=1u) {
+        if(lane<step) sums[lane]+=sums[lane+step];
+        barrier();
+    }
+    if(lane==0u) O(p.outbuf).v[gl_WorkGroupID.x]=floatBitsToUint(sums[0]);
+}
