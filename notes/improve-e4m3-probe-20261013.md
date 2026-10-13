@@ -10,6 +10,45 @@ The source of the idea is mauri870/DLSSNR-RDNA3, commit 5f099e2, MIT,
 copyright mochizuki0323; its license is retained under licenses/.
 This is a separate public-source engine, not Daniel's closed AMD installer.
 
+## Follow-up: complete graph checked, 2026-10-13
+
+The owner requested the next inexpensive task and testing if usage allowed.
+publish.glsl now has compile-time NR_E4M3_MAGIC, **default 0**. Setting it to 1
+uses the magnitude-based candidate. No runtime default is changed.
+frame_replay.py --shader-dir selects a complete variant set before constructing
+the backend; separate processes and directories avoid overwriting baseline shaders.
+
+On Linux, device **Intel(R) Graphics (LNL)**, six paired rounds per invocation:
+
+| Output | Network field | Order | Baseline replay ms | Candidate replay ms | Lower time |
+| --- | --- | --- | ---: | ---: | ---: |
+| 320x320 | 320x320 | baseline then candidate | 23.840 | 22.949 | 3.74% |
+| 320x320 | 320x320 | candidate then baseline | 24.090 | 22.923 | 4.85% |
+| 1280x720 | 1344x768 | baseline then candidate | 147.434 | 142.742 | 3.18% |
+
+Both the original and changed-input head SHA256 match across variants in every
+comparison. Within each invocation block, single and replay paths also agree.
+Additional candidate runs pass test_gemm_contract.py and test_frame_execution.py,
+covering epilogues, resolution changes, specialization, scratch planning, cached
+replay, changed inputs and recording-failure recovery.
+
+These are short synthetic backend-frame timings, including input/output movement
+around the resident graph, not game FPS or complete daemon preprocessing/composition.
+320 reverse order corroborates a small gain on this machine; 720 has one ordering.
+Windows/B580 has not been tested. Keep the option off pending that check.
+
+The two directories were compiled from the same Makefile shader inventory with
+glslangValidator --target-env vulkan1.3 -Isrc/gpu -DNR_E4M3_MAGIC=0 or =1;
+source/defines for each shader are read by src/tools/build_check.py:make_shaders.
+Runtime libraries and local weights were reused. Reproduction after compiling:
+
+```sh
+python3 src/bench/frame_replay.py --size 320 320 --pairs 6 --shader-dir work/e4m3-baseline --json work/e4m3-baseline-320.json
+python3 src/bench/frame_replay.py --size 320 320 --pairs 6 --shader-dir work/e4m3-magic --json work/e4m3-magic-320.json
+```
+
+Raw JSON/logs are kept under work/e4m3-*. No model outputs or weights are committed.
+
 ## Result on the local Linux Intel GPU
 
 - 1,114,875 inputs: every FP16 bit pattern, random FP32 bits, E4M3 midpoint
@@ -27,8 +66,8 @@ This is a separate public-source engine, not Daniel's closed AMD installer.
   over one reused buffer. It is not a complete model or game-frame benchmark.
   An earlier exploratory run was closer to 1%; a stable speed gain is not claimed.
 
-The production e4m3 function and runtime defaults have not changed. Only the
-isolated probe and notes are added; whole-frame validation is deferred.
+At the initial probe commit 37ae423 the production e4m3 function was unchanged.
+The follow-up above adds a gated candidate while retaining the default algorithm.
 Private output: work/e4m3-result.json and work/e4m3-probe.log.
 
 To reproduce, build the regular runtime/shaders, then:
@@ -40,10 +79,9 @@ python3 src/bench/e4m3_probe.py
 
 ## Next after limits reset, in order
 
-1. Try the candidate behind a controlled shader switch. Preserve numerical
-   boundaries, validate whole-frame outputs and pair old/new graph timings.
-   Repeat on B580/Windows before enabling it by default. A tiny isolated-kernel
-   difference is insufficient evidence for a production change.
+1. Repeat the gated candidate on B580/Windows, and repeat larger-field timings
+   in reversed order before enabling it. The Linux whole-graph checks above pass;
+   independent-driver validation remains necessary.
 2. Join the existing fused FFN and C32 attention block. Measure register pressure,
    spills, image correctness and graph time; do not duplicate the FFN fusion
    already present in the current source.

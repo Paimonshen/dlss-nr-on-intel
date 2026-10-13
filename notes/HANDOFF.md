@@ -12,11 +12,14 @@ you need the evidence behind a line in this file, rather than reading them in or
 ## Small E4M3 probe; remaining work deferred (2026-10-13)
 
 Owner requested the cheapest task now and the rest after limits reset.
-Branch improve-e4m3 contains a standalone GPU rounding probe, not a runtime-default
-change. 1,114,875 inputs match current publish.glsl bit-for-bit on the local Intel
-GPU; a short timing run suggests only a small, overlapping-range difference.
+Branch improve-e4m3 now also has a compile-time NR_E4M3_MAGIC experiment, default 0,
+and frame_replay --shader-dir for variant comparisons. 1,114,875 probe inputs
+match, and complete-graph original/changed head hashes match at 320x320 and 720p.
+Short local Linux timings improve 3–5%, including reversed 320 ordering.
+Candidate GEMM-contract and frame-execution regressions pass. This is not a B580,
+Windows or game-FPS measurement; default activation awaits independent-driver checks.
 See notes/improve-e4m3-probe-20261013.md for reproduction and the queued work:
-whole-graph E4M3 validation/timing, FFN+attention C32 fusion, GPU pre/post with
+B580/Windows E4M3 validation, FFN+attention C32 fusion, GPU pre/post with
 shared game resources, then dependency-driven multi-block execution.
 
 ## PR #13 reviewed on Windows (2026-10-13)

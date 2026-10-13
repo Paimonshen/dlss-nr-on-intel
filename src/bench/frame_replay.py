@@ -7,6 +7,7 @@ allocation/capture separately from warm timing. Requires local logical weights.
 import argparse
 import hashlib
 import json
+import os
 import pathlib
 import sys
 import time
@@ -24,9 +25,25 @@ def main():
     parser.add_argument('--pairs', type=int, default=6)
     parser.add_argument('--input', type=pathlib.Path)
     parser.add_argument('--json', type=pathlib.Path)
+    parser.add_argument('--shader-dir', type=pathlib.Path,
+                        help='use a complete shader variant directory for this process')
     args = parser.parse_args()
     if args.pairs < 1 or min(args.size) < 1:
         parser.error('size and pairs must be positive')
+    if args.shader_dir:
+        variants = {
+            'GEMM': 'gemm_resident', 'UNARY': 'resident', 'ROW': 'attention',
+            'HISTORY': 'history', 'TILED': 'gemm_tiled', 'STAGED': 'gemm_staged',
+            'STAGED32': 'gemm_staged32', 'STAGED32_DEEP': 'gemm_staged32_deep',
+            'ROWS': 'attention_rows', 'WINDOW': 'window_attention',
+            'WINDOW_BLOCK': 'window_block', 'GLOBAL_ATTENTION': 'global_attention',
+            'FFN': 'ffn_fused',
+        }
+        for name, stem in variants.items():
+            path = args.shader_dir.resolve() / (stem + '.spv')
+            if not path.is_file():
+                parser.error(f'missing variant shader: {path}')
+            os.environ[f'XMX_{name}_SPV'] = str(path)
     h, w = args.size
     if args.input:
         color = nr_frame.image_io.load(args.input, size=(h, w))
@@ -72,6 +89,7 @@ def main():
     rt.submit()
     np.testing.assert_array_equal(frame.run(features, execution='replay'), reference)
     report = {'output_hw': [h, w], 'network_hw': list(features.shape[:2]),
+              'shader_dir': str(args.shader_dir.resolve()) if args.shader_dir else None,
               'warmup_ms': warmups, 'bit_identical': True,
               'head_sha256': hashlib.sha256(reference.tobytes()).hexdigest(),
               'changed_head_sha256': hashlib.sha256(changed_reference.tobytes()).hexdigest(),

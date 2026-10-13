@@ -30,13 +30,26 @@ float half_round(float x) {
  * the instruction there with hand-packed half bits is what broke the picture on the B580
  * (Paimon, PR #3). */
 
+#ifndef NR_E4M3_MAGIC
+#define NR_E4M3_MAGIC 0
+#endif
+
 float e4m3(float x) {
     float magnitude = min(abs(x), 448.0);
+#if NR_E4M3_MAGIC
+    /* Optional experiment; idea from mauri870/DLSSNR-RDNA3 (MIT), 5f099e2.
+     * See licenses/rdna3-e4m3-MIT.txt. Magnitude preserves our NaN/zero rules. */
+    uint bits = floatBitsToUint(magnitude) & 0x7F800000u;
+    float magic = uintBitsToFloat(max(bits, 0x3C800000u) + 0x0A400000u);
+    precise float sum = magnitude + magic;
+    precise float rounded = sum - magic;
+#else
     int exponent = (floatBitsToInt(magnitude) >> 23) & 0xFF;
     exponent = max(exponent, 121) - 3;                 // 121-3 = the 2^-9 subnormal step
     float step = intBitsToFloat(exponent << 23);
     float reciprocal = intBitsToFloat((254 - exponent) << 23);
     float rounded = roundEven(magnitude * reciprocal) * step;
+#endif
     return x < 0.0 ? -rounded : rounded;
 }
 
