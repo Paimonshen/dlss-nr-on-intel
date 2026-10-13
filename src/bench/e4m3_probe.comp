@@ -1,0 +1,37 @@
+#version 450
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_GOOGLE_include_directive : require
+#include "publish.glsl"
+layout(local_size_x = 256) in;
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer FloatBuf { float v[]; };
+layout(push_constant, scalar) uniform Push { FloatBuf a, b, c, d; uint m, n, k, batch;
+    uint sa, sb, sc, flags; float p0, p1, p2, p3; } pc;
+
+/* Rounding-constant idea from mauri870/DLSSNR-RDNA3, 5f099e2, MIT,
+ * Copyright (c) 2026 mochizuki0323. See licenses/rdna3-e4m3-MIT.txt.
+ * Modified: round magnitude and retain our existing min/NaN and zero-sign rules. */
+float candidate(float x) {
+    float magnitude = min(abs(x), 448.0);
+    uint bits = floatBitsToUint(magnitude) & 0x7F800000u;
+    float magic = uintBitsToFloat(max(bits, 0x3C800000u) + 0x0A400000u);
+    precise float sum = magnitude + magic;
+    precise float rounded = sum - magic;
+    return x < 0.0 ? -rounded : rounded;
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.m) return;
+    float x = pc.a.v[i];
+    uint mode = pc.flags & 255u;
+    if (mode == 2u) {
+        pc.b.v[i] = e4m3(x);
+        pc.c.v[i] = candidate(x);
+    } else {
+        pc.c.v[i] = mode == 1u ? candidate(x) : e4m3(x);
+    }
+}

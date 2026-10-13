@@ -9,6 +9,16 @@ you need the evidence behind a line in this file, rather than reading them in or
 
 ---
 
+## Small E4M3 probe; remaining work deferred (2026-10-13)
+
+Owner requested the cheapest task now and the rest after limits reset.
+Branch improve-e4m3 contains a standalone GPU rounding probe, not a runtime-default
+change. 1,114,875 inputs match current publish.glsl bit-for-bit on the local Intel
+GPU; a short timing run suggests only a small, overlapping-range difference.
+See notes/improve-e4m3-probe-20261013.md for reproduction and the queued work:
+whole-graph E4M3 validation/timing, FFN+attention C32 fusion, GPU pre/post with
+shared game resources, then dependency-driven multi-block execution.
+
 ## PR #13 reviewed on Windows (2026-10-13)
 
 The continuation reviewed `Paimonshen/perf-recheck` at `1fc7aa7`, rebased onto `041ef3b`.
