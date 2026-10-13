@@ -6,7 +6,11 @@ status, driver findings and alternative build paths.
 
 Local 0.0.1.3 preparation adds an opt-in same-Arc GPU image path, still off by
 default. Full-model swapchain smoke passed on Intel 101.9150 with resize, effect
-and scale changes, and synchronization validation. Warm image-processing
+and scale changes, and synchronization validation. The GPU option selects
+`NR_GPU_ONLY=1`: unavailable or failed shared processing keeps the original
+game image instead of capturing pixels through the host. CPU command submission,
+settings and reduced metadata remain. See [strict-path checks](GPU-PRESENT-SMOKE.md).
+Warm image-processing
 measurements are recorded through full 1440p; actual game/desktop measurements
 remain pending. This is not a released game-FPS claim.
 See [the continuation evidence](../notes/gpu-frame-path-20261013.md) and

@@ -115,6 +115,7 @@ struct device_data {
 	VkFence stalled_fence;
 	VkSwapchainKHR result_chain;
 	int queues_announced;           /* the one-time queue inventory has been logged */
+	int gpu_only_notice;
 	VkCommandPool pool;
 	VkCommandBuffer transfer_commands;
 	VkFence transfer_fence;
@@ -191,6 +192,24 @@ static const char *socket_path;
 static const char *trigger_path;
 static int ui_mask;
 
+static int gpu_only_mode(void)
+{
+    const char *value = getenv("NR_GPU_ONLY");
+    return value && !strcmp(value, "1");
+}
+
+/* Strict mode can retain the game's image, but must never turn an unavailable
+ * shared path into CPU pixel capture, processing or cached-image writeback. */
+static int host_pixel_path_allowed(struct device_data *data, const char *operation)
+{
+    if (!gpu_only_mode()) return 1;
+    if (!data || !data->gpu_only_notice) {
+        fprintf(stderr, "[nr_layer] GPU-only: CPU pixel path disabled (%s); original GPU image retained\n", operation);
+        if (data) data->gpu_only_notice = 1;
+    }
+    return 0;
+}
+
 /* The frame goes to a daemon over a Unix socket rather than being processed in
  * process: the implementation is Python and this is a shared object living inside the
  * game. For a photo mode the game is meant to stall anyway, so the round trip is free;
@@ -247,6 +266,11 @@ static void drop_inflight(struct device_data *data)
 	if (!data->inflight) return;
 	data->inflight = 0;
 	nr_link link = nr_link_from_handle(data->inflight_fd);
+	if (gpu_only_mode()) {
+		/* A stale legacy reply is closed, not downloaded into a discard buffer. */
+		nr_link_close(&link);
+		return;
+	}
 	unsigned char sink[65536];
 	for (VkDeviceSize got = 0; got < data->inflight_size; ) {
 		size_t want = data->inflight_size - got < sizeof sink
@@ -1347,6 +1371,7 @@ static void release_staging(struct device_data *data)
 
 static int ensure_resources(struct device_data *data, VkDeviceSize needed)
 {
+    if (!host_pixel_path_allowed(data, "host capture allocation")) return -1;
 	if (!data->pool) {
 		VkCommandPoolCreateInfo info = {
 			.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
@@ -1412,6 +1437,7 @@ static int ensure_resources(struct device_data *data, VkDeviceSize needed)
 static int transfer(struct device_data *data, struct swapchain_data *chain, VkQueue queue,
                     uint32_t index, int to_image)
 {
+    if (!host_pixel_path_allowed(data, "host capture/writeback")) return -1;
     if (data->device_error || data->transfer_error) return -1;
 #define FN(type, name) type name = (type)data->get_device_proc(data->device, "vk" #name)
     FN(PFN_vkAllocateCommandBuffers, AllocateCommandBuffers);
@@ -1578,6 +1604,7 @@ static int mask_worth_sending(uint32_t held, uint32_t pixels)
 static int process_frame(struct device_data *data, struct swapchain_data *chain,
 			 VkQueue queue, uint32_t index)
 {
+    if (!host_pixel_path_allowed(data, "host frame processing")) return -1;
 	nr_timing_begin(&data->timing, (uint64_t)(uintptr_t)data->device,
 		(uint64_t)chain->swapchain, chain->extent.width, chain->extent.height,
 		data->queue_family, data->frame_counter, 0, 0);
@@ -1654,6 +1681,7 @@ static int process_frame(struct device_data *data, struct swapchain_data *chain,
 static int process_frame_async(struct device_data *data, struct swapchain_data *chain,
 			       VkQueue queue, uint32_t index)
 {
+    if (!host_pixel_path_allowed(data, "host asynchronous processing")) return -1;
 	nr_timing_begin(&data->timing, (uint64_t)(uintptr_t)data->device,
 		(uint64_t)chain->swapchain, chain->extent.width, chain->extent.height,
 		data->queue_family, data->frame_counter, 1, 0);
@@ -1797,6 +1825,7 @@ static VkResult present_locked(VkQueue queue,
 	 * network's cost follows the extent it is given (notes/phase37). N only decides how
 	 * many game frames each rendered one covers. */
 	if (live_every > 0) {
+		if (gpu_only_mode()) data->holding = 0;
 		/* The trigger keeps its meaning — "do the thing" — so the effect can be
 		 * turned on and off mid-game without restarting it. With no trigger
 		 * configured, live mode simply always runs. */
@@ -1832,6 +1861,10 @@ static VkResult present_locked(VkQueue queue,
 					continue;
 				}
 #endif
+				if (!host_pixel_path_allowed(data, "shared processing unavailable")) {
+					data->holding = 0;
+					continue;
+				}
 				done = async_live ? process_frame_async(data, chain, queue, index)
 						      : process_frame(data, chain, queue, index);
 				if (done == 0) {
@@ -1842,11 +1875,16 @@ static VkResult present_locked(VkQueue queue,
 					data->holding = 0; /* never replay a partially received reply */
 					nr_timing_finish(&data->timing, 0);
 				}
-			} else if (data->holding && data->result_size == want) {
+			} else if (!gpu_only_mode() && data->holding && data->result_size == want) {
 				memcpy(data->mapped, data->result, (size_t)data->result_size);
 				transfer(data, chain, queue, index, 1);
 			}
 		}
+		return present_now(data, queue, info);
+	}
+	if (!host_pixel_path_allowed(data, "photo/capture mode requires host pixels")) {
+		data->holding = data->have_earlier = 0;
+		drop_inflight(data);
 		return present_now(data, queue, info);
 	}
 

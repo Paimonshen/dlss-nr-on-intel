@@ -10,11 +10,13 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 import importlib.util
+import hashlib
 import json
 import os
 from pathlib import Path
 import queue
 import re
+import statistics
 import subprocess
 import sys
 import threading
@@ -23,6 +25,47 @@ import uuid
 
 ROOT = Path(__file__).resolve().parents[2]
 MAX_LOG = 1024 * 1024
+PRESENT_PATTERN = (r"^present phase=(\d+) frame=(\d+) extent=(\d+)x(\d+) "
+                   r"image=\d+ result=-?\d+ present_ms=([0-9]+(?:\.[0-9]+)?)\r?$")
+
+
+def parse_extent(value):
+    match = re.fullmatch(r"(\d+)x(\d+)", value)
+    if not match:
+        raise argparse.ArgumentTypeError("extent must be WIDTHxHEIGHT")
+    width, height = map(int, match.groups())
+    if not 128 <= width <= 4096 or not 64 <= height <= 4096:
+        raise argparse.ArgumentTypeError("extent requires width 128..4096 and height 64..4096")
+    return width, height
+
+
+def present_timings(output, warmup):
+    rows = re.findall(PRESENT_PATTERN, output, re.MULTILINE)
+    result = []
+    for phase in (1, 2):
+        samples = [(int(w), int(h), float(ms)) for p, f, w, h, ms in rows
+                   if int(p) == phase and int(f) > warmup]
+        if not samples:
+            continue
+        values = sorted(row[2] for row in samples)
+        result.append({"phase": phase, "width": samples[0][0], "height": samples[0][1],
+                       "samples": len(values), "median_ms": statistics.median(values),
+                       "p95_ms": values[max(0, (95 * len(values) + 99) // 100 - 1)],
+                       "scope": "vkQueuePresentKHR including layer capture/network/return and downstream WSI"})
+    return result
+
+
+def validate_present_output(output, frames, extents):
+    timed = re.findall(PRESENT_PATTERN, output, re.MULTILINE)
+    rows = [row[:4] for row in timed]
+    if len(rows) != 2 * frames or len(re.findall(r"^present phase=", output, re.MULTILINE)) != len(rows):
+        raise RuntimeError("missing/partial native present or timing evidence")
+    for phase, size in enumerate(extents, 1):
+        actual = [(int(f), int(w), int(h)) for p, f, w, h in rows if int(p) == phase]
+        if sorted(actual) != [(frame, *size) for frame in range(1, frames + 1)]:
+            raise RuntimeError(f"phase {phase}: frame IDs or actual swapchain extents differ from the request")
+    if any(not 0 <= float(ms) < float("inf") for _, _, _, _, ms in timed):
+        raise RuntimeError("invalid native present duration")
 
 
 def atomic_json(path, value):
@@ -134,6 +177,13 @@ def main():
     parser.add_argument("--layer", type=Path, default=ROOT / "work/libnr_layer.dll")
     parser.add_argument("--output-dir", type=Path, help="new/empty result folder under this checkout's work directory")
     parser.add_argument("--frames", type=int, default=12, help="1..120 frames per swapchain")
+    parser.add_argument("--extent", type=parse_extent, default=(128, 64), help="initial swapchain WIDTHxHEIGHT")
+    parser.add_argument("--resize-extent", type=parse_extent, default=(160, 96), help="second swapchain WIDTHxHEIGHT")
+    parser.add_argument("--render-scale", type=float, default=0.4)
+    parser.add_argument("--warmup", type=int, default=0, help="exclude the first N presents per phase from timing")
+    parser.add_argument("--gpu-only", action="store_true", help="forbid CPU pixel fallback; failures retain the original")
+    parser.add_argument("--unsupported", choices=("async", "settings"),
+                        help="GPU-only diagnostic: unsupported mode must retain the original without CPU pixels")
     parser.add_argument("--pause-ms", type=int, default=None, help="0..1000 ms per frame; controls default to 100")
     parser.add_argument("--exercise-controls", action="store_true", help="test owned trigger off/on and render-scale changes")
     parser.add_argument("--restart-daemon", action="store_true", help="step the fixture through owned daemon loss/restart and safe fallback")
@@ -157,6 +207,14 @@ def main():
         parser.error("synchronization validation cannot be required with validation disabled")
     if args.baseline and args.fenced:
         parser.error("fenced transport requires NR; it cannot be forced for a no-NR baseline")
+    if args.baseline and args.gpu_only:
+        parser.error("GPU-only policy requires NR")
+    if args.unsupported and (not args.gpu_only or args.baseline or args.restart_daemon or args.exercise_controls or args.frames < 8):
+        parser.error("unsupported-mode test requires GPU-only, at least 8 frames, and no other controls")
+    if not 0 <= args.warmup < args.frames or not 0.05 <= args.render_scale <= 1.0:
+        parser.error("warmup must be below frames and render scale must be 0.05..1.0")
+    if args.exercise_controls and args.render_scale != 0.4:
+        parser.error("controlled scale changes start at render scale 0.4")
     if args.restart_daemon and (args.baseline or args.exercise_controls or args.frames < 8):
         parser.error("daemon restart requires NR, at least 8 frames, and separate trigger/scale controls")
     pause_ms = args.pause_ms if args.pause_ms is not None else (100 if args.exercise_controls else 0)
@@ -181,8 +239,10 @@ def main():
         parser.error("selected Python environment lacks NumPy")
     daemon_command = [str(native_python), "-u", str(ROOT / "src/layer/nr_daemon.py"),
                       "--socket", endpoint, "--root", str(ROOT), "--settings", str(settings),
-                      "--render-scale", "0.4", "--min-extent", "128", "--max-pixels", "1048576"]
-    fixture_command = [str(fixture), "--frames", str(args.frames), "--pause-ms", str(pause_ms)]
+                      "--render-scale", str(args.render_scale), "--min-extent", "128", "--max-pixels",
+                      str(max(w * h for w, h in (args.extent, args.resize_extent)))]
+    fixture_command = [str(fixture), "--frames", str(args.frames), "--pause-ms", str(pause_ms),
+                       "--extent", "%dx%d" % args.extent, "--resize-extent", "%dx%d" % args.resize_extent]
     if not args.no_validation:
         fixture_command.append("--sync-validation" if args.sync_validation else "--validation")
     if args.api11:
@@ -193,11 +253,22 @@ def main():
         fixture_command.append("--no-layer")
     if args.restart_daemon:
         fixture_command += ["--step", "--check-original-frame", "3"]
+        if args.gpu_only:
+            fixture_command += ["--check-second-original-frame", "5"]
+    elif args.unsupported:
+        fixture_command += ["--check-original-frame", "3"]
     plan = {"root": str(ROOT), "output_dir": str(folder), "endpoint": endpoint,
             "layer": str(layer), "daemon_command": daemon_command, "fixture_command": fixture_command,
             "exercise_controls": args.exercise_controls, "gpu_test": bool(args.run), "baseline": args.baseline,
             "force_fence": args.fenced, "restart_daemon": args.restart_daemon,
+            "gpu_only": args.gpu_only, "extents": [args.extent, args.resize_extent],
+            "unsupported": args.unsupported,
+            "render_scale": args.render_scale, "timing_warmup": args.warmup,
             "fixture_extra_environment": {"NR_GPU_TRANSPORT_FENCE": "1"} if args.fenced else {}}
+    plan["artifact_sha256"] = {str(path.relative_to(ROOT)) if path.is_relative_to(ROOT) else str(path):
+                               hashlib.sha256(path.read_bytes()).hexdigest()
+                               for path in (layer, fixture, ROOT / "work/libxmx.dll", ROOT / "work/image_stats.spv")
+                               if path.is_file()}
     print(json.dumps(plan, indent=2), flush=True)
     if not args.run:
         return 0
@@ -206,8 +277,8 @@ def main():
     atomic_json(manifest, {"file_format_version": "1.0.0", "layer": {
         "name": "VK_LAYER_dlssnr_intel", "type": "GLOBAL", "library_path": str(layer),
         "api_version": "1.3.0", "implementation_version": "1", "description": "Owned GPU present smoke"}})
-    atomic_json(settings, {"render_scale": 0.4, "min_extent": 128, "profile": "standard",
-                           "detail_strength": 1, "colour_strength": 1})
+    atomic_json(settings, {"render_scale": args.render_scale, "min_extent": 128, "profile": "standard",
+                           "detail_strength": 0.5 if args.unsupported == "settings" else 1, "colour_strength": 1})
     trigger.touch()
     environment = {name: value for name, value in os.environ.items()
                    if not name.upper().startswith(("NR_", "XMX_", "VK_"))
@@ -223,6 +294,10 @@ def main():
         NR_LAYER_TRIGGER=str(trigger), NR_LAYER_LOG=str(daemon_log), NR_LAYER_LIVE="1", NR_LAYER_ASYNC="0",
         NR_LAYER_UI_MASK="0", NR_LAYER_SPAWN="0", NR_GPU_IMAGE="1", NR_GPU_TRANSPORT="1",
         NR_INPUT_FP16="1", NR_DLL_PATH=r"C:\msys64\ucrt64\bin", PYTHONUTF8="1", PYTHONDONTWRITEBYTECODE="1")
+    if args.gpu_only:
+        environment["NR_GPU_ONLY"] = "1"
+    if args.unsupported == "async":
+        environment["NR_LAYER_ASYNC"] = "1"
     # Startup watcher concerns only this harness, so a crashed harness cannot
     # leave its GPU daemon behind. No external process is stopped or observed.
     daemon_environment = dict(environment, NR_LAYER_SPAWNED=str(os.getpid()))
@@ -234,6 +309,7 @@ def main():
     environment.update(VK_LAYER_PATH=os.pathsep.join(layer_paths), VK_INSTANCE_LAYERS="VK_LAYER_dlssnr_intel",
         ENABLE_NR_LAYER="1", DISABLE_VK_LAYER_VALVE_steam_fossilize_1="1", VK_LOADER_DEBUG=args.loader_debug,
         NR_LAYER_TIMING="1", NR_LAYER_TIMING_FILE=str(folder / "layer-timing.jsonl"))
+    environment["NR_LAYER_TIMING_EVERY"] = "1"
     # Applied after copying daemon_environment: only the exporting fixture
     # chooses v2. The daemon verifies the actual packet's version and handles.
     environment.update(plan["fixture_extra_environment"])
@@ -257,7 +333,7 @@ def main():
                     # The frame ACK already means GPU work completed. Wait for
                     # its flushed metric too so the stop cannot erase evidence.
                     deadline = time.monotonic() + min(5, remaining)
-                    while len(re.findall(r"^128x64.*\btransport=gpu-shared(?:-fence)?\b",
+                    while len(re.findall(rf"^{args.extent[0]}x{args.extent[1]}.*\btransport=gpu-shared(?:-fence)?\b",
                                          tail(daemon_log), re.MULTILINE)) < 2:
                         if time.monotonic() >= deadline or daemon.poll() is not None:
                             raise RuntimeError("initial daemon did not confirm the first two shared frames")
@@ -293,6 +369,9 @@ def main():
             if daemon is not None and daemon.poll() is not None:
                 raise RuntimeError(f"owned daemon exited while fixture was running ({daemon.returncode})")
             output = tail(folder / "fixture.stdout.log")
+            validate_present_output(output, args.frames, (args.extent, args.resize_extent))
+            summary["device"] = next(iter(re.findall(r"^device=.*", output, re.MULTILINE)), "")
+            summary["driver"] = next(iter(re.findall(r"^driver=.*", output, re.MULTILINE)), "")
             for phase in (1, 2):
                 count = len(re.findall(rf"^present phase={phase} frame=", output, re.MULTILINE))
                 if count != args.frames:
@@ -302,12 +381,14 @@ def main():
                                       for w, h, transport in frames]
             if args.fenced and any(transport != "gpu-shared-fence" for _, _, transport in frames):
                 raise RuntimeError("requested fenced transport was not used for every shared GPU frame")
-            if not args.baseline and not args.restart_daemon and (not any((w, h) == ("128", "64") for w, h, _ in frames) \
-                    or not any((w, h) == ("160", "96") for w, h, _ in frames)):
+            extents = [tuple(map(str, size)) for size in (args.extent, args.resize_extent)]
+            if not args.baseline and not args.restart_daemon and not args.unsupported and any(
+                    not any((w, h) == size for w, h, _ in frames) for size in extents):
                 raise RuntimeError("daemon did not confirm shared GPU processing for both swapchain extents")
-            expected = {("128", "64"): args.frames - (2 if args.exercise_controls else 0),
-                        ("160", "96"): args.frames}
-            for extent, wanted in (expected.items() if not args.baseline and not args.restart_daemon else ()):
+            expected = {}
+            for phase, size in enumerate(extents):
+                expected[size] = expected.get(size, 0) + args.frames - (2 if args.exercise_controls and phase == 0 else 0)
+            for extent, wanted in (expected.items() if not args.baseline and not args.restart_daemon and not args.unsupported else ()):
                 observed = sum((w, h) == extent for w, h, _ in frames)
                 if observed != wanted:
                     raise RuntimeError(f"extent {extent}: {observed} shared GPU frames, expected {wanted}")
@@ -318,17 +399,37 @@ def main():
                 summary["fallback_frames"] = [{"width": int(w), "height": int(h)} for w, h in fallback]
                 summary["original_pixel_verified"] = bool(re.search(
                     r"^original_pixel frame=3 .*status=retained\r?$", output, re.MULTILINE))
-                if len(frames) != 2 or any((w, h) != ("128", "64") for w, h, _ in frames):
+                summary["post_restart_pixel_verified"] = bool(re.search(
+                    r"^original_pixel frame=5 .*status=retained\r?$", output, re.MULTILINE))
+                if len(frames) != 2 or any((w, h) != extents[0] for w, h, _ in frames):
                     raise RuntimeError("outage policy expected only the two initial shared frames")
-                if len(fallback) != 2 * args.frames - 3:
-                    raise RuntimeError("daemon restart did not process subsequent frames through the safe host transport")
+                wanted_fallback = 0 if args.gpu_only else 2 * args.frames - 3
+                if len(fallback) != wanted_fallback:
+                    raise RuntimeError("daemon restart did not obey the selected CPU fallback policy")
                 if not summary["original_pixel_verified"] or "frame exchange failed; original frame retained" not in stderr_text:
                     raise RuntimeError("outage image did not prove that the game's original clear color was retained")
+                if args.gpu_only and not summary["post_restart_pixel_verified"]:
+                    raise RuntimeError("strict restart did not prove a fresh original frame after the daemon returned")
+            if args.unsupported:
+                summary["original_pixel_verified"] = bool(re.search(
+                    r"^original_pixel frame=3 .*status=retained\r?$", output, re.MULTILINE))
+                if frames or not summary["original_pixel_verified"]:
+                    raise RuntimeError("unsupported GPU-only mode did not retain the exact original without processing")
             if not args.baseline and args.exercise_controls and not re.search(r"^settings:.*render_scale=1(?:\.0)?(?:,|\s|$)",
                                                        tail(daemon_log), re.MULTILINE):
                 raise RuntimeError("daemon did not acknowledge the controlled render-scale change")
             if re.search(r"^(?:frame rejected/failed|GPU lost|Traceback)", tail(daemon_log), re.MULTILINE):
                 raise RuntimeError("daemon reported a frame failure or lost GPU")
+            if args.gpu_only:
+                successful = re.findall(r"^\d+x\d+ .*\bin [\d.]+s.*", tail(daemon_log), re.MULTILINE)
+                if any(not re.search(r"\btransport=gpu-shared(?:-fence)?\b", line) for line in successful):
+                    raise RuntimeError("GPU-only run used an unlabeled/CPU pixel transport")
+                timing_path = folder / "layer-timing.jsonl"
+                records = [json.loads(line) for line in timing_path.read_text(encoding="utf-8").splitlines()] if timing_path.is_file() else []
+                if any(record.get("transport") == "cpu" and record.get("requests", 0) for record in records):
+                    raise RuntimeError("GPU-only layer recorded a CPU pixel request")
+                summary["cpu_pixel_requests"] = 0
+            summary["present_timings"] = present_timings(output, args.warmup)
             summary["ok"] = True
     except Exception as error:
         summary["error"] = str(error)
@@ -353,6 +454,9 @@ def main():
         summary["synchronization_validation"] = "synchronization_validation=on" in output
         summary["validation_errors"] = len(re.findall(r"^validation ERROR:",
                                                       summary["fixture_stderr_tail"], re.MULTILINE))
+        if summary["validation_errors"] or (args.sync_validation and not summary["synchronization_validation"]):
+            summary["ok"] = False
+            summary["error"] = "synchronization validation was unavailable or reported errors"
         atomic_json(folder / "summary.json", summary)
         print("present smoke result: " + str(folder / "summary.json"), flush=True)
     return 0 if summary["ok"] else 1

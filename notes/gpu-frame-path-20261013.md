@@ -24,8 +24,10 @@ drains private fences before destroying referenced objects.
 
 The first implementation requires synchronous live processing on every frame,
 SDR RGBA8/BGRA8, no interface mask/capture/dump/meter, and FP16 feature input.
-Unsupported modes use the existing transport, with a reason in the logs.
-GPU preparation/composition can also run behind that existing host transport.
+With `NR_GPU_ONLY=1`, unsupported modes retain the game's original GPU image.
+The experimental window option now selects this strict policy. The existing host
+transport remains available when strict mode is unset; GPU preparation/composition
+can also run behind it. See gpu-only-20261014.md for the latest policy and tests.
 Tiny images requiring the CPU algorithm's minimum-size enlargement are declined
 before GPU capture; there is no unconditional 320-pixel surface cutoff.
 

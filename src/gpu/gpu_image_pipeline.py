@@ -128,7 +128,8 @@ class GPUImagePipeline:
         self.decode.record(raw,self.active)
         self.inner_decode.record(raw,self.inner)
         self.rt.submit()
-        cut=self.stats.delta(self.inner,self.previous_inner,iw,ih) if self.history_frames else 0.0
+        cut=self.stats.delta(self.inner,self.previous_inner,iw,ih,
+                             decision_threshold=live.cut_limit) if self.history_frames else 0.0
         history=live.temporal>0 and self.history_frames>0 and cut<=live.cut_limit
         if not history: self.history_frames=0
         self.rt.begin()

@@ -402,19 +402,27 @@ class WizardFixture(unittest.TestCase):
         for value in ("true", 1, None, []):
             with self.assertRaises(ValueError):
                 core.Profile.from_dict({**old, "gpu_image_path": value})
-        for flag in ("NR_GPU_IMAGE", "NR_GPU_TRANSPORT"):
+        for flag in ("NR_GPU_IMAGE", "NR_GPU_TRANSPORT", "NR_GPU_ONLY"):
             self.assertEqual(core.runtime_env(self.profile)[flag], "0")
+        with patch.dict(os.environ, {"NR_GPU_ONLY": "1"}):
+            self.assertEqual(core.runtime_env(self.profile)["NR_GPU_ONLY"], "0")
         enabled = replace(self.profile, gpu_image_path=True, nr_async=True, nr_every=3)
         self.assertEqual(core.Profile.from_dict(enabled.to_dict()), enabled)
         self.assertTrue(core.install(self.profile)["ok"])
         path = core.installed_path(self.profile) / core.ENV_FILE
         before = path.read_text(encoding="utf-8").splitlines()
+        # An installation from before strict mode gains its explicit flag when
+        # the requested profile is applied; all non-pacing paths stay intact.
+        path.write_text("\n".join(line for line in before if not line.startswith("NR_GPU_ONLY=")) + "\n",
+                        encoding="utf-8")
         result = core.set_pacing(enabled)
         self.assertTrue(result["applied"])
         self.assertEqual(core.load_profile(self.root), enabled)
         values = dict(line.split("=", 1) for line in path.read_text(encoding="utf-8").splitlines()
                       if "=" in line and not line.startswith("#"))
-        self.assertEqual((values["NR_GPU_IMAGE"], values["NR_GPU_TRANSPORT"]), ("1", "1"))
+        self.assertEqual((values["NR_GPU_IMAGE"], values["NR_GPU_TRANSPORT"], values["NR_GPU_ONLY"]), ("1", "1", "1"))
+        self.assertEqual(sum(line.startswith("NR_GPU_ONLY=")
+                             for line in path.read_text(encoding="utf-8").splitlines()), 1)
         # Enabling the experimental image path does not overwrite requested pacing.
         self.assertEqual((values["NR_LAYER_ASYNC"], values["NR_LAYER_LIVE"]), ("1", "3"))
         unchanged = [line for line in before if line.split("=", 1)[0] not in core.PACING]
@@ -423,7 +431,7 @@ class WizardFixture(unittest.TestCase):
         core.set_pacing(self.profile)
         values = dict(line.split("=", 1) for line in path.read_text(encoding="utf-8").splitlines()
                       if "=" in line and not line.startswith("#"))
-        self.assertEqual((values["NR_GPU_IMAGE"], values["NR_GPU_TRANSPORT"]), ("0", "0"))
+        self.assertEqual((values["NR_GPU_IMAGE"], values["NR_GPU_TRANSPORT"], values["NR_GPU_ONLY"]), ("0", "0", "0"))
         self.assertNotIn("NR_LAYER_TIMING", core.runtime_env(enabled))
         self.assertNotIn("NR_LAYER_TIMING_LOG", core.runtime_env(enabled))
 

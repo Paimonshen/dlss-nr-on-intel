@@ -26,6 +26,7 @@ class FakeBuffer:
         self.address=self.id*4096
         self.nbytes=int(count)*np.dtype(dtype).itemsize
         self.kind=kind
+        self.downloads=[]
         self.bytes=np.zeros(self.nbytes,np.uint8)
         runtime.buffers[self.address]=self
 
@@ -37,6 +38,7 @@ class FakeBuffer:
     def download(self,dtype=np.float32,count=None):
         if self.kind!=X.HOST_READ:
             raise AssertionError("the metadata implementation tried to read image pixels")
+        self.downloads.append((np.dtype(dtype),count))
         return self.bytes.view(dtype)[:count].copy()
 
     def free(self): self.id=-1
@@ -53,6 +55,7 @@ class FakeRuntime:
     def begin(self): self.recorded=0
     def submit(self): pass
     def abort(self): self.aborts+=1
+    def copy(self,source,target,nbytes): target.bytes[:nbytes]=source.bytes[:nbytes]
 
 
 class FakePipeline:
@@ -63,7 +66,20 @@ class FakePipeline:
         self.rt.calls.append((p.mode,groups))
         source=self.rt.buffers[p.a].bytes
         target=self.rt.buffers[p.out].bytes
-        if p.mode in (0,3):
+        if p.mode in (4,5):
+            count=(p.width*p.height*p.channels+1023)//1024
+            partials=source.view(np.float32)[:count]
+            if p.mode==4:
+                values=np.array([partials.sum(dtype=np.uint64)],np.uint32)
+            else:
+                hi,lo=compensated_sum(partials)
+                bits=partials.view(np.uint32)
+                subnormal=((bits&0x7f800000)==0)&((bits&0x007fffff)!=0)
+                status=(1 if np.isnan(partials).any() else 2 if np.isinf(partials).any()
+                        else 3 if subnormal.any() or not np.isfinite((hi,lo)).all() else 0)
+                values=np.array((hi,lo,0),np.float32).view(np.uint32)
+                values[2]=status
+        elif p.mode in (0,3):
             rgb=source.reshape(p.height,p.width,4)[...,:3]
             rows=rgb.max(axis=(1,2));columns=rgb.max(axis=(0,2))
             if p.mode==0:
@@ -84,6 +100,28 @@ class FakePipeline:
             values=np.array([items[i:i+1024].sum(dtype=np.float32)
                              for i in range(0,a.size,1024)],np.float32).view(np.uint32)
         target[:values.nbytes]=values.view(np.uint8)
+
+
+def compensated_sum(values):
+    """CPU FP32 emulation of the shader's exact lane/reduction order."""
+    def two(a,b):
+        s=np.float32(a+b)
+        from_b=np.float32(s-a)
+        e=np.float32(np.float32(a-np.float32(s-from_b))+np.float32(b-from_b))
+        return s,e
+    def add(a,b):
+        hi=two(a[0],b[0]);lo=two(a[1],b[1])
+        combined=two(hi[0],np.float32(hi[1]+lo[0]))
+        return two(combined[0],np.float32(combined[1]+lo[1]))
+    pairs=np.zeros((256,2),np.float32)
+    with np.errstate(over="ignore",invalid="ignore"):
+        for i,v in enumerate(values):
+            if np.isfinite(v): pairs[i%256]=add(pairs[i%256],(v,np.float32(0)))
+        step=128
+        while step:
+            for lane in range(step): pairs[lane]=add(pairs[lane],pairs[lane+step])
+            step//=2
+    return pairs[0]
 
 
 class HostChecks(unittest.TestCase):
@@ -157,13 +195,98 @@ class HostChecks(unittest.TestCase):
         b=rng.random(a.shape,dtype=np.float32)
         sa=self.rt.buffer(a.size).upload(a);sb=self.rt.buffer(b.size).upload(b)
         self.assertAlmostEqual(self.stats.delta(sa,sb,53,37),float(np.abs(a-b).mean()),places=7)
+        self.assertEqual(self.rt.calls[-2:],[(1,6),(5,1)])
+        self.assertEqual(self.stats.scalars.downloads[-1][1],3)
+        self.assertFalse(self.stats.partials.downloads)
         self.assertEqual(self.stats.nonfinite(sa,53,37,3),0)
+        self.assertEqual(self.rt.calls[-2:],[(2,6),(4,1)])
+        self.assertEqual(self.stats.scalars.downloads[-1][1],1)
         a.reshape(-1)[[0,1023,1024,-1]]=[np.nan,np.inf,-np.inf,np.nan]
         sa.upload(a)
         self.assertEqual(self.stats.nonfinite(sa,53,37,3),4)
         with self.assertRaises(ValueError): self.stats.delta(sa,None,53,37)
         self.stats.close()
         with self.assertRaises(RuntimeError): self.stats.nonfinite(sa,53,37,3)
+
+    def test_delta_matches_old_fp64_sum_and_threshold_edges_fall_back(self):
+        rng=np.random.default_rng(2389)
+        for shape in ((17,37,3),(97,129,3),(320,512,3)):
+            a=rng.random(shape,dtype=np.float32)
+            b=a*np.float32(.65)
+            sa=self.rt.buffer(a.size).upload(a);sb=self.rt.buffer(b.size).upload(b)
+            got=self.stats.delta(sa,sb,shape[1],shape[0])
+            count=(a.size+1023)//1024
+            old=float(self.stats.partials.bytes.view(np.float32)[:count].sum(dtype=np.float64)/a.size)
+            bound=self.stats.last_delta_error_bound
+            self.assertLessEqual(abs(got-old),bound)
+            self.assertLess(bound,1e-8)
+            self.assertFalse(self.stats.last_delta_fallback)
+            # Even a threshold equal to the previous FP64 answer must preserve
+            # its exact <= decision, rather than relying on approximate last bits.
+            guarded=self.stats.delta(sa,sb,shape[1],shape[0],decision_threshold=old)
+            self.assertEqual(guarded,old)
+            self.assertTrue(self.stats.last_delta_fallback)
+            self.assertEqual(self.stats.last_delta_error_bound,0.)
+            self.stats.delta(sa,sb,shape[1],shape[0],decision_threshold=.5)
+            self.assertFalse(self.stats.last_delta_fallback)
+            sa.free();sb.free()
+
+    def test_compensated_normal_range_vs_fp64_reference(self):
+        rng=np.random.default_rng(2592)
+        u32=float(np.finfo(np.float32).eps)/2
+        u64=float(np.finfo(np.float64).eps)/2
+        for count in (1,7,255,256,257,4097,12288):
+            for kind in range(4):
+                values=rng.uniform(0,1024,count).astype(np.float32)
+                if kind==1: values*=np.float32(1e-7)
+                if kind==2:
+                    values=np.exp2(rng.uniform(-40,10,count)).astype(np.float32)
+                if kind==3:
+                    values[1::2]=np.float32(2**-24)
+                hi,lo=compensated_sum(values)
+                elements=count*1024
+                got=float((np.float64(hi)+np.float64(lo))/elements)
+                old=float(values.sum(dtype=np.float64)/elements)
+                relative=16*count*u32*u32+4*count*u64
+                bound=relative/(1-relative)*abs(got)+16*count*float(np.finfo(np.float32).tiny)/elements
+                self.assertLessEqual(abs(got-old),bound)
+                self.assertLess(bound,1e-8)
+
+    def test_final_nonfinite_count_above_fp32_integer_precision(self):
+        # 2²⁴+1 cannot be kept in one FP32 value. Each first-pass count is
+        # exactly representable and the uint final reduction must retain the +1.
+        counts=np.full(16385,1024,np.float32);counts[-1]=1
+        source=self.rt.buffer(counts.size).upload(counts)
+        target=self.rt.buffer(3,np.uint32,kind=X.HOST_READ)
+        push=G._Push(source.address,0,target.address,16777217,1,4,1,(ctypes.c_uint32*4)())
+        self.stats.pipeline.record(push,1)
+        self.assertEqual(int(target.download(np.uint32,1)[0]),16777217)
+
+    def test_delta_nan_inf_and_finite_overflow_status(self):
+        a=self.rt.buffer(2048).upload(np.ones(2048,np.float32))
+        b=self.rt.buffer(2048).upload(np.zeros(2048,np.float32))
+        self.assertTrue(np.isfinite(self.stats.delta(a,b,2048,1,1)))
+        for special in (np.nan,np.inf):
+            values=np.ones(2048,np.float32);values[0]=special;a.upload(values)
+            got=self.stats.delta(a,b,2048,1,1)
+            self.assertTrue(np.isnan(got) if np.isnan(special) else np.isinf(got))
+        # Partials remain finite, but their FP32 pair can overflow. This
+        # uncommon non-image range uses the unchanged FP64 metadata sum.
+        a.upload(np.full(2048,np.float32(2e35)))
+        got=self.stats.delta(a,b,2048,1,1)
+        old=float(self.stats.partials.bytes.view(np.float32)[:2].sum(dtype=np.float64)/2048)
+        self.assertTrue(np.isfinite(got))
+        self.assertEqual(got,old)
+        self.assertTrue(self.stats.last_delta_fallback)
+        a.upload(np.zeros(2048,np.float32))
+        self.assertEqual(self.stats.delta(a,b,2048,1,1,decision_threshold=0.),0.)
+        self.assertTrue(self.stats.last_delta_fallback)
+        a.upload(np.full(2048,np.finfo(np.float32).smallest_subnormal,np.float32))
+        got=self.stats.delta(a,b,2048,1,1,decision_threshold=0.)
+        old=float(self.stats.partials.bytes.view(np.float32)[:2].sum(dtype=np.float64)/2048)
+        self.assertEqual(got,old)
+        self.assertTrue(self.stats.last_delta_fallback)
+        self.assertGreater(got,0.)
 
     def test_failed_recording_aborts(self):
         source=self.rt.buffer(8*8*4,np.uint8)
@@ -179,6 +302,76 @@ class DeviceChecks(unittest.TestCase):
 
     def setUp(self):
         self.stats=G.GPUImageStats(self.rt);self.addCleanup(self.stats.close)
+
+    def test_device_scalar_delta_vs_old_fp64_and_threshold_decisions(self):
+        rng=np.random.default_rng(2884)
+        original=X.Buffer.download
+        downloads=[]
+        def reduced_only(buffer,*args,**kwargs):
+            if buffer.kind!=X.HOST_READ:
+                raise AssertionError("DEVICE download while reducing metadata")
+            count=kwargs.get("count",args[1] if len(args)>1 else None)
+            downloads.append(count)
+            return original(buffer,*args,**kwargs)
+        with patch.object(X.Buffer,"view",side_effect=AssertionError("host image view")),\
+             patch.object(X.Buffer,"download",reduced_only):
+            for shape in ((17,37,3),(320,512,3),(576,1024,3)):
+                a=rng.random(shape,dtype=np.float32)
+                b=a*np.float32(.65)
+                sa=self.rt.buffer(a.size,kind=X.DEVICE).upload(a)
+                sb=self.rt.buffer(b.size,kind=X.DEVICE).upload(b)
+                try:
+                    got=self.stats.delta(sa,sb,shape[1],shape[0])
+                    self.assertEqual(downloads[-1],3)
+                    self.assertFalse(self.stats.last_delta_fallback)
+                    bound=self.stats.last_delta_error_bound
+                    old=self.stats._exact_delta(a.size,(a.size+1023)//1024)
+                    self.assertLessEqual(abs(got-old),bound)
+                    self.assertLess(bound,1e-8)
+                    for threshold in (old,np.nextafter(old,-np.inf),np.nextafter(old,np.inf)):
+                        guarded=self.stats.delta(sa,sb,shape[1],shape[0],decision_threshold=threshold)
+                        self.assertEqual(guarded,old)
+                        self.assertEqual(guarded<=threshold,old<=threshold)
+                        self.assertTrue(self.stats.last_delta_fallback)
+                    self.stats.delta(sa,sb,shape[1],shape[0],decision_threshold=.5)
+                    self.assertFalse(self.stats.last_delta_fallback)
+                    self.assertEqual(downloads[-1],3)
+                finally: sa.free();sb.free()
+
+    def test_device_final_count_and_compensated_pairs(self):
+        counts=np.full(16385,1024,np.float32);counts[-1]=1
+        source=self.rt.buffer(counts.size,kind=X.DEVICE).upload(counts)
+        target=self.rt.buffer(3,np.uint32,kind=X.HOST_READ)
+        try:
+            self.rt.begin()
+            self.stats.pipeline.record(G._Push(source.address,0,target.address,16777217,1,4,1,
+                                               (ctypes.c_uint32*4)()),1)
+            self.rt.submit()
+            self.assertEqual(int(target.download(np.uint32,1)[0]),16777217)
+            rng=np.random.default_rng(2987)
+            for count in (1,257,4097,12288):
+                values=np.exp2(rng.uniform(-40,10,count)).astype(np.float32)
+                source.upload(np.pad(values,(0,source.nbytes//4-count)))
+                self.rt.begin()
+                self.stats.pipeline.record(G._Push(source.address,0,target.address,count*1024,1,5,1,
+                                                   (ctypes.c_uint32*4)()),1)
+                self.rt.submit()
+                result=target.download(np.uint32,3)
+                self.assertEqual(result[2],0)
+                hi,lo=result[:2].view(np.float32)
+                got=float((np.float64(hi)+np.float64(lo))/(count*1024))
+                old=float(values.sum(dtype=np.float64)/(count*1024))
+                self.assertLess(abs(got-old),1e-8)
+            # A raw positive subnormal must request exact metadata fallback;
+            # it must not silently become zero through FP32 FTZ in this pass.
+            tiny=np.array([1],np.uint32).view(np.float32)
+            source.upload(np.pad(tiny,(0,source.nbytes//4-1)))
+            self.rt.begin()
+            self.stats.pipeline.record(G._Push(source.address,0,target.address,1024,1,5,1,
+                                               (ctypes.c_uint32*4)()),1)
+            self.rt.submit()
+            self.assertEqual(target.download(np.uint32,3)[2],3)
+        finally: source.free();target.free()
 
     def test_device_regions_and_reductions_only_read_metadata(self):
         original=X.Buffer.download

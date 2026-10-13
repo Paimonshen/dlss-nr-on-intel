@@ -12,8 +12,73 @@ layout(push_constant,scalar) uniform P {
     uint top,bottom,left,right;
 } p;
 shared float sums[256];
+shared vec2 pairs[256];
+shared uint counts[256];
+
+// Error-free FP32 two-sum, followed by a normalized two-component addition.
+// No native FP64 capability is required. Keep each rounding operation precise:
+// a contracted/reassociated expression would erase the compensation.
+vec2 two_sum(float a,float b) {
+    precise float sum=a+b;
+    precise float from_b=sum-a;
+    precise float error=(a-(sum-from_b))+(b-from_b);
+    return vec2(sum,error);
+}
+vec2 add_pair(vec2 a,vec2 b) {
+    precise vec2 hi=two_sum(a.x,b.x);
+    precise vec2 lo=two_sum(a.y,b.y);
+    precise float carry=hi.y+lo.x;
+    precise vec2 combined=two_sum(hi.x,carry);
+    precise float tail=combined.y+lo.y;
+    return two_sum(combined.x,tail);
+}
+
 void main() {
     uint lane=gl_LocalInvocationID.x;
+    if(p.mode==4u||p.mode==5u) {
+        uint elements=p.width*p.height*p.channels;
+        uint partial_count=elements/1024u+(elements%1024u!=0u?1u:0u);
+        uint count=0u,flags=0u;
+        precise vec2 total=vec2(0.0);
+        for(uint i=lane;i<partial_count;i+=256u) {
+            uint bits=U(p.a).v[i];
+            float value=uintBitsToFloat(bits);
+            if(p.mode==4u) count+=uint(value);
+            // Preserve the old host FP64 answer when FP32 partials are
+            // subnormal: detect raw bits before any potentially-FTZ arithmetic.
+            else if((bits&0x7f800000u)==0u&&(bits&0x007fffffu)!=0u) flags|=4u;
+            else if(isnan(value)) flags|=1u;
+            else if(isinf(value)) flags|=2u;
+            else total=add_pair(total,vec2(value,0.0));
+        }
+        pairs[lane]=total;
+        counts[lane]=p.mode==4u?count:flags;
+        barrier();
+        for(uint step=128u;step>0u;step>>=1u) {
+            if(lane<step) {
+                if(p.mode==4u) counts[lane]+=counts[lane+step];
+                else {
+                    pairs[lane]=add_pair(pairs[lane],pairs[lane+step]);
+                    counts[lane]|=counts[lane+step];
+                }
+            }
+            barrier();
+        }
+        if(lane==0u) {
+            if(p.mode==4u) O(p.outbuf).v[0]=counts[0];
+            else {
+                // Status0: compensated pair;1: source NaN;2: source infinity;
+                // 3: subnormal partials/finite pair overflow, use old FP64 sum.
+                uint status=(counts[0]&1u)!=0u?1u:(counts[0]&2u)!=0u?2u:
+                    ((counts[0]&4u)!=0u||isnan(pairs[0].x)||isinf(pairs[0].x)||
+                     isnan(pairs[0].y)||isinf(pairs[0].y))?3u:0u;
+                O(p.outbuf).v[0]=floatBitsToUint(pairs[0].x);
+                O(p.outbuf).v[1]=floatBitsToUint(pairs[0].y);
+                O(p.outbuf).v[2]=status;
+            }
+        }
+        return;
+    }
     if(p.mode==0u||p.mode==3u) {
         uint line=gl_GlobalInvocationID.x;
         bool row=true;

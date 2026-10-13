@@ -9,7 +9,7 @@ you need the evidence behind a line in this file, rather than reading them in or
 
 ---
 
-## Local GPU frame path and Windows E4M3 check (2026-10-13, later)
+## Local GPU frame path and Windows E4M3 check (2026-10-14)
 
 The continuation is on local `codex/gpu-frame-path`, based on `7abed9d`.
 GPU preparation/composition/history and authenticated shared Vulkan resources
@@ -29,8 +29,13 @@ not FPS. Unchanged settings uploads are cached. Forced-fence full-image smoke
 also passes with controls and synchronization validation. A paired memory-policy
 probe found cached DEVICE memory slower; that experiment was removed. The full-
 resolution network gap remains unexplained. Final daemon outage/restart passed:
-original frame retained, then host-image fallback, zero sync errors. Shared mode
+original frame retained, then compatibility host-image fallback, zero sync errors. Shared mode
 renegotiates after device/game restart. Next: real game A/B and B580 measurement.
+
+The GPU window option now selects `NR_GPU_ONLY=1`: unsupported or failed shared
+processing retains original GPU frames without legacy pixel capture/processing.
+Final GPU reductions return compact statistics. See `notes/gpu-only-20261014.md`
+for strict failure checks and complete 1080p/1440p present measurements.
 
 Separately checked remote `improve-e4m3` at `40cb8e5` on 101.9150: zero mismatches
 over 1,114,875 inputs, exact full/changed network heads, GEMM/frame regressions

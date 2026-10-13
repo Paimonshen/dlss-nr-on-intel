@@ -178,6 +178,7 @@ test: all work/attention_ab.spv work/test_exchange work/test_settled work/test_p
 	python3 src/gpu/test_joint_qkv.py
 	python3 src/layer/test_daemon.py
 	python3 src/layer/test_daemon_owner.py
+	python3 src/layer/test_gpu_only.py
 	python3 src/layer/test_gpu_transport.py
 	work/test_surface_policy
 	work/test_transfer_resources

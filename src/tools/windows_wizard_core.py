@@ -52,7 +52,7 @@ PROXY_NAME = "vulkan-1.dll"
 ENV_FILE = "nr-env.txt"
 # The pacing variables (Profile.nr_async, nr_every) set_pacing rewrites in ENV_FILE, and the
 # most presents one network frame may cover in the window.
-PACING = ("NR_LAYER_LIVE", "NR_LAYER_ASYNC", "NR_GPU_IMAGE", "NR_GPU_TRANSPORT")
+PACING = ("NR_LAYER_LIVE", "NR_LAYER_ASYNC", "NR_GPU_IMAGE", "NR_GPU_TRANSPORT", "NR_GPU_ONLY")
 MAX_EVERY = 4
 # Where the proxy lists the folders the game was started in, for DXVK's first log there.
 START_FOLDERS = "start-folders.txt"
@@ -360,10 +360,11 @@ def layer_environment(profile):
     # Said either way, so an NR_LAYER_ASYNC the game inherits cannot decide it.
     values["NR_LAYER_ASYNC"] = "1" if profile.nr_async else "0"
     # Explicit zeroes also clear the option when rewriting an installed profile.
-    # Async/every-N remain the requested settings; the layer selects a supported
-    # fallback if shared GPU transport cannot run with them.
+    # Async/every-N remain the requested settings. This option keeps pixels on
+    # GPU and skips the effect when its transport/pacing is unsupported.
     values["NR_GPU_IMAGE"] = "1" if profile.gpu_image_path else "0"
     values["NR_GPU_TRANSPORT"] = "1" if profile.gpu_image_path else "0"
+    values["NR_GPU_ONLY"] = "1" if profile.gpu_image_path else "0"
     return values
 
 

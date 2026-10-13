@@ -80,7 +80,7 @@ class FakeComposer:
 class FakeStats:
     def __init__(self,rt): self.cut=0.;self.bad=0;self.crop=None
     def region(self,raw,width,height,fmt): return self.crop or (0,height,0,width)
-    def delta(self,*args): return self.cut
+    def delta(self,*args,**kwargs): return self.cut
     def nonfinite(self,*args): return self.bad
     def close(self): pass
 

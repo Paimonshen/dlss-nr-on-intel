@@ -609,6 +609,8 @@ def process_connection(connection, backend, args):
     if header is None:
         return
     magic, width, height, vk_format = struct.unpack("<4I", header)
+    if os.environ.get("NR_GPU_ONLY") == "1" and magic != MAGIC_GPU:
+        raise ValueError("GPU-only: legacy host frame rejected before pixel payload")
     shared = getattr(args, "gpu_transport", None)
     if shared is not None:
         shared.cleanup_stale()
@@ -633,11 +635,18 @@ def process_connection(connection, backend, args):
         return
     if magic not in (MAGIC, MAGIC_MASKED):
         raise ValueError(f"bad magic {magic:#x}")
+    return process(connection, backend, args, width, height, vk_format, masked=magic == MAGIC_MASKED)
+
+
+def process(connection, backend, args, width, height, vk_format, *, masked=False):
+    """Legacy host image processing, guarded even when invoked directly."""
+    if os.environ.get("NR_GPU_ONLY") == "1":
+        raise ValueError("GPU-only: host frame processing is forbidden")
     if not width or not height or width * height > args.max_pixels:
         raise ValueError(f"rejected extent {width}x{height}; limit {args.max_pixels} pixels")
     payload = receive(connection, width * height * 4, keep="frame")
     interface = (receive(connection, width * height, keep="interface")
-                 if magic == MAGIC_MASKED else None)
+                 if masked else None)
     if vk_format not in FORMATS:
         print(f"unsupported VkFormat {vk_format}; passing the frame through",
               flush=True)

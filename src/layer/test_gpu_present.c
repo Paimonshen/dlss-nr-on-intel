@@ -54,6 +54,7 @@ struct fixture {
     VkDeviceMemory probe_memory;
     void *probe_mapped;
     unsigned original_frame;
+    unsigned second_original_frame;
     int original_verified;
     int unsafe;
 };
@@ -232,6 +233,14 @@ static int initialize_device(struct fixture *f)
                 f->physical = devices[n]; f->family = i;
                 printf("device=%s family=%u device_api=1.%u\n", properties.deviceName, i,
                     VK_API_VERSION_MINOR(properties.apiVersion));
+                if (properties.apiVersion >= VK_API_VERSION_1_2) {
+                    VkPhysicalDeviceDriverProperties driver = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
+                    VkPhysicalDeviceProperties2 properties2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+                        .pNext = &driver};
+                    vkGetPhysicalDeviceProperties2(devices[n], &properties2);
+                    printf("driver=%s info=%s version_raw=%u\n", driver.driverName, driver.driverInfo,
+                        properties.driverVersion);
+                }
                 break;
             }
         }
@@ -434,23 +443,34 @@ static int draw(struct fixture *f, unsigned phase, unsigned frame)
             unsigned char swap = expected[0]; expected[0] = expected[2]; expected[2] = swap;
         }
         for (unsigned i = 0; i < 4; ++i)
-            if (abs((int)pixel[i] - (int)expected[i]) > 1) {
+            if (pixel[i] != expected[i]) {
                 fprintf(stderr, "outage image pixel changed: channel=%u actual=%u expected=%u\n",
                     i, (unsigned)pixel[i], (unsigned)expected[i]); return 0;
             }
+        unsigned sampled_original_frame = f->original_frame;
         f->original_verified = 1;
-        printf("original_pixel frame=%u value=%u,%u,%u,%u status=retained\n", f->original_frame,
+        if (f->second_original_frame) {
+            f->original_frame = f->second_original_frame;
+            f->second_original_frame = 0;
+            f->original_verified = 0;
+        }
+        printf("original_pixel frame=%u value=%u,%u,%u,%u status=retained\n", sampled_original_frame,
             (unsigned)pixel[0], (unsigned)pixel[1], (unsigned)pixel[2], (unsigned)pixel[3]);
     }
     /* A render-finished semaphore per image is reusable only after reacquiring that image. */
     VkPresentInfoKHR present = {.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .waitSemaphoreCount = 1,
         .pWaitSemaphores = &f->chain.rendered[image], .swapchainCount = 1,
         .pSwapchains = &f->chain.handle, .pImageIndices = &image};
+    LARGE_INTEGER present_start, present_end, present_frequency;
+    QueryPerformanceFrequency(&present_frequency);
+    QueryPerformanceCounter(&present_start);
     result = vkQueuePresentKHR(f->queue, &present);
+    QueryPerformanceCounter(&present_end);
     if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) return checked(f, result, "vkQueuePresentKHR", __LINE__);
     f->chain.written[image] = frame;
-    printf("present phase=%u frame=%u extent=%ux%u image=%u result=%d\n",
-        phase, frame, f->chain.extent.width, f->chain.extent.height, image, (int)result);
+    printf("present phase=%u frame=%u extent=%ux%u image=%u result=%d present_ms=%.6f\n",
+        phase, frame, f->chain.extent.width, f->chain.extent.height, image, (int)result,
+        1000.0 * (double)(present_end.QuadPart - present_start.QuadPart) / (double)present_frequency.QuadPart);
     fflush(stdout);
     return 1;
 }
@@ -486,18 +506,30 @@ static void cleanup(struct fixture *f)
     if (f->module) UnregisterClassW(window_class, f->module);
 }
 
+static int parse_extent(const char *value, VkExtent2D *extent)
+{
+    unsigned long width, height;
+    char extra;
+    if (sscanf(value, "%lux%lu%c", &width, &height, &extra) != 2 ||
+        width < 128 || height < 64 || width > 4096 || height > 4096) return 0;
+    extent->width = (uint32_t)width;
+    extent->height = (uint32_t)height;
+    return 1;
+}
+
 int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
-    unsigned frames = 12, pause_ms = 0, original_frame = 0;
+    unsigned frames = 12, pause_ms = 0, original_frame = 0, second_original_frame = 0;
     int stepped = 0;
     int validate = 0, require_sync = 0;
     uint32_t api = VK_API_VERSION_1_3;
+    VkExtent2D initial_extent = {128, 64}, resized_extent = {160, 96};
     for (int i = 1; i < argc; ++i) {
         if (!strcmp(argv[i], "--help")) {
-            puts("test_gpu_present [--validation] [--sync-validation] [--api11] [--trace] [--no-layer] [--step] [--check-original-frame N] [--frames 1..120] [--pause-ms 0..1000]\n"
+            puts("test_gpu_present [--validation] [--sync-validation] [--api11] [--trace] [--no-layer] [--step] [--check-original-frame N] [--frames 1..120] [--pause-ms 0..1000] [--extent WxH] [--resize-extent WxH]\n"
                  "Uses temporary loader manifest/environment and prestarted daemon supplied by the driver.\n"
-                 "Hidden 128x64 -> 160x96 SDR Win32 swapchains; exits after both phases. Optional original check samples one pixel.");
+                 "Two bounded hidden SDR Win32 swapchains (default 128x64 -> 160x96); exits after both phases. Optional original check samples one pixel.");
             return 0;
         } else if (!strcmp(argv[i], "--validation")) validate = 1;
         else if (!strcmp(argv[i], "--sync-validation")) { validate = 1; require_sync = 1; }
@@ -505,22 +537,34 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--trace")) trace_calls = 1;
         else if (!strcmp(argv[i], "--no-layer")) use_nr_layer = 0;
         else if (!strcmp(argv[i], "--step")) stepped = 1;
+        else if ((!strcmp(argv[i], "--extent") || !strcmp(argv[i], "--resize-extent")) && i + 1 < argc) {
+            int resized = !strcmp(argv[i], "--resize-extent");
+            if (!parse_extent(argv[++i], resized ? &resized_extent : &initial_extent)) {
+                fprintf(stderr, "invalid extent (width 128..4096, height 64..4096)\n"); return 2;
+            }
+        }
         else if ((!strcmp(argv[i], "--frames") || !strcmp(argv[i], "--pause-ms") ||
-                  !strcmp(argv[i], "--check-original-frame")) && i + 1 < argc) {
+                  !strcmp(argv[i], "--check-original-frame") || !strcmp(argv[i], "--check-second-original-frame")) && i + 1 < argc) {
             int frame_option = !strcmp(argv[i], "--frames");
             int original_option = !strcmp(argv[i], "--check-original-frame");
+            int second_original_option = !strcmp(argv[i], "--check-second-original-frame");
             char *end = NULL;
             unsigned long value = strtoul(argv[++i], &end, 10);
-            if (!end || *end || (frame_option || original_option ? value < 1 || value > 120 : value > 1000)) {
+            if (!end || *end || (frame_option || original_option || second_original_option ? value < 1 || value > 120 : value > 1000)) {
                 fprintf(stderr, "invalid bounded frame/pause option\n"); return 2;
             }
             if (frame_option) frames = (unsigned)value;
             else if (original_option) original_frame = (unsigned)value;
+            else if (second_original_option) second_original_frame = (unsigned)value;
             else pause_ms = (unsigned)value;
         } else { fprintf(stderr, "unknown or incomplete option: %s\n", argv[i]); return 2; }
     }
     struct fixture f = {0};
     f.original_frame = original_frame;
+    f.second_original_frame = second_original_frame;
+    if (second_original_frame && (!original_frame || second_original_frame <= original_frame || second_original_frame >= frames)) {
+        fprintf(stderr, "second original check must follow the first and precede the last frame\n"); return 2;
+    }
     if (!use_nr_layer) {
         SetEnvironmentVariableA("VK_INSTANCE_LAYERS", NULL);
         SetEnvironmentVariableA("ENABLE_NR_LAYER", NULL);
@@ -531,7 +575,7 @@ int main(int argc, char **argv)
     WNDCLASSW klass = {.lpfnWndProc = window_proc, .hInstance = f.module, .lpszClassName = window_class};
     if (!RegisterClassW(&klass)) { fprintf(stderr, "RegisterClass: %lu\n", (unsigned long)GetLastError()); goto done; }
     f.window = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, window_class, L"NR GPU present fixture",
-        WS_POPUP, 0, 0, 128, 64, NULL, NULL, f.module, NULL);
+        WS_POPUP, 0, 0, (int)initial_extent.width, (int)initial_extent.height, NULL, NULL, f.module, NULL);
     if (!f.window) { fprintf(stderr, "CreateWindow: %lu\n", (unsigned long)GetLastError()); goto done; }
     /* No WS_VISIBLE or ShowWindow: this owned smoke surface never takes focus. */
     if (!initialize_instance(&f, validate, require_sync, api)) goto done;
@@ -539,7 +583,7 @@ int main(int argc, char **argv)
     VkWin32SurfaceCreateInfoKHR surface = {.sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR,
         .hinstance = f.module, .hwnd = f.window};
     if (!checked(&f, vkCreateWin32SurfaceKHR(f.instance, &surface, NULL, &f.surface), "vkCreateWin32SurfaceKHR", __LINE__)) goto done;
-    if (!initialize_device(&f) || !create_chain(&f, 128, 64)) goto done;
+    if (!initialize_device(&f) || !create_chain(&f, initial_extent.width, initial_extent.height)) goto done;
     for (unsigned phase = 1; phase <= 2; ++phase) {
         printf("phase_begin=%u pid=%lu frames=%u\n", phase, (unsigned long)GetCurrentProcessId(), frames);
         fflush(stdout);
@@ -558,10 +602,10 @@ int main(int argc, char **argv)
             if (f.original_frame && !f.original_verified) {
                 fprintf(stderr, "outage image was not reacquired for its original-pixel check\n"); goto done;
             }
-            if (!SetWindowPos(f.window, NULL, 0, 0, 160, 96, SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOMOVE)) {
+            if (!SetWindowPos(f.window, NULL, 0, 0, (int)resized_extent.width, (int)resized_extent.height, SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOMOVE)) {
                 fprintf(stderr, "SetWindowPos: %lu\n", (unsigned long)GetLastError()); goto done;
             }
-            if (!pump() || !create_chain(&f, 160, 96)) goto done;
+            if (!pump() || !create_chain(&f, resized_extent.width, resized_extent.height)) goto done;
         }
     }
     passed = 1;

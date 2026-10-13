@@ -2,7 +2,9 @@
 
 `src/layer/test_gpu_present.c` presents real SDR images through the NR Vulkan layer.
 Its hidden owned window presents 12 frames at 128×64, recreates the swapchain at
-160×96, then presents another 12. It does not read pixels back to the host.
+160×96, then presents another 12 by default. Bounded `--extent` and
+`--resize-extent` arguments also exercise 1080p/1440p. Ordinary runs do not read
+pixels back to the host.
 `src/layer/test_gpu_present.py` supplies a private daemon, endpoint, manifest,
 settings, trigger and result folder. It never installs a game, changes the registry,
 replaces a runtime DLL or stops an existing process.
@@ -90,7 +92,9 @@ The separate `--restart-daemon` case steps the fixture through the test rather
 than relying on pause timing. After two confirmed shared frames it stops only
 its native daemon, presents frame 3 with that endpoint absent, then restarts its
 own daemon at the same endpoint. Later frames must use the existing safe
-`gpu-image-host` fallback; the test does not change the device's recovery policy.
+`gpu-image-host` fallback unless `--gpu-only` is requested. Strict runs must keep
+showing original frames without host pixel processing after the failure; the
+test does not change the device's recovery policy.
 
 ```powershell
 .\work\python\Scripts\python.exe src\layer\test_gpu_present.py `
@@ -115,3 +119,37 @@ reported zero errors. The current recovery policy intentionally keeps shared
 transport disabled for that device after failure. Restarting the daemon resumes
 the host transport; restarting the game or recreating its Vulkan device is
 required to enable shared transport again.
+
+## Strict GPU pixel policy and high resolutions
+
+`--gpu-only` sets `NR_GPU_ONLY=1` in both owned processes. The layer forbids legacy
+host capture, cached-image writeback, async pixel exchange and photo/dump paths.
+The daemon rejects legacy headers before reading their pixel payload. A shared
+transport failure or unsupported mode leaves the original GPU image on screen.
+The experimental GPU option in the setup window also selects this strict policy.
+
+The CPU still loads weights at startup, records Vulkan commands, handles settings,
+ownership and reduced statistics. Strict mode forbids CPU access to full frame,
+feature, neural-head and image-history pixels; it does not promise zero CPU work.
+
+```powershell
+.\work\python\Scripts\python.exe src\layer\test_gpu_present.py `
+  --run --gpu-only --sync-validation --layer work\nr_layer.dll `
+  --extent 1920x1080 --resize-extent 2560x1440 `
+  --frames 55 --warmup 25 --render-scale 0.4 --run-timeout 300
+```
+
+`present_timings` records 30 warm samples per geometry in this example. Its scope
+is the complete `vkQueuePresentKHR` call including capture, daemon processing,
+return and downstream WSI. Rendering and acquisition outside that call are not
+timed, and this owned synthetic fixture is not a game FPS benchmark. Summaries
+include the driver and binary/shader hashes. Repeat with `--render-scale 1.0` for
+the full network scale or `--fenced` to validate private-fence synchronization.
+
+Separate strict failure cases use `--gpu-only --restart-daemon --frames 8` or
+`--gpu-only --unsupported async --frames 8` / `--unsupported settings`. These
+diagnostics alone sample one original pixel (four bytes), verifying exact
+retention. Strict restart also checks a fresh frame after the daemon returns,
+so that case samples two four-byte pixels. No `gpu-image-host`/CPU or unlabeled
+successful transport is allowed in their daemon logs; CPU requests in the
+layer timing records also fail the test.
