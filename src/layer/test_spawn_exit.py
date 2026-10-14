@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""A daemon the layer started ends with its game, on Windows (`nr_daemon.end_with_game`).
+"""A daemon the layer started ends with its game (`nr_daemon.end_with_game`): on Windows
+through a process handle, on Linux through a pidfd.
 
 The layer puts the game's process id in NR_LAYER_SPAWNED. Here a sleeping Python stands in
 for the game, and the watcher runs in a process of its own, since it ends that process.
@@ -7,11 +8,10 @@ Checks:
 - while the game runs, the daemon runs;
 - when the game exits, the daemon exits within a few seconds, and says why;
 - a game that is already gone ends the daemon at once;
-- without an id (a daemon started by hand), or with Linux's marker 1, nothing is watched.
+- without an id (a daemon started by hand), or with the marker 1 Linux's layer wrote until
+  2026-10-14, nothing is watched.
 
     python src/layer/test_spawn_exit.py
-
-Exits 77, skipped, off Windows.
 """
 import gc
 import os
@@ -59,10 +59,6 @@ def ended(process, seconds):
 
 
 def main():
-    if os.name != "nt":
-        print("skipped: Windows only")
-        return 77
-
     print("the game runs, then exits:")
     stand_in = game()
     watcher = daemon(stand_in.pid)
@@ -100,7 +96,7 @@ def main():
     if code is None:
         watcher.kill()
 
-    for name, marker in (("no id: a daemon started by hand", None), ("Linux's marker 1", 1),
+    for name, marker in (("no id: a daemon started by hand", None), ("the old marker 1", 1),
                          ("not a number", "yes")):
         print(f"{name}:")
         watcher = daemon(marker)
