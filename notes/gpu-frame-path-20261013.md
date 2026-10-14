@@ -1,6 +1,6 @@
 # Experimental GPU frame path, Windows continuation
 
-Windows work toward 0.0.1.3, based on 7abed9d and tested through dfb2143.
+Windows work toward 0.0.1.2 (planned as 0.0.1.3), based on 7abed9d and tested through dfb2143.
 Prepared for owner-requested publication into improve-e4m3. No release.
 The window's GPU image option remains off by default. A real game benchmark
 and matched desktop measurements remain necessary before release claims.

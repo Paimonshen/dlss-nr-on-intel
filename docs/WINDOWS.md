@@ -4,7 +4,7 @@ For installation and a first game test, start with the
 [Windows user quick start](WINDOWS-QUICKSTART.md). This file records the port's
 status, driver findings and alternative build paths.
 
-Local 0.0.1.3 preparation adds an opt-in same-Arc GPU image path, still off by
+Release 0.0.1.2 adds an opt-in same-Arc GPU image path, still off by
 default. Full-model swapchain smoke passed on Intel 101.9150 with resize, effect
 and scale changes, and synchronization validation. The GPU option selects
 `NR_GPU_ONLY=1`: unavailable or failed shared processing keeps the original
