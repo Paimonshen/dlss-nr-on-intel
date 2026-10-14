@@ -64,6 +64,8 @@ under that date. When an item is done, strike it through here and name the commi
   Paimonshen's in-game menu.
 
 **Linux**
+- `improve-e4m3` has four tests red on Linux: the queue priority Mesa does not offer, and the GPU
+  image path, which is not bit-exact on Mesa. For Codex, before it merges. Below, 10-14.
 - No Linux release has been published, but `deploy.sh --release` would build one without a 32-bit
   layer, so a 32-bit game under Proton (DoA5) could not use it. Archive, 10-07.
 - A daemon started by a short-lived process (a launcher that makes a Vulkan instance before the
@@ -124,6 +126,27 @@ under that date. When an item is done, strike it through here and name the commi
   runs one subgroup to a workgroup (archive, 09-25).
 
 ---
+
+## `improve-e4m3` (Codex) on Linux at `20cba61`: the default path unchanged, four tests red (2026-10-14, later)
+
+Checked in a detached copy, `work/e4m3-check`, with `f3220fd`'s test fix applied; Codex's own
+worktree untouched. It builds with no warnings, and both layers load. With the GPU path and
+`NR_E4M3_MAGIC` off, as by default, it is `master` on Linux: heads `e62005b8…` / `c217fd2f…`
+(changed `e7c72789…` / `95f46f67…`), the replayed graph and the live table the same within noise.
+
+CTest 58 of 62. `make test` stops at its first line, `test_device_pick.py`:
+- **`gpu_device_pick`**: `XMX_QUEUE_PRIORITY=high`, alone and with the compute family, expects
+  libxmx to report the priority. Mesa does not offer high for these families, and libxmx says
+  so ("not offered for this queue family; the driver's default"). The test wants Windows' answer.
+- **`gpu_image_preprocess`, `gpu_image_compose`, `gpu_image_pipeline`**: the GPU image path is
+  not bit-exact on Mesa. Preprocessing is 1 ulp of float32 off on a few values, composition up to
+  0.00049, and the full model's answer bytes differ. The shaders are `precise` throughout, and
+  `image_preprocess.comp` already notes that `OpFDiv` may be inexact; Mesa lowers division to a
+  reciprocal and a multiply. The path is Windows-only and off by default, but the tests run here.
+
+For Codex: make the image shaders exact on Mesa, or hold their tests to the driver they were
+proved on, and let `test_device_pick.py` accept "not offered". Merging `master` in brings
+`f3220fd`, and a small conflict at the top of this file, where both lines changed it.
 
 ## Steam on Linux: the daemon ends with its game; the README table re-measured (2026-10-14, later)
 
