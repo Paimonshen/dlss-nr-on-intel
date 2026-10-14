@@ -214,7 +214,7 @@ def main():
                         help="frames left out first: the extent's buffers are built, and the GPU "
                              "ramps. Its own cost decays from ~72 to ~40 ms over about 20 frames, "
                              "so anything less than 25 leaves the measurement in the ramp "
-                             "(notes/HANDOFF.md, 性能测量规范)")
+                             "(notes/windows-dump-measurements-20261010.md, 性能测量规范)")
     parser.add_argument("--out", type=pathlib.Path, help="also write the table here")
     args = parser.parse_args()
     plan = []

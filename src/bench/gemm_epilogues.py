@@ -4,8 +4,8 @@
 On Intel's Windows compiler the staged GEMM is 1.2-1.5x Mesa's time a frame, and the worst call
 sites are short K loops under a heavy epilogue: the gate activation, the residual and the QKV
 epilogue at K = 64 run at ~2.1x, the same epilogues at K = 256-512 at 1.3-1.5x, and the narrow
-N = 32 contracts at Mesa's speed (HANDOFF, 2026-10-02). A frame cannot say which part of a call
-is slow. This times one shape at a time, each pass on the device's own timestamps:
+N = 32 contracts at Mesa's speed (HANDOFF archive, 2026-10-02). A frame cannot say which part of
+a call is slow. This times one shape at a time, each pass on the device's own timestamps:
 
 - `f32`: no epilogue, a float32 output, stored straight from the accumulators;
 - `half`: no epilogue, a half output, through the shared-memory stage like every publish;

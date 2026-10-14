@@ -157,7 +157,7 @@ Treat all of the above as *reported*, not verified. Verifying it is Phase 1's jo
    with disjoint lifetimes alias — brought 720p to **2.3 GiB** of device buffers and
    made 1920x1080 fit without swapping. `notes/phase32-scratch-and-qk.md`. Sizing each
    role by the buffers a recording actually touches then took 720p to **0.7 GiB** and
-   1920x1088 from 2.9 to **1.2 GiB**, weights included (2026-09-26, HANDOFF). Do not
+   1920x1088 from 2.9 to **1.2 GiB**, weights included (2026-09-26, the HANDOFF archive). Do not
    retrofit tiling; there is nothing to retrofit it to.
 2. **No NVIDIA GPU exists on this machine or anywhere accessible.** There is no way to
    produce reference activations from the original binary. Ground truth must come from
@@ -392,7 +392,7 @@ layer is proven under a second Vulkan client, VKD3D-Proton on a 64-bit D3D12 tit
 2026-09-23: each pass is efficient, but over a third of the frame was passes that need not
 exist. Eight bit-identical fusions, shared memory kept inside 2 KB and a padded bottleneck
 took 1280x720 from 445 to 231 ms and the curve to `10 ms + 230 ms per megapixel`
-(`notes/improve-fusions.md`, `notes/improve-qkv-epilogue.md`, HANDOFF). The staged GEMM
+(`notes/improve-fusions.md`, `notes/improve-qkv-epilogue.md`, the HANDOFF archive). The staged GEMM
 had been running on half its threads — 15.5 KB of shared memory a workgroup, where a core
 holds 128 KB between them; given all of them, and a partial last block, it took the curve to `9.4 ms + 196`
 (`notes/improve-shared-memory.md`, which also records a Mesa quirk that makes some *smaller*
