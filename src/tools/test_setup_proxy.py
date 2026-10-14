@@ -106,7 +106,9 @@ class ProxyOwnershipTests(unittest.TestCase):
         environment = self.environment()
         self.assertEqual(environment["NR_ROOT"], str(self.root))
         self.assertEqual(environment["NR_GAME_EXE"], str(self.profile.game_exe))
-        self.assertEqual(environment["NR_PYTHON"], sys.executable)
+        # the profile's interpreter, which Profile resolves: on Linux sys.executable is
+        # /usr/bin/python3, a symlink to the versioned binary the profile records
+        self.assertEqual(environment["NR_PYTHON"], str(self.profile.python))
         self.assertEqual(environment["VK_LAYER_PATH"], str(self.destination / "VkLayer_dlss_nr.json"))
         self.assertNotIn("NR_LAYER_SPAWNED", environment)
 
