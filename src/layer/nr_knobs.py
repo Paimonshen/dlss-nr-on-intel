@@ -131,19 +131,20 @@ DEFAULTS = {knob.name: knob.default for knob in KNOBS}
 # moment the host passes moved to C and then stayed wrong for a week.
 RATES = (
     (512, 288, 0.35, 25.9),
-    (512, 288, 0.50, 26.0),
-    (640, 360, 0.35, 26.0),
-    (640, 360, 0.50, 27.0),
-    (854, 480, 0.50, 34.0),
-    (1024, 768, 0.55, 56.5),
-    (1920, 1080, 0.55, 111.8),
+    (512, 288, 0.50, 25.6),
+    (640, 360, 0.35, 26.6),
+    (640, 360, 0.50, 26.6),
+    (854, 480, 0.50, 33.1),
+    (1024, 768, 0.55, 51.5),
+    (1920, 1080, 0.55, 111.0),
 )
-RATES_MEASURED = "2026-09-27"
+RATES_MEASURED = "2026-10-14"
 # What a reader of the table needs and the numbers cannot say. Empty when there is nothing.
-RATES_NOTE = ("Medians of six runs with swap empty; a row's runs spread up to 15 %. On "
-              "2026-09-23, with 5.5 GiB in zram and the kernel's memory-pressure figures "
-              "rising, 1920x1080 ran anywhere from 322 to 463 ms: if that row is much slower "
-              "for you, look at swap before anything else.")
+RATES_NOTE = ("Medians of six runs of `live_rates.py --warmup 3` with swap empty; a row's "
+              "runs spread up to 13 %. The tool's default warm-up of 25 frames reads the middle "
+              "rows slower on this laptop. On 2026-09-23, with 5.5 GiB in zram and the kernel's "
+              "memory-pressure figures rising, 1920x1080 ran anywhere from 322 to 463 ms: if "
+              "that row is much slower for you, look at swap before anything else.")
 
 
 def clamp(knob, value):
