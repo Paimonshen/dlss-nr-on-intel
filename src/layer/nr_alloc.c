@@ -3,8 +3,8 @@
  *
  * Windows' heap gives a freed block of about a megabyte or more straight back to the system, so
  * the next array of that size starts on fresh pages and pays a page fault for every 4 KB of it:
- * ~16 000 faults a 1280x720 frame, 11-15 ms of it (HANDOFF, 2026-10-02). The daemon makes the
- * same full-frame arrays every frame, so a block kept from one frame serves the next.
+ * ~16 000 faults a 1280x720 frame, 11-15 ms of it (HANDOFF archive, 2026-10-02). The daemon
+ * makes the same full-frame arrays every frame, so a block kept from one frame serves the next.
  *
  * It sits in front of the handler NumPy had. Small blocks go straight through to that one, and
  * so does every large block it does not keep, so nothing here allocates or frees on a heap of

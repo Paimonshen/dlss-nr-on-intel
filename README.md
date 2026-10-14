@@ -472,19 +472,19 @@ The average change between two frames above which the scene is taken to have cut
 
 <!-- rates:begin -->
 
-Measured through the socket on 2026-09-27 by `python3 src/bench/live_rates.py` — the whole round trip a game waits for, median of nine frames, not graph time alone:
+Measured through the socket on 2026-10-14 by `python3 src/bench/live_rates.py` — the whole round trip a game waits for, median of nine frames, not graph time alone:
 
 | swapchain | render scale | ms | fps |
 | --- | ---: | ---: | ---: |
 | 512x288 | 0.35 | 26 | 38.6 |
-| 512x288 | 0.50 | 26 | 38.5 |
-| 640x360 | 0.35 | 26 | 38.5 |
-| 640x360 | 0.50 | 27 | 37.0 |
-| 854x480 | 0.50 | 34 | 29.4 |
-| 1024x768 | 0.55 | 56 | 17.7 |
-| 1920x1080 | 0.55 | 112 | 8.9 |
+| 512x288 | 0.50 | 26 | 39.1 |
+| 640x360 | 0.35 | 27 | 37.6 |
+| 640x360 | 0.50 | 27 | 37.6 |
+| 854x480 | 0.50 | 33 | 30.2 |
+| 1024x768 | 0.55 | 52 | 19.4 |
+| 1920x1080 | 0.55 | 111 | 9.0 |
 
-Medians of six runs with swap empty; a row's runs spread up to 15 %. On 2026-09-23, with 5.5 GiB in zram and the kernel's memory-pressure figures rising, 1920x1080 ran anywhere from 322 to 463 ms: if that row is much slower for you, look at swap before anything else.
+Medians of six runs of `live_rates.py --warmup 3` with swap empty; a row's runs spread up to 13 %. The tool's default warm-up of 25 frames reads the middle rows slower on this laptop. On 2026-09-23, with 5.5 GiB in zram and the kernel's memory-pressure figures rising, 1920x1080 ran anywhere from 322 to 463 ms: if that row is much slower for you, look at swap before anything else.
 
 That is the daemon's own cost with nothing else on the GPU. A game adds its own frame to it: **Tekken 7** ran at **30 fps at 800x450** with the render scale at 0.35, and 27 at 0.6, in a live session on 2026-09-27 — against 10.5 fps at 640x360 on 2026-09-16 (`notes/phase59`).
 

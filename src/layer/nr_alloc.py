@@ -2,7 +2,7 @@
 
 Windows' heap gives a freed block of about a megabyte or more back to the system, and the next
 array of that size pays a page fault for every 4 KB of its fresh pages: ~16 000 faults and
-11-15 ms of a 1280x720 frame (HANDOFF, 2026-10-02). `src/layer/nr_alloc.c`, built as
+11-15 ms of a 1280x720 frame (HANDOFF archive, 2026-10-02). `src/layer/nr_alloc.c`, built as
 `work/libnr_alloc.dll`, is a NumPy allocator in front of NumPy's own that keeps those blocks
 and gives back whatever a whole frame did not take again.
 
@@ -10,7 +10,7 @@ and gives back whatever a whole frame did not take again.
     nr_alloc.frame_done()   # after each frame
 
 `NR_KEEP_BLOCKS=0` leaves NumPy's allocator alone. Linux does not build the library: there
-every stage of the daemon's frame is under 2.2 ms (HANDOFF, 2026-10-02).
+every stage of the daemon's frame is under 2.2 ms (HANDOFF archive, 2026-10-02).
 """
 import ctypes
 import os

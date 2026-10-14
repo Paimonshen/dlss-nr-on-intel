@@ -762,9 +762,14 @@ static void ensure_daemon(void)
 		/* Copy the environment with the marker added, so the game's own environment is
 		 * untouched (setenv() in a multithreaded process is not safe).
 		 * VK_INSTANCE_LAYERS is dropped for the same reason as on Windows: the daemon
-		 * builds its own Vulkan instance and would otherwise load this layer too. */
+		 * builds its own Vulkan instance and would otherwise load this layer too.
+		 * The marker carries the game's process id, as on Windows, and the daemon ends
+		 * when the game does (nr_daemon.end_with_game): Steam's reaper waits for every
+		 * process a game started, so a daemon that outlived it kept the game running
+		 * for Steam, and the model in memory. */
 		extern char **environ;
-		char marker[] = "NR_LAYER_SPAWNED=1";
+		char marker[48];
+		snprintf(marker, sizeof marker, "NR_LAYER_SPAWNED=%ld", (long)getpid());
 		size_t count = 0;
 		while (environ[count]) count++;
 		char **child_env = malloc((count + 2) * sizeof *child_env);

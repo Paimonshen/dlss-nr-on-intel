@@ -188,6 +188,7 @@ test: all work/attention_ab.spv work/test_exchange work/test_settled work/test_p
 	python3 src/layer/test_temporal.py
 	python3 src/layer/test_toggle.py
 	python3 src/layer/test_panel.py
+	python3 src/layer/test_spawn_exit.py
 	python3 src/tools/publish_check.py
 	python3 src/tools/claims_check.py
 	python3 src/tools/build_check.py

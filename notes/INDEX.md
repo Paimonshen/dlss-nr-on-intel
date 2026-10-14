@@ -26,6 +26,7 @@ disproved.
 | `windows-first-releases-20261009.md` | the first Windows releases, elevation tests and the original tester diagnosis |
 | `gpu-only-20261014.md` | strict same-Arc pixel residency; complete 1080p/1440p present measurements, GPU metadata reductions and failure checks |
 | `gpu-frame-stages-20261013.md` | Windows CPU/GPU image-stage comparison, scopes, allocation probe and negative high-resolution E4M3 results |
+| `archive/HANDOFF-until-2026-10-07.md` | HANDOFF's dated entries from the first render to PR #9, moved out word for word on 2026-10-14: history, and the evidence HANDOFF's open items point to |
 | `reproduce.md` | how to run the resident path from a clean checkout |
 
 ## The binary, the weights, the graph

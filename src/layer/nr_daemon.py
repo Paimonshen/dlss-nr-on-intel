@@ -1065,19 +1065,22 @@ def half_probe_child():
 def end_with_game():
     """End this daemon when the game that started it exits.
 
-    On Windows the layer starts the daemon from inside the game and puts the game's process
-    id in NR_LAYER_SPAWNED. Steam counts every process a game starts as the game, so a daemon
-    that outlived it kept the game running for Steam: Restore Steam refused, and the model
-    stayed in memory until something killed the daemon. A daemon started any other way has
-    no id there and runs until it is stopped, as before; so does Linux's, whose layer marks
-    its child with 1.
+    The layer starts the daemon from inside the game and puts the game's process id in
+    NR_LAYER_SPAWNED. Steam counts every process a game starts as the game, so a daemon that
+    outlived it kept the game running for Steam, and the model in memory until something
+    killed the daemon: on Windows Restore Steam refused, and on Linux Steam's reaper, which
+    waits for every descendant, waited for the daemon. A daemon started any other way has no
+    id there and runs until it is stopped, as before; so does one marked 1, as Linux's layer
+    marked it until 2026-10-14.
     """
     try:
         pid = int(os.environ.get("NR_LAYER_SPAWNED", ""))
     except ValueError:
         return None
-    if os.name != "nt" or pid <= 1:
+    if pid <= 1:
         return None
+    if os.name != "nt":
+        return _end_with_game_posix(pid)
     import ctypes
     import threading
     from ctypes import wintypes
@@ -1118,6 +1121,39 @@ def print_gpu_frame(width, height, vk_format, live, metrics, transport):
           f"gpu 0+{metrics['network_ms']:.0f}+0ms  network {nw}x{nh} scale {live.render_scale:g} "
           f"transport={transport} image prep={metrics['preprocess_ms']:.3f}ms "
           f"compose={metrics['compose_ms']:.3f}ms", flush=True)
+
+
+def _end_with_game_posix(pid):
+    """`end_with_game` on Linux: a pidfd, which is readable once the process has exited.
+
+    The descriptor is held from here on, so the id cannot be reused under it, as the handle
+    is on Windows."""
+    import select
+    import threading
+    try:
+        watched = os.pidfd_open(pid)
+    except ProcessLookupError:
+        print(f"the game that started this daemon (process {pid}) has already exited; "
+              "stopping", flush=True)
+        os._exit(0)
+    except (AttributeError, OSError) as error:
+        print(f"cannot watch the game that started this daemon (process {pid}, {error}); "
+              "it runs until it is stopped", flush=True)
+        return None
+
+    def wait():
+        poll = select.poll()
+        poll.register(watched, select.POLLIN)
+        while not poll.poll():
+            pass
+        print(f"the game that started this daemon (process {pid}) has exited; stopping",
+              flush=True)
+        os._exit(0)
+
+    print(f"ends with the game that started it (process {pid})", flush=True)
+    thread = threading.Thread(target=wait, name="end-with-game", daemon=True)
+    thread.start()
+    return thread
 
 
 def main():
