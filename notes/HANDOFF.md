@@ -50,39 +50,35 @@ Each line says where its evidence is: "below" is a dated entry in this file, "ar
 under that date. When an item is done, strike it through here and name the commit.
 
 **Waiting for the owner**
-- File the Mesa issue on shared-memory sizing: Mesa rounds a workgroup's declaration up, so some
-  smaller declarations run on fewer threads. The reproducer is `src/probe/slm_occupancy.*`, the
-  draft with the patch is `work/mesa-26.2.3/ISSUE.md`, and filing needs the owner's account on
-  gitlab.freedesktop.org. Archive, 09-24; `notes/improve-shared-memory.md`.
 - Judgements in a game, pending since September:
-  - `min_extent` below 320 on a small window: faster, and a different picture. The in-game
-    comparison made while its bottleneck bug lived (09-25 to 09-26) needs redoing. Archive, 09-25
-    to 09-27.
   - Whether render scale 0.9 still looks better than 1.0 for screenshots, now that 1280x720 runs
     on the vendor's field. Archive, 09-27.
   - Whether Mortal Kombat 1 fits at render scale 1.0 now that the daemon needs 0.7-1.2 GiB. It
     was OOM-killed there on 09-16. Archive, 09-26.
-- The unmerged window attention hangs Intel's Windows driver from 32 windows up (a TDR). The
-  graph uses the merged kernel, and `gpu_window_attention` stays out of CTest there. Each try
-  resets the GPU, so it waits for the owner's word. Archive, 09-30 and 10-01.
+  - ~~`min_extent` below 320 on a small window~~: no problems at high and low resolutions (the
+    owner, 10-14).
 - GitHub on 10-14: issue #17 (DOOM at 3 fps with the GPU at 10 %) and discussion #14 (a B570 in
-  Mafia 3, and a Reddit post) have no answer. #12 and #15 work after a reinstall, and #12 waits
-  for the next release. #16 is Paimonshen's in-game menu.
-- Optional, public: llama.cpp issue #13530 keeps cooperative matrices off for every Intel GPU, and
-  this project has measurements of an Xe2 iGPU. Archive, "1. Do this first".
+  Mafia 3, and a Reddit post) have no answer. For #17 the owner's reading: when the whole frame
+  waits on the network, the game has nothing to render past the network's own frame rate, so its
+  load stays low. #12 and #15 work after a reinstall, and #12 waits for the next release. #16 is
+  Paimonshen's in-game menu.
 
 **Linux**
-- The Linux release carries no 32-bit layer, so a 32-bit game under Proton (DoA5) cannot use it.
-  Archive, 10-07.
-- Steam may keep a game "running" while the daemon its layer started lives (`launch-nr.sh` sets
-  `NR_LAYER_SPAWN=1`). Check it through Steam. If it does, the marker can carry `getpid()` and the
-  daemon watch it with a pidfd, as on Windows. Below, 10-08.
-- The README's live table: 1024x768 at 0.55 measures 48-51 ms against its 56.5. Re-measure with
-  `live_rates.py --warmup 3` and regenerate (`knob_doc.py`). Archive, 10-07.
+- No Linux release has been published, but `deploy.sh --release` would build one without a 32-bit
+  layer, so a 32-bit game under Proton (DoA5) could not use it. Archive, 10-07.
+- A daemon started by a short-lived process (a launcher that makes a Vulkan instance before the
+  game) ends with that process, and a game whose instance found it alive gets none after: the
+  layer starts a daemon only in `vkCreateInstance`. The same on Windows. Not seen in a game.
 - Optional: `build_check.py` could hold `build_win.bat` to the same floor (`/DNR_F16C`,
   `/fp:precise`, `/openmp`). The owner does not mind either way. Archive, 10-07.
+- ~~Steam keeping a game "running" while its daemon lives~~: it did, and the daemon now ends with
+  its game on Linux too. Below, 10-14, later.
+- ~~The README's live table~~: re-measured at `--warmup 3`, 10-14.
 
 **Windows**
+- The unmerged window attention hangs Intel's Windows driver from 32 windows up (a TDR). The
+  graph uses the merged kernel, and `gpu_window_attention` stays out of CTest there. Each try
+  resets the GPU; the owner's word (10-14) is to try it on Windows. Archive, 09-30 and 10-01.
 - The staged GEMM's loop on Intel's compiler takes 1.2-1.5x Mesa's time where the graph is large.
   The packed copies took 6-9 % of it; the rest is open. Archive, 10-02 and 10-03.
 - Four daemon processes were seen with Mortal Kombat 11 on 10-09: perhaps two daemons, if DXVK
@@ -108,6 +104,14 @@ under that date. When an item is done, strike it through here and name the commi
 - The asynchronous live mode exists (`NR_LAYER_ASYNC=1`) and stays off: a frame of latency, over
   the owner's ~15 ms. Archive, 09-25.
 - The DLSS-SR (upscaler) reading is on the local branch `upscaler`, dropped on 2026-09-22.
+- llama.cpp issue #13530 keeps cooperative matrices off for every Intel GPU, and this project has
+  measurements of an Xe2 iGPU to post there. Put off by the owner, 10-14.
+- The Mesa issue on shared-memory sizing: Mesa rounds a workgroup's declaration up, so some
+  smaller declarations run on fewer threads. Still so in Mesa 26.2.4 (`src/probe/slm_occupancy`:
+  64-256 B at 3.7x the 1 KB time) and in Mesa's `main` on 10-14, where the code is as it was in
+  2024. It costs this frame nothing. The draft with the patch is `work/mesa-26.2.3/ISSUE.md`; the
+  owner's gitlab.freedesktop.org account is too new to file it yet. Archive, 09-24;
+  `notes/improve-shared-memory.md`.
 
 **Leads left untried** (each small; the estimates are in the archive)
 - Reading the colour and the previous frame as the bytes they arrive as: ~35 MB less memory
@@ -120,6 +124,21 @@ under that date. When an item is done, strike it through here and name the commi
   runs one subgroup to a workgroup (archive, 09-25).
 
 ---
+
+## Steam on Linux: the daemon ends with its game; the README table re-measured (2026-10-14, later)
+
+**Steam's reaper waited for the daemon.** Steam starts a game under `reaper`, which makes itself
+the subreaper and waits for every descendant, a `setsid` one included. Steam's own
+`ubuntu12_32/reaper`, with `work/test_present` through the layer and `NR_LAYER_SPAWN=1`: the
+stand-in game ended after 0.6 s, the reaper still waited 20 s later, and it returned 0.02 s after
+the daemon was stopped. So a game started from Steam stayed "running", with the model in memory,
+until something stopped its daemon. The Linux layer now marks the daemon with the game's process
+id, as Windows' does, and `nr_daemon.end_with_game` watches it through a pidfd. The same run
+returns as soon as the game ends, and the daemon's log says why. `test_spawn_exit.py` runs on both
+systems (make test, CTest).
+
+**The README's table**, re-measured with `live_rates.py --warmup 3`, medians of six: the same
+within a millisecond, except 1024x768 at 0.55, 56.5 -> 51.5 ms.
 
 ## On Linux at d29b665: green after a test fix, the speed test, and the warm-up (2026-10-14)
 
