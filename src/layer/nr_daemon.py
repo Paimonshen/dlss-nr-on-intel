@@ -895,7 +895,8 @@ def process(connection, backend, args, width, height, vk_format, *, masked=False
             # `image_io.save_raw`; convert with `src/tools/dump_to_png.py`, outside the timing.
             #
             # NR_DUMP_SLOW=1 restores the old call, and exists only so the two can be measured
-            # against each other in one session (`analysis_e/_team/dump修复与基线重建.md`).
+            # against each other in one session (the contributor's own notes on the dump fix and
+            # the rebuilt baseline, which are not in this repository).
             # It is a debugging switch, not a supported mode.
             slow = os.environ.get("NR_DUMP_SLOW") == "1"
             write = image_io.save if slow else image_io.save_raw

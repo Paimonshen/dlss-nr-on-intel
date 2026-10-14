@@ -43,7 +43,7 @@ GPU contention from a game running beside them).
 
 ---
 
-## 性能测量规范 (2026-10-10)
+## Rules for measuring performance (2026-10-10)
 
 **This section is the contract for any performance number quoted from this repository.** It
 exists because two rounds of measurements on this machine disagreed by 12-26 % and the cause
@@ -77,7 +77,8 @@ because it silently includes whatever startup the window happened to contain.
 running, its previously submitted work is still executing on the GPU while the neural pass runs, so
 the pass is slower than it is alone. The 70 ms is what a player sees; the 56 ms is what the daemon
 costs in isolation, and it decomposes as **44 ms GPU (40 of it the graph) + 11.5 ms host + 0.7 ms
-unattributed**, each segment measured (`analysis_e/_team/干净逐pass剖面.md`).
+unattributed**, each segment measured (in the contributor's own per-pass profile, which is not
+in this repository).
 
 ### Rules, each of which was broken at least once here
 

@@ -122,7 +122,8 @@ is *bits*, not values.
   inside a block is invisible to `if defined` later in the same block. Both fail
   silently. Every batch script here uses top-level `goto` for anything with a
   redirection or a set-then-test pair.
-- A `bat` file needs CRLF; a UTF-8 BOM makes cmd try to run `锘緻echo`. `git` treats a
+- A `bat` file needs CRLF; a UTF-8 BOM makes cmd read its three bytes into the first line
+  and fail on `@echo` as an unknown command. `git` treats a
   CRLF rewrite of a LF file as a full-file change — normalize, don't churn.
 
 ## cmd batch scripts: the recurring traps
@@ -307,7 +308,8 @@ reading would have caught, and one that could not be fixed the obvious way.
   `work/` was from a manual run three days earlier. A missing source is an error now.
 
 - **Em dashes through a GBK round trip.** Master's eighteen `—`, on fifteen lines, were
-  `鈥?` here, with the following space eaten. Two sat at end-of-line where the newline went
+  a GBK character and a question mark here (the dash's three UTF-8 bytes read as GBK),
+  with the following space eaten. Two sat at end-of-line where the newline went
   too, so a naive repair joined comment lines; done against master byte for byte.
 
 **The lesson, and it is the same one twice over:** both silent failures here - the log that
