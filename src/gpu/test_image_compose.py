@@ -195,6 +195,8 @@ class DeviceChecks(unittest.TestCase):
         if nr_image.library() is None:
             self.skipTest("native CPU image library is missing")
         rt = xmxres.Runtime()
+        if not xmxres.image_path_exact(rt.lib):
+            self.skipTest(xmxres.IMAGE_PATH_EXACT_ONLY)
         rng = np.random.default_rng(110013)
         checks = 0
         for vk_format in (37, 43, 44, 50):

@@ -160,6 +160,8 @@ class GPUParity(unittest.TestCase):
         if CPU_ONLY:
             raise unittest.SkipTest("CPU-only recorder checks requested")
         cls.rt = xmxres.Runtime()
+        if not xmxres.image_path_exact(cls.rt.lib):
+            raise unittest.SkipTest(xmxres.IMAGE_PATH_EXACT_ONLY)
 
     def compare_features(self, *, shape, inner, field, fmt, crop=None, frame_index=0,
                          history=False, controls=None):

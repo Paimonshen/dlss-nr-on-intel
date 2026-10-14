@@ -147,7 +147,8 @@ def _load():
             ("xmx_rec_qkv", [ctypes.c_int] * 5 + [ctypes.c_uint] * 4),
             ("xmx_profile", [ctypes.c_int]),
             ("xmx_rec_history", [ctypes.c_int] * 3 + [ctypes.c_uint] * 5),
-            ("xmx_device_lost", [])):
+            ("xmx_device_lost", []),
+            ("xmx_driver", [])):
         getattr(lib, name).argtypes = args
         getattr(lib, name).restype = ctypes.c_int
     lib.xmx_buf_ptr.argtypes = [ctypes.c_int]
@@ -195,6 +196,24 @@ def _load():
 
 def align(value, multiple):
     return -(-value // multiple) * multiple
+
+
+# Intel's Windows driver, VK_DRIVER_ID_INTEL_PROPRIETARY_WINDOWS: where the GPU image path was
+# proved byte for byte against the CPU's (notes/gpu-frame-path-20261013.md). Mesa lowers
+# OpFDiv to a reciprocal and a multiply, and there preparation lands one float32 ulp off and
+# composition up to 0.00049 (HANDOFF, 2026-10-14), so the path's parity tests hold the bytes
+# on this driver alone. The path is off by default on every driver.
+INTEL_WINDOWS_DRIVER = 5
+
+
+def image_path_exact(lib=None):
+    """Whether this device's driver is the one the GPU image path's bytes were proved on."""
+    return (lib or _load()).xmx_driver() == INTEL_WINDOWS_DRIVER
+
+
+IMAGE_PATH_EXACT_ONLY = ("the GPU image path is held to the CPU's bytes on Intel's Windows driver, "
+                         "where it was proved; on this driver it is not exact, and it is off by "
+                         "default everywhere (xmxres.image_path_exact)")
 
 
 # what a buffer is for, which decides where it lives

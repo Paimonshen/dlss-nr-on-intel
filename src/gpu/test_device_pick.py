@@ -109,9 +109,11 @@ def start(device, **settings):
 
 def queues():
     print("this machine's queues:")
-    # Above medium a driver may refuse without a privilege (Linux: CAP_SYS_NICE); then it says so
+    # Above medium a driver may not offer the level for the family (Mesa, as Linux showed on
+    # 10-14), or refuse it without a privilege (Linux: CAP_SYS_NICE); either way libxmx says so
     # and runs at its default. Intel's Windows driver takes every level.
-    high = (", priority high", "queue priority high refused")
+    high = (", priority high", "queue priority high refused",
+            "XMX_QUEUE_PRIORITY=high is not offered for this queue family")
     for settings, said in (
             ({"XMX_QUEUE_PRIORITY": "high"}, high),
             ({"XMX_QUEUE_PRIORITY": "medium"}, ("libxmx: queue family 0, priority medium",)),

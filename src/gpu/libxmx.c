@@ -64,6 +64,7 @@ static struct {
 	VkQueryPool qpool; unsigned prof, prof_n; float ts_period;
 	char name[256]; char err[256]; char memory[256]; char memory_read[256];
 	int ready, lost, discrete, unmapped, external, external_semaphore, external_pending, resident_pending, transfer_pending;
+	int driver;                /* the device's VkDriverId, 0 where Vulkan 1.2 cannot say (xmx_init) */
 	unsigned char device_uuid[VK_UUID_SIZE], driver_uuid[VK_UUID_SIZE];
 	int pin32;                /* pipelines require 32-lane subgroups (build_pipeline_spec) */
 	int half_by_cast;         /* half_round's spelling, constant 1 on every pipeline (xmx_init) */
@@ -625,6 +626,10 @@ int xmx_preserve16(void) { return g.preserve16; }
  * 0 the packHalf2x16 round trip. The daemon's start-up probe checks the one in use. */
 int xmx_half_by_cast(void) { return g.half_by_cast; }
 
+/* The device's VkDriverId (xmx_init): what a test asks before holding a path to the bytes it
+ * was proved on with one driver's compiler. */
+int xmx_driver(void) { return g.driver; }
+
 /* Whether the device is a card with memory of its own rather than the host's (memtype). */
 int xmx_discrete(void) { return g.discrete; }
 
@@ -907,6 +912,7 @@ int xmx_init(const char *spv_path)
 			.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &driver };
 		vkGetPhysicalDeviceProperties2(g.pd, &query);
 		g.half_by_cast = driver.driverID == VK_DRIVER_ID_INTEL_PROPRIETARY_WINDOWS;
+		g.driver = (int)driver.driverID;
 	}
 	const char *half = getenv("XMX_HALF_ROUND");
 	if (half && *half) {

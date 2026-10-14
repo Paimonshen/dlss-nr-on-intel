@@ -8,7 +8,9 @@ reads the final result only after process_device has returned.
 from __future__ import annotations
 import argparse
 import contextlib
+import os
 import pathlib
+import struct
 import sys
 import unittest
 from types import SimpleNamespace
@@ -93,6 +95,30 @@ class HostChecks(unittest.TestCase):
         self.backend=FakeBackend();self.pipe=G.GPUImagePipeline(self.backend)
         self.addCleanup(self.pipe.close)
         self.raw=self.backend.runtime.buffer(192*256*4,np.uint8)
+
+    def test_default_daemon_takes_the_host_path(self):
+        # Off unless asked, on any driver: without NR_GPU_IMAGE, NR_GPU_TRANSPORT and NR_GPU_ONLY,
+        # as by default, a host frame is accepted and reaches the host image path, and the GPU
+        # image pipeline is never built. Where the GPU path is not exact (Mesa), this is what
+        # its tests hold; its parity is held on Intel's Windows driver.
+        class Reached(Exception): pass
+        def region(*args): raise Reached
+        class Connection:
+            def __init__(self,data): self.data=data
+            def recv(self,count):
+                chunk,self.data=self.data[:count],self.data[count:]
+                return chunk
+            def sendall(self,data): raise AssertionError("answered before the host path")
+        width,height=8,4
+        frame=struct.pack("<4I",nr_daemon.MAGIC,width,height,37)+bytes(range(width*height*4))
+        args=SimpleNamespace(live=SimpleNamespace(refresh=lambda:None),max_pixels=1<<22,
+                             letterbox=SimpleNamespace(region=region),dump=None,meter=None)
+        keep={k:v for k,v in os.environ.items()
+              if k not in ("NR_GPU_IMAGE","NR_GPU_TRANSPORT","NR_GPU_ONLY")}
+        with patch.dict(os.environ,keep,clear=True),             patch.object(G,"GPUImagePipeline",side_effect=AssertionError("GPU image pipeline built")):
+            with self.assertRaises(Reached):
+                nr_daemon.process_connection(Connection(frame),None,args)
+        self.assertEqual(args.image_transport,"cpu")
 
     def test_no_history_first_frame_then_cut_and_reset(self):
         live=settings()
@@ -195,6 +221,8 @@ class FullModelChecks(unittest.TestCase):
     def setUpClass(cls):
         if not nr_frame.WEIGHTS.is_file() or nr_image.library() is None:
             raise RuntimeError("full model/native library is required for --full-model")
+        if not X.image_path_exact():
+            raise unittest.SkipTest(X.IMAGE_PATH_EXACT_ONLY)
         cls.backend=nr_frame.ResidentBackend(max_cached_frames=4)
 
     @classmethod
