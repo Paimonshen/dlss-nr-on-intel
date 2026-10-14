@@ -97,6 +97,29 @@ submits waits out libxmx's 60 s fence timeout (`VK_TIMEOUT`), Windows records Li
 On this driver, leave the test out:
 `ctest ... -E gpu_window_attention`.
 
+**Found and avoided, 2026-10-15, on 101.9150.** It still hung there, and was taken apart one
+submit at a time, each case in a child process that the parent kills after a timeout:
+- The unmerged window attention alone never hangs: 32, 64 and 512 windows, sixteen heads, 300
+  submits in a row.
+- Two of them hang, in one submit or in two, and so does one followed by the merged variant,
+  in either order. Two merged ones do not. The device is lost about 4 s in.
+- Only with the bias, and only from 32 windows (two of sixteen heads): 6 and 16 do not. Two
+  unmerged ones hang at every scale tried (0.01, 0.3, 5 and zeros), so the values are not the
+  trigger. In the whole test's order the first scale passed and the second hung: the passes
+  recorded before it, or the timing, can hide it.
+- Not register spills: the driver's statistics give both variants no scratch memory. The
+  driver does not show its compiled code (`XMX_PIPELINE_IR` writes nothing).
+
+So it takes both: the bias loaded as a float32 cooperative matrix from global memory, and the
+float32 accumulators stored straight to global memory. Then the next dispatch does not survive.
+What in the driver does this is not known. Indices and extents were checked, and every access
+stays inside its buffer and its 16 KB of shared memory. The unmerged variant now stores the context through the
+output stage in shared memory and plain vec4 stores, as the merged one already did: the
+same bytes, and no hang in any case above, in five runs of the whole test (48 bit-exact
+cases each), or in the graph with `NR_FUSE_ATTENTION_MERGE=0`. `gpu_window_attention` is in
+CTest on Windows again. Why the earlier staging (above) still hung at times is not known; this
+one leaves no cooperative-matrix store to global memory in the kernel.
+
 ## Against Linux, on the same frames
 
 Python on Windows has no `AF_UNIX`. So the comparison ran the daemon's own `serve()` in-process on

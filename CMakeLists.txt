@@ -292,12 +292,6 @@ if(NR_BUILD_TESTS)
       qkv_fusion scratch_arena graph frame_execution resident)
     nr_test(gpu_${name} "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/src/gpu/test_${name}.py")
   endforeach()
-  # This diagnostic exercises the unmerged kernel the production graph does not
-  # use. Intel's Windows driver hangs on it (docs/WINDOWS.md, phase71); keep it
-  # visible in the inventory but prevent an unfiltered ctest from running it.
-  if(WIN32)
-    set_tests_properties(gpu_window_attention PROPERTIES DISABLED TRUE)
-  endif()
   foreach(name image_preprocess image_compose image_stats)
     nr_test(gpu_${name} "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/src/gpu/test_${name}.py")
     set_tests_properties(gpu_${name} PROPERTIES LABELS "gpu;image")

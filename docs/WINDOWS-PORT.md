@@ -321,4 +321,5 @@ being used; that one line is now an error.
 One item was deliberately **not** acted on: `test_window_attention.py` hangs the GPU on the
 maintainer's machine (Windows LiveKernelEvent 141), on the unmerged store that the graph
 builds only under `NR_FUSE_ATTENTION_MERGE=0`. This machine already has two bugchecks and
-TDR events behind it, so it was left as his finding rather than reproduced blind.
+TDR events behind it, so it was left as his finding rather than reproduced blind. (Found and
+avoided on 2026-10-15: `notes/phase71-intel-windows-driver.md`.)

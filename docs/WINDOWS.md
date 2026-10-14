@@ -140,11 +140,12 @@ asynchronous alike, inside the spread of single runs (19.05-20.12). The network'
 are most of the frame there, and in step the game waits rather than competes. They are left
 for a discrete card.
 
-On Intel's driver, leave `gpu_window_attention` out: `ctest --test-dir work/cmake -E
-gpu_window_attention`. Its unmerged variant, which the graph does not use by default, hangs the
-engine from 32 windows up (phase71). Everything else passes, now that libxmx declares
-`DenormPreserve 16`; before it, a zero's sign in two GEMMs and 378 values of the ViT attention's
-unfused reference differed here.
+CTest runs whole on Intel's driver since 2026-10-15. `gpu_window_attention` hung the engine
+from 32 windows up until then: the unmerged window attention stored its float32 context straight
+from the cooperative-matrix accumulators, and with the bias loaded as a float32 matrix the next
+dispatch lost the device. It stores through shared memory now, the same bytes (phase71).
+Everything passes, now that libxmx declares `DenormPreserve 16` as well; before it, a zero's sign
+in two GEMMs and 378 values of the ViT attention's unfused reference differed here.
 
 ## The first session, in order
 

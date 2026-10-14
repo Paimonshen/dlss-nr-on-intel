@@ -78,9 +78,9 @@ under that date. When an item is done, strike it through here and name the commi
 - ~~The README's live table~~: re-measured at `--warmup 3`, 10-14.
 
 **Windows**
-- The unmerged window attention hangs Intel's Windows driver from 32 windows up (a TDR). The
-  graph uses the merged kernel, and `gpu_window_attention` stays out of CTest there. Each try
-  resets the GPU; the owner's word (10-14) is to try it on Windows. Archive, 09-30 and 10-01.
+- ~~The unmerged window attention hangs Intel's Windows driver from 32 windows up~~: found and
+  avoided on 10-15, and `gpu_window_attention` is in CTest on Windows again. Below, 10-15;
+  phase71.
 - The staged GEMM's loop on Intel's compiler takes 1.2-1.5x Mesa's time where the graph is large.
   The packed copies took 6-9 % of it; the rest is open. Archive, 10-02 and 10-03.
 - Four daemon processes were seen with Mortal Kombat 11 on 10-09: perhaps two daemons, if DXVK

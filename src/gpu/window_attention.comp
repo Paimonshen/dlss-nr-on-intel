@@ -22,6 +22,7 @@ layout(buffer_reference, scalar, buffer_reference_align = 16) buffer HalfBuf { f
 layout(buffer_reference, scalar, buffer_reference_align = 16) buffer FloatBuf { float v[]; };
 layout(buffer_reference, scalar, buffer_reference_align = 8) buffer Half4Buf { f16vec4 v[]; };
 layout(buffer_reference, scalar, buffer_reference_align = 16) buffer Uvec4Buf { uvec4 v[]; };
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer Vec4Buf { vec4 v[]; };
 layout(push_constant, scalar) uniform Push {
     HalfBuf q, k; FloatBuf output_data; HalfBuf v;
     uint m, heads, unused, batches;
@@ -175,17 +176,19 @@ void main() {
         /* the probabilities and the output stage are the same bytes */
         subgroupMemoryBarrierShared();
         subgroupBarrier();
-        for (uint j = 0u; j < 2u; j++) {
-            if (MERGED_OUTPUT)
-                coopMatStore(acc[j], f32, scratch + j * 16u, 32u, gl_CooperativeMatrixLayoutRowMajor);
-            else
-                coopMatStore(acc[j], pc.output_data.v, offset + row * 32u + j * 16u, 32u,
-                             gl_CooperativeMatrixLayoutRowMajor);
-        }
+        for (uint j = 0u; j < 2u; j++)
+            coopMatStore(acc[j], f32, scratch + j * 16u, 32u, gl_CooperativeMatrixLayoutRowMajor);
     }
-    if (MERGED_OUTPUT) {
-        subgroupMemoryBarrierShared();
-        subgroupBarrier();
+    subgroupMemoryBarrierShared();
+    subgroupBarrier();
+    /* The FP32 context goes out through the output stage too, in plain stores. Stored straight
+     * from the accumulators, as it was, it hung Intel's Windows driver from 32 windows up: with
+     * the bias loaded as a float32 matrix from global memory, the next dispatch after it lost
+     * the device (101.8991 to 101.9150; notes/phase71-intel-windows-driver.md). The same bytes. */
+    if (!MERGED_OUTPUT) {
+        for (uint at = local * 4u; at < 8u * 32u; at += 128u)
+            Vec4Buf(uint64_t(pc.output_data)).v[(offset + row * 32u + at) / 4u] = v4[scratch / 4u + at / 4u];
+    } else {
         for (uint at = local * 4u; at < 8u * 32u; at += 128u) {
             uint target = ((batch / pc.heads) * 64u + row + at / 32u) * pc.heads * 32u
                         + (batch % pc.heads) * 32u + at % 32u;
