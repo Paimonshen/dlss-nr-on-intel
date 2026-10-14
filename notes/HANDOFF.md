@@ -16,19 +16,20 @@ When the dated entries grow long, move the older ones into the archive the same 
 
 ---
 
-## Where things stand (2026-10-14)
+## Where things stand (2026-10-15)
 
 - **It works on both systems of this laptop** (Arc 140V): Linux with Mesa, Windows with Intel's
   driver. A Vulkan layer hands each presented frame to a daemon that runs NVIDIA's network on the
   GPU and writes the answer back into the swapchain. DirectX 8-11 games go through DXVK. DirectX 12
   runs on Linux through VKD3D-Proton and is not offered on Windows.
 - **The releases are Windows-only so far**: v0.0.1 (`7f9c364`) and v0.0.1.1 (`f9ec5f1`, the
-  latest), a ZIP with the setup window, DXVK 3.1.1, both layers and a `vulkan-1.dll` proxy. 0.0.1.2
-  is next, and the owner describes it. Linux users build from source (README).
+  latest), a ZIP with the setup window, DXVK 3.1.1, both layers and a `vulkan-1.dll` proxy.
+  **0.0.1.2 is built from `2f90064` and tested, and waits for the owner's word on the tag and the
+  release** (below, 10-15). Linux users build from source (README).
 - **Branches.** `master` holds everything released and since (`d29b665`, PR #13). `windows` is the
-  Windows line, merged into `master`. `improve-e4m3` (Codex, 9 commits ahead of `master`) is where
-  new work goes: an experimental GPU-only frame path on Windows and an E4M3 rounding experiment,
-  both off by default. The owner asked Paimonshen to open his in-game menu (#16) against it.
+  Windows line, merged into `master`. `improve-e4m3` is where new work goes, with `master` merged in
+  on 10-15 (`7e7dfb5`): Codex's experimental GPU-only frame path on Windows and an E4M3 rounding
+  experiment, both off by default, and what 0.0.1.2 is built from. The owner asked Paimonshen to open his in-game menu (#16) against it.
   `improve-int8` is kept for INT8 experiments; Codex's own branches are Codex's.
 - **Pace.** The owner is slowing development until NVIDIA's updated DLSS 5 model is available, and
   will then check its architecture against this implementation before more model-specific work
@@ -64,8 +65,8 @@ under that date. When an item is done, strike it through here and name the commi
   Paimonshen's in-game menu.
 
 **Linux**
-- `improve-e4m3` has four tests red on Linux: the queue priority Mesa does not offer, and the GPU
-  image path, which is not bit-exact on Mesa. For Codex, before it merges. Below, 10-14.
+- `improve-e4m3`'s four red tests on Linux: changed on Windows to pass there (`1a146c2`, below,
+  10-15), and not yet run on Linux. `make test` in both memory modes and CTest, please.
 - No Linux release has been published, but `deploy.sh --release` would build one without a 32-bit
   layer, so a 32-bit game under Proton (DoA5) could not use it. Archive, 10-07.
 - A daemon started by a short-lived process (a launcher that makes a Vulkan instance before the
@@ -83,8 +84,11 @@ under that date. When an item is done, strike it through here and name the commi
   phase71.
 - The staged GEMM's loop on Intel's compiler takes 1.2-1.5x Mesa's time where the graph is large.
   The packed copies took 6-9 % of it; the rest is open. Archive, 10-02 and 10-03.
-- Four daemon processes were seen with Mortal Kombat 11 on 10-09: perhaps two daemons, if DXVK
-  made an instance before the first daemon's pipe existed. Not checked. Below, 10-12.
+- ~~Four daemon processes with Mortal Kombat 11~~: two processes are one daemon (the venv's
+  `python.exe` and the interpreter it starts); four were two. The owner lock now stops a second
+  one. Below, 10-15.
+- DOOM (2016) through 0.0.1.2 is untested: the owner's own installation from another release is in
+  its folder, and its removal was refused by this session's safety check. Below, 10-15.
 - `windows_launch.py`'s Configure Steam, Restore Steam and their wrapper can go, with their tests,
   once no release with those buttons is in testers' hands. The GitHub releases have none. Below,
   10-09.
@@ -126,6 +130,88 @@ under that date. When an item is done, strike it through here and name the commi
   runs one subgroup to a workgroup (archive, 09-25).
 
 ---
+
+## 0.0.1.2 built and tested on Windows; the window attention hang found and avoided (2026-10-15)
+
+The owner relayed the Linux agent's list of 10-14 and answered its questions. On `improve-e4m3`,
+pushed to GitHub at the owner's word:
+- **`7e7dfb5`**, `master` (`429855c`) merged in. The three conflicts as the list asked: both of
+  `nr_daemon.py`'s new functions, both groups of `notes/INDEX.md` rows, and this file on
+  `master`'s structure with `improve-e4m3`'s entries of 10-12 to 10-14 placed by date.
+- **`1a146c2`**, Linux's four red tests. `test_device_pick.py` takes Mesa's "is not offered for
+  this queue family". The GPU image path's parity tests hold the bytes on Intel's Windows driver,
+  where they were proved: libxmx records the device's `VkDriverId` (`xmx_driver`), and
+  `xmxres.image_path_exact` asks for 5. Elsewhere they are skipped with the reason, and a new
+  host check, run on any driver, holds that the default daemon takes the host path and never
+  builds the GPU image pipeline. Checked here with the id forced to differ. **Next on Linux:**
+  `make test` in both memory modes and CTest.
+- **`4932958`**: `test_setup_proxy.py` failed on Windows: an 8.3 TEMP against the long names
+  Profile resolves to, and MSYS2's Python, which `setup.bat` refuses as `NR_PYTHON` (no NumPy or
+  safetensors); the batch tests are skipped with the reason under such a Python.
+- **`584f1fa`**: 0.0.1.3 is 0.0.1.2, as the owner numbers it.
+- **`2f90064`**: no stray Chinese characters in the notes, the owner asked. PR #13 brought a
+  section heading, two references to it and two names of the contributor's own files in Chinese;
+  they are English now. `docs/WINDOWS-PORT.md`'s two mojibake examples are said in words. The
+  Japanese path names in `test_windows_launch.py` stay: they are its Unicode fixtures.
+- **`1ef43e0`**: the unmerged window attention, below.
+
+At `2f90064`: MinGW CTest 63 of 63 (64 of 64 with `gpu_window_attention` at `1ef43e0`); against the
+MSVC build CTest's Python entries 56 of 56 (57 of 57 at `1ef43e0`), the wizard 79, launch 40, release 19, `setup_proxy` 11
+(the native venv), `build_check`, `publish_check`, `claims_check`, and the layer's `spawn_reasons`,
+`vulkan_proxy`, `spawn_exit`, `pipe`, `alloc`; the window's self-test, 68 named controls and 161
+keys in English, Russian and Spanish. `NR_E4M3_MAGIC` is 0 and the GPU path off, by default.
+
+**The release**, `D:\NRonWindows\rel\dlss-nr-windows-0.0.1.2-x64.zip`: `deploy.bat --release` at
+`2f90064`, DXVK 3.1.1 from the pin's cache, 299 entries, 19 805 166 bytes, SHA-256
+`df930e0d805250cc79fb3ad8eebb9bf11b786005186fc843f5f4bf164b00bf87`. No NVIDIA DLL, no weights, no
+Chinese. The window attention change is not in it, as the list asked. Not tagged, not published.
+
+**From the ZIP, through Steam's Play button, Arc 140V, 101.9150**: a first build at `584f1fa`,
+Mortal Kombat 11 624 frames and Dead or Alive 5 (32-bit, the 32-bit proxy) 554, the weights
+extracted on the first Install NR; the final one, Mortal Kombat 11 767 frames. Each with none
+rejected, Save report with no warning, the daemon ending with the game, Steam letting go, and the
+game's folder as before after Remove NR. **DOOM was not run**: its folder holds the owner's own
+installation from `D:\NR Test\dlss-nr-windows-7f9c364`, which 0.0.1.2 will not install over. The
+owner agreed to remove it; this session's safety check refused the removal twice, so it waits for
+the owner's Remove NR in that release's window. The folder's NR files are backed up in
+`nr-game\backups\doom-owner-install-2026-10-15`.
+
+**The four daemon processes of 10-09.** Listed with their parents, a daemon is two processes: the
+venv's `python.exe`, whose parent is the game, and the interpreter it starts. Four were two
+daemons; `nr_daemon_owner.py`'s lock now refuses a second one on the same pipe.
+
+**The power mode.** On 10-14 and the night of 10-15 Windows ran on mains in "best power
+efficiency" (the owner found it); on 10-12 it was "best performance". The host passes run slower
+there, the same in this release and in a build of 10-12, so it was not the code: Mortal Kombat 11
+gave 14-16 processed frames a second against 19-20. `quiet-check.ps1` prints the mode: put it beside
+every number.
+
+**The GPU image path in a game** (the window's option, `NR_GPU_ONLY`), Mortal Kombat 11 at
+1280x720, render scale 0.4, processed frames a second over 40 s, the runs interleaved: in power
+efficiency, off 14.1 and 15.7, on 22.7 and 23.0, every frame through `gpu-shared`, no fallback;
+in best performance, off 18.8 and 18.7, on 23.5 and 23.7 (+26 %), every frame through `gpu-shared` again. The path leans far less on the CPU's clock. The daemon's frame falls from 60 to 37-38 ms there, the network staying at 31-33.
+
+**Speed test of the release, 101.9150, best performance**, network and round trip in ms, two runs
+(the table of 10-12 was 101.9033; keep them apart):
+
+| window | 0.4 | 1.0 |
+| --- | --- | --- |
+| 640x360 | 25 / 28 | 45-46 / 50 |
+| 800x450 | 24-25 / 29 | 73 / 79 |
+| 1280x720 | 33-34 / 41 | 166-170 / 179-183 |
+| 1920x1080 | 61 / 76 | 371-426 / 396-452 |
+
+**The unmerged window attention, found and avoided** (`1ef43e0`, the owner: try it on Windows). On
+101.9150 the test still lost the device. Case by case, each in a child the parent kills after a
+timeout: the unmerged variant alone never hangs (to 512 windows, 300 submits); two of it, in one
+submit or two, or it and the merged one in either order, lose the device about 4 s in, with the
+bias and from 32 windows (6 and 16 do not), at any scale of the data; two merged ones do not. No
+scratch memory in either (the driver does not show its code). Only the unmerged variant, with the
+bias, loads a float32 cooperative matrix from global memory and stores float32 accumulators straight
+to global memory. It now stores through shared memory and plain vec4 stores, as the merged one did:
+the same bytes (48 cases, five runs), no hang in any case, and the graph with
+`NR_FUSE_ATTENTION_MERGE=0` passes. `gpu_window_attention` is in CTest on Windows again.
+`notes/phase71`. Merged, the default, is unchanged.
 
 ## `improve-e4m3` (Codex) on Linux at `20cba61`: the default path unchanged, four tests red (2026-10-14, later)
 
