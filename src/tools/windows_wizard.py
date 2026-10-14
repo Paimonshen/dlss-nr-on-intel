@@ -76,7 +76,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=('discover', 'check', 'dependencies', 'install', 'uninstall',
         'launch', 'on', 'off', 'status', 'report', 'save', 'settings', 'settings-save', 'settings-reset',
-        'speedtest'))
+        'speedtest', 'pacing'))
     parser.add_argument('--root', type=Path, default=release_root())
     parser.add_argument('--input', type=Path)
     parser.add_argument('--output', type=Path, required=True)
@@ -140,6 +140,8 @@ def main() -> int:
                 result = {'ok': True, 'profile': profile.to_dict()}
             elif args.action == 'speedtest':
                 result = core.speed_test(profile, emit=emit)
+            elif args.action == 'pacing':
+                result = core.set_pacing(profile)
             else:
                 if args.destination is None:
                     raise ValueError('Choose a report destination.')

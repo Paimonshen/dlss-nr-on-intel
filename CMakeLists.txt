@@ -30,6 +30,8 @@ else()
 endif()
 option(NR_BUILD_LAYER "Build the Vulkan game layer and its tests" ${NR_LAYER_DEFAULT})
 option(NR_BUILD_TESTS "Register checks with CTest" ON)
+option(NR_ENABLE_GPU_SMOKE_TESTS
+  "Register manual Win32 GPU interop/present tests (run outside the sandbox with an exclusive GPU slot)" OFF)
 
 # Python and the launchers currently find artifacts in source/work. Keep that
 # contract explicit: do not expose an output-directory knob they cannot follow.
@@ -93,6 +95,10 @@ nr_shader(window_attention.spv src/gpu/window_attention.comp)
 nr_shader(window_block.spv src/gpu/window_block.comp)
 nr_shader(global_attention.spv src/gpu/global_attention.comp)
 nr_shader(ffn_fused.spv src/gpu/ffn_fused.comp)
+nr_shader(image_preprocess.spv src/gpu/image_preprocess.comp)
+nr_shader(image_compose.spv src/gpu/image_compose.comp)
+nr_shader(image_stats.spv src/gpu/image_stats.comp)
+nr_shader(half_probe.spv src/bench/half_probe.comp)
 if(NR_BUILD_TESTS)
   nr_shader(attention_ab.spv src/gpu/attention.comp -DSOFTMAX_AB)
 endif()
@@ -183,6 +189,37 @@ endif()
 if(NR_BUILD_TESTS)
   enable_testing()
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
+  # Policy/transfer lifetime checks use mocked dispatch, so they are useful even
+  # when the game layer itself is not built (the Windows compute configuration).
+  find_package(Threads REQUIRED)
+  foreach(test test_surface_policy test_transfer_resources)
+    add_executable(${test} src/layer/${test}.c)
+    target_link_libraries(${test} PRIVATE nr_vulkan Threads::Threads)
+    target_compile_options(${test} PRIVATE -O2 -UNDEBUG)
+    nr_output(${test})
+  endforeach()
+  if(WIN32)
+    foreach(test test_gpu_bridge test_gpu_rpc test_gpu_rpc_native test_device_teardown test_gpu_only)
+      add_executable(${test} src/layer/${test}.c)
+      target_link_libraries(${test} PRIVATE nr_vulkan)
+      target_compile_options(${test} PRIVATE -O2 -UNDEBUG)
+      nr_output(${test})
+    endforeach()
+    # These executables are owned diagnostic fixtures, never installed games.
+    # Building a fixture builds its runtime prerequisites, but does not run it.
+    add_executable(test_gpu_interop src/layer/test_gpu_interop.c)
+    target_link_libraries(test_gpu_interop PRIVATE nr_vulkan)
+    target_compile_options(test_gpu_interop PRIVATE -O2 -UNDEBUG)
+    add_dependencies(test_gpu_interop xmx shaders)
+    nr_output(test_gpu_interop)
+    if(NR_BUILD_LAYER)
+      add_executable(test_gpu_present src/layer/test_gpu_present.c)
+      target_link_libraries(test_gpu_present PRIVATE nr_vulkan user32)
+      target_compile_options(test_gpu_present PRIVATE -O2 -UNDEBUG)
+      add_dependencies(test_gpu_present nr_layer xmx nr_image nr_alloc shaders)
+      nr_output(test_gpu_present)
+    endif()
+  endif()
   function(nr_test name)
     add_test(NAME ${name} COMMAND ${ARGN})
     # GPU tests share one device; concurrent processes distort timing and can exhaust
@@ -196,6 +233,44 @@ if(NR_BUILD_TESTS)
       set_property(TEST ${name} APPEND PROPERTY ENVIRONMENT "PYTHONUTF8=1")
     endif()
   endfunction()
+  foreach(name surface_policy transfer_resources)
+    nr_test(layer_${name} "$<TARGET_FILE:test_${name}>")
+    set_tests_properties(layer_${name} PROPERTIES LABELS "host")
+  endforeach()
+  nr_test(layer_daemon_owner "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/src/layer/test_daemon_owner.py")
+  nr_test(layer_gpu_transport "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/src/layer/test_gpu_transport.py")
+  nr_test(layer_gpu_only_daemon "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/src/layer/test_gpu_only.py")
+  set_tests_properties(layer_daemon_owner layer_gpu_transport layer_gpu_only_daemon PROPERTIES LABELS "host")
+  if(WIN32)
+    foreach(name gpu_bridge gpu_rpc gpu_rpc_native device_teardown gpu_only)
+      nr_test(layer_${name} "$<TARGET_FILE:test_${name}>")
+      set_tests_properties(layer_${name} PROPERTIES LABELS "host")
+    endforeach()
+    if(NR_ENABLE_GPU_SMOKE_TESTS)
+      # Opt-in inventory only: an ordinary unfiltered CTest run must not open
+      # Win32 WSI or contend with another GPU process. REQUIRED_FILES also
+      # prevents the Python harness launching before the prerequisites exist.
+      get_filename_component(NR_COMPILER_BIN "${CMAKE_C_COMPILER}" DIRECTORY)
+      nr_test(gpu_win32_interop "${Python3_EXECUTABLE}"
+        "${PROJECT_SOURCE_DIR}/src/layer/test_gpu_interop.py"
+        --executable "$<TARGET_FILE:test_gpu_interop>")
+      set_tests_properties(gpu_win32_interop PROPERTIES LABELS "gpu;manual;win32"
+        TIMEOUT 90
+        REQUIRED_FILES "$<TARGET_FILE:test_gpu_interop>;$<TARGET_FILE:xmx>;${NR_SPV}")
+      set_property(TEST gpu_win32_interop APPEND PROPERTY ENVIRONMENT
+        "NR_ROOT=${PROJECT_SOURCE_DIR}" "NR_DLL_PATH=${NR_COMPILER_BIN}")
+      if(NR_BUILD_LAYER)
+        nr_test(gpu_win32_present "${Python3_EXECUTABLE}"
+          "${PROJECT_SOURCE_DIR}/src/layer/test_gpu_present.py" --run --sync-validation --exercise-controls
+          --fixture "$<TARGET_FILE:test_gpu_present>" --layer "$<TARGET_FILE:nr_layer>")
+        set_tests_properties(gpu_win32_present PROPERTIES LABELS "gpu;manual;win32"
+          TIMEOUT 180
+          REQUIRED_FILES "$<TARGET_FILE:test_gpu_present>;$<TARGET_FILE:nr_layer>;$<TARGET_FILE:xmx>;$<TARGET_FILE:nr_image>;$<TARGET_FILE:nr_alloc>;${NR_SPV};${NR_WORK_DIR}/mlxw/dlssnr-logical.safetensors")
+        set_property(TEST gpu_win32_present APPEND PROPERTY ENVIRONMENT
+          "NR_ROOT=${PROJECT_SOURCE_DIR}" "NR_DLL_PATH=${NR_COMPILER_BIN}")
+      endif()
+    endif()
+  endif()
   if(NR_BUILD_LAYER)
     nr_test(settled "$<TARGET_FILE:test_settled>")
     foreach(name daemon ui_mask present temporal toggle panel)
@@ -211,12 +286,30 @@ if(NR_BUILD_TESTS)
   nr_test(release "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/src/tools/test_release.py")
   nr_test(setup_proxy "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/src/tools/test_setup_proxy.py")
   nr_test(profile_tables "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/src/bench/frame_profile.py" --tables)
-  foreach(name gemm_contract denorm input_fp16 compact_head joint_qkv gemm_int8 gemm_int8_staged
+  foreach(name device_pick gemm_contract denorm input_fp16 compact_head joint_qkv gemm_int8 gemm_int8_staged
       window_block global_attention int8_quant gemm_residual window_residual window_attention
       gemm_qkv glue ffn_fused staged_partial staged32 staged_packed epilogue specialization softmax_pack
       qkv_fusion scratch_arena graph frame_execution resident)
     nr_test(gpu_${name} "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/src/gpu/test_${name}.py")
   endforeach()
+  # This diagnostic exercises the unmerged kernel the production graph does not
+  # use. Intel's Windows driver hangs on it (docs/WINDOWS.md, phase71); keep it
+  # visible in the inventory but prevent an unfiltered ctest from running it.
+  if(WIN32)
+    set_tests_properties(gpu_window_attention PROPERTIES DISABLED TRUE)
+  endif()
+  foreach(name image_preprocess image_compose image_stats)
+    nr_test(gpu_${name} "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/src/gpu/test_${name}.py")
+    set_tests_properties(gpu_${name} PROPERTIES LABELS "gpu;image")
+  endforeach()
+  nr_test(gpu_image_pipeline "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/src/gpu/test_image_pipeline.py" --full-model)
+  set_tests_properties(gpu_image_pipeline PROPERTIES LABELS "gpu;image")
+  nr_test(host_image_preprocess "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/src/gpu/test_image_preprocess.py" --cpu-only)
+  foreach(name image_compose image_stats image_pipeline)
+    nr_test(host_${name} "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/src/gpu/test_${name}.py" --host-only)
+  endforeach()
+  set_tests_properties(host_image_preprocess host_image_compose host_image_stats host_image_pipeline
+    PROPERTIES LABELS "host;image")
   nr_test(gpu_ffn_batch "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/src/gpu/test_ffn_batch.py" --gpu)
   foreach(name frame_cache native_image nr_model temporal_controls dump_raw dump_geometry)
     nr_test(ref_${name} "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/src/ref/test_${name}.py")

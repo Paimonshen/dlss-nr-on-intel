@@ -339,6 +339,102 @@ class WizardFixture(unittest.TestCase):
         self.assertTrue(core.uninstall(self.profile)["ok"])
         self.assertEqual(sorted(path.name for path in game.iterdir()), [self.game.name])
 
+    def test_pacing_in_the_profile_the_environment_and_an_installed_game(self):
+        # Asynchronous mode and every Nth frame: kept in the profile, set for the layer either
+        # way, and written into an installed game's ENV_FILE without its other lines moving.
+        self.assertEqual((self.profile.nr_async, self.profile.nr_every), (False, 1))
+        env = core.layer_environment(self.profile)
+        self.assertEqual((env["NR_LAYER_LIVE"], env["NR_LAYER_ASYNC"]), ("1", "0"))
+        paced = replace(self.profile, nr_async=True, nr_every=2)
+        env = core.runtime_env(paced)
+        self.assertEqual((env["NR_LAYER_LIVE"], env["NR_LAYER_ASYNC"]), ("2", "1"))
+        self.assertEqual(core.Profile.from_dict(paced.to_dict()), paced)
+        earlier = self.profile.to_dict()
+        del earlier["nr_async"], earlier["nr_every"]
+        self.assertEqual(core.Profile.from_dict(earlier), self.profile)
+        for bad in ({"nr_async": "yes"}, {"nr_every": 0}, {"nr_every": core.MAX_EVERY + 1},
+                    {"nr_every": True}, {"nr_every": 1.5}, {"nr_every": "2"}):
+            with self.assertRaises(ValueError, msg=bad):
+                core.Profile.from_dict({**self.profile.to_dict(), **bad})
+
+        # Not installed: kept in the profile, and nothing else written.
+        result = core.set_pacing(paced)
+        self.assertEqual((result["ok"], result["applied"]), (True, False))
+        self.assertEqual(core.load_profile(self.root), paced)
+        self.assertFalse(core.installed_path(paced).exists())
+
+        def written():
+            lines = env_file.read_text(encoding="utf-8").splitlines()
+            return lines, dict(line.split("=", 1) for line in lines
+                               if "=" in line and not line.startswith("#"))
+
+        self.assertTrue(core.install(self.profile)["ok"])
+        env_file = core.installed_path(self.profile) / core.ENV_FILE
+        before, values = written()
+        self.assertEqual((values["NR_LAYER_LIVE"], values["NR_LAYER_ASYNC"]), ("1", "0"))
+        # Installed: the two lines change, the rest stays as Install NR wrote it, even with
+        # another Python in the window that Install NR has not checked.
+        result = core.set_pacing(replace(paced, python=self.base / "unchecked" / "python.exe"))
+        self.assertEqual((result["ok"], result["applied"]), (True, True))
+        after, values = written()
+        self.assertEqual((values["NR_LAYER_LIVE"], values["NR_LAYER_ASYNC"]), ("2", "1"))
+        self.assertEqual(values["NR_PYTHON"], str(self.python))
+        others = [line for line in before if line.split("=", 1)[0] not in core.PACING]
+        self.assertEqual([line for line in after if line.split("=", 1)[0] not in core.PACING], others)
+        self.assertEqual(len(after), len(before))
+        core.set_pacing(self.profile)
+        after, values = written()
+        self.assertEqual((values["NR_LAYER_LIVE"], values["NR_LAYER_ASYNC"]), ("1", "0"))
+        self.assertFalse(env_file.with_name(core.ENV_FILE + ".new").exists())
+        # Another release's installation is left alone.
+        other = replace(self.profile, root=self.base / "another release", nr_every=3)
+        (self.base / "another release" / "work").mkdir(parents=True)
+        result = core.set_pacing(other)
+        self.assertEqual((result["ok"], result["applied"]), (True, False))
+        self.assertEqual(written()[0], after)
+        self.assertTrue(core.uninstall(self.profile)["ok"])
+
+    def test_gpu_image_profile_is_opt_in_and_updates_installed_environment(self):
+        self.assertFalse(self.profile.gpu_image_path)
+        old = self.profile.to_dict()
+        del old["gpu_image_path"]
+        self.assertEqual(core.Profile.from_dict(old), self.profile)
+        for value in ("true", 1, None, []):
+            with self.assertRaises(ValueError):
+                core.Profile.from_dict({**old, "gpu_image_path": value})
+        for flag in ("NR_GPU_IMAGE", "NR_GPU_TRANSPORT", "NR_GPU_ONLY"):
+            self.assertEqual(core.runtime_env(self.profile)[flag], "0")
+        with patch.dict(os.environ, {"NR_GPU_ONLY": "1"}):
+            self.assertEqual(core.runtime_env(self.profile)["NR_GPU_ONLY"], "0")
+        enabled = replace(self.profile, gpu_image_path=True, nr_async=True, nr_every=3)
+        self.assertEqual(core.Profile.from_dict(enabled.to_dict()), enabled)
+        self.assertTrue(core.install(self.profile)["ok"])
+        path = core.installed_path(self.profile) / core.ENV_FILE
+        before = path.read_text(encoding="utf-8").splitlines()
+        # An installation from before strict mode gains its explicit flag when
+        # the requested profile is applied; all non-pacing paths stay intact.
+        path.write_text("\n".join(line for line in before if not line.startswith("NR_GPU_ONLY=")) + "\n",
+                        encoding="utf-8")
+        result = core.set_pacing(enabled)
+        self.assertTrue(result["applied"])
+        self.assertEqual(core.load_profile(self.root), enabled)
+        values = dict(line.split("=", 1) for line in path.read_text(encoding="utf-8").splitlines()
+                      if "=" in line and not line.startswith("#"))
+        self.assertEqual((values["NR_GPU_IMAGE"], values["NR_GPU_TRANSPORT"], values["NR_GPU_ONLY"]), ("1", "1", "1"))
+        self.assertEqual(sum(line.startswith("NR_GPU_ONLY=")
+                             for line in path.read_text(encoding="utf-8").splitlines()), 1)
+        # Enabling the experimental image path does not overwrite requested pacing.
+        self.assertEqual((values["NR_LAYER_ASYNC"], values["NR_LAYER_LIVE"]), ("1", "3"))
+        unchanged = [line for line in before if line.split("=", 1)[0] not in core.PACING]
+        self.assertEqual([line for line in path.read_text(encoding="utf-8").splitlines()
+                          if line.split("=", 1)[0] not in core.PACING], unchanged)
+        core.set_pacing(self.profile)
+        values = dict(line.split("=", 1) for line in path.read_text(encoding="utf-8").splitlines()
+                      if "=" in line and not line.startswith("#"))
+        self.assertEqual((values["NR_GPU_IMAGE"], values["NR_GPU_TRANSPORT"], values["NR_GPU_ONLY"]), ("0", "0", "0"))
+        self.assertNotIn("NR_LAYER_TIMING", core.runtime_env(enabled))
+        self.assertNotIn("NR_LAYER_TIMING_LOG", core.runtime_env(enabled))
+
     def test_remove_takes_dxvks_first_log_from_the_folders_the_game_started_in(self):
         # DXVK opens its first log before it loads the proxy, so in the folder the game was
         # started in: Steam starts Mortal Kombat 11 in its root, above the executable.
@@ -938,6 +1034,74 @@ class WizardFixture(unittest.TestCase):
         self.assertEqual(result["processed"], 0)
         self.assertEqual(result["errors"], 1)
 
+    def test_gpu_daemon_diagnostics_persist_without_claiming_active_processing(self):
+        log = self.root / "work/nr_daemon.log"
+        metadata = {"pid": 1234, "python": "3.12", "device": "Intel Arc B580",
+                    "gpu_image": True}
+        log.write_text("daemon session " + json.dumps(metadata) + "\n"
+                       "half rounding: nearest\nmodel ready in 1s\n"
+                       "GPU shared transport fallback: asynchronous mode\n"
+                       "1280x720 rgba in 0.02s change 0.1 network 512x320 "
+                       "transport=gpu-image-host image prep=1.25ms compose=2.50ms\n",
+                       encoding="utf-8")
+        result = core.status(self.profile)
+        self.assertEqual(result["daemon_session"], metadata)
+        self.assertEqual(result["last_frame"]["transport"], "gpu-image-host")
+        self.assertEqual((result["last_frame"]["prep_ms"], result["last_frame"]["compose_ms"]), (1.25, 2.5))
+        self.assertEqual(result["gpu_fallbacks"], ["GPU shared transport fallback: asynchronous mode"])
+        self.assertFalse(result["fresh_frames"])
+        core._LOG_STATES.clear()
+        result = core.status(self.profile)
+        self.assertEqual(result["daemon_session"], metadata)
+        self.assertEqual(result["last_frame"]["transport"], "gpu-image-host")
+        with log.open("a", encoding="utf-8") as handle:
+            handle.write('daemon session {"pid": 1235}\n'
+                         "half rounding: nearest\nmodel ready in 1s\n"
+                         "1280x720 rgba in 0.01s change 0.1 network 512x320 "
+                         "transport=gpu-shared image prep=0.75ms compose=1.00ms\n")
+        core._LOG_STATES.clear()
+        result = core.status(self.profile)
+        self.assertEqual(result["daemon_session"], {"pid": 1235})
+        self.assertEqual(result["processed"], 1)
+        self.assertEqual(result["gpu_fallbacks"], [])
+        self.assertEqual(result["last_frame"]["transport"], "gpu-shared")
+
+    def test_gpu_daemon_diagnostics_ignore_invalid_records_and_limit_fallbacks(self):
+        state = core._new_log_state()
+        for line in ('daemon session []', 'daemon session {broken}',
+                     '1280x720 rgba in 0.01s change 0.1 image prep=nanms compose=-1ms'):
+            core._parse_log_line(state, line)
+        self.assertIsNone(state["daemon_session"])
+        self.assertNotIn("prep_ms", state["last_frame"])
+        for index in range(35):
+            core._parse_log_line(state, f"GPU image fallback: fixture {index}")
+        self.assertEqual(len(state["gpu_fallbacks"]), 30)
+        self.assertEqual(state["gpu_fallbacks"][0], "GPU image fallback: fixture 5")
+        self.assertEqual(state["errors"], 0)
+
+    def test_layer_timing_report_is_bounded_and_does_not_enable_measurements(self):
+        self.assertIsNone(core._layer_timing_report(self.profile))
+        path = self.root / "work/logs/layer-timing.jsonl"
+        path.parent.mkdir(parents=True)
+        with path.open("w", encoding="utf-8") as handle:
+            handle.write('{"padding": "' + 'x' * core.MAX_LOG_TAIL + '"}\n')
+            handle.write('broken\n[]\n')
+            for index in range(140):
+                handle.write(json.dumps({"frame": index, "transport": "gpu-shared", "capture_ms": 0.5}) + "\n")
+            handle.write('{"frame": 999')
+        timing = core._layer_timing_report(self.profile)
+        self.assertTrue(timing["truncated"])
+        self.assertEqual(len(timing["records"]), 128)
+        self.assertEqual(timing["records"][0]["frame"], 12)
+        self.assertEqual(timing["records"][-1]["frame"], 139)
+        self.assertEqual(timing["malformed_records"], 2)
+        report = self.base / "timing report.json"
+        with patch.object(core, "_system_metadata", return_value={}):
+            self.assertTrue(core.export_report(self.profile, report)["ok"])
+        self.assertEqual(core._read_json(report)["layer_timings"], timing)
+        self.assertFalse(core.profile_path(self.root).exists())
+        self.assertNotIn("NR_LAYER_TIMING", core.runtime_env(self.profile))
+
     def test_export_without_git_or_settings_includes_diagnostics_only(self):
         core._atomic_json(self.root / "release-metadata.json", {"schema_version": 1, "source_commit": "04459d2", "source_branch": "improve-release"})
         (self.root / "work/nr_daemon.log").write_text("fixture daemon output\n")
@@ -957,6 +1121,7 @@ class WizardFixture(unittest.TestCase):
         self.assertEqual(saved["warnings"], [])
         self.assertEqual(saved["elevation"], {"window_integrity": 0x2000, "window_elevated": False, "uac_enabled": True})
         self.assertEqual(saved["dxvk_logs"], [])
+        self.assertIsNone(saved["layer_timings"])
         self.assertNotIn("fixture_648", report.read_text(encoding="utf-8"))
         self.assertFalse(core.export_report(self.profile, self.base / "report.dll")["ok"])
 

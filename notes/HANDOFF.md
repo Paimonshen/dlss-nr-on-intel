@@ -1,6 +1,6 @@
 # HANDOFF — read this first
 
-State of the DLSS-NR on Intel Xe2 project as of **2026-10-13**. notes/CLAUDE.md holds the
+State of the DLSS-NR on Intel Xe2 project as of **2026-10-14**. notes/CLAUDE.md holds the
 original brief; **this file overrides it wherever they disagree**, and after
 2026-09-09 they disagree about something foundational.
 
@@ -22,7 +22,49 @@ See notes/improve-e4m3-probe-20261013.md for reproduction and the queued work:
 B580/Windows E4M3 validation, FFN+attention C32 fusion, GPU pre/post with
 shared game resources, then dependency-driven multi-block execution.
 
+## Local GPU frame path and Windows E4M3 check (2026-10-14)
+
+The tested Windows continuation (`codex/gpu-frame-path`, through `dfb2143`) is
+integrated into `improve-e4m3` at the owner's explicit request.
+GPU preparation/composition/history and authenticated shared Vulkan resources
+are implemented behind an experimental window option, off by default. The same
+Arc SDR every-frame synchronous path passed actual Win32 swapchain/full-model
+smoke on **101.9150** for API 1.1 and 1.3: 24 presents, 22 GPU frames, resize,
+trigger and scale controls, zero synchronization-validation errors. Correct
+private command-buffer loader dispatch initialization was required. Owner lock,
+primary surface policy, transfer reuse and timeout-safe cleanup have CPU tests.
+No tag, release or real-game FPS gain is claimed.
+
+`notes/gpu-frame-path-20261013.md` records the limits and remaining checks.
+Current-driver image parity passes; rotating 25-warm/30-sample benchmarks now
+cover full 1080p/1440p. At 1440p/0.4 CPU/GPU-host medians are 179.59/122.14 ms;
+at full 1440p, 786.39/743.07 ms. These exclude game capture/IPC/return and are
+not FPS. Unchanged settings uploads are cached. Forced-fence full-image smoke
+also passes with controls and synchronization validation. A paired memory-policy
+probe found cached DEVICE memory slower; that experiment was removed. The full-
+resolution network gap remains unexplained. Final daemon outage/restart passed:
+original frame retained, then compatibility host-image fallback, zero sync errors. Shared mode
+renegotiates after device/game restart. Next: real game A/B and B580 measurement.
+
+The GPU window option now selects `NR_GPU_ONLY=1`: unsupported or failed shared
+processing retains original GPU frames without legacy pixel capture/processing.
+Final GPU reductions return compact statistics. See `notes/gpu-only-20261014.md`
+for strict failure checks and complete 1080p/1440p present measurements.
+
+Separately checked remote `improve-e4m3` at `40cb8e5` on 101.9150: zero mismatches
+over 1,114,875 inputs, exact full/changed network heads, GEMM/frame regressions
+pass. Alternating warmed contexts showed about 9.6% slower paired time at 320
+and neutral 720p. Full 1080p/1440p remain exact but are about 10.1%/22.4% slower.
+Its source is retained on this branch; keep the compile-time experiment off.
+
+The owner authorized this branch publication; later push/merge/release needs confirmation.
+
 ## PR #13 reviewed on Windows (2026-10-13)
+
+PR #13 is merged into remote `master` at `d29b665`. The independent continuation branch
+also contains Claude's local `2658b24`, `471de6e` and `f8afcf4`; those three commits remain
+included in this publication. Combined checks pass: device/queue selection, graph execution, CLI installation,
+raw geometry, 75 wizard tests (one platform-specific skip), and the WPF self-test.
 
 The continuation reviewed `Paimonshen/perf-recheck` at `1fc7aa7`, rebased onto `041ef3b`.
 The MSVC build reaches all six stages. The raw writer avoids per-image ImageMagick and
@@ -43,12 +85,58 @@ successfully, and seven relevant native/GPU/installer CTest entries pass. The fi
 failure regression and raw PNG checks were repeated after the last correction. No game or
 inference-speed benchmark is claimed by these regression tests.
 
+## The network's GPU, frame pacing in the window, and the daemon's queue (2026-10-12, later)
+
+At the owner's word ("можем пушить") `196c8d1..041ef3b` went to `windows` and `master`, after
+the Windows suites and the window's self-test ran again at the head. Then the first three steps
+toward more frames on desktop cards that the owner agreed to, from a look at the other ports
+(AMD's among them: the network before the upscaler, an asynchronous residual, the game's own
+device, a high-priority queue). Local, not pushed:
+
+- **`2658b24` The network runs on a GPU that can run it.** `xmx_init` took the loader's first
+  device. It now takes one with the float16 8x16x16 cooperative-matrix shape at subgroup scope
+  and `VK_KHR_workgroup_memory_explicit_layout`, a discrete card first; an older Intel iGPU, a
+  card of another vendor or a virtual device listed first is passed over. Frames reach the
+  daemon through host memory, so a game on another card can have its network on the Arc. With
+  none able, the loader's first non-CPU device, as before, and the log says what it lacks.
+  `XMX_DEVICE` names one, by index or part of its name; with several devices the daemon's log
+  lists them. `src/gpu/test_device_pick.py` puts sixteen machines in front of `xmx_pick_device`.
+- **`471de6e` Frame pacing in the setup window**: Asynchronous (`NR_LAYER_ASYNC`) and "Network
+  on" every 1st-4th frame (`NR_LAYER_LIVE`), on the NR controls tab. The profile keeps them; a
+  bridge action, `pacing`, rewrites only those two lines of an installed game's `nr-env.txt`,
+  which the layer reads when the game starts. vkcube's stderr shows the layer taking both.
+- **The daemon's queue**: `XMX_QUEUE_PRIORITY` (low to realtime, `VK_KHR_global_priority`) and
+  `XMX_QUEUE_FAMILY=compute` (the family without graphics: Intel's compute engine) or a number.
+  Off by default, since they bought nothing here: below.
+
+**Mortal Kombat 11 through Steam, 1280x720, render scale 0.4 (network 512x320), Arc 140V on
+mains, 101.9033, quiet before and after; processed frames a second over 40 s, two runs each,
+the configurations interleaved** (`nr-game\queue-game-series.ps1`):
+
+| | default | high | compute | compute + high |
+| --- | --- | --- | --- | --- |
+| in step | 19.75, 19.90 | 19.65, 19.22 | 19.59, 19.47 | 19.42, 19.79 |
+| asynchronous | 19.47, 19.72 | 19.05, 20.12 | 19.07, 19.12 | |
+
+Nothing outside the spread of single runs. The daemon's frame is 50 ms, 33 of them the network
+on the GPU and the rest host passes, and in step the game waits on the present rather than
+competing; asynchronous overlaps only the game's few milliseconds. Without a game the speed
+test gives the same times in all four queue configurations. A discrete card, where the game's
+frame and the network's are closer, is where asynchronous and the priority could show: the
+next measure belongs to a B580. (The daemon logs a frame's time to 10 ms, so its median reads
+40 or 50 for the same 45; the processed rate is the measure.)
+
+**Next on Linux:** `python3 src/gpu/test_device_pick.py` — ANV must report the shape (else the
+daemon now says "trying device 0 ... although it lacks"), an llvmpipe in the list is passed
+over, and above medium `XMX_QUEUE_PRIORITY` is likely refused without `CAP_SYS_NICE`, which the
+test accepts and the log says. `make test` for the rest. The window is Windows' alone.
+
 ## A speed test on a tester's first run, kept for their reports (2026-10-12)
 
 The owner asked for a short measure of frame time on a first run, saved where reports gather it,
 for the user to be told what NR does at best, at render scale 1.0 as well as 0.4, and for the
 window to say that capturing the frame and the rest take time too. `2afb9e8`, `7cc281e` and
-`c15f491`, local:
+`c15f491`, pushed 10-12:
 - `src/bench/speed_test.py` starts the daemon as the layer does and sends it synthetic frames,
   one connection a frame, at 640x360, 800x450, 1280x720 and 1920x1080, at 0.4 and at 1.0. For
   each it keeps the network's own time (the middle of the daemon's `gpu in+run+out`, from its
@@ -97,7 +185,7 @@ its stderr is the handle the process starts with). Checked here on a console and
 
 Asked the tester for `set NR` and `set VK` and whether a `python.exe` of ours runs (10-11).
 
-**`0a4ce03`, local:** each of the three ways out now says so on stderr (`[nr_layer] no daemon
+**`0a4ce03`, pushed 10-12:** each of the three ways out now says so on stderr (`[nr_layer] no daemon
 started: ...`), so the same capture names it; `NR_LAYER_SPAWN` unset stays silent. The proxy takes
 an inherited `NR_LAYER_SPAWNED` out of the game's own process. `VK_LAYER_PATH` names the manifest
 itself, and the loader stops reading the installation's records as manifests. Tests:
@@ -124,101 +212,11 @@ medians cannot establish zero dump overhead; compare throughput over matched ste
 intervals and report frame-time percentiles. The review adds per-frame geometry so resizing
 cannot silently reshape older raw captures, and validates PNGs before removing raw files.
 
-## The first Windows releases, and a tester's game that got the proxy but never the layer (2026-10-09, later)
+## The first Windows releases and tester diagnostics (2026-10-09)
 
-**Released at the owner's word**, under versions the owner named; neither carries the NVIDIA DLL
-or weights:
-- **v0.0.1**, tagged at `7f9c364`: `dlss-nr-windows-0.0.1-x64.zip`, 19 445 355 bytes, SHA-256
-  `b9f5af1b…6437`.
-- **v0.0.1.1**, tagged at `f9ec5f1`, the latest: `dlss-nr-windows-0.0.1.1-x64.zip`,
-  19 448 154 bytes, SHA-256 `bbcee183…fda2`. Against 0.0.1 only `release-metadata.json`,
-  `scripts/windows_wizard_core.py` and `windows-wizard.ps1` differ; the DLLs are the same. From
-  the unpacked ZIP: the window's self-test, Check (the DLL as 310.8.0.0), Install NR on Dead or
-  Alive 5 with the weights extracted, Save report (19 checks, the DLL tested, the extractor's
-  log) and Remove NR, the folder as before. The game was not started.
-
-`master` is `windows` again, at `f9ec5f1`. `2cba658` (the README: Windows beside Linux, and what
-differs between them) went through PR #11; the rest went straight to `master`, which the owner
-prefers to a pull request to oneself. `137fa78` is the issue form, `.github/ISSUE_TEMPLATE/problem.yml`:
-platform, release, step, the window's words and its report.
-
-**`a243ef8`, from the first tester's report.** An Arc B580 (issue #12) failed to install 0.0.1
-twice, and its report said neither which check failed nor what the weight extractor printed. Now:
-- the window names each failed check and why;
-- Save report carries the checks, the DLL's version and SHA-256 and whether it is the tested
-  310.8.0.0, and the tail of `work/logs/get-weights.log`, where install now writes the extractor's
-  output;
-- the Python and DLL probes wait 30 s, not 4, which a fresh environment's first NumPy import can
-  need;
-- a `VCOMP140.DLL` that does not load is named, with the Visual C++ Redistributable's link.
-
-With 0.0.1.1 the B580 installed: its DLL is 310.8.0.0, 649 tensors, every check passed. Which
-change did it is not known.
-
-**Then no effect, in Need for Speed Heat (DX11 through DXVK) or in DOOM (2016).** The report from
-the first: the proxy's launch record for `NeedForSpeedHeat.exe`, still running; the trigger on;
-and **no `nr_daemon.log` at all**. The layer opens that log and spawns the daemon in
-`nr_CreateInstance`. So the proxy loaded and set the variables, and the layer never made an
-instance in the game. The window cannot tell: the launch record is there, so Enable NR's warning
-stays silent.
-
-**The likely reason: Windows' Vulkan loader ignores `VK_LAYER_PATH` in an elevated process.** In
-Vulkan-Loader's source (`main`, read on 10-09):
-- `VK_LAYER_PATH`, `VK_ADD_LAYER_PATH` and the implicit-layer and driver variables go through
-  `loader_secure_getenv`, which on Windows returns nothing in a process at High integrity or above
-  (`is_high_integrity`);
-- HKCU's layer keys are skipped then too (`use_secondary_hive`), and only HKLM is read;
-- `VK_INSTANCE_LAYERS` is plain `loader_getenv`, so the layer is still asked for. Its absence is
-  one error line in the loader's debug output, and the instance is made without it.
-
-So a game run as administrator gets the proxy and never the layer. So does every game when UAC is
-off, and every game started by a launcher that runs as administrator. The tester's account is
-named "Admin", on Windows 11 Pro build 28000. Asked in the issue at 11:40 UTC, with Task
-Manager's Elevated column to check. On Linux `secure_getenv` refuses only setuid and setgid
-processes, and games are neither.
-
-**Confirmed here, with vkcube through the proxy** (`nr-game\elevated-test.ps1`, the release built
-from `644814b`). As the user: 437 frames answered in 20 s, the record at integrity 8192, the
-daemon gone with vkcube. As administrator, through one UAC prompt: the record at 12288, no daemon
-started and nothing in its log, and setup's backend, as the window's buttons call it, said the
-game runs elevated, in its status and at Enable NR (the window's words for it are in its
-self-test). The same files and the same folder both times. For the tester it is still a question.
-
-**And DOOM is set up through `DOOMx64vk.exe`**, with the game's API on Vulkan. The proxy acts only
-in the executable setup names, and Steam's `DOOMx64.exe` starts `DOOMx64vk.exe` only for Vulkan.
-Setup does not say so. Asked as well.
-
-**The owner's call (10-09): a warning, no registry for now.** `644814b`, with the quick start
-in `61e71a8`:
-1. The proxy puts the game's integrity level in its launch record. The status says when the game
-   runs elevated, and Enable NR warns: start it, and Steam or the launcher that starts it,
-   without administrator rights; with UAC off, that NR needs UAC on.
-2. Check and Install NR warn, without stopping an installation, when this window runs as
-   administrator or UAC is off; and, for a Vulkan game, when the chosen executable does not load
-   `vulkan-1.dll` itself, by import, delay-load or name, naming the one beside it that imports it.
-   On DOOM's own files: `DOOMx64.exe` is warned about and `DOOMx64vk.exe` named; `DOOMx64vk.exe`
-   is not.
-3. Save report carries the warnings, the window's level and UAC, and the game's DXVK logs from
-   `work/logs`, the game's folder and the folders it was started in, which would show whether
-   DXVK drew the game at all. Need for Speed Heat could have run DirectX 12, or loaded System32's
-   `d3d11.dll`; nothing in its report says which.
-
-Tested: `test_vulkan_proxy.py` with the child at Medium and at Low integrity (8192, 4096), the x86
-proxy through a 32-bit probe, 72 setup tests, the window's self-test (137 keys in three
-languages). From the release's ZIP, through Steam's Play button: Mortal Kombat 11 740 frames and
-Dead or Alive 5 850, none rejected, each record at 8192 with no warning, DXVK's logs in Save
-report, the folders as before after Remove NR. Not pushed and not released: the owner's word
-first.
-
-Kept for later: the layer's manifest under `HKLM\SOFTWARE\Khronos\Vulkan\ExplicitLayers`, removed
-by Remove NR, the one place an elevated process's loader still looks; with UAC off, the only way
-NR reaches a game at all. An explicit layer loads only where it is asked for, but the key is
-machine-wide, needs administrator rights to write, and would load a file a user can change into
-elevated games: what the loader's check is there to prevent.
-
-**Next on Linux:** the Windows tool suites at the head. `test_windows_wizard.py` changed again in
-`a243ef8` and `644814b`; its `_file_version`, integrity and UAC tests skip off Windows, and
-`test_vulkan_proxy.py` does entirely. Nothing Linux builds or runs changed.
+The v0.0.1/v0.0.1.1 release record, elevation tests and original issue #12 diagnosis are
+preserved in [windows-first-releases-20261009.md](windows-first-releases-20261009.md). The
+later issue #12 entry above supersedes the original inference that the layer never loaded.
 
 ## NR whatever starts the game: a vulkan-1.dll beside it, and the setup window without Steam (2026-10-09)
 

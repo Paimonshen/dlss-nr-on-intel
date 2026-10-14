@@ -16,13 +16,16 @@ class Weights:
 
 
 class Frame:
-    def __init__(self, runtime, weights, height, width):
+    def __init__(self, runtime, weights, height, width, *, device_image_io=False):
         self.weights = weights
         self.closed = False
+        self._closed = False
+        self.device_image_io = device_image_io
         self.height, self.width = height, width
 
     def close(self):
         self.closed = True
+        self._closed = True
 
 
 def main():
@@ -52,6 +55,18 @@ def main():
     assert first.closed and len(backend._frames) == 1
     backend.close()
     assert second.closed
+    backend.max_cached_frames = 2
+    cpu = backend.frame(384, 384)
+    gpu = backend.frame(384, 384, device_image_io=True)
+    assert cpu is not gpu and not cpu.device_image_io and gpu.device_image_io
+    assert cpu.weights is gpu.weights and len(backend._frames) == 2
+    gpu.close()
+    replacement = backend.frame(384, 384, device_image_io=True)
+    assert replacement is not gpu and not replacement._closed
+    assert backend.frame(384, 384) is cpu and not cpu.closed
+    assert replacement.weights is cpu.weights and len(backend._frames) == 2
+    backend.close()
+    assert cpu.closed and replacement.closed
     print('frame cache: reuse, LRU eviction and release OK')
     noise_cache()
 

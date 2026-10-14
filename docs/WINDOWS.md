@@ -4,6 +4,18 @@ For installation and a first game test, start with the
 [Windows user quick start](WINDOWS-QUICKSTART.md). This file records the port's
 status, driver findings and alternative build paths.
 
+Local 0.0.1.3 preparation adds an opt-in same-Arc GPU image path, still off by
+default. Full-model swapchain smoke passed on Intel 101.9150 with resize, effect
+and scale changes, and synchronization validation. The GPU option selects
+`NR_GPU_ONLY=1`: unavailable or failed shared processing keeps the original
+game image instead of capturing pixels through the host. CPU command submission,
+settings and reduced metadata remain. See [strict-path checks](GPU-PRESENT-SMOKE.md).
+Warm image-processing
+measurements are recorded through full 1440p; actual game/desktop measurements
+remain pending. This is not a released game-FPS claim.
+See [the continuation evidence](../notes/gpu-frame-path-20261013.md) and
+[the benchmark scopes](../notes/gpu-frame-stages-20261013.md).
+
 **Experimental; first run on Windows on 2026-09-29/30** (Arc 140V, Intel's driver 101.8991,
 then 101.9033). The compute side builds and runs there, and since PR #3 joined (2026-10-02) the
 layer and the daemon do too, from an MSVC build (`docs/WINDOWS-PORT.md`). What
@@ -106,6 +118,27 @@ before starting the daemon to compare the old loader; `=1` forces the new one. S
 output bytes. Rebuild both `libxmx` and the three staged shaders
 in the checkout named by the game's `NR_ROOT`; changing another checkout does not update
 an already running daemon or a separate MSVC build.
+
+**Which GPU runs the network.** libxmx no longer takes the first Vulkan device the loader
+lists: it takes one with the cooperative-matrix shape the kernels are written for (float16
+8x16 by 16x16 into float32, Xe2's) and `VK_KHR_workgroup_memory_explicit_layout`, a discrete
+card before an integrated one. A desktop's older Intel iGPU, a card of another vendor or a
+virtual device is passed over, and since frames reach the daemon through host memory, a game
+on another card can have its network on the Arc. With more than one device, the daemon's log
+lists them, what each lacks, and the one chosen. `XMX_DEVICE` names another: its index in
+that list, or part of its name (`B580`). `src/gpu/test_device_pick.py` checks the choice on
+machines this one is not, and this machine's own devices through `xmx_init`.
+
+**Its queue.** `XMX_QUEUE_PRIORITY=low|medium|high|realtime` asks for that global priority on
+the daemon's queue (`VK_KHR_global_priority`; Intel's driver takes all four, Linux may refuse
+above medium without `CAP_SYS_NICE`, and the daemon then says so and runs at the default).
+`XMX_QUEUE_FAMILY=compute` puts the queue on a family without graphics, Intel's compute engine,
+instead of the one the game draws on; a number names a family. Neither is set by default: in
+Mortal Kombat 11 on the Arc 140V (1280x720, render scale 0.4, driver 101.9033) each
+combination averaged 19.1-19.8 processed frames a second over two runs, in step and
+asynchronous alike, inside the spread of single runs (19.05-20.12). The network's own 33 ms
+are most of the frame there, and in step the game waits rather than competes. They are left
+for a discrete card.
 
 On Intel's driver, leave `gpu_window_attention` out: `ctest --test-dir work/cmake -E
 gpu_window_attention`. Its unmerged variant, which the graph does not use by default, hangs the

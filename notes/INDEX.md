@@ -23,6 +23,9 @@ disproved.
 | `opendlss-reference.md` | a second implementation that claims the vendor's own arithmetic, runnable here: where ours differs from it by specification; the decoder skips a block early and six more places MLX-DLSS's graph computed something else — a raw value into four GEMMs, block 30's pool, the wide blocks' and the ViT's publishes, the ViT's own attention — found step by step and fixed; our head against its now RGB corr 0.98-0.997, 0.5-1.9 levels of 255, and what is left is arithmetic; and the padded field — every field with both sides a multiple of 256 draws a 25-30 % weaker pass, 1280x720 ran on one, and the vendor's rule steps around it |
 | `reviewing.md` | how to run `/ultrareview` on this repo without wasting a run |
 | `windows-dump-measurements-20261010.md` | the raw-dump measurements, warm-up rules and limits of rounded timing logs |
+| `windows-first-releases-20261009.md` | the first Windows releases, elevation tests and the original tester diagnosis |
+| `gpu-only-20261014.md` | strict same-Arc pixel residency; complete 1080p/1440p present measurements, GPU metadata reductions and failure checks |
+| `gpu-frame-stages-20261013.md` | Windows CPU/GPU image-stage comparison, scopes, allocation probe and negative high-resolution E4M3 results |
 | `reproduce.md` | how to run the resident path from a clean checkout |
 
 ## The binary, the weights, the graph
@@ -116,7 +119,7 @@ disproved.
 | `improve-doom-vulkan-20261005.md` | DOOM's own Vulkan renderer through Proton: 390 gameplay frames accepted, 20–23 FPS at 1280x720 with NR versus 59–60 without; process evidence distinguishes this from a native Linux executable |
 | `improve-windows-integration-20261005.md` | Windows updates through `e616afc` integrated into improve: allocator and pipe overhead, x86 layer, packed staged loads, first-test guidance and pipe-handle cleanup; 44 Linux tests passed, with a Windows rerun still required |
 | `improve-release-20261005.md` | PR #5 integrated with the Windows runtime: one checked release assembler, allocator included, portable Linux host passes, first-test settings and launchers; twelve release tests and an actual Linux package/model smoke pass |
-| `improve-e4m3-probe-20261013.md` | E4M3 experiment: 1,114,875 probe inputs and complete-graph heads match; gated candidate lowers local LNL/Linux replay time 3–5%; Windows/B580 and larger changes remain queued |
+| `improve-e4m3-probe-20261013.md` | E4M3 experiment: exact probes/heads and initial Linux gain; Windows follow-up is slower at 1080p/1440p, so the gate stays off; B580 remains unmeasured |
 | `phase69-the-stand-that-discriminates.md` | the present test rebuilt so it can fail — frames in flight, a semaphore per image, a real stall, a present queue of another family — and what it found first: the old default waited on the presenting queue, not the drawing one. Its fix never shipped; `improve-present-fences.md` replaced both paths |
 | `phase68-what-validation-settles.md` | the present test under the Khronos validation layer: both old sync modes clean, two real bugs in the harness fixed, and a negative control showing the test could not yet prove the wait load-bearing |
 | `phase66-the-present-has-a-test.md` | the present's own semaphores instead of a queue idle, behind `NR_LAYER_SYNC`; a headless swapchain makes the layer's copy out and back testable without a game, and the first run found `present_now` calling itself |

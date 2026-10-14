@@ -1,5 +1,10 @@
 # Small E4M3 experiment and work after the limit reset
 
+Windows follow-up on Arc 140V / Intel 101.9150 is now recorded in
+[gpu-frame-stages-20261013.md](gpu-frame-stages-20261013.md): outputs remain exact,
+but paired full-network time is about 10.1% slower at 1080p and 22.4% at 1440p.
+Keep `NR_E4M3_MAGIC=0`; the Linux measurements below are the original experiment.
+
 2026-10-13. The owner requested only the cheapest task now and the remaining
 work after the limits reset. Branch: improve-e4m3, based on master d29b665.
 

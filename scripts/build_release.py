@@ -44,6 +44,30 @@ def required_shaders(root: Path) -> set[str]:
     return names
 
 
+def source_commit(root: Path) -> str | None:
+    """Identify this source checkout without borrowing an ancestor's HEAD.
+
+    Git discovers repositories above its working directory. An extracted source
+    tree nested in another checkout therefore needs an explicit top-level check.
+    Query Git itself so linked worktrees with a .git file remain supported.
+    """
+    try:
+        version = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--show-toplevel", "HEAD"],
+            capture_output=True, text=True, encoding="utf-8", timeout=3)
+        values = version.stdout.splitlines()
+        if version.returncode != 0 or len(values) != 2:
+            return None
+        top, commit = values
+        if Path(top).resolve() != root.resolve():
+            return None
+        if not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", commit):
+            return None
+        return commit
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return None
+
+
 def assemble(root: Path, target: Path, platform: str) -> Path:
     root, target = root.resolve(), target.resolve()
     if platform not in ("linux", "windows"):
@@ -117,14 +141,7 @@ def assemble(root: Path, target: Path, platform: str) -> Path:
             for name in WINDOWS_TOOLS:
                 shutil.copy2(root / "src/tools" / name, stage / "scripts" / name)
         # Bug reports from a prebuilt package do not require an installed Git.
-        commit = None
-        try:
-            version = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
-                                     capture_output=True, text=True, timeout=3)
-            if version.returncode == 0:
-                commit = version.stdout.strip()
-        except (OSError, subprocess.TimeoutExpired):
-            pass
+        commit = source_commit(root)
         (stage / "release-metadata.json").write_text(
             json.dumps({"schema_version": 1, "source_commit": commit,
                         "platform": platform, "windows_wizard": windows,

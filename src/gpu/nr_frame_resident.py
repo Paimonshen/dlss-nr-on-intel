@@ -162,7 +162,7 @@ class ResidentFrame:
             return getattr(self.__dict__["w"], name)
         raise AttributeError(name)
 
-    def __init__(self, runtime, weights, height, width):
+    def __init__(self, runtime, weights, height, width, *, device_image_io=False):
         self.split = (0.0, 0.0, 0.0)      # host write, graph, host read, of the last frame
         # a caller may hand over shared weights or the raw tensors; the benches and tests
         # hand over tensors, and then this frame owns the upload as it always did
@@ -170,6 +170,7 @@ class ResidentFrame:
         self._owns_weights = self.w is not weights
         self.rt, self.weights = runtime, self.w.weights
         self.height, self.width = height, width
+        self.device_image_io = bool(device_image_io)
         self.levels = self._plan(height, width)
         self._scratch, self._blocks, self._buffers, self._edges = {}, {}, {}, {}
         self._graphs = {}
@@ -254,8 +255,10 @@ class ResidentFrame:
         if existing is None or existing.nbytes < elements * np.dtype(dtype).itemsize:
             if existing is not None:
                 existing.free()
-            existing = self.rt.buffer(elements, dtype,
-                                      kind=self.HOST_SIDE.get(name, xmxres.GRAPH))
+            kind = self.HOST_SIDE.get(name, xmxres.GRAPH)
+            if self.device_image_io and name in self.HOST_SIDE:
+                kind = xmxres.DEVICE
+            existing = self.rt.buffer(elements, dtype, kind=kind)
             self._buffers[name] = existing
         return existing
 
@@ -333,13 +336,25 @@ class ResidentFrame:
     # -- the frame --------------------------------------------------------
 
     def run(self, features, submits=None, capture=None, timing=None, execution=None):
+        if self.device_image_io:
+            raise ValueError("GPU image frames use run_device after GPU preprocessing")
         try:
             return self._run(features, submits, capture, timing, execution)
         except Exception:
             self.rt.abort()
             raise
 
-    def _run(self, features, submits, capture, timing, execution, dry=False):
+    def run_device(self, *, submits=None, execution=None):
+        """Run GPU-produced features and return the GPU head without a host pixel read."""
+        if not self.device_image_io:
+            raise ValueError("run_device requires device_image_io=True")
+        try:
+            return self._run(None, submits, None, None, execution, device_input=True)
+        except Exception:
+            self.rt.abort()
+            raise
+
+    def _run(self, features, submits, capture, timing, execution, dry=False, device_input=False):
         rt = self.rt
         import time as _time
 
@@ -349,7 +364,7 @@ class ResidentFrame:
             # the scratch plan's discovery: recorded as a replay would be, never run
             execution = "replay"
         else:
-            if features.shape != (self.height, self.width, 16):
+            if not device_input and features.shape != (self.height, self.width, 16):
                 raise ValueError("features must match the frame's (height, width, 16)")
             self._prepare_scratch(capture)
             execution = execution or os.environ.get("NR_FRAME_MODE", "replay")
@@ -396,8 +411,8 @@ class ResidentFrame:
         # Wall times around host writes, graph completion and host reads. They are
         # not PCIe counters: GPU access to mapped host memory occurs during the graph.
         mark = _time.perf_counter()
-        view = None if dry else self.input_view()
-        if dry:
+        view = None if dry or device_input else self.input_view()
+        if dry or device_input:
             pass                     # nothing runs, so nothing goes in
         elif features.ctypes.data == view.ctypes.data and features.dtype == view.dtype:
             pass                     # built in place (`input_view`): nothing to copy
@@ -418,6 +433,9 @@ class ResidentFrame:
             if submits is not None:
                 submits.append(passes)
             mark = _time.perf_counter()
+            if device_input:
+                self.split = (0.0, ran, 0.0)
+                return self.head_buffer()
             out = self.read_head()
             self.split = (carried, ran, _time.perf_counter() - mark)
             return out.reshape(height, width, 4)
@@ -683,4 +701,6 @@ class ResidentFrame:
             counter[0] = rt.submit()
         if submits is not None:
             submits.append(counter[0])
+        if device_input:
+            return self.head_buffer()
         return self.read_head()

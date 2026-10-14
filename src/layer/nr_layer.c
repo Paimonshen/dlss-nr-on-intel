@@ -35,6 +35,10 @@
 #include <vulkan/vulkan.h>
 #include <vulkan/vk_layer.h>
 #include "nr_transport.h"
+#include "nr_layer_stats.h"
+#include "nr_surface_policy.h"
+#include "nr_gpu_bridge.h"
+#include "nr_gpu_rpc.h"
 
 #ifdef _WIN32
 #  include <io.h>
@@ -111,7 +115,20 @@ struct device_data {
 	VkFence stalled_fence;
 	VkSwapchainKHR result_chain;
 	int queues_announced;           /* the one-time queue inventory has been logged */
+	int gpu_only_notice;
 	VkCommandPool pool;
+	VkCommandBuffer transfer_commands;
+	VkFence transfer_fence;
+	VkPipelineStageFlags *transfer_stages;
+	uint32_t transfer_stage_capacity;
+	struct nr_layer_timing timing;
+	struct nr_surface_selection primary;
+#ifdef _WIN32
+	struct nr_gpu_bridge *gpu;
+	HANDLE gpu_peer;
+	int gpu_enabled, gpu_blocked, gpu_attached, gpu_exposed, gpu_announced;
+	unsigned long gpu_retry_frame;
+#endif
 	VkDeviceMemory staging_memory;
 	VkBuffer staging;
 	VkDeviceSize staging_size;
@@ -136,7 +153,11 @@ struct device_data {
 	int inflight;
 	int inflight_fd;
 	VkDeviceSize inflight_size;
+	uint64_t inflight_timing_started;
+	unsigned inflight_timing_slot;
+	unsigned inflight_timing_group;
 	PFN_vkGetDeviceProcAddr get_device_proc;
+	PFN_vkSetDeviceLoaderData set_loader_data;
 	PFN_vkQueuePresentKHR present;
 	PFN_vkCreateSwapchainKHR create_swapchain;
 	PFN_vkDestroySwapchainKHR destroy_swapchain;
@@ -153,6 +174,7 @@ struct swapchain_data {
 	uint32_t image_count;
 	VkFormat format;
 	VkExtent2D extent;
+	struct nr_surface_record surface;
 };
 
 static struct device_data devices[8];
@@ -161,6 +183,7 @@ static struct swapchain_data swapchains[MAX_SWAPCHAINS];
 static nr_mutex_t lock = NR_MUTEX_INIT;
 static PFN_vkGetInstanceProcAddr next_instance_proc;
 static VkInstance layer_instance;
+static uint32_t layer_api_version;
 static const char *capture_path;
 static long capture_every;
 static long live_every;
@@ -168,6 +191,24 @@ static int async_live;
 static const char *socket_path;
 static const char *trigger_path;
 static int ui_mask;
+
+static int gpu_only_mode(void)
+{
+    const char *value = getenv("NR_GPU_ONLY");
+    return value && !strcmp(value, "1");
+}
+
+/* Strict mode can retain the game's image, but must never turn an unavailable
+ * shared path into CPU pixel capture, processing or cached-image writeback. */
+static int host_pixel_path_allowed(struct device_data *data, const char *operation)
+{
+    if (!gpu_only_mode()) return 1;
+    if (!data || !data->gpu_only_notice) {
+        fprintf(stderr, "[nr_layer] GPU-only: CPU pixel path disabled (%s); original GPU image retained\n", operation);
+        if (data) data->gpu_only_notice = 1;
+    }
+    return 0;
+}
 
 /* The frame goes to a daemon over a Unix socket rather than being processed in
  * process: the implementation is Python and this is a shared object living inside the
@@ -221,9 +262,15 @@ static int exchange(const void *header, size_t header_size, const void *payload,
  * the swapchain changes or the device goes. */
 static void drop_inflight(struct device_data *data)
 {
+	data->inflight_timing_started = 0;
 	if (!data->inflight) return;
 	data->inflight = 0;
 	nr_link link = nr_link_from_handle(data->inflight_fd);
+	if (gpu_only_mode()) {
+		/* A stale legacy reply is closed, not downloaded into a discard buffer. */
+		nr_link_close(&link);
+		return;
+	}
 	unsigned char sink[65536];
 	for (VkDeviceSize got = 0; got < data->inflight_size; ) {
 		size_t want = data->inflight_size - got < sizeof sink
@@ -777,6 +824,8 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateInstance(const VkInstanceCreateInfo *inf
 		 * instance — only the handful of global ones can — so the instance has
 		 * to be kept. */
 		layer_instance = *instance;
+		layer_api_version = info->pApplicationInfo && info->pApplicationInfo->apiVersion
+			? info->pApplicationInfo->apiVersion : VK_API_VERSION_1_0;
 		capture_path = getenv("NR_LAYER_CAPTURE");
 		socket_path = getenv("NR_LAYER_SOCKET");
 		ensure_daemon();
@@ -821,12 +870,45 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateDevice(VkPhysicalDevice physical,
 {
 	VkLayerDeviceCreateInfo *link = device_chain(info);
 	if (!link) return VK_ERROR_INITIALIZATION_FAILED;
+	PFN_vkSetDeviceLoaderData set_loader_data = NULL;
+	for (VkLayerDeviceCreateInfo *item = (VkLayerDeviceCreateInfo *)info->pNext;
+	     item; item = (VkLayerDeviceCreateInfo *)item->pNext)
+		if (item->sType == VK_STRUCTURE_TYPE_LOADER_DEVICE_CREATE_INFO &&
+		    item->function == VK_LOADER_DATA_CALLBACK) {
+			set_loader_data = item->u.pfnSetDeviceLoaderData;
+			break;
+		}
 	PFN_vkGetInstanceProcAddr next_instance = link->u.pLayerInfo->pfnNextGetInstanceProcAddr;
 	PFN_vkGetDeviceProcAddr next_device = link->u.pLayerInfo->pfnNextGetDeviceProcAddr;
 	link->u.pLayerInfo = link->u.pLayerInfo->pNext;
 
-	PFN_vkCreateDevice create = (PFN_vkCreateDevice)next_instance(NULL, "vkCreateDevice");
-	VkResult r = create(physical, info, allocator, device);
+	PFN_vkCreateDevice create = (PFN_vkCreateDevice)next_instance(layer_instance, "vkCreateDevice");
+	if (!create) return VK_ERROR_INITIALIZATION_FAILED;
+	const VkDeviceCreateInfo *chosen = info;
+#ifdef _WIN32
+	struct nr_gpu_device_patch patch;
+	memset(&patch, 0, sizeof patch);
+	if (layer_api_version >= VK_API_VERSION_1_1 && nr_gpu_patch_device(&patch, physical, info,
+		(PFN_vkEnumerateDeviceExtensionProperties)next_instance(layer_instance, "vkEnumerateDeviceExtensionProperties"),
+		(PFN_vkGetPhysicalDeviceFeatures2)next_instance(layer_instance, "vkGetPhysicalDeviceFeatures2"),
+		(PFN_vkGetPhysicalDeviceProperties)next_instance(layer_instance, "vkGetPhysicalDeviceProperties")))
+		chosen = &patch.info;
+	else if (getenv("NR_GPU_TRANSPORT") && !strcmp(getenv("NR_GPU_TRANSPORT"), "1"))
+		fprintf(stderr, "[nr_layer] GPU transport fallback: %s\n",
+			patch.reason ? patch.reason : "Vulkan 1.1 instance required");
+	VkLayerDeviceLink *saved_link = link->u.pLayerInfo;
+#endif
+	VkResult r = create(physical, chosen, allocator, device);
+#ifdef _WIN32
+	if (r != VK_SUCCESS && patch.enabled) {
+		fprintf(stderr, "[nr_layer] GPU transport fallback: patched device creation failed (%d)\n", r);
+		link->u.pLayerInfo = saved_link;
+		r = create(physical, info, allocator, device);
+		patch.enabled = 0;
+	}
+	int gpu_enabled = patch.enabled && r == VK_SUCCESS;
+	nr_gpu_patch_free(&patch);
+#endif
 	if (r != VK_SUCCESS) return r;
 
 	nr_mutex_lock(&lock);
@@ -838,6 +920,10 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateDevice(VkPhysicalDevice physical,
 		data->device = *device;
 		data->physical = physical;
 		data->get_device_proc = next_device;
+		data->set_loader_data = set_loader_data;
+#ifdef _WIN32
+		data->gpu_enabled = gpu_enabled;
+#endif
 		data->present = (PFN_vkQueuePresentKHR)next_device(*device, "vkQueuePresentKHR");
 		data->get_device_queue =
 			(PFN_vkGetDeviceQueue)next_device(*device, "vkGetDeviceQueue");
@@ -913,6 +999,9 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateSwapchainKHR(VkDevice device,
 		entry->device = device;
 		entry->format = info->imageFormat;
 		entry->extent = info->imageExtent;
+		entry->surface.handle = (uint64_t)*swapchain;
+		entry->surface.width = info->imageExtent.width;
+		entry->surface.height = info->imageExtent.height;
 		entry->image_count = MAX_IMAGES;
 		VkResult got = data->get_swapchain_images(device, *swapchain,
 							  &entry->image_count, entry->images);
@@ -934,14 +1023,244 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateSwapchainKHR(VkDevice device,
 	return r;
 }
 
+/* A family change is legal only after our last submission completed. A failed
+ * fence wait makes the whole device terminal and pins these resources until
+ * teardown. Destroying the pool also releases its cached command buffer. */
+static void release_transfer_resources(struct device_data *data)
+{
+    if (data->transfer_fence) {
+        PFN_vkDestroyFence destroy = (PFN_vkDestroyFence)
+            data->get_device_proc(data->device, "vkDestroyFence");
+        if (destroy) destroy(data->device, data->transfer_fence, NULL);
+        data->transfer_fence = VK_NULL_HANDLE;
+    }
+    if (data->pool) {
+        PFN_vkDestroyCommandPool destroy = (PFN_vkDestroyCommandPool)
+            data->get_device_proc(data->device, "vkDestroyCommandPool");
+        if (destroy) destroy(data->device, data->pool, NULL);
+        data->pool = VK_NULL_HANDLE;
+    }
+    data->transfer_commands = VK_NULL_HANDLE;
+    free(data->transfer_stages);
+    data->transfer_stages = NULL;
+    data->transfer_stage_capacity = 0;
+}
+
+#ifdef _WIN32
+/* The importer acknowledges RELEASE only after its private GPU fences and
+ * imported objects are finished. A lost reply never proves that no import
+ * happened: retain the export until acknowledgement or authenticated peer exit. */
+static int release_gpu_bridge(struct device_data *data)
+{
+    if (!data->gpu) return 1;
+    int safe = !data->gpu_exposed;
+    if (!safe && socket_path) {
+        struct nr_gpu_packet packet;
+        struct nr_gpu_reply reply;
+        nr_gpu_bridge_packet(data->gpu, NR_GPU_RELEASE, &packet);
+        safe = nr_gpu_rpc(socket_path, &packet, &reply) && reply.status == NR_GPU_SUCCESS;
+    }
+    if (!safe && data->gpu_peer)
+        safe = WaitForSingleObject(data->gpu_peer, 0) == WAIT_OBJECT_0;
+    if (!safe) {
+        data->gpu_blocked = 1;
+        fprintf(stderr, "[nr_layer] GPU transport fallback: export retained until daemon releases it or exits\n");
+        return 0;
+    }
+    VkResult result = nr_gpu_bridge_close(data->gpu, NULL);
+    if (result != VK_SUCCESS && result != VK_ERROR_DEVICE_LOST) {
+        data->device_error = VK_ERROR_DEVICE_LOST;
+        return 0;
+    }
+    free(data->gpu);
+    data->gpu = NULL;
+    if (data->gpu_peer) CloseHandle(data->gpu_peer);
+    data->gpu_peer = NULL;
+    data->gpu_attached = data->gpu_exposed = 0;
+    return 1;
+}
+
+/* 2: image already returned on GPU; -1: captured but no output, keep original;
+ * 0: negotiation declined before taking waits, use the established host path. */
+static int process_frame_gpu(struct device_data *data, struct swapchain_data *chain,
+                             VkQueue queue, uint32_t index)
+{
+    if (!data->gpu_enabled || data->gpu_blocked || !socket_path ||
+        data->frame_counter < data->gpu_retry_frame) return 0;
+    if (async_live || live_every != 1 || ui_mask || capture_path) {
+        if (!data->gpu_announced++)
+            fprintf(stderr, "[nr_layer] GPU transport fallback: requires synchronous live every frame without mask/capture\n");
+        return 0;
+    }
+    if (data->gpu && !nr_gpu_bridge_compatible(data->gpu, data->queue_family, queue,
+        chain->extent.width, chain->extent.height, chain->format) && !release_gpu_bridge(data)) return 0;
+    if (!data->gpu) {
+        struct nr_gpu_bridge *bridge = calloc(1, sizeof *bridge);
+        if (!bridge) return 0;
+#define NR_GPU_INSTANCE(name) (PFN_vk##name)next_instance_proc(layer_instance, "vk" #name)
+        VkResult result = nr_gpu_bridge_init(bridge, data->device, data->physical, data->queue_family,
+            data->get_device_proc, NR_GPU_INSTANCE(GetPhysicalDeviceProperties2),
+            NR_GPU_INSTANCE(GetPhysicalDeviceExternalBufferProperties),
+            NR_GPU_INSTANCE(GetPhysicalDeviceExternalSemaphoreProperties),
+            NR_GPU_INSTANCE(GetPhysicalDeviceMemoryProperties), NR_GPU_INSTANCE(GetPhysicalDeviceQueueFamilyProperties));
+#undef NR_GPU_INSTANCE
+        bridge->set_loader_data = data->set_loader_data;
+        struct nr_gpu_packet hello;
+        static volatile LONG64 sessions;
+        LARGE_INTEGER ticks;
+        QueryPerformanceCounter(&ticks);
+        uint64_t session = (uint64_t)ticks.QuadPart ^ ((uint64_t)GetCurrentProcessId() << 32)
+                           ^ (uint64_t)InterlockedIncrement64(&sessions);
+        if (!session) session = 1;
+        if (result == VK_SUCCESS)
+            result = nr_gpu_bridge_configure(bridge, chain->extent.width, chain->extent.height,
+                                             chain->format, session, &hello);
+        if (result != VK_SUCCESS) {
+            fprintf(stderr, "[nr_layer] GPU transport fallback: %s (%d)\n",
+                bridge->reason ? bridge->reason : "export creation failed", result);
+            nr_gpu_bridge_close(bridge, NULL);
+            free(bridge);
+            if (result == VK_ERROR_FORMAT_NOT_SUPPORTED) data->gpu_retry_frame = data->frame_counter + 300;
+            else data->gpu_blocked = 1;
+            return 0;
+        }
+        data->gpu = bridge;
+        data->gpu_exposed = 1;
+        struct nr_gpu_reply reply;
+        DWORD peer_pid = 0;
+        int answered = nr_gpu_rpc_peer(socket_path, &hello, &reply, &peer_pid);
+        if (peer_pid) data->gpu_peer = OpenProcess(SYNCHRONIZE, FALSE, peer_pid);
+        if (!answered || reply.status != NR_GPU_SUCCESS) {
+            if (answered && reply.status == NR_GPU_UNSUPPORTED) data->gpu_exposed = 0;
+            fprintf(stderr, "[nr_layer] GPU transport fallback: daemon negotiation %s (%u)\n",
+                answered ? "declined" : "failed", answered ? reply.detail : 0u);
+            release_gpu_bridge(data);
+            if (answered && reply.status == NR_GPU_UNSUPPORTED)
+                data->gpu_retry_frame = data->frame_counter + 300;
+            else data->gpu_blocked = 1;
+            return 0;
+        }
+        data->gpu_attached = 1;
+        fprintf(stderr, "[nr_layer] GPU transport ready: %ux%u format %d family %u daemon %lu sync=%s; pixels remain on GPU\n",
+            bridge->width, bridge->height, bridge->format, bridge->family, (unsigned long)peer_pid,
+            bridge->fenced ? "fence" : "semaphore");
+    }
+    struct nr_gpu_bridge *bridge = data->gpu;
+    nr_timing_begin(&data->timing, (uint64_t)(uintptr_t)data->device,
+        (uint64_t)chain->swapchain, chain->extent.width, chain->extent.height,
+        data->queue_family, data->frame_counter, 0, 1);
+    uint64_t began = data->timing.active ? nr_time_us() : 0;
+    VkResult result = nr_gpu_bridge_capture(bridge, chain->images[index], queue,
+        data->waits_consumed ? 0 : data->present_wait_count,
+        data->waits_consumed ? NULL : data->present_wait);
+    if (bridge->waits_consumed) data->waits_consumed = 1;
+    if (data->timing.active) nr_timing_add(&data->timing, NR_TIME_CAPTURE, nr_time_us() - began);
+    if (result != VK_SUCCESS) {
+        data->gpu_blocked = 1;
+        if (result == VK_ERROR_DEVICE_LOST || bridge->capture_pending)
+            data->device_error = VK_ERROR_DEVICE_LOST;
+        return -1;
+    }
+    struct nr_gpu_packet packet;
+    struct nr_gpu_reply reply;
+    nr_gpu_bridge_packet(bridge, NR_GPU_FRAME, &packet);
+    began = data->timing.active ? nr_time_us() : 0;
+    int answered = nr_gpu_rpc(socket_path, &packet, &reply);
+    if (data->timing.active) nr_timing_add(&data->timing, NR_TIME_EXCHANGE, nr_time_us() - began);
+    if (answered && reply.status == NR_GPU_SUCCESS) {
+        began = data->timing.active ? nr_time_us() : 0;
+        result = nr_gpu_bridge_copy_output(bridge, chain->images[index], queue);
+        if (data->timing.active) nr_timing_add(&data->timing, NR_TIME_RETURN, nr_time_us() - began);
+        if (result == VK_SUCCESS) return 2;
+        /* An output submit may still own the swapchain image. Never forward an
+         * unsynchronized present after that private fence failed. */
+        data->device_error = VK_ERROR_DEVICE_LOST;
+    } else {
+        result = nr_gpu_bridge_wait(bridge, bridge->capture_fence, &bridge->capture_pending);
+        if (result != VK_SUCCESS) data->device_error = VK_ERROR_DEVICE_LOST;
+    }
+    int retry_unsupported = answered && reply.status == NR_GPU_UNSUPPORTED;
+    fprintf(stderr, "[nr_layer] GPU transport fallback: %s; original frame retained\n",
+        retry_unsupported ? "frame settings unsupported" : "frame exchange failed");
+    data->gpu_blocked = 1;
+    if (release_gpu_bridge(data) && retry_unsupported && !data->device_error) {
+        /* Dynamic settings can temporarily require the host path. A confirmed
+         * capture completion and peer release let a future HELLO try again. */
+        data->gpu_blocked = 0;
+        data->gpu_retry_frame = data->frame_counter + 300;
+    }
+    return -1;
+}
+#endif
+
 /* Everything this layer allocated per device, given back. The pointer to
  * `vkDestroyDevice` was being stored and never used: a staging buffer, its device memory
  * and its host mapping leaked on every device teardown, which a game that recreates its
  * device — a resolution change under some wrappers — does more than once. Ported from the
  * parallel ProjectsCodex tree. */
-static void release_device(struct device_data *data)
+static int drain_private_submissions(struct device_data *data, const char *teardown)
 {
+	/* A failed private wait can make present report DEVICE_LOST without the
+	 * driver having actually stopped. Drain those submissions once before
+	 * freeing any child object or forwarding vkDestroyDevice. Keep the device
+	 * and its occupied tracking slot if the real work still has not finished. */
+	VkFence pending_fences[4];
+	uint32_t pending_count = 0;
+	if (data->transfer_fence && data->device_error)
+		pending_fences[pending_count++] = data->transfer_fence;
+	if (data->stalled_fence && data->stalled_fence != data->transfer_fence)
+		pending_fences[pending_count++] = data->stalled_fence;
+#ifdef _WIN32
+	if (data->gpu) {
+		if (data->gpu->capture_pending) pending_fences[pending_count++] = data->gpu->capture_fence;
+		if (data->gpu->output_pending) pending_fences[pending_count++] = data->gpu->output_fence;
+	}
+#endif
+	if (pending_count) {
+		PFN_vkWaitForFences wait = (PFN_vkWaitForFences)
+			data->get_device_proc(data->device, "vkWaitForFences");
+		VkResult drained = wait ? wait(data->device, pending_count, pending_fences,
+			VK_TRUE, UINT64_C(10000000000)) : VK_ERROR_INITIALIZATION_FAILED;
+		if (drained != VK_SUCCESS && drained != VK_ERROR_DEVICE_LOST) {
+			data->device_error = VK_ERROR_DEVICE_LOST;
+#ifdef _WIN32
+			data->gpu_blocked = 1;
+#endif
+			fprintf(stderr, "[nr_layer] %s teardown retained: %u private submissions remain unresolved (%d)\n",
+				teardown, pending_count, drained);
+			return 0;
+		}
+		if (drained == VK_ERROR_DEVICE_LOST) data->device_error = drained;
+#ifdef _WIN32
+		if (data->gpu) {
+			data->gpu->capture_pending = data->gpu->output_pending = 0;
+			if (drained == VK_ERROR_DEVICE_LOST) data->gpu->error = drained;
+		}
+#endif
+	}
+	return 1;
+}
+
+static int release_device(struct device_data *data)
+{
+	if (!drain_private_submissions(data, "device")) return 0;
+#ifdef _WIN32
+	if (!release_gpu_bridge(data) && data->gpu) {
+		/* At device teardown all local submissions are now finished (or the
+		 * driver confirmed loss). Peer imports own independent backing refs;
+		 * their missing RELEASE reply alone cannot keep this local device alive. */
+		fprintf(stderr, "[nr_layer] device teardown: closing drained local exports; daemon owns its imported references\n");
+		nr_gpu_bridge_close(data->gpu, NULL);
+		free(data->gpu);
+		data->gpu = NULL;
+		if (data->gpu_peer) CloseHandle(data->gpu_peer);
+		data->gpu_peer = NULL;
+		data->gpu_attached = data->gpu_exposed = 0;
+	}
+	nr_gpu_rpc_reap();
+#endif
 	drop_inflight(data);
+	nr_timing_summary(&data->timing);
 	if (data->mapped) {
 		PFN_vkUnmapMemory unmap =
 			(PFN_vkUnmapMemory)data->get_device_proc(data->device, "vkUnmapMemory");
@@ -957,11 +1276,7 @@ static void release_device(struct device_data *data)
 			(PFN_vkFreeMemory)data->get_device_proc(data->device, "vkFreeMemory");
 		if (release) release(data->device, data->staging_memory, NULL);
 	}
-	if (data->pool) {
-		PFN_vkDestroyCommandPool destroy = (PFN_vkDestroyCommandPool)
-			data->get_device_proc(data->device, "vkDestroyCommandPool");
-		if (destroy) destroy(data->device, data->pool, NULL);
-	}
+	release_transfer_resources(data);
 	if (data->stalled_fence) {
         PFN_vkDestroyFence destroy = (PFN_vkDestroyFence)data->get_device_proc(data->device, "vkDestroyFence");
         destroy(data->device, data->stalled_fence, NULL);
@@ -970,6 +1285,7 @@ static void release_device(struct device_data *data)
 	free(data->result);
 	free(data->earlier);
 	free(data->outgoing);
+	return 1;
 }
 
 VKAPI_ATTR void VKAPI_CALL nr_DestroyDevice(VkDevice device,
@@ -978,6 +1294,7 @@ VKAPI_ATTR void VKAPI_CALL nr_DestroyDevice(VkDevice device,
 	struct device_data *data = find_device(device);
 	PFN_vkDestroyDevice next = data ? data->destroy_device : NULL;
 	if (data) {
+		if (!release_device(data)) return;
 		nr_mutex_lock(&lock);
 		for (int i = 0; i < MAX_SWAPCHAINS; i++)
 			if (swapchains[i].device == device)
@@ -986,7 +1303,6 @@ VKAPI_ATTR void VKAPI_CALL nr_DestroyDevice(VkDevice device,
 			if (queues[i].device == device)
 				memset(&queues[i], 0, sizeof queues[i]);
 		nr_mutex_unlock(&lock);
-		release_device(data);
 		memset(data, 0, sizeof *data);
 	}
 	if (next) next(device, allocator);
@@ -1001,7 +1317,17 @@ VKAPI_ATTR void VKAPI_CALL nr_DestroySwapchainKHR(VkDevice device, VkSwapchainKH
 {
 	struct device_data *data = find_device(device);
     if (data) nr_mutex_lock(&data->present_lock);
+    if (data && !drain_private_submissions(data, "swapchain")) {
+        /* Pending capture/writeback commands may still name these VkImages.
+         * Keep both the swapchain and its tracking entry until a later safe
+         * teardown; a synthetic DEVICE_LOST does not cancel driver work. */
+        nr_mutex_unlock(&data->present_lock);
+        return;
+    }
     if (data && data->result_chain == swapchain) {
+#ifdef _WIN32
+        release_gpu_bridge(data);
+#endif
         data->result_chain = VK_NULL_HANDLE;
         data->holding = data->have_earlier = 0;
     }
@@ -1045,6 +1371,7 @@ static void release_staging(struct device_data *data)
 
 static int ensure_resources(struct device_data *data, VkDeviceSize needed)
 {
+    if (!host_pixel_path_allowed(data, "host capture allocation")) return -1;
 	if (!data->pool) {
 		VkCommandPoolCreateInfo info = {
 			.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
@@ -1110,6 +1437,7 @@ static int ensure_resources(struct device_data *data, VkDeviceSize needed)
 static int transfer(struct device_data *data, struct swapchain_data *chain, VkQueue queue,
                     uint32_t index, int to_image)
 {
+    if (!host_pixel_path_allowed(data, "host capture/writeback")) return -1;
     if (data->device_error || data->transfer_error) return -1;
 #define FN(type, name) type name = (type)data->get_device_proc(data->device, "vk" #name)
     FN(PFN_vkAllocateCommandBuffers, AllocateCommandBuffers);
@@ -1121,22 +1449,41 @@ static int transfer(struct device_data *data, struct swapchain_data *chain, VkQu
     FN(PFN_vkQueueSubmit, QueueSubmit);
     FN(PFN_vkWaitForFences, WaitForFences);
     FN(PFN_vkCreateFence, CreateFence);
-    FN(PFN_vkDestroyFence, DestroyFence);
-    FN(PFN_vkFreeCommandBuffers, FreeCommandBuffers);
+    FN(PFN_vkResetFences, ResetFences);
+    FN(PFN_vkResetCommandBuffer, ResetCommandBuffer);
 #undef FN
-    VkCommandBuffer commands = VK_NULL_HANDLE;
-    VkFence fence = VK_NULL_HANDLE;
-    VkPipelineStageFlags *stages = NULL;
+    uint64_t transfer_started = data->timing.active ? nr_time_us() : 0;
+    VkCommandBuffer commands = data->transfer_commands;
+    VkFence fence = data->transfer_fence;
     VkResult r;
-    VkCommandBufferAllocateInfo alloc = {
-        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-        .commandPool = data->pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-        .commandBufferCount = 1 };
-    r = AllocateCommandBuffers(data->device, &alloc, &commands);
-    if (r != VK_SUCCESS) goto failed;
-    VkFenceCreateInfo fi = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
-    r = CreateFence(data->device, &fi, NULL, &fence);
-    if (r != VK_SUCCESS) goto failed;
+    if (!commands) {
+        VkCommandBufferAllocateInfo alloc = {
+            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+            .commandPool = data->pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+            .commandBufferCount = 1 };
+        r = AllocateCommandBuffers(data->device, &alloc, &commands);
+        if (r != VK_SUCCESS) goto failed;
+        if (data->set_loader_data &&
+            (r = data->set_loader_data(data->device, commands)) != VK_SUCCESS) {
+            release_transfer_resources(data); /* Reclaim this unsubmitted allocation before retry. */
+            goto failed;
+        }
+        data->transfer_commands = commands;
+    } else {
+        /* The only way here follows a successful fence wait. A failed wait
+         * latches device_error and returns before any future reset or recording. */
+        r = ResetCommandBuffer(commands, 0);
+        if (r != VK_SUCCESS) goto failed;
+    }
+    if (!fence) {
+        VkFenceCreateInfo fi = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+        r = CreateFence(data->device, &fi, NULL, &fence);
+        if (r != VK_SUCCESS) goto failed;
+        data->transfer_fence = fence;
+    } else {
+        r = ResetFences(data->device, 1, &fence);
+        if (r != VK_SUCCESS) goto failed;
+    }
     VkCommandBufferBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
         .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT };
     r = BeginCommandBuffer(commands, &bi);
@@ -1183,36 +1530,40 @@ static int transfer(struct device_data *data, struct swapchain_data *chain, VkQu
     r = EndCommandBuffer(commands);
     if (r != VK_SUCCESS) goto failed;
     uint32_t waits = data->present_wait_count;
-    if (waits) {
-        stages = malloc((size_t)waits * sizeof *stages);
-        if (!stages) { r = VK_ERROR_OUT_OF_HOST_MEMORY; goto failed; }
-        for (uint32_t i = 0; i < waits; i++) stages[i] = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    if (waits > data->transfer_stage_capacity) {
+        VkPipelineStageFlags *grown = realloc(data->transfer_stages,
+            (size_t)waits * sizeof *grown);
+        if (!grown) { r = VK_ERROR_OUT_OF_HOST_MEMORY; goto failed; }
+        data->transfer_stages = grown;
+        data->transfer_stage_capacity = waits;
+        for (uint32_t i = 0; i < waits; i++) grown[i] = VK_PIPELINE_STAGE_TRANSFER_BIT;
     }
     VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
         .waitSemaphoreCount = waits, .pWaitSemaphores = waits ? data->present_wait : NULL,
-        .pWaitDstStageMask = stages, .commandBufferCount = 1, .pCommandBuffers = &commands };
+        .pWaitDstStageMask = waits ? data->transfer_stages : NULL,
+        .commandBufferCount = 1, .pCommandBuffers = &commands };
     r = QueueSubmit(queue, 1, &si, fence);
     if (r != VK_SUCCESS) goto failed;
     data->waits_consumed = 1;
     data->present_wait_count = 0;
+    uint64_t wait_started = data->timing.active ? nr_time_us() : 0;
     r = WaitForFences(data->device, 1, &fence, VK_TRUE, UINT64_MAX);
+    if (data->timing.active) {
+        nr_timing_add(&data->timing, to_image ? NR_TIME_WRITEBACK_WAIT : NR_TIME_READBACK_WAIT,
+            nr_time_us() - wait_started);
+        nr_timing_add(&data->timing, to_image ? NR_TIME_RETURN : NR_TIME_CAPTURE,
+            nr_time_us() - transfer_started);
+    }
     if (r != VK_SUCCESS) {
         /* Keep potentially pending commands/fence until device teardown. Never recycle
          * their memory after an unsuccessful wait, or continue presenting this device. */
         data->device_error = r;
-        data->stalled_fence = fence;
-        free(stages);
         return -1;
     }
-    free(stages);
-    DestroyFence(data->device, fence, NULL);
-    FreeCommandBuffers(data->device, data->pool, 1, &commands);
     return 0;
 failed:
-    free(stages);
-    if (fence) DestroyFence(data->device, fence, NULL);
-    if (commands) FreeCommandBuffers(data->device, data->pool, 1, &commands);
     data->transfer_error = r;
+    if (r == VK_ERROR_DEVICE_LOST) data->device_error = r;
     fprintf(stderr, "[nr_layer] transfer failed (%d)\n", (int)r);
     return -1;
 }
@@ -1253,6 +1604,10 @@ static int mask_worth_sending(uint32_t held, uint32_t pixels)
 static int process_frame(struct device_data *data, struct swapchain_data *chain,
 			 VkQueue queue, uint32_t index)
 {
+    if (!host_pixel_path_allowed(data, "host frame processing")) return -1;
+	nr_timing_begin(&data->timing, (uint64_t)(uintptr_t)data->device,
+		(uint64_t)chain->swapchain, chain->extent.width, chain->extent.height,
+		data->queue_family, data->frame_counter, 0, 0);
 	VkDeviceSize needed = (VkDeviceSize)chain->extent.width * chain->extent.height * 4;
 	if (ensure_resources(data, needed)) return -1;
 	if (transfer(data, chain, queue, index, 0)) return -1;
@@ -1270,8 +1625,9 @@ static int process_frame(struct device_data *data, struct swapchain_data *chain,
 		uint32_t held = settled(data->mapped, data->earlier, pixels,
 					data->outgoing + needed);
 		masked = mask_worth_sending(held, pixels);
-		fprintf(stderr, "[nr_layer] %u%% of the frame held still; ui mask %s\n",
-			100u * held / pixels, masked ? "sent" : "refused");
+		if (!data->timing.enabled)
+			fprintf(stderr, "[nr_layer] %u%% of the frame held still; ui mask %s\n",
+				100u * held / pixels, masked ? "sent" : "refused");
 	}
 
 	uint32_t header[4] = { masked ? 0x314E524Eu : 0x304E524Eu, chain->extent.width,
@@ -1287,24 +1643,32 @@ static int process_frame(struct device_data *data, struct swapchain_data *chain,
 	if (!socket_path) return -1;
 	/* The mask travels immediately after the colour, one byte a pixel. */
 	if (masked) {
-		if (exchange(header, sizeof header, data->outgoing,
-			     (size_t)needed + pixels, data->result, (size_t)needed)) {
+		uint64_t began = data->timing.active ? nr_time_us() : 0;
+		int failed = exchange(header, sizeof header, data->outgoing,
+			     (size_t)needed + pixels, data->result, (size_t)needed);
+		if (data->timing.active) nr_timing_add(&data->timing, NR_TIME_EXCHANGE, nr_time_us() - began);
+		if (failed) {
 			fprintf(stderr, "[nr_layer] the daemon did not answer; frame unchanged\n");
 			return -1;
 		}
 		memcpy(data->mapped, data->result, (size_t)needed);
-		fprintf(stderr, "[nr_layer] processed %ux%u with a ui mask\n",
-			chain->extent.width, chain->extent.height);
+		if (!data->timing.enabled)
+			fprintf(stderr, "[nr_layer] processed %ux%u with a ui mask\n",
+				chain->extent.width, chain->extent.height);
 		return 0;
 	}
-	if (exchange(header, sizeof header, data->mapped, (size_t)needed, data->result,
-		     (size_t)needed)) {
+	uint64_t began = data->timing.active ? nr_time_us() : 0;
+	int failed = exchange(header, sizeof header, data->mapped, (size_t)needed, data->result,
+		     (size_t)needed);
+	if (data->timing.active) nr_timing_add(&data->timing, NR_TIME_EXCHANGE, nr_time_us() - began);
+	if (failed) {
 		fprintf(stderr, "[nr_layer] the daemon did not answer; frame unchanged\n");
 		return -1;
 	}
 	memcpy(data->mapped, data->result, (size_t)needed);
-	fprintf(stderr, "[nr_layer] processed %ux%u\n", chain->extent.width,
-		chain->extent.height);
+	if (!data->timing.enabled)
+		fprintf(stderr, "[nr_layer] processed %ux%u\n", chain->extent.width,
+			chain->extent.height);
 	return 0;
 }
 
@@ -1317,15 +1681,30 @@ static int process_frame(struct device_data *data, struct swapchain_data *chain,
 static int process_frame_async(struct device_data *data, struct swapchain_data *chain,
 			       VkQueue queue, uint32_t index)
 {
+    if (!host_pixel_path_allowed(data, "host asynchronous processing")) return -1;
+	nr_timing_begin(&data->timing, (uint64_t)(uintptr_t)data->device,
+		(uint64_t)chain->swapchain, chain->extent.width, chain->extent.height,
+		data->queue_family, data->frame_counter, 1, 0);
 	VkDeviceSize needed = (VkDeviceSize)chain->extent.width * chain->extent.height * 4;
 	if (ensure_resources(data, needed) || transfer(data, chain, queue, index, 0)) {
 		drop_inflight(data);
 		return -1;
 	}
 	int answered = 0;
+	uint64_t exchange_started = data->timing.active ? nr_time_us() : 0;
 	if (data->inflight && data->inflight_size == needed) {
 		data->inflight = 0;
 		answered = exchange_receive(data->inflight_fd, data->result, (size_t)needed) == 0;
+		if (answered && data->inflight_timing_started &&
+		    data->inflight_timing_group == data->timing.group) {
+			/* Attach wall latency to the previous sampled request. Current request
+			 * timing only describes work blocking this present, not the old frame. */
+			struct nr_timing_sample *previous = &data->timing.samples[data->inflight_timing_slot];
+			previous->us[NR_TIME_PREVIOUS_RESPONSE] = nr_time_us() - data->inflight_timing_started;
+			previous->valid |= 1u << NR_TIME_PREVIOUS_RESPONSE;
+			data->timing.since_summary++;
+		}
+		data->inflight_timing_started = 0;
 		if (!answered)
 			fprintf(stderr, "[nr_layer] the daemon did not answer; frame unchanged\n");
 	} else {
@@ -1339,8 +1718,15 @@ static int process_frame_async(struct device_data *data, struct swapchain_data *
 			data->inflight = 1;
 			data->inflight_fd = fd;
 			data->inflight_size = needed;
+			if (data->timing.active) {
+				data->inflight_timing_started = data->timing.started;
+				data->inflight_timing_slot = data->timing.cursor;
+				data->inflight_timing_group = data->timing.group;
+			}
 		}
 	}
+	if (data->timing.active)
+		nr_timing_add(&data->timing, NR_TIME_EXCHANGE, nr_time_us() - exchange_started);
 	if (!answered) return -1;
 	memcpy(data->mapped, data->result, (size_t)needed);
 	return 0;
@@ -1376,22 +1762,47 @@ static VkResult present_locked(VkQueue queue,
 	if (owner) {
 		data = find_device(owner->device);
 		if (data && data->queue_family != owner->family) {
+#ifdef _WIN32
+			release_gpu_bridge(data);
+#endif
 			data->queue_family = owner->family;
-			/* Destroy rather than drop: command buffers are allocated and freed
-			 * per transfer, so nothing outlives the pool, and a dropped handle
-			 * would leak once per family change. */
-			if (data->pool) {
-				PFN_vkDestroyCommandPool destroy = (PFN_vkDestroyCommandPool)
-					data->get_device_proc(data->device, "vkDestroyCommandPool");
-				if (destroy) destroy(data->device, data->pool, NULL);
-				data->pool = VK_NULL_HANDLE;   /* rebuilt for the right family */
-			}
+			/* Cached commands belong to this family. All prior transfers completed
+			 * their fence; otherwise nr_QueuePresentKHR rejects this device. */
+			release_transfer_resources(data);
 		}
 	}
 	if (!data)
 		for (int i = 0; i < 8; i++) if (devices[i].device) { data = &devices[i]; break; }
 	if (!data) return VK_ERROR_INITIALIZATION_FAILED;
 	data->frame_counter++;
+	/* Mark all surfaces in this present before choosing. A service window can
+	 * present alone without displacing a recently active main game window. */
+	struct nr_surface_record records[MAX_SWAPCHAINS] = {{0}};
+	nr_mutex_lock(&lock);
+	for (uint32_t i = 0; i < info->swapchainCount; ++i) {
+		struct swapchain_data *chain = find_swapchain(info->pSwapchains[i]);
+		if (chain && chain->device == data->device)
+			nr_surface_mark_presented(&chain->surface, data->frame_counter);
+	}
+	for (size_t i = 0; i < MAX_SWAPCHAINS; ++i)
+		if (swapchains[i].device == data->device) records[i] = swapchains[i].surface;
+	nr_mutex_unlock(&lock);
+	const char *preferred = getenv("NR_LAYER_SWAPCHAIN");
+	uint64_t preferred_handle = preferred ? strtoull(preferred, NULL, 0) : 0;
+	struct nr_surface_choice primary = nr_surface_choose(records, MAX_SWAPCHAINS,
+		data->frame_counter, 120, data->primary, preferred_handle);
+	if (primary.changed) {
+#ifdef _WIN32
+		release_gpu_bridge(data);
+		data->gpu_retry_frame = 0;
+#endif
+		data->holding = data->have_earlier = 0;
+		drop_inflight(data);
+		data->primary = primary.selection;
+		fprintf(stderr, "[nr_layer] primary swapchain %llx %ux%u (%s)\n",
+			(unsigned long long)primary.selection.handle, primary.selection.width,
+			primary.selection.height, primary.reason == NR_SURFACE_EXPLICIT ? "selected" : "largest recent");
+	}
 	if (!data->queues_announced) {
 		data->queues_announced = 1;
 		announce_queues(data->device, queue, owner ? owner->family : data->queue_family);
@@ -1414,6 +1825,7 @@ static VkResult present_locked(VkQueue queue,
 	 * network's cost follows the extent it is given (notes/phase37). N only decides how
 	 * many game frames each rendered one covers. */
 	if (live_every > 0) {
+		if (gpu_only_mode()) data->holding = 0;
 		/* The trigger keeps its meaning — "do the thing" — so the effect can be
 		 * turned on and off mid-game without restarting it. With no trigger
 		 * configured, live mode simply always runs. */
@@ -1421,11 +1833,16 @@ static VkResult present_locked(VkQueue queue,
 		if (!on) {
 			data->holding = 0;
 			drop_inflight(data);
+#ifdef _WIN32
+			if (!data->gpu_blocked) release_gpu_bridge(data);
+#endif
 		}
 		for (uint32_t i = 0; on && i < info->swapchainCount; i++) {
 			if (data->device_error || data->transfer_error) return present_now(data, queue, info);
 			struct swapchain_data *chain = find_swapchain(info->pSwapchains[i]);
-			if (!chain || info->pImageIndices[i] >= chain->image_count) continue;
+			if (!chain || chain->device != data->device ||
+			    (uint64_t)chain->swapchain != data->primary.handle ||
+			    info->pImageIndices[i] >= chain->image_count) continue;
             if (data->result_chain != chain->swapchain) {
                 data->holding = data->have_earlier = 0;
                 data->result_chain = chain->swapchain;
@@ -1435,17 +1852,39 @@ static VkResult present_locked(VkQueue queue,
 			VkDeviceSize want = (VkDeviceSize)chain->extent.width
 					  * chain->extent.height * 4;
 			if (data->frame_counter % (unsigned long)live_every == 0) {
-				int done = async_live ? process_frame_async(data, chain, queue, index)
+				int done;
+#ifdef _WIN32
+				int gpu = process_frame_gpu(data, chain, queue, index);
+				if (gpu) {
+					data->holding = 0;
+					nr_timing_finish(&data->timing, gpu == 2);
+					continue;
+				}
+#endif
+				if (!host_pixel_path_allowed(data, "shared processing unavailable")) {
+					data->holding = 0;
+					continue;
+				}
+				done = async_live ? process_frame_async(data, chain, queue, index)
 						      : process_frame(data, chain, queue, index);
 				if (done == 0) {
 					data->holding = 1;
-					transfer(data, chain, queue, index, 1);
-				} else data->holding = 0; /* never replay a partially received reply */
-			} else if (data->holding && data->result_size == want) {
+					int returned = transfer(data, chain, queue, index, 1) == 0;
+					nr_timing_finish(&data->timing, returned);
+				} else {
+					data->holding = 0; /* never replay a partially received reply */
+					nr_timing_finish(&data->timing, 0);
+				}
+			} else if (!gpu_only_mode() && data->holding && data->result_size == want) {
 				memcpy(data->mapped, data->result, (size_t)data->result_size);
 				transfer(data, chain, queue, index, 1);
 			}
 		}
+		return present_now(data, queue, info);
+	}
+	if (!host_pixel_path_allowed(data, "photo/capture mode requires host pixels")) {
+		data->holding = data->have_earlier = 0;
+		drop_inflight(data);
 		return present_now(data, queue, info);
 	}
 
@@ -1459,7 +1898,9 @@ static VkResult present_locked(VkQueue queue,
 	for (uint32_t i = 0; i < info->swapchainCount; i++) {
 		if (data->device_error || data->transfer_error) return present_now(data, queue, info);
 		struct swapchain_data *chain = find_swapchain(info->pSwapchains[i]);
-		if (!chain || info->pImageIndices[i] >= chain->image_count) continue;
+		if (!chain || chain->device != data->device ||
+		    (uint64_t)chain->swapchain != data->primary.handle ||
+		    info->pImageIndices[i] >= chain->image_count) continue;
             if (data->result_chain != chain->swapchain) {
                 data->holding = data->have_earlier = 0;
                 data->result_chain = chain->swapchain;
@@ -1486,8 +1927,9 @@ static VkResult present_locked(VkQueue queue,
 		} else if (wanted && !data->holding) {
 			if (process_frame(data, chain, queue, index) == 0) {
 				data->holding = 1;
-				transfer(data, chain, queue, index, 1);
-			}
+				int returned = transfer(data, chain, queue, index, 1) == 0;
+				nr_timing_finish(&data->timing, returned);
+			} else nr_timing_finish(&data->timing, 0);
 		} else if (wanted && data->holding
 			   && data->result_size == (VkDeviceSize)chain->extent.width
 						 * chain->extent.height * 4) {
