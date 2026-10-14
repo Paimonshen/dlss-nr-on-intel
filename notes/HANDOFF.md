@@ -9,6 +9,21 @@ you need the evidence behind a line in this file, rather than reading them in or
 
 ---
 
+## On Linux at d29b665: green after a test fix, the speed test, and the warm-up (2026-10-14)
+
+`make test` stopped at `test_setup_proxy.py`: `Profile` resolves the interpreter, and here
+`sys.executable` is a symlink (`python3` -> `python3.14`). The test now compares with the
+profile's. Then: `make test` green in both memory modes (578), CTest 48 of 48, test-proton, and
+the Windows tool suites (147, 19 skipped).
+
+`speed_test.py` here, network / round trip, ms. At 0.4: 640x360 23/25.7, 800x450 23/27.3,
+1280x720 29/35.5, 1920x1080 52/63.0. At 1.0: 40/44.6, 61/67.0, 140/152.0, 273/298.9. Windows'
+table of 10-12 matches up to 800x450; at 1.0 from 1280x720 it is slower (170, 384).
+
+`live_rates.py`'s new warm-up of 25 frames (PR #13) reads this laptop slower: with `--warmup 3`
+the table is 10-07's (640x360 at 0.5 26-28 ms, 854x480 31-35), with 25 29-34 and 38-45; 512x288
+and 1080p do not move. Not the code: compare with the README table at `--warmup 3`.
+
 ## PR #13 reviewed on Windows (2026-10-13)
 
 The continuation reviewed `Paimonshen/perf-recheck` at `1fc7aa7`, rebased onto `041ef3b`.
