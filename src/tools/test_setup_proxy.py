@@ -24,7 +24,9 @@ class ProxyOwnershipTests(unittest.TestCase):
     def setUp(self):
         room = tempfile.TemporaryDirectory(prefix="nr-cli-proxy-")
         self.addCleanup(room.cleanup)
-        self.base = Path(room.name)
+        # Resolved, as Profile resolves what it is given: a TEMP in 8.3 form
+        # (C:\Users\NAME~1\...) otherwise compares unequal to the same file's long name.
+        self.base = Path(room.name).resolve()
         self.root = self.base / "release & !Русский!"
         self.game = self.base / "game & !Игра!"
         (self.root / "work").mkdir(parents=True)
@@ -146,12 +148,23 @@ class ProxyOwnershipTests(unittest.TestCase):
         self.assertEqual(setup.choose_game(self.game, self.profile.game_exe.name), self.profile.game_exe)
 
 
+def _runs_setup(python):
+    """Whether `python` is one setup.bat accepts as NR_PYTHON: 64-bit, with NumPy and safetensors.
+    CTest's Python under MSYS2 has neither package, and the batch refuses it by design."""
+    check = "import struct, numpy, safetensors; assert struct.calcsize('P') == 8"
+    return subprocess.run([python, "-c", check], capture_output=True).returncode == 0
+
+
 @unittest.skipUnless(os.name == "nt", "Windows installer requires cmd.exe")
+@unittest.skipUnless(os.name != "nt" or _runs_setup(sys.executable),
+                     "setup.bat needs NR_PYTHON with NumPy and safetensors; run this test with "
+                     "such a Python (this one lacks them)")
 class BatchProxyTests(unittest.TestCase):
     write = fixtures.ReleaseTests.write
 
     def setUp(self):
         fixtures.ReleaseTests.setUp(self)
+        self.base = self.base.resolve()          # a TEMP in 8.3 form, as above
         self.target = self.base / "package & !Русский!"
         fixtures.release.assemble(self.root, self.target, "windows")
         weights = self.target / "work/mlxw/dlssnr-logical.safetensors"
