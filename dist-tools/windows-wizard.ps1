@@ -488,8 +488,8 @@ $script:Strings=@{
   AsyncMode='Asynchronous: the network works while the game draws its next frame'
   AsyncModeTip='More frames a second, and what is on screen is one processed frame behind.'
   GpuImagePath='Experimental: frames remain on the GPU'
-  GpuImagePathTip='Frames remain on the GPU. If the GPU path is unavailable or processing fails, the effect is skipped and the game shows its original frame. Requires the game and network on the same Arc, asynchronous off and every frame.'
-  GpuImageNote='Takes effect at the next game start. Asynchronous mode or processing fewer than every frame skips the effect in this mode.'
+  GpuImagePathTip='Frames stay on the GPU from capture to the screen, with no copy through the CPU. Needs the game and the network on the same Arc, and a game on Vulkan 1.1 or newer, as DirectX games through DXVK are. Where that is not so, NR takes its usual path, and Save report says why.'
+  GpuImageNote='Takes effect at the next game start. NR then works on every frame, in step: asynchronous mode and every Nth frame wait until this is off.'
   EveryLabel='Network on'; EveryTip='The frames between repeat the last result: the game runs faster, and the picture changes only on the network''s frames.'
   Every1='every frame'; Every2='every 2nd frame'; Every3='every 3rd frame'; Every4='every 4th frame'
   'Loading.pacing'='Saving frame pacing…'; 'Done.pacing'='Frame pacing saved; it takes effect when the game starts next.'
@@ -582,8 +582,8 @@ $script:Strings=@{
   AsyncMode='Асинхронно: сеть работает, пока игра рисует следующий кадр'
   AsyncModeTip='Больше кадров в секунду, а на экране результат на один обработанный кадр позже.'
   GpuImagePath='Экспериментально: кадры остаются на GPU'
-  GpuImagePathTip='Кадры остаются на GPU. Если этот путь недоступен или обработка завершилась с ошибкой, эффект пропускается и показывается исходный кадр игры. Нужны игра и сеть на одной Arc, выключенный асинхронный режим и обработка каждого кадра.'
-  GpuImageNote='Применится при следующем запуске игры. При асинхронной подаче или обработке реже каждого кадра эффект в этом режиме пропускается.'
+  GpuImagePathTip='Кадры остаются на GPU от захвата до экрана, без копии через процессор. Нужны игра и сеть на одной Arc и игра на Vulkan 1.1 или новее, как игры DirectX через DXVK. Где это не так, NR идёт обычным путём, а «Сохранить отчёт» говорит почему.'
+  GpuImageNote='Применится при следующем запуске игры. NR тогда работает на каждом кадре, синхронно: асинхронный режим и сеть на каждом N-м кадре ждут, пока это выключено.'
   EveryLabel='Сеть на'; EveryTip='Кадры между ними повторяют последний результат: игра идёт быстрее, а картинка меняется только на кадрах сети.'
   Every1='каждом кадре'; Every2='каждом 2-м кадре'; Every3='каждом 3-м кадре'; Every4='каждом 4-м кадре'
   'Loading.pacing'='Сохраняем подачу кадров…'; 'Done.pacing'='Подача кадров сохранена и применится при следующем запуске игры.'
@@ -676,8 +676,8 @@ $script:Strings=@{
   AsyncMode='Asíncrono: la red trabaja mientras el juego dibuja el siguiente fotograma'
   AsyncModeTip='Más fotogramas por segundo, y lo que se ve va un fotograma procesado por detrás.'
   GpuImagePath='Experimental: los fotogramas permanecen en la GPU'
-  GpuImagePathTip='Los fotogramas permanecen en la GPU. Si esta ruta no está disponible o falla el procesamiento, se omite el efecto y se muestra el fotograma original del juego. Requiere el juego y la red en la misma Arc, modo asíncrono desactivado y todos los fotogramas.'
-  GpuImageNote='Se aplica al próximo inicio del juego. En este modo se omite el efecto si se activa el modo asíncrono o se procesa menos de todos los fotogramas.'
+  GpuImagePathTip='Los fotogramas permanecen en la GPU desde la captura hasta la pantalla, sin copia por la CPU. Requiere el juego y la red en la misma Arc, y un juego con Vulkan 1.1 o posterior, como los juegos DirectX a través de DXVK. Si no es así, NR usa su ruta habitual y «Guardar informe» dice por qué.'
+  GpuImageNote='Se aplica al próximo inicio del juego. NR trabaja entonces en cada fotograma y en sincronía: el modo asíncrono y la red cada N fotogramas esperan a que esto se desactive.'
   EveryLabel='Red en'; EveryTip='Los fotogramas intermedios repiten el último resultado: el juego va más rápido, y la imagen cambia solo en los fotogramas de la red.'
   Every1='cada fotograma'; Every2='uno de cada 2 fotogramas'; Every3='uno de cada 3 fotogramas'; Every4='uno de cada 4 fotogramas'
   'Loading.pacing'='Guardando el ritmo de fotogramas…'; 'Done.pacing'='Ritmo de fotogramas guardado; se aplica la próxima vez que se inicie el juego.'
@@ -933,7 +933,14 @@ function Apply-Profile($Profile) {
         $script:Ui.GpuImagePath.IsChecked=[bool]$Profile.gpu_image_path
         $every=[int]$Profile.nr_every
         $script:Ui.EveryFrame.SelectedIndex=$(if($every -ge 1 -and $every -le $script:Ui.EveryFrame.Items.Count){$every-1}else{0})
+        Update-PacingState
     } finally { $script:ApplyingProfile=$false }
+}
+# The GPU image path takes every frame, in step with the game, or stands aside (issue #17):
+# with it on, asynchronous mode and every Nth frame are greyed and kept for when it is off.
+function Update-PacingState([bool]$Busy=[bool]$script:Busy) {
+    $free=-not $Busy -and -not [bool]$script:Ui.GpuImagePath.IsChecked
+    foreach($name in @('AsyncMode','EveryLabel','EveryFrame')) { $script:Ui[$name].IsEnabled=$free }
 }
 # Asynchronous mode and every Nth frame are read by the layer when the game starts: a change
 # is saved at once, into the installed game's nr-env.txt too, and waits for a running action.
@@ -942,7 +949,8 @@ function Request-Pacing {
     if($script:Busy) { $script:PacingDue=$true } else { $script:PacingDue=$false; Start-Bridge 'pacing' }
 }
 function Set-Busy([bool]$Busy) {
-    foreach($name in @('DllPath','GamePath','PythonPath','Api','GameArgs','Fossilize','BrowseDll','BrowseGame','BrowsePython','FindPython','Check','Dependencies','Install','Uninstall','Launch','Toggle','SpeedTest','Report','ControlsToggle','ControlsLaunch','ResetSettings','AsyncMode','GpuImagePath','EveryFrame')) { $script:Ui[$name].IsEnabled=-not $Busy }
+    foreach($name in @('DllPath','GamePath','PythonPath','Api','GameArgs','Fossilize','BrowseDll','BrowseGame','BrowsePython','FindPython','Check','Dependencies','Install','Uninstall','Launch','Toggle','SpeedTest','Report','ControlsToggle','ControlsLaunch','ResetSettings','GpuImagePath')) { $script:Ui[$name].IsEnabled=-not $Busy }
+    Update-PacingState $Busy
     $script:Ui.KnobRows.IsEnabled=(-not $Busy -or ($script:Busy -and $script:Busy.Action -eq 'settings-save'))
     # An indeterminate ProgressBar animates while collapsed too: 6 % of a core, the window idle.
     $script:Ui.Spinner.IsIndeterminate=$Busy
@@ -1216,9 +1224,13 @@ if($SelfTest) {
         Apply-Profile ([pscustomobject]@{python='fixture';game_exe='fixture.exe';api='vulkan';disable_fossilize=$true;nr_async=$true;nr_every=3;gpu_image_path=$true})
         $sent=Profile-FromWindow
         if(-not $sent.nr_async -or $sent.nr_every -ne 3 -or -not $sent.gpu_image_path -or $script:PacingDue) { throw 'Frame pacing and GPU image choice did not reach the profile' }
+        if($script:Ui.AsyncMode.IsEnabled -or $script:Ui.EveryFrame.IsEnabled) { throw 'The GPU image path left asynchronous mode or every Nth frame to choose' }
+        Set-Busy $true; Set-Busy $false
+        if($script:Ui.AsyncMode.IsEnabled -or $script:Ui.EveryFrame.IsEnabled) { throw 'An action''s end opened asynchronous mode or every Nth frame under the GPU image path' }
         Apply-Profile ([pscustomobject]@{python='fixture';game_exe='fixture.exe';api='vulkan';disable_fossilize=$true})
         $sent=Profile-FromWindow
         if($sent.nr_async -or $sent.nr_every -ne 1 -or $sent.gpu_image_path) { throw 'An older profile was not every frame, in step, with GPU image path off' }
+        if(-not $script:Ui.AsyncMode.IsEnabled -or -not $script:Ui.EveryFrame.IsEnabled) { throw 'Asynchronous mode or every Nth frame stayed greyed with the GPU image path off' }
         Set-Progress 'ChooseFiles'
         $script:ApplyingProfile=$true; Request-Pacing; $script:ApplyingProfile=$false
         if($script:PacingDue -or $script:ProgressKey -ne 'ChooseFiles') { throw 'Applying a profile asked to save frame pacing' }
@@ -1265,8 +1277,8 @@ $script:Ui.ResetSettings.Add_Click({ Reset-NrSettings })
 # changes the box without a click.
 $script:Ui.AsyncMode.Add_Checked({ Request-Pacing })
 $script:Ui.AsyncMode.Add_Unchecked({ Request-Pacing })
-$script:Ui.GpuImagePath.Add_Checked({ Request-Pacing })
-$script:Ui.GpuImagePath.Add_Unchecked({ Request-Pacing })
+$script:Ui.GpuImagePath.Add_Checked({ Update-PacingState; Request-Pacing })
+$script:Ui.GpuImagePath.Add_Unchecked({ Update-PacingState; Request-Pacing })
 $script:Ui.EveryFrame.Add_SelectionChanged({ Request-Pacing })
 $script:Ui.Theme.Add_Click({
     Set-Theme $(if($script:Theme -eq 'dark'){'light'}else{'dark'})

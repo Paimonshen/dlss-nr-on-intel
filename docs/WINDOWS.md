@@ -6,10 +6,13 @@ status, driver findings and alternative build paths.
 
 Release 0.0.1.2 adds an opt-in same-Arc GPU image path, still off by
 default. Full-model swapchain smoke passed on Intel 101.9150 with resize, effect
-and scale changes, and synchronization validation. The GPU option selects
-`NR_GPU_ONLY=1`: unavailable or failed shared processing keeps the original
-game image instead of capturing pixels through the host. CPU command submission,
-settings and reduced metadata remain. See [strict-path checks](GPU-PRESENT-SMOKE.md).
+and scale changes, and synchronization validation. Since issue #17 the window's
+option runs every frame in step (asynchronous mode and every Nth frame wait, kept
+in the profile) and is no longer strict: where the shared path stands aside, as in
+a game that asks for Vulkan 1.0 (DOOM 2016), NR takes its usual path, and the
+layer writes why into `nr_daemon.log`, which status and Save report read.
+`NR_GPU_ONLY=1`, set by hand, still keeps the original game image instead of
+capturing pixels through the host. See [strict-path checks](GPU-PRESENT-SMOKE.md).
 Warm image-processing
 measurements are recorded through full 1440p; actual game/desktop measurements
 remain pending. This is not a released game-FPS claim.

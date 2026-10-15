@@ -31,6 +31,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>
 #include <errno.h>
 #include <vulkan/vulkan.h>
 #include <vulkan/vk_layer.h>
@@ -128,6 +129,10 @@ struct device_data {
 	HANDLE gpu_peer;
 	int gpu_enabled, gpu_blocked, gpu_attached, gpu_exposed, gpu_announced;
 	unsigned long gpu_retry_frame;
+	/* Why the GPU path stands aside for good on this device, written into the daemon's
+	 * log once frames take the usual path, after the daemon's own first lines. */
+	char gpu_note[200];
+	int gpu_note_logged, gpu_lines;
 #endif
 	VkDeviceMemory staging_memory;
 	VkBuffer staging;
@@ -198,13 +203,61 @@ static int gpu_only_mode(void)
     return value && !strcmp(value, "1");
 }
 
+static void nr_default_dir(char *out, size_t size);
+
+/* A line appended whole to the daemon's log, which the daemon has open for appending and
+ * shares. On Windows a game's stderr reaches nobody, and the setup window's status and
+ * Save report read this log: the GPU path's reasons go there too (issue #17). */
+static void append_daemon_log(const char *line)
+{
+	char fallback[1024 + 32];
+	const char *log = getenv("NR_LAYER_LOG");
+	if (!log || !*log) {
+		char dir[1024];
+		nr_default_dir(dir, sizeof dir);
+		snprintf(fallback, sizeof fallback, "%s/nr_daemon.log", dir);
+		log = fallback;
+	}
+#ifdef _WIN32
+	HANDLE h = CreateFileA(log, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+			       NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+	if (h == INVALID_HANDLE_VALUE) return;
+	DWORD wrote;
+	WriteFile(h, line, (DWORD)strlen(line), &wrote, NULL);
+	CloseHandle(h);
+#else
+	int fd = open(log, O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0644);
+	if (fd < 0) return;
+	ssize_t wrote = write(fd, line, strlen(line));
+	(void)wrote;
+	close(fd);
+#endif
+}
+
+/* Said on stderr, as before, and into the daemon's log when to_log. */
+static void say(int to_log, const char *fmt, va_list args)
+{
+	char line[512];
+	vsnprintf(line, sizeof line, fmt, args);
+	fputs(line, stderr);
+	if (to_log) append_daemon_log(line);
+}
+
+static void say_in_log(const char *fmt, ...)
+{
+	va_list args;
+	va_start(args, fmt);
+	say(1, fmt, args);
+	va_end(args);
+}
+
 /* Strict mode can retain the game's image, but must never turn an unavailable
  * shared path into CPU pixel capture, processing or cached-image writeback. */
 static int host_pixel_path_allowed(struct device_data *data, const char *operation)
 {
     if (!gpu_only_mode()) return 1;
     if (!data || !data->gpu_only_notice) {
-        fprintf(stderr, "[nr_layer] GPU-only: CPU pixel path disabled (%s); original GPU image retained\n", operation);
+        say_in_log("[nr_layer] GPU-only: CPU pixel path disabled (%s); original GPU image retained\n", operation);
         if (data) data->gpu_only_notice = 1;
     }
     return 0;
@@ -893,20 +946,30 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateDevice(VkPhysicalDevice physical,
 #ifdef _WIN32
 	struct nr_gpu_device_patch patch;
 	memset(&patch, 0, sizeof patch);
+	char gpu_note[200] = "";
 	if (layer_api_version >= VK_API_VERSION_1_1 && nr_gpu_patch_device(&patch, physical, info,
 		(PFN_vkEnumerateDeviceExtensionProperties)next_instance(layer_instance, "vkEnumerateDeviceExtensionProperties"),
 		(PFN_vkGetPhysicalDeviceFeatures2)next_instance(layer_instance, "vkGetPhysicalDeviceFeatures2"),
 		(PFN_vkGetPhysicalDeviceProperties)next_instance(layer_instance, "vkGetPhysicalDeviceProperties")))
 		chosen = &patch.info;
-	else if (getenv("NR_GPU_TRANSPORT") && !strcmp(getenv("NR_GPU_TRANSPORT"), "1"))
-		fprintf(stderr, "[nr_layer] GPU transport fallback: %s\n",
-			patch.reason ? patch.reason : "Vulkan 1.1 instance required");
+	else if (getenv("NR_GPU_TRANSPORT") && !strcmp(getenv("NR_GPU_TRANSPORT"), "1")) {
+		if (layer_api_version < VK_API_VERSION_1_1)
+			/* A game on Vulkan 1.0, DOOM (2016) among them (issue #17). */
+			snprintf(gpu_note, sizeof gpu_note,
+				 "Vulkan 1.1 instance required, and the game asked for %u.%u",
+				 VK_API_VERSION_MAJOR(layer_api_version), VK_API_VERSION_MINOR(layer_api_version));
+		else
+			snprintf(gpu_note, sizeof gpu_note, "%s",
+				 patch.reason ? patch.reason : "the device cannot share frames");
+		fprintf(stderr, "[nr_layer] GPU transport fallback: %s\n", gpu_note);
+	}
 	VkLayerDeviceLink *saved_link = link->u.pLayerInfo;
 #endif
 	VkResult r = create(physical, chosen, allocator, device);
 #ifdef _WIN32
 	if (r != VK_SUCCESS && patch.enabled) {
-		fprintf(stderr, "[nr_layer] GPU transport fallback: patched device creation failed (%d)\n", r);
+		snprintf(gpu_note, sizeof gpu_note, "patched device creation failed (%d)", r);
+		fprintf(stderr, "[nr_layer] GPU transport fallback: %s\n", gpu_note);
 		link->u.pLayerInfo = saved_link;
 		r = create(physical, info, allocator, device);
 		patch.enabled = 0;
@@ -928,6 +991,7 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateDevice(VkPhysicalDevice physical,
 		data->set_loader_data = set_loader_data;
 #ifdef _WIN32
 		data->gpu_enabled = gpu_enabled;
+		memcpy(data->gpu_note, gpu_note, sizeof data->gpu_note);
 #endif
 		data->present = (PFN_vkQueuePresentKHR)next_device(*device, "vkQueuePresentKHR");
 		data->get_device_queue =
@@ -1052,6 +1116,31 @@ static void release_transfer_resources(struct device_data *data)
 }
 
 #ifdef _WIN32
+/* The GPU path's lines: on stderr, and the first few of a device in the daemon's log. A
+ * format refused is tried again every 300 frames, and the log need not say so each time. */
+static void gpu_say(struct device_data *data, const char *fmt, ...)
+{
+    int to_log = data->gpu_lines < 8;
+    data->gpu_lines += to_log;
+    va_list args;
+    va_start(args, fmt);
+    say(to_log, fmt, args);
+    va_end(args);
+}
+
+/* A reason the path stands aside for good is written once frames take the usual path: by
+ * then the daemon has written its own first lines, which begin a session in the window's
+ * reading of the log, and the reason lands inside it. */
+static void log_gpu_note(struct device_data *data)
+{
+    if (!data->gpu_note[0] || data->gpu_note_logged) return;
+    data->gpu_note_logged = 1;
+    char line[300];
+    snprintf(line, sizeof line, "[nr_layer] GPU transport fallback: %s; frames take the usual path\n",
+             data->gpu_note);
+    append_daemon_log(line);
+}
+
 /* The importer acknowledges RELEASE only after its private GPU fences and
  * imported objects are finished. A lost reply never proves that no import
  * happened: retain the export until acknowledgement or authenticated peer exit. */
@@ -1069,7 +1158,7 @@ static int release_gpu_bridge(struct device_data *data)
         safe = WaitForSingleObject(data->gpu_peer, 0) == WAIT_OBJECT_0;
     if (!safe) {
         data->gpu_blocked = 1;
-        fprintf(stderr, "[nr_layer] GPU transport fallback: export retained until daemon releases it or exits\n");
+        gpu_say(data, "[nr_layer] GPU transport fallback: export retained until daemon releases it or exits\n");
         return 0;
     }
     VkResult result = nr_gpu_bridge_close(data->gpu, NULL);
@@ -1093,8 +1182,14 @@ static int process_frame_gpu(struct device_data *data, struct swapchain_data *ch
     if (!data->gpu_enabled || data->gpu_blocked || !socket_path ||
         data->frame_counter < data->gpu_retry_frame) return 0;
     if (async_live || live_every != 1 || ui_mask || capture_path) {
-        if (!data->gpu_announced++)
+        if (!data->gpu_announced++) {
             fprintf(stderr, "[nr_layer] GPU transport fallback: requires synchronous live every frame without mask/capture\n");
+            if (!data->gpu_note[0])
+                snprintf(data->gpu_note, sizeof data->gpu_note,
+                         "requires synchronous live every frame without mask/capture "
+                         "(NR_LAYER_ASYNC=%d, NR_LAYER_LIVE=%ld%s%s)", async_live, live_every,
+                         ui_mask ? ", a mask" : "", capture_path ? ", a capture" : "");
+        }
         return 0;
     }
     if (data->gpu && !nr_gpu_bridge_compatible(data->gpu, data->queue_family, queue,
@@ -1121,7 +1216,7 @@ static int process_frame_gpu(struct device_data *data, struct swapchain_data *ch
             result = nr_gpu_bridge_configure(bridge, chain->extent.width, chain->extent.height,
                                              chain->format, session, &hello);
         if (result != VK_SUCCESS) {
-            fprintf(stderr, "[nr_layer] GPU transport fallback: %s (%d)\n",
+            gpu_say(data, "[nr_layer] GPU transport fallback: %s (%d)\n",
                 bridge->reason ? bridge->reason : "export creation failed", result);
             nr_gpu_bridge_close(bridge, NULL);
             free(bridge);
@@ -1137,7 +1232,7 @@ static int process_frame_gpu(struct device_data *data, struct swapchain_data *ch
         if (peer_pid) data->gpu_peer = OpenProcess(SYNCHRONIZE, FALSE, peer_pid);
         if (!answered || reply.status != NR_GPU_SUCCESS) {
             if (answered && reply.status == NR_GPU_UNSUPPORTED) data->gpu_exposed = 0;
-            fprintf(stderr, "[nr_layer] GPU transport fallback: daemon negotiation %s (%u)\n",
+            gpu_say(data, "[nr_layer] GPU transport fallback: daemon negotiation %s (%u)\n",
                 answered ? "declined" : "failed", answered ? reply.detail : 0u);
             release_gpu_bridge(data);
             if (answered && reply.status == NR_GPU_UNSUPPORTED)
@@ -1146,7 +1241,7 @@ static int process_frame_gpu(struct device_data *data, struct swapchain_data *ch
             return 0;
         }
         data->gpu_attached = 1;
-        fprintf(stderr, "[nr_layer] GPU transport ready: %ux%u format %d family %u daemon %lu sync=%s; pixels remain on GPU\n",
+        gpu_say(data, "[nr_layer] GPU transport ready: %ux%u format %d family %u daemon %lu sync=%s; pixels remain on GPU\n",
             bridge->width, bridge->height, bridge->format, bridge->family, (unsigned long)peer_pid,
             bridge->fenced ? "fence" : "semaphore");
     }
@@ -1185,7 +1280,7 @@ static int process_frame_gpu(struct device_data *data, struct swapchain_data *ch
         if (result != VK_SUCCESS) data->device_error = VK_ERROR_DEVICE_LOST;
     }
     int retry_unsupported = answered && reply.status == NR_GPU_UNSUPPORTED;
-    fprintf(stderr, "[nr_layer] GPU transport fallback: %s; original frame retained\n",
+    gpu_say(data, "[nr_layer] GPU transport fallback: %s; original frame retained\n",
         retry_unsupported ? "frame settings unsupported" : "frame exchange failed");
     data->gpu_blocked = 1;
     if (release_gpu_bridge(data) && retry_unsupported && !data->device_error) {
@@ -1876,6 +1971,9 @@ static VkResult present_locked(VkQueue queue,
 					data->holding = 1;
 					int returned = transfer(data, chain, queue, index, 1) == 0;
 					nr_timing_finish(&data->timing, returned);
+#ifdef _WIN32
+					log_gpu_note(data);
+#endif
 				} else {
 					data->holding = 0; /* never replay a partially received reply */
 					nr_timing_finish(&data->timing, 0);

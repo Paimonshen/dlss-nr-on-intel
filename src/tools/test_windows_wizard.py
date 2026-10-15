@@ -420,11 +420,18 @@ class WizardFixture(unittest.TestCase):
         self.assertEqual(core.load_profile(self.root), enabled)
         values = dict(line.split("=", 1) for line in path.read_text(encoding="utf-8").splitlines()
                       if "=" in line and not line.startswith("#"))
-        self.assertEqual((values["NR_GPU_IMAGE"], values["NR_GPU_TRANSPORT"], values["NR_GPU_ONLY"]), ("1", "1", "1"))
+        # Never strict: where the GPU path stands aside, NR takes its usual path (issue #17).
+        self.assertEqual((values["NR_GPU_IMAGE"], values["NR_GPU_TRANSPORT"], values["NR_GPU_ONLY"]), ("1", "1", "0"))
         self.assertEqual(sum(line.startswith("NR_GPU_ONLY=")
                              for line in path.read_text(encoding="utf-8").splitlines()), 1)
-        # Enabling the experimental image path does not overwrite requested pacing.
-        self.assertEqual((values["NR_LAYER_ASYNC"], values["NR_LAYER_LIVE"]), ("1", "3"))
+        # The GPU path takes every frame in step or stands aside: the asynchronous mode and
+        # every Nth frame asked for wait in the profile until it is off.
+        self.assertEqual((values["NR_LAYER_ASYNC"], values["NR_LAYER_LIVE"]), ("0", "1"))
+        core.set_pacing(replace(enabled, gpu_image_path=False))
+        values = dict(line.split("=", 1) for line in path.read_text(encoding="utf-8").splitlines()
+                      if "=" in line and not line.startswith("#"))
+        self.assertEqual((values["NR_LAYER_ASYNC"], values["NR_LAYER_LIVE"], values["NR_GPU_IMAGE"]),
+                         ("1", "3", "0"))
         unchanged = [line for line in before if line.split("=", 1)[0] not in core.PACING]
         self.assertEqual([line for line in path.read_text(encoding="utf-8").splitlines()
                           if line.split("=", 1)[0] not in core.PACING], unchanged)
@@ -1041,6 +1048,9 @@ class WizardFixture(unittest.TestCase):
         log.write_text("daemon session " + json.dumps(metadata) + "\n"
                        "half rounding: nearest\nmodel ready in 1s\n"
                        "GPU shared transport fallback: asynchronous mode\n"
+                       "[nr_layer] GPU transport fallback: Vulkan 1.1 instance required; "
+                       "frames take the usual path\n"
+                       "[nr_layer] GPU transport ready: 1280x720 format 44\n"
                        "1280x720 rgba in 0.02s change 0.1 network 512x320 "
                        "transport=gpu-image-host image prep=1.25ms compose=2.50ms\n",
                        encoding="utf-8")
@@ -1048,7 +1058,10 @@ class WizardFixture(unittest.TestCase):
         self.assertEqual(result["daemon_session"], metadata)
         self.assertEqual(result["last_frame"]["transport"], "gpu-image-host")
         self.assertEqual((result["last_frame"]["prep_ms"], result["last_frame"]["compose_ms"]), (1.25, 2.5))
-        self.assertEqual(result["gpu_fallbacks"], ["GPU shared transport fallback: asynchronous mode"])
+        # The layer's own reason, which it writes into the daemon's log (issue #17).
+        self.assertEqual(result["gpu_fallbacks"], [
+            "GPU shared transport fallback: asynchronous mode",
+            "[nr_layer] GPU transport fallback: Vulkan 1.1 instance required; frames take the usual path"])
         self.assertFalse(result["fresh_frames"])
         core._LOG_STATES.clear()
         result = core.status(self.profile)

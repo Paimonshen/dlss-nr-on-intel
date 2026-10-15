@@ -345,7 +345,7 @@ def layer_environment(profile):
         "NR_LAYER_LOG": str(work / "nr_daemon.log"),
         "NR_LAYER_TRIGGER": str(work / "nr_trigger"),
         "NR_LAYER_SOCKET": rf"\\.\pipe\nr_windows_{token}",
-        "NR_LAYER_LIVE": str(profile.nr_every), "NR_LAYER_SPAWN": "1", "NR_KEEP_BLOCKS": "1",
+        "NR_LAYER_SPAWN": "1", "NR_KEEP_BLOCKS": "1",
         # The manifest itself, not its folder: the loader reads every .json in a folder it is
         # given, and warned that the installation's own records are not layer manifests.
         "ENABLE_NR_LAYER": "1", "VK_LAYER_PATH": str(installed_path(profile) / "VkLayer_dlss_nr.json"),
@@ -357,14 +357,20 @@ def layer_environment(profile):
     }
     if profile.disable_fossilize:
         values["DISABLE_VK_LAYER_VALVE_steam_fossilize_1"] = "1"
-    # Said either way, so an NR_LAYER_ASYNC the game inherits cannot decide it.
-    values["NR_LAYER_ASYNC"] = "1" if profile.nr_async else "0"
-    # Explicit zeroes also clear the option when rewriting an installed profile.
-    # Async/every-N remain the requested settings. This option keeps pixels on
-    # GPU and skips the effect when its transport/pacing is unsupported.
-    values["NR_GPU_IMAGE"] = "1" if profile.gpu_image_path else "0"
-    values["NR_GPU_TRANSPORT"] = "1" if profile.gpu_image_path else "0"
-    values["NR_GPU_ONLY"] = "1" if profile.gpu_image_path else "0"
+    gpu = profile.gpu_image_path
+    # The GPU image path's shared transport takes every frame, in step with the game, and
+    # stands aside otherwise (issue #17). With it on, the profile's asynchronous mode and
+    # every Nth frame wait, kept for when it is off. Said either way, so an NR_LAYER_ASYNC
+    # the game inherits cannot decide it.
+    values["NR_LAYER_ASYNC"] = "1" if profile.nr_async and not gpu else "0"
+    values["NR_LAYER_LIVE"] = "1" if gpu else str(profile.nr_every)
+    # Explicit zeroes also clear the option when rewriting an installed profile. Never
+    # strict: where a game cannot keep its frames on the GPU (a Vulkan 1.0 instance, say),
+    # NR takes its usual path and the layer's line in the log says why, where the strict
+    # mode left the game's frame alone and said nothing a user could see (issue #17).
+    values["NR_GPU_IMAGE"] = "1" if gpu else "0"
+    values["NR_GPU_TRANSPORT"] = "1" if gpu else "0"
+    values["NR_GPU_ONLY"] = "0"
     return values
 
 
@@ -1617,7 +1623,9 @@ def _parse_log_line(state, line):
             state["half_probe"]["ok"] = True
     if "keeping NumPy's large blocks" in line:
         state["allocator"] = True
-    if line.startswith(("GPU image fallback:", "GPU shared transport fallback:")):
+    # The daemon's reasons, and the layer's, which it writes into the same log.
+    if line.startswith(("GPU image fallback:", "GPU shared transport fallback:",
+                        "[nr_layer] GPU transport fallback:", "[nr_layer] GPU-only:")):
         state["gpu_fallbacks"] = (state["gpu_fallbacks"] + [line[:1000]])[-30:]
     if line.startswith("frame rejected/failed") or "unsupported VkFormat" in line:
         state["rejected"] += 1
