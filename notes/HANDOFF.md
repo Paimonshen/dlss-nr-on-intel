@@ -156,6 +156,13 @@ through Steam, 914 frames on `gpu-shared`, none refused, the folder as before; t
 `NR_LAYER_ASYNC=1` added by hand, 808 frames on `gpu-image-host` and the asynchronous reason in the
 log. The reply on #17 is posted, at the owner's word. Not pushed.
 
+**Hogwarts Legacy (DirectX 12, Epic, Denuvo) does not run through VKD3D-Proton on Windows either**,
+as Mortal Kombat 1 did not on 10-08. VKD3D-Proton 3.0.1 with DXVK 3.1.1's `dxgi.dll`: Epic's
+overlay (`EOSOVH`) makes a D3D11 device on DXVK's adapter, and Windows' `d3d11.dll` crashes. With
+DXVK's `d3d11.dll` too, the layer and the daemon start, and the game crashes in its own code about
+15 s in; the same without NR. The game also resets XeSS to FSR in its settings (restored). So DX12
+on Windows is the `dxgi.dll` proxy (Open items); on Linux it is Proton, as for Mortal Kombat 1.
+
 **Next on Linux:** `make test` and CTest. `nr_layer.c`'s POSIX arm gained `append_daemon_log`
 (open with `O_APPEND`, one write, close), which only the GPU-only notice uses there.
 
