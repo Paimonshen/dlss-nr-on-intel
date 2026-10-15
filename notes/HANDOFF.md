@@ -58,10 +58,10 @@ under that date. When an item is done, strike it through here and name the commi
     was OOM-killed there on 09-16. Archive, 09-26.
   - ~~`min_extent` below 320 on a small window~~: no problems at high and low resolutions (the
     owner, 10-14).
-- GitHub on 10-14: issue #17 (DOOM at 3 fps with the GPU at 10 %) and discussion #14 (a B570 in
-  Mafia 3, and a Reddit post) have no answer. For #17 the owner's reading: when the whole frame
-  waits on the network, the game has nothing to render past the network's own frame rate, so its
-  load stays low. #12 and #15 work after a reinstall, and #12 waits for the next release. #16 is
+- GitHub on 10-14: discussion #14 (a B570 in Mafia 3, and a Reddit post) has no answer. Issue
+  #17 (DOOM at 3 fps with the GPU at 10 %) is answered and its GPU-path bug fixed, below, 10-16.
+  For #17 the owner's reading: when the whole frame waits on the network, the game has nothing to
+  render past the network's own frame rate, so its load stays low. #12 and #15 work after a reinstall, and #12 waits for the next release. #16 is
   Paimonshen's in-game menu.
 
 **Linux**
@@ -130,6 +130,34 @@ under that date. When an item is done, strike it through here and name the commi
   runs one subgroup to a workgroup (archive, 09-25).
 
 ---
+
+## Issue #17: the GPU image path falls back instead of turning NR off (2026-10-16)
+
+A tester's report (Arc B580, i3-12100, DOOM 2016 at 1080p, 0.0.1.2): with the window's GPU option
+on, NR did nothing. The option set `NR_GPU_ONLY=1`, and the layer's shared transport stands aside
+for a game whose instance asks for Vulkan 1.0 (DOOM 2016, vkcube) and in asynchronous or
+every-Nth-frame mode (the tester's profile had both). Strict mode then left the game's frame alone,
+and the reason went only to the game's stderr, which nobody sees on Windows. The rest of the
+report: the daemon's frame 50-60 ms, 25 of it on the GPU, the GPU 38 % busy; every 2nd frame
+doubled the frame rate, asynchronous changed nothing.
+
+**`a31efe6`:**
+- The window's option runs every frame in step: asynchronous mode and every Nth frame are greyed
+  and kept in the profile for when it is off. It is no longer strict (`NR_GPU_ONLY=0`): where the
+  shared path stands aside, NR takes its usual path.
+- The layer appends its GPU-path lines (ready, the fallbacks, the GPU-only notice) to
+  `NR_LAYER_LOG`, and a reason the path stands aside for good once frames take the usual path,
+  so after the daemon's first lines; status and Save report list them in `gpu_fallbacks`.
+
+Checked at the head, MSVC build: CTest 64 of 64, the wizard 79, the bridge 6, the window's
+self-test (68 controls, 161 keys). Through a release assembled from the tree: vkcube with the
+option, 321 frames on `gpu-image-host` and the Vulkan 1.0 reason in status; Mortal Kombat 11
+through Steam, 914 frames on `gpu-shared`, none refused, the folder as before; the same with
+`NR_LAYER_ASYNC=1` added by hand, 808 frames on `gpu-image-host` and the asynchronous reason in the
+log. The reply on #17 is posted, at the owner's word. Not pushed.
+
+**Next on Linux:** `make test` and CTest. `nr_layer.c`'s POSIX arm gained `append_daemon_log`
+(open with `O_APPEND`, one write, close), which only the GPU-only notice uses there.
 
 ## 0.0.1.2 built and tested on Windows; the window attention hang found and avoided (2026-10-15)
 
