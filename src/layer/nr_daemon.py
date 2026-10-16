@@ -186,28 +186,30 @@ class Settings:
     def __init__(self, args):
         self.path = args.settings
         self.stamp = None
+        # The menu's live preview, beside the settings file.
+        #
+        # The menu edits in memory and writes the user's settings file only on Save; while they are
+        # dragging, what they are trying arrives here instead. It is a partial object - only the
+        # knobs they have touched - and it is applied over the saved values, never merged back into
+        # them: the saved file is the record and this is a message about right now.
+        self.live_path = f"{args.settings}.live" if args.settings else None
+        self.live_stamp = None
+        # The last bytes read from each file, so a write that shares its predecessor's mtime is
+        # still noticed. See `_read_json`.
+        self.stamp_bytes = None
+        self.live_stamp_bytes = None
+        # Whether this daemon has read the preview file yet. The first reading is the one where an
+        # inherited, unconfirmed preview has to be refused; after that the user is watching the
+        # values change and the flag is no longer the question. See `refresh`.
+        self._started = False
+        # The last settings object read, kept so the preview can be applied over it on a frame where
+        # the saved file itself did not change. See `refresh`.
+        self.saved_values = {}
         for knob in self.KNOBS:
             setattr(self, knob, getattr(args, knob))
 
-    def refresh(self):
-        if not self.path:
-            return
-        try:
-            stamp = os.stat(self.path).st_mtime_ns
-        except OSError:
-            return
-        if stamp == self.stamp:
-            return
-        self.stamp = stamp
-        try:
-            with open(self.path) as handle:
-                given = json.load(handle)
-        except (OSError, ValueError) as error:
-            print(f"settings: {error}; keeping the current ones", flush=True)
-            return
-        if not isinstance(given, dict):
-            print("settings: expected a JSON object; keeping the current ones", flush=True)
-            return
+    def _apply(self, given, source):
+        """The knob values in `given`, validated. Returns the names it changed."""
         changed = []
         for knob in self.KNOBS:
             if knob not in given:
@@ -255,7 +257,173 @@ class Settings:
                 setattr(self, knob, value)
                 changed.append(f"{knob}={value}")
         if changed:
-            print("settings: " + ", ".join(changed), flush=True)
+            print(f"settings ({source}): " + ", ".join(changed), flush=True)
+        return changed
+
+    def refresh(self):
+        """Recompute the knob values from the saved settings, with the menu's preview on top.
+
+        Read as a pair rather than as two independent updates, and that is the whole reason this is
+        not two calls to a per-file reader. The saved file is the baseline and the preview is an
+        override; the preview is a partial object that exists only while the menu has something
+        unsaved. Layering them incrementally would leave a knob stuck at a previewed value the
+        moment the preview stopped mentioning it - which is exactly what Reset, or a panel closed
+        without saving, produces. Recomputing from the baseline every time makes "no longer in the
+        preview" mean "back to what is saved", which is the behaviour the user asked for.
+        """
+        saved = self._read_json(self.path, "saved", "stamp")
+        preview = self._read_json(self.live_path, "preview", "live_stamp")
+
+        # Nothing to do until one of them has actually changed.
+        if saved is None and preview is None:
+            return
+
+        # A preview whose author is gone, and that no Save confirmed, is not a preview.
+        #
+        # This is the rule that settles the reported bug: "save, then reset, then restart shows the
+        # picture from before the save". Reset writes its defaults to the preview so the change is
+        # visible, the game then exits with the panel open - the normal way to leave - and the file
+        # survives into the next session, where it overrode the saved settings.
+        #
+        # Neither timestamp can separate that from a legitimate preview: "Reset ten minutes after
+        # Save" and "a real preview ten minutes after Save" are identical in time, and what differs
+        # is whether the user ever accepted the values. Nor can it be "the first reading", which an
+        # earlier attempt used and which broke the live effect - a daemon starts, the user is
+        # already dragging a slider, and their change arrives before the first poll.
+        #
+        # What separates them is whether the process that wrote the preview is still running. The
+        # layer writes its PID for exactly this, and `_owner_alive` reports a missing PID as dead:
+        # every current layer writes one, so a preview without it came from a session that has
+        # already ended - which was the shape of the file that caused the report.
+        #
+        # `_confirmed` is the belt to that braces: a preview a Save did write stays valid even
+        # after its process ends, because the values in it are the ones in the settings file.
+        #
+        # There is deliberately NO timestamp comparison between the two files. An earlier version
+        # had one - "a preview older than the save it would override is stale" - and it was wrong in
+        # both directions. Save writes BOTH files, so their order within one save says nothing; and
+        # a preview written before a save is still the user's current intent when they have since
+        # moved another knob. The PID answers the only question that matters - is anyone still
+        # standing behind this file - and a second, weaker rule on top of it produced false
+        # rejections that turned the live effect off.
+        if preview is not None and not self._owner_alive(preview) and not self._confirmed(preview):
+            preview = None
+
+        # The saved values are KEPT, not just read when they change.
+        #
+        # This is the part a first version got wrong, and the test caught it: when only the preview
+        # changed, the saved file read back as "unchanged" and there was nothing to fall back to -
+        # so a knob the preview stopped mentioning kept its previewed value forever. Remembering the
+        # last saved object means "no longer previewed" can always mean "back to what is saved",
+        # which is what Reset and a panel closed without saving both require.
+        if saved is not None:
+            self.saved_values = saved
+
+        merged = dict(self.saved_values)
+        if preview:
+            merged.update(preview)
+        self._apply(merged, "preview" if preview else "saved")
+
+    @staticmethod
+    def _confirmed(preview):
+        """Whether a Save confirmed the values this preview shows.
+
+        An object with no `menu_confirmed` is treated as UNconfirmed. That inverts an earlier
+        reading of this function, and it is the right way round: a preview written by an older layer
+        is a preview from a session that is over, and this daemon's first look at it is exactly the
+        case where a leftover Reset must not win. Treating the missing key as confirmed is what let
+        the reported bug through.
+        """
+        return bool(preview.get("menu_confirmed"))
+
+    @staticmethod
+    def _owner_alive(preview):
+        """Whether the process that wrote this preview is still running.
+
+        A preview is a message from a live menu to a live daemon. When the menu's process ends, the
+        values it was showing stop being anyone's intent and the saved settings must take over.
+
+        A preview with NO `menu_pid` is reported as dead, and that is deliberate. Every layer built
+        with the current source writes one; a preview without it therefore came from a session that
+        has already ended, which is exactly the leftover this function exists to refuse. Reporting
+        it alive - the first version's choice, made to stay compatible with an older layer - is what
+        let the reported bug through, because the real leftover file had no PID in it either.
+
+        The cost is that an older layer's live previews are ignored. That is the acceptable side of
+        the trade: the user's saved settings are honoured, and the mismatched pair is a build that
+        should be reinstalled rather than a combination to keep working.
+        """
+        pid = preview.get("menu_pid")
+        if not isinstance(pid, int) or pid <= 0:
+            return False
+        if os.name == "nt":
+            import ctypes
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            STILL_ACTIVE = 259
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            if not handle:
+                return False          # no such process
+            try:
+                code = ctypes.c_ulong()
+                if kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                    return code.value == STILL_ACTIVE
+                return True
+            finally:
+                kernel32.CloseHandle(handle)
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except (PermissionError, OSError):
+            return True
+
+    def _read_json(self, path, source, attr):
+        """The object in `path`, or None when there is nothing new to read.
+
+        None means "unchanged or unreadable", which is distinct from an empty dict - the caller
+        uses it to tell "no new information" from "this file now says nothing".
+
+        The stamp is compared first because it is one stat call, but a stamp match is NOT the
+        answer on its own: this filesystem gives consecutive writes the SAME `st_mtime_ns` when
+        they land within one tick, which was measured at about half a millisecond here. A held
+        arrow key writes at 20 Hz, so consecutive changes can share a stamp - and treating that as
+        "unchanged" drops the second one. The bytes are compared as well, which costs one read on
+        the frames where the file did change and nothing at all when it did not.
+        """
+        if not path:
+            return None
+        try:
+            stamp = os.stat(path).st_mtime_ns
+        except OSError:
+            # A missing preview is the normal case: it appears when the menu is first moved and is
+            # not required to exist. A missing settings file is equally normal on a first run.
+            return None
+
+        same_stamp = (stamp == getattr(self, attr))
+        setattr(self, attr, stamp)
+        try:
+            with open(path, "rb") as handle:
+                raw = handle.read()
+        except OSError:
+            return None
+
+        # The bytes decide, not the stamp. See the note above.
+        if same_stamp and raw == getattr(self, attr + "_bytes", None):
+            return None
+        setattr(self, attr + "_bytes", raw)
+
+        try:
+            given = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError) as error:
+            print(f"settings ({source}): {error}; keeping the current ones", flush=True)
+            return {}
+        if not isinstance(given, dict):
+            print(f"settings ({source}): expected a JSON object; keeping the current ones",
+                  flush=True)
+            return {}
+        return given
 
 
 def resample(image, size):
