@@ -31,6 +31,10 @@ When the dated entries grow long, move the older ones into the archive the same 
   on 10-15 (`7e7dfb5`): Codex's experimental GPU-only frame path on Windows and an E4M3 rounding
   experiment, both off by default, and what 0.0.1.2 is built from. The owner asked Paimonshen to open his in-game menu (#16) against it.
   `improve-int8` is kept for INT8 experiments; Codex's own branches are Codex's.
+- **DirectX 12 on Windows, before the upscaler** (branch `dx12`, 10-16): a `libxess.dll` in front
+  of Intel's hands the daemon the frame XeSS is about to upscale, in the game's own D3D12, and
+  adds NR's change to it. It runs in Hogwarts Legacy; trails and halos in motion were still
+  visible there, and the fixes since are proven on a replay only (below, 10-16).
 - **Pace.** The owner is slowing development until NVIDIA's updated DLSS 5 model is available, and
   will then check its architecture against this implementation before more model-specific work
   (#16, 10-14).
@@ -67,6 +71,9 @@ under that date. When an item is done, strike it through here and name the commi
 **Linux**
 - `improve-e4m3`'s four red tests on Linux: changed on Windows to pass there (`1a146c2`, below,
   10-15), and not yet run on Linux. `make test` in both memory modes and CTest, please.
+- `dx12` changes the shared daemon (`MAGIC_MOTION`, `History.follow`) and `nr_image.c`
+  (`nr_history_sample`): `make test`, and `src/ref/test_native_image.py` with
+  `src/layer/test_temporal.py` in particular, please. Below, 10-16.
 - No Linux release has been published, but `deploy.sh --release` would build one without a 32-bit
   layer, so a 32-bit game under Proton (DoA5) could not use it. Archive, 10-07.
 - A daemon started by a short-lived process (a launcher that makes a Vulkan instance before the
@@ -92,18 +99,20 @@ under that date. When an item is done, strike it through here and name the commi
 - `windows_launch.py`'s Configure Steam, Restore Steam and their wrapper can go, with their tests,
   once no release with those buttons is in testers' hands. The GitHub releases have none. Below,
   10-09.
-- DirectX 12 is not offered. A `dxgi.dll` proxy, as geladons/DLSS5_INTEL has, is the route after
-  the release. A game that runs elevated, or any game with UAC off, never gets the layer; the HKLM
-  manifest that would reach it is kept for later. Below, 10-08 and 10-09.
+- DirectX 12 is not offered by the release. VKD3D-Proton does not run Hogwarts Legacy on Windows
+  (below, 10-16); the route taken instead is the game's own upscaler, `src/xess` on `dx12` (below,
+  10-16), for games with XeSS. A game that runs elevated, or any game with UAC off, never gets the
+  layer; the HKLM manifest that would reach it is kept for later. Below, 10-08 and 10-09.
+- `dx12`: record a real Hogwarts sequence with the owner (`record=N`), replay it, and show the
+  owner the replays before the next game test. Below, 10-16.
 - MSVC: the composition is not vectorised (0.5-1.8 ms behind gcc), and `_Pragma("GCC ivdep")`
   gives three C4068 warnings that an `NR_IVDEP` macro would silence. Archive, 10-02 and 10-07.
 - Housekeeping: each release root in `D:\NRonWindows\rel` holds ~440 MB of extracted weights, and
   `D:` ran out of space mid-test. Below, 10-12.
 
 **Planned, not started** (parked by the owner: do not start unasked)
-- Motion vectors from the game's own upscaler, through OptiScaler: real reprojection, no interface
-  in the input, the network at render size. 2-3 weeks, deferred on 2026-09-26. Archive, "Planned,
-  not started".
+- ~~Motion vectors from the game's own upscaler, through OptiScaler~~: started by the owner on
+  10-16 for XeSS, without OptiScaler: `src/xess` on `dx12`, below.
 - A FAQ in the README. Later.
 - INT8 on the bottleneck: the exact kernel exists (`gemm_staged_int8.comp`) and stays out of the
   graph by the owner's decision; `improve-int8` keeps the branch. Archive, 09-26.
@@ -130,6 +139,56 @@ under that date. When an item is done, strike it through here and name the commi
   runs one subgroup to a workgroup (archive, 09-25).
 
 ---
+
+## DirectX 12 through the game's own XeSS: NR before the upscaler (2026-10-16, branch `dx12`)
+
+The owner asked for NR on the frame before the game's upscaler instead of DXVK/VKD3D: the scene at
+render size with no interface on it, where NVIDIA's own pipeline runs the network (phase37), and
+the game on its own D3D12. `src/xess/` is a `libxess.dll` that goes in front of Intel's (renamed
+`libxess_nr_orig.dll`): `xessD3D12Execute`, `xessD3D12Init` and the two scale setters are its own,
+the other 68 exports jump through pointers filled from Intel's DLL (`gen_xess_exports.py`; MSVC's
+link.exe will not write `name=dll.name` forwarders). Settings in `nr-xess.txt` beside it, the log
+in `nr-xess.log`.
+
+**How.** The game records XeSS into a command list it has not submitted, so nothing can wait for
+the network. Ahead of XeSS the proxy copies the colour for the daemon (a `WriteBufferImmediate`
+marker says when it is done); a worker sends it over the layer's pipe protocol and keeps NR's
+change (answer minus what it was given, in the proxy's linear light, `nr_display` encode with
+white 1). Every later frame gets the newest change added before XeSS, read along the game's motion
+vectors: a tracker per change follows them frame by frame back to its frame (current to previous,
+pixels of the motion texture, no jitter; the picture moves by +jitter). MATCH trusts a change
+where what NR was given there lies inside the current 3x3 neighbourhood's per-channel range;
+REDUCE and APPLY fill the rest from the trusted change of nearby cells weighted by likeness. A new
+change fades in over the frames a change takes to come. The daemon gets each pixel's offset to the
+previous frame it was given (`MAGIC_MOTION`, 0x324E524E): `History.follow` reprojects its history
+with the vendor's five-tap Catmull-Rom (`nr_history_sample` in `nr_image.c`, byte-identical to
+MLX-DLSS's NumPy), asks the hold floor of the game's last frame moved there, and drops history
+where that frame differs by more than `STALE` (0.12).
+
+**Measured in Hogwarts Legacy** (UE 4.27, XeSS 2.0.2, flags `HIGH_RES_MV | AUTOEXPOSURE`, colour
+R11G11B10 at 1130x706 for Quality and 835x522 for Performance, 1920x1200 out, velocity and jitter
+scales 1): it runs; NR at render scale 0.5 lands 5-8 times a second beside the game (the network
+~100 ms on the shared GPU). The proxy's warp check: at 25-38 px of motion the last frame NR had,
+moved by the trackers, differs from the current one by 2.5-3 levels against 9-11 unmoved. The owner
+still saw trails and halos in motion at 11:50. Found since, on `replay_nr_xess` (below): the change
+of a moving object was being read onto the background it uncovered (the trackers trace that
+background back to the object), first through a luma-only match that a blue and a beige surface of
+one brightness both passed, then through the daemon's own history; per-channel matching, the fill
+and `STALE` remove the trail from a synthetic replay (a square over a panning texture). Not yet seen
+in the game.
+
+**Tools.** `test_nr_xess.exe` (8 cases on the device against a CPU transcription of the shader:
+formats, strength 0 exact, motion, jitter, untrusted vectors, the fade, the motion the daemon is
+told); `record=N` + `record_dir=` in `nr-xess.txt` record colour, vectors and jitter;
+`replay_nr_xess.exe <recording> <out> work\xess-replay\libxess_intel.dll` runs them through the
+proxy, a daemon and Intel's XeSS without the game (`--off`, `--strength`, `--warp`, `--history`,
+`--match`); `make_synthetic_recording.py`, `replay_view.py`. The game test script is
+`D:\NRonWindows\nr-game\hogwarts-xess-test.ps1` (outside the repo): it stops itself after 30 min.
+
+**Next on Windows:** record ~5 s of Hogwarts with the owner (waving characters, camera turns),
+replay with and without NR, show the owner. Later: frames by GPU sharing instead of the pipe, the
+FFX and DLSS entry points, OptiScaler.
+**Next on Linux:** `make test`, with `test_native_image.py` and `test_temporal.py`.
 
 ## Issue #17: the GPU image path falls back instead of turning NR off (2026-10-16)
 
