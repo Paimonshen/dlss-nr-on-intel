@@ -911,3 +911,83 @@ void nr_compose_encode(const float *head, ptrdiff_t hy, ptrdiff_t hx, ptrdiff_t 
         free(discard);
     }
 }
+
+/* MLX-DLSS's `sample_history` (python/mlxdlss/temporal.py): the vendor's five-tap
+ * Catmull-Rom reprojection of the previous output, at normalised coordinates (u, v), one
+ * pair per output pixel. Transcribed operation for operation, so the bytes are the NumPy's
+ * (test_native_image.py): Python's `sum` starts from 0, and so do these, which is what
+ * turns a -0 product into +0 there. */
+static inline float clamp_to(float value, float lower, float upper)
+{
+    value = value < lower ? lower : value;
+    return value > upper ? upper : value;
+}
+
+static void catmull(float normalized, ptrdiff_t dimension, float *outer0, float *middle,
+                    float *outer3, float *w0, float *w3, float *g)
+{
+    float pixel = normalized * (float)dimension - 0.5f;
+    float base_index = floorf(pixel);
+    float t = clamp_to(pixel - base_index, 0.0f, 1.0f);
+    float square = t * t, cube = square * t;
+    float w1 = 1.0f - 2.5f * square + 1.5f * cube;
+    float w2 = 0.5f * t + 2.0f * square - 1.5f * cube;
+    *w0 = -0.5f * t + square - 0.5f * cube;
+    *w3 = -0.5f * square + 0.5f * cube;
+    *g = w1 + w2;
+    float base = base_index + 0.5f;
+    float lower = 0.5f, upper = (float)dimension - 0.5f;
+    *outer0 = clamp_to(base - 1.0f, lower, upper);
+    *middle = clamp_to(base + w2 / *g, lower, upper);
+    *outer3 = clamp_to(base + 2.0f, lower, upper);
+}
+
+/* `_sample_linear`: bilinear at pixel-centre coordinates, clamped to the edge. */
+static void sample_linear(const float *image, ptrdiff_t sy, ptrdiff_t sx, ptrdiff_t sc,
+                          ptrdiff_t height, ptrdiff_t width, ptrdiff_t channels, float x,
+                          float y, float *out)
+{
+    float px = x - 0.5f, py = y - 0.5f;
+    float fx = floorf(px), fy = floorf(py);
+    ptrdiff_t x0 = fx < 0.0f ? 0 : fx > (float)(width - 1) ? width - 1 : (ptrdiff_t)fx;
+    ptrdiff_t y0 = fy < 0.0f ? 0 : fy > (float)(height - 1) ? height - 1 : (ptrdiff_t)fy;
+    ptrdiff_t x1 = x0 + 1 < width ? x0 + 1 : width - 1;
+    ptrdiff_t y1 = y0 + 1 < height ? y0 + 1 : height - 1;
+    float tx = clamp01(px - (float)x0), ty = clamp01(py - (float)y0);
+    for (ptrdiff_t c = 0; c < channels; c++) {
+        const float *plane = image + c * sc;
+        float top = plane[y0 * sy + x0 * sx] * (1.0f - tx) + plane[y0 * sy + x1 * sx] * tx;
+        float bottom = plane[y1 * sy + x0 * sx] * (1.0f - tx) + plane[y1 * sy + x1 * sx] * tx;
+        out[c] = top * (1.0f - ty) + bottom * ty;
+    }
+}
+
+void nr_history_sample(const float *history, ptrdiff_t sy, ptrdiff_t sx, ptrdiff_t sc,
+                       ptrdiff_t height, ptrdiff_t width, ptrdiff_t channels,
+                       const float *u, const float *v, ptrdiff_t rows, ptrdiff_t columns,
+                       float *output)
+{
+    NR_PARALLEL_FOR("omp parallel for schedule(dynamic, 4)")
+    for (ptrdiff_t r = 0; r < rows; r++) {
+        for (ptrdiff_t q = 0; q < columns; q++) {
+            ptrdiff_t at = r * columns + q;
+            float xo0, xm, xo3, xw0, xw3, xg, yo0, ym, yo3, yw0, yw3, yg;
+            catmull(u[at], width, &xo0, &xm, &xo3, &xw0, &xw3, &xg);
+            catmull(v[at], height, &yo0, &ym, &yo3, &yw0, &yw3, &yg);
+            float weights[5] = { xw0 * yg, xg * yw0, xg * yg, xg * yw3, xw3 * yg };
+            float points[5][2] = { { xo0, ym }, { xm, yo0 }, { xm, ym }, { xm, yo3 }, { xo3, ym } };
+            float taps[5][8];
+            for (int k = 0; k < 5; k++)
+                sample_linear(history, sy, sx, sc, height, width, channels, points[k][0],
+                              points[k][1], taps[k]);
+            float sum = 0.0f;
+            for (int k = 0; k < 5; k++) sum = sum + weights[k];
+            float *out = output + at * channels;
+            for (ptrdiff_t c = 0; c < channels; c++) {
+                float total = 0.0f;
+                for (int k = 0; k < 5; k++) total = total + weights[k] * taps[k][c];
+                out[c] = total / sum;
+            }
+        }
+    }
+}

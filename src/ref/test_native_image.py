@@ -422,6 +422,27 @@ def fused_grade_checks(rng):
     check(f"fused pass with grade and history: {cases} cases", cases == 24)
 
 
+def history_checks(rng):
+    """The vendor's history reprojection, natively, against MLX-DLSS's NumPy it
+    transcribes: same extent, down, up and four channels, coordinates straying past every
+    edge, exact pixel centres, and a reversed view."""
+    temporal = nr_frame.load_mlx_numpy_modules(("temporal",))[0]
+    for shape, rows, columns in (((45, 70, 3), 45, 70), ((64, 96, 4), 32, 48),
+                                 ((30, 50, 3), 60, 100), ((522, 835, 3), 522, 835)):
+        history = rng.random(shape, dtype=np.float32) * np.float32(4)
+        yy, xx = np.indices((rows, columns), dtype=np.float32)
+        u = ((xx + np.float32(0.5)) / np.float32(columns)
+             + (rng.random((rows, columns), dtype=np.float32) - np.float32(0.5)) * np.float32(0.3))
+        v = ((yy + np.float32(0.5)) / np.float32(rows)
+             + (rng.random((rows, columns), dtype=np.float32) - np.float32(0.5)) * np.float32(0.3))
+        u[0, :4] = (np.arange(4, dtype=np.float32) + np.float32(0.5)) / np.float32(shape[1])
+        same(f"history {shape[1]}x{shape[0]}x{shape[2]} sampled at {columns}x{rows}",
+             nr_image.history_sample(history, u, v), temporal.sample_history(history, u, v))
+    reversed_view = history[..., ::-1]
+    same("history from a reversed view", nr_image.history_sample(reversed_view, u, v),
+         temporal.sample_history(np.ascontiguousarray(reversed_view), u, v))
+
+
 def main():
     if nr_image.library() is None:
         print("  no work/libnr_image.so — `make` builds it; the NumPy path still runs")
@@ -435,6 +456,7 @@ def main():
     fused_checks(rng)
     grade_checks(rng)
     fused_grade_checks(rng)
+    history_checks(rng)
     if FAILURES:
         print(f"\n{len(FAILURES)} FAILED: " + ", ".join(FAILURES), flush=True)
         return 1

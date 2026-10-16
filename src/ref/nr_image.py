@@ -82,6 +82,9 @@ def _library():
     lib.nr_decode8.restype = None
     lib.nr_encode8.argtypes = [ptr, stride, stride, stride, ptr, size, size, C.c_int, ptr]
     lib.nr_encode8.restype = None
+    lib.nr_history_sample.argtypes = [ptr, stride, stride, stride, stride, stride, stride,
+                                      ptr, ptr, stride, stride, ptr]
+    lib.nr_history_sample.restype = None
     return lib
 
 
@@ -384,3 +387,23 @@ def bilinear(image, size):
                            output.ctypes.data)
         source = output
     return source
+
+
+def history_sample(history, u, v):
+    """MLX-DLSS's `sample_history`, the vendor's five-tap Catmull-Rom reprojection, at the
+    normalised coordinates `u`, `v` (one pair per output pixel); byte-identical to it.
+    `None` without the library."""
+    lib = library()
+    if lib is None:
+        return None
+    source = np.require(history, dtype=np.float32, requirements=['A'])
+    u = np.ascontiguousarray(u, dtype=np.float32)
+    v = np.ascontiguousarray(v, dtype=np.float32)
+    if (source.ndim != 3 or min(source.shape) < 1 or source.shape[2] > 8
+            or u.shape != v.shape or u.ndim != 2):
+        raise ValueError('history_sample expects nonempty HWC of at most 8 channels and '
+                         'two coordinate planes of one shape')
+    output = np.empty(u.shape + (source.shape[2],), np.float32)
+    lib.nr_history_sample(source.ctypes.data, *_strides(source), *source.shape,
+                          u.ctypes.data, v.ctypes.data, *u.shape, output.ctypes.data)
+    return output
