@@ -681,7 +681,7 @@ class WizardFixture(unittest.TestCase):
             "render_scale", "min_extent", "profile", "intensity", "detail_strength",
             "colour_strength", "temporal", "hold", "release", "cut_limit"])
         names = {knob["name"]: knob for knob in catalogue}
-        self.assertEqual(names["profile"]["choices"], ["standard", "natural", "cinematic", "neutral"])
+        self.assertEqual(names["profile"]["choices"], ["standard", "natural", "cinematic"])
         self.assertEqual((names["min_extent"]["high"], names["min_extent"]["runtime_high"]), (320, 4096))
         self.assertEqual((names["release"]["high"], names["release"]["runtime_high"]), (64, 255))
         daemon_source = (Path(core.__file__).resolve().parent.parent / "layer/nr_daemon.py").read_text(encoding="utf-8")
@@ -774,6 +774,10 @@ class WizardFixture(unittest.TestCase):
         daemon_source = (Path(core.__file__).resolve().parent.parent / "layer/nr_daemon.py").read_text(encoding="utf-8")
         tree = ast.parse(daemon_source)
         actual_class = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Settings")
+        # The ENGINE's profile table, which stands in for `nr_frame.PROFILES`. It keeps `neutral`
+        # even though the menu no longer offers it: the daemon validates a settings file against
+        # what the engine can run, not against what the UI lists, so a hand-edited file naming
+        # `neutral` is still accepted. `nr_knobs.PROFILES` is the list the menu shows.
         namespace = {"os": os, "math": math, "json": json,
                      "nr_frame": SimpleNamespace(PROFILES={choice: {} for choice in ("standard", "natural", "cinematic", "neutral")})}
         exec(compile(ast.Module(body=[actual_class], type_ignores=[]), "nr_daemon.py", "exec"), namespace)
