@@ -1,0 +1,649 @@
+/* test_nr_xess.c — the XeSS proxy's GPU work on this machine's D3D12 device, without a
+ * game. A colour texture goes through two executes: the first is captured for NR, the
+ * second is handed NR's change. Both are checked against the CPU, for each colour format
+ * the proxy takes, and with the strength at 0 the pass must give the colour back exactly.
+ * Then the change is followed through motion — a uniform motion with the picture moving
+ * along, a half-pixel jitter, and a block whose vectors say it moved while the picture did
+ * not, where the change is not trusted and is filled from around it — and one change fades into the
+ * next over three executes. Every expected value comes from a CPU transcription of
+ * nr_xess.hlsl below.
+ *
+ *   test_nr_xess              a stand-in daemon
+ *   test_nr_xess <pipe>       the daemon listening at <pipe>, for the whole round trip
+ */
+#define NR_XESS_TEST
+#include "nr_xess.c"
+
+static xess_d3d12_execute_params_t seen;
+
+static xess_result_t stub_execute(xess_context_handle_t context, ID3D12GraphicsCommandList *list,
+				  const xess_d3d12_execute_params_t *params)
+{
+	(void)context;
+	(void)list;
+	seen = *params;
+	return 0;
+}
+
+static xess_result_t stub_init(xess_context_handle_t context, const xess_d3d12_init_params_t *params)
+{
+	(void)context;
+	(void)params;
+	return 0;
+}
+
+/* What the stand-in daemons were told about motion: the sum and count of the known
+ * offsets, over every request that carried any. */
+static double motion_sum[2];
+static size_t motion_known;
+
+static void note_motion(const float *motion, uint32_t width, uint32_t height)
+{
+	for (size_t i = 0; motion && i < (size_t)width * height; i++)
+		if (!isnan(motion[2 * i])) {
+			motion_sum[0] += motion[2 * i];
+			motion_sum[1] += motion[2 * i + 1];
+			motion_known++;
+		}
+}
+
+/* Every byte brightened by 20. */
+static int brighten(const uint8_t *frame, const float *motion, uint8_t *answer, uint32_t width,
+		    uint32_t height)
+{
+	note_motion(motion, width, height);
+	for (size_t i = 0; i < (size_t)width * height * 4; i++)
+		answer[i] = (uint8_t)(frame[i] > 235 ? 255 : frame[i] + 20);
+	return 0;
+}
+
+/* Unchanged but for one square, brightened by `spot_level`, so where a change lands is plain
+ * to see and two answers can differ. */
+#define SPOT_X 30
+#define SPOT_Y 18
+static int spot_level = 60;
+
+static int spot(const uint8_t *frame, const float *motion, uint8_t *answer, uint32_t width,
+		uint32_t height)
+{
+	note_motion(motion, width, height);
+	memcpy(answer, frame, (size_t)width * height * 4);
+	for (uint32_t y = SPOT_Y; y < SPOT_Y + 6; y++)
+		for (uint32_t x = SPOT_X; x < SPOT_X + 6; x++)
+			for (int c = 0; c < 3; c++) {
+				uint8_t *b = answer + ((size_t)y * width + x) * 4 + c;
+				*b = (uint8_t)(*b + spot_level > 255 ? 255 : *b + spot_level);
+			}
+	return 0;
+}
+
+static struct {
+	ID3D12Device *device;
+	ID3D12CommandQueue *queue;
+	ID3D12CommandAllocator *allocator;
+	ID3D12GraphicsCommandList *list;
+	ID3D12Fence *fence;
+	UINT64 value;
+	HANDLE event;
+} gpu;
+
+static int submit(void)
+{
+	ID3D12GraphicsCommandList_Close(gpu.list);
+	ID3D12CommandList *lists[] = { (ID3D12CommandList *)gpu.list };
+	ID3D12CommandQueue_ExecuteCommandLists(gpu.queue, 1, lists);
+	ID3D12CommandQueue_Signal(gpu.queue, gpu.fence, ++gpu.value);
+	ID3D12Fence_SetEventOnCompletion(gpu.fence, gpu.value, gpu.event);
+	if (WaitForSingleObject(gpu.event, 10000) != WAIT_OBJECT_0) {
+		printf("FAIL: the GPU did not finish (device removed: 0x%lx)\n",
+		       (unsigned long)ID3D12Device_GetDeviceRemovedReason(gpu.device));
+		return -1;
+	}
+	ID3D12CommandAllocator_Reset(gpu.allocator);
+	ID3D12GraphicsCommandList_Reset(gpu.list, gpu.allocator, NULL);
+	return 0;
+}
+
+#define W 80
+#define H 50
+#define BASE_X 5
+#define BASE_Y 3
+#define IN_W 70
+#define IN_H 45
+#define MOTION_W (2 * IN_W)    /* high-resolution vectors, twice the colour's extent */
+#define MOTION_H (2 * IN_H)
+
+static void pattern(int x, int y, float *rgba)
+{
+	rgba[0] = x / 40.0f;               /* to 2: past the knee, so the gain is exercised */
+	rgba[1] = y / 25.0f;
+	rgba[2] = ((x + y) % 7) / 3.0f;
+	rgba[3] = 0.5f;
+}
+
+static void pack(int kind, const float *c, uint8_t *out)
+{
+	if (kind == KIND_RGBA16F) {
+		uint16_t h[4] = { to_half(c[0]), to_half(c[1]), to_half(c[2]), to_half(c[3]) };
+		memcpy(out, h, 8);
+		return;
+	}
+	uint32_t r = (uint32_t)((to_half(c[0]) + 0x8) >> 4), g = (uint32_t)((to_half(c[1]) + 0x8) >> 4);
+	uint32_t b = (uint32_t)((to_half(c[2]) + 0x10) >> 5);
+	uint32_t v = (r > 0x7BF ? 0x7BF : r) | (g > 0x7BF ? 0x7BF : g) << 11 | (b > 0x3DF ? 0x3DF : b) << 22;
+	memcpy(out, &v, 4);
+}
+
+/* The colour of input pixel (x, y) as the format holds it, the picture moved so that the
+ * pixel shows the pattern at (x + sx, y + sy). */
+static void colour_at(int kind, int x, int y, int sx, int sy, float *rgba)
+{
+	uint8_t packed[8];
+	pattern(x + BASE_X + sx, y + BASE_Y + sy, rgba);
+	pack(kind, rgba, packed);
+	load_texel(packed, kind, rgba);
+}
+
+/* A texture of the given texels, in NON_PIXEL_SHADER_RESOURCE as XeSS's inputs are. */
+static ID3D12Resource *texture(DXGI_FORMAT format, UINT width, UINT height, UINT texel,
+			       void (*fill)(int x, int y, uint8_t *out, const void *how), const void *how)
+{
+	D3D12_RESOURCE_DESC desc = {
+		.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D, .Width = width, .Height = height,
+		.DepthOrArraySize = 1, .MipLevels = 1, .Format = format, .SampleDesc = { 1, 0 },
+	};
+	D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint;
+	UINT rows;
+	UINT64 row_bytes, bytes;
+	ID3D12Device_GetCopyableFootprints(gpu.device, &desc, 0, 1, 0, &footprint, &rows, &row_bytes, &bytes);
+	D3D12_HEAP_PROPERTIES local = { .Type = D3D12_HEAP_TYPE_DEFAULT };
+	ID3D12Resource *tex = NULL, *upload;
+	if (FAILED(ID3D12Device_CreateCommittedResource(gpu.device, &local, D3D12_HEAP_FLAG_NONE, &desc,
+			D3D12_RESOURCE_STATE_COPY_DEST, NULL, &IID_ID3D12Resource, (void **)&tex)))
+		return NULL;
+	ID3D12Device *keep = nr.device;         /* make_buffer works on nr's device */
+	nr.device = gpu.device;
+	upload = make_buffer(D3D12_HEAP_TYPE_UPLOAD, bytes, D3D12_RESOURCE_FLAG_NONE,
+			     D3D12_RESOURCE_STATE_GENERIC_READ);
+	nr.device = keep;
+	uint8_t *mapped;
+	ID3D12Resource_Map(upload, 0, NULL, (void **)&mapped);
+	for (UINT y = 0; y < height; y++)
+		for (UINT x = 0; x < width; x++)
+			fill((int)x, (int)y, mapped + footprint.Offset + (size_t)y * footprint.Footprint.RowPitch
+			     + (size_t)x * texel, how);
+	ID3D12Resource_Unmap(upload, 0, NULL);
+	D3D12_TEXTURE_COPY_LOCATION to = { .pResource = tex, .Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX };
+	D3D12_TEXTURE_COPY_LOCATION from = { .pResource = upload, .Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
+					     .PlacedFootprint = footprint };
+	ID3D12GraphicsCommandList_CopyTextureRegion(gpu.list, &to, 0, 0, 0, &from, NULL);
+	D3D12_RESOURCE_BARRIER b = transition(tex, D3D12_RESOURCE_STATE_COPY_DEST,
+					      D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+	ID3D12GraphicsCommandList_ResourceBarrier(gpu.list, 1, &b);
+	if (submit()) return NULL;
+	ID3D12Resource_Release(upload);
+	return tex;
+}
+
+struct colour_how { int kind, sx, sy; };
+
+static void fill_colour(int x, int y, uint8_t *out, const void *how)
+{
+	const struct colour_how *c = how;
+	float rgba[4];
+	pattern(x + c->sx, y + c->sy, rgba);
+	pack(c->kind, rgba, out);
+}
+
+/* Motion in texels: `how` is { x, y } everywhere, or { x, y, x0, y0, x1, y1 } inside a block
+ * of texels and nothing outside it. */
+static void fill_motion(int x, int y, uint8_t *out, const void *how)
+{
+	const float *m = how;
+	int inside = m[2] == 0 && m[4] == 0 ? 1 : x >= m[2] && y >= m[3] && x < m[4] && y < m[5];
+	uint16_t v[2] = { to_half(inside ? m[0] : 0), to_half(inside ? m[1] : 0) };
+	memcpy(out, v, 4);
+}
+
+/* Until the worker has published a change from a capture after `after` and is idle again. */
+static int wait_change(uint32_t after)
+{
+	for (ULONGLONG until = GetTickCount64() + 60000; GetTickCount64() < until; Sleep(5)) {
+		AcquireSRWLockExclusive(&nr.lock);
+		int done = nr.ready >= 0 && nr.change_anchor[nr.ready] > after && nr.capture == 0;
+		ReleaseSRWLockExclusive(&nr.lock);
+		if (done) return 0;
+	}
+	printf("FAIL: no change was published within 60 s (daemon failures: %u)\n", nr.failed);
+	return -1;
+}
+
+/* The colour an execute handed XeSS, as XeSS would read it. */
+static uint8_t *read_mixed(void)
+{
+	ID3D12Resource *readback = make_buffer(D3D12_HEAP_TYPE_READBACK, nr.bytes,
+					       D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST);
+	D3D12_RESOURCE_BARRIER b = transition(nr.mixed, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+					      D3D12_RESOURCE_STATE_COPY_SOURCE);
+	ID3D12GraphicsCommandList_ResourceBarrier(gpu.list, 1, &b);
+	D3D12_TEXTURE_COPY_LOCATION to = { .pResource = readback, .Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
+					   .PlacedFootprint = nr.footprint };
+	D3D12_TEXTURE_COPY_LOCATION from = { .pResource = nr.mixed, .Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX };
+	ID3D12GraphicsCommandList_CopyTextureRegion(gpu.list, &to, 0, 0, 0, &from, NULL);
+	b = transition(nr.mixed, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+	ID3D12GraphicsCommandList_ResourceBarrier(gpu.list, 1, &b);
+	if (submit()) return NULL;
+	uint8_t *raw, *copy = malloc((size_t)nr.bytes);
+	D3D12_RANGE all = { 0, (SIZE_T)nr.bytes }, none = { 0, 0 };
+	ID3D12Resource_Map(readback, 0, &all, (void **)&raw);
+	memcpy(copy, raw, (size_t)nr.bytes);
+	ID3D12Resource_Unmap(readback, 0, &none);
+	ID3D12Resource_Release(readback);
+	return copy;
+}
+
+/* ---- nr_xess.hlsl's MATCH, REDUCE and APPLY on the CPU ---- */
+
+/* A capture's change as the worker published it: what NR was given and what it answered. */
+struct snapshot {
+	uint8_t given[IN_W * IN_H * 4], answer[IN_W * IN_H * 4];
+};
+
+static void take(struct snapshot *s)
+{
+	memcpy(s->given, nr.frame, sizeof s->given);
+	memcpy(s->answer, nr.answer, sizeof s->answer);
+}
+
+/* The change (c < 3), or what NR was given as `likeness` measures it (c 3-5), as published. */
+static float fine_value(const struct snapshot *s, int x, int y, int c)
+{
+	const uint8_t *g = s->given + ((size_t)y * IN_W + x) * 4, *a = s->answer + ((size_t)y * IN_W + x) * 4;
+	if (c < 3) return half_value[change_half[a[c] << 8 | g[c]]];
+	return half_value[likeness_half[g[c - 3]]];
+}
+
+static float clampf(float v, float lo, float hi)
+{
+	return v < lo ? lo : v > hi ? hi : v;
+}
+
+static void fine_at(const struct snapshot *s, float gx, float gy, float *out)
+{
+	float cx = clampf(gx, 0, IN_W - 1), cy = clampf(gy, 0, IN_H - 1);
+	int ix = (int)floorf(cx), iy = (int)floorf(cy);
+	int jx = ix + 1 < IN_W ? ix + 1 : IN_W - 1, jy = iy + 1 < IN_H ? iy + 1 : IN_H - 1;
+	float fx = cx - floorf(cx), fy = cy - floorf(cy);
+	for (int c = 0; c < 6; c++) {
+		float top = fine_value(s, ix, iy, c) * (1 - fx) + fine_value(s, jx, iy, c) * fx;
+		float bottom = fine_value(s, ix, jy, c) * (1 - fx) + fine_value(s, jx, jy, c) * fx;
+		out[c] = top * (1 - fy) + bottom * fy;
+	}
+}
+
+static void likeness(const float *rgb, float *out)
+{
+	float d[3], white = config.white;
+	for (int c = 0; c < 3; c++) d[c] = (rgb[c] > 0 ? rgb[c] : 0) / white;
+	float lit = 0.2126f * d[0] + 0.7152f * d[1] + 0.0722f * d[2];
+	if (lit > 0.75f)
+		for (int c = 0; c < 3; c++) d[c] *= (0.75f + 0.25f * (1 - expf(-(lit - 0.75f) / 0.25f))) / lit;
+	for (int c = 0; c < 3; c++) out[c] = sqrtf(clampf(d[c], 0, 1));
+}
+
+/* Where the tracker sends pixel (x, y) on the change's grid, jitter included. NULL for an
+ * execute without motion vectors: the change is read in place, wholly trusted. */
+typedef void (*place_fn)(int x, int y, float *gx, float *gy);
+
+static void trusted(const struct snapshot *s, place_fn place, int x, int y, const float *low,
+		    const float *high, float *out)
+{
+	if (!place) {
+		for (int c = 0; c < 3; c++) out[c] = fine_value(s, x, y, c);
+		out[3] = 1;
+		return;
+	}
+	float gx, gy, d[6];
+	place(x, y, &gx, &gy);
+	out[0] = out[1] = out[2] = out[3] = 0;
+	if (gx >= -0.5f && gy >= -0.5f && gx <= IN_W - 0.5f && gy <= IN_H - 0.5f) {
+		fine_at(s, gx, gy, d);
+		float outside = -1e30f;
+		for (int c = 0; c < 3; c++) {
+			float o = low[c] - d[3 + c] > d[3 + c] - high[c] ? low[c] - d[3 + c] : d[3 + c] - high[c];
+			outside = o > outside ? o : outside;
+		}
+		for (int c = 0; c < 3; c++) out[c] = d[c];
+		out[3] = clampf((config.match_to - outside) / (config.match_to - config.match_from), 0, 1);
+	}
+}
+
+#define CELLS_W ((IN_W + CELL - 1) / CELL)
+#define CELLS_H ((IN_H + CELL - 1) / CELL)
+
+/* The change each pixel of a frame whose picture moved by (sx, sy) takes: the newest change
+ * through `place`, the one before it through `old_place` given way `fade` of the way, and the
+ * fill where neither was trusted. */
+static void expected(const struct snapshot *newest, place_fn place, const struct snapshot *old,
+		     place_fn old_place, float fade, int kind, int sx, int sy, float *delta)
+{
+	static float matched[IN_W * IN_H * 7], sums[CELLS_W * CELLS_H * 7];
+	for (int y = 0; y < IN_H; y++)
+		for (int x = 0; x < IN_W; x++) {
+			float low[3] = { 1, 1, 1 }, high[3] = { 0, 0, 0 }, rgba[4], own[3] = { 0 }, l[3];
+			float now[4], then[4];
+			for (int dy = -1; dy <= 1; dy++)
+				for (int dx = -1; dx <= 1; dx++) {
+					int qx = x + dx < 0 ? 0 : x + dx > IN_W - 1 ? IN_W - 1 : x + dx;
+					int qy = y + dy < 0 ? 0 : y + dy > IN_H - 1 ? IN_H - 1 : y + dy;
+					colour_at(kind, qx, qy, sx, sy, rgba);
+					likeness(rgba, l);
+					for (int c = 0; c < 3; c++) {
+						low[c] = l[c] < low[c] ? l[c] : low[c];
+						high[c] = l[c] > high[c] ? l[c] : high[c];
+						if (!dx && !dy) own[c] = l[c];
+					}
+				}
+			trusted(newest, place, x, y, low, high, now);
+			float *m = matched + ((size_t)y * IN_W + x) * 7;
+			for (int c = 0; c < 3; c++) m[c] = now[c] * now[3];
+			m[3] = now[3];
+			if (old) {
+				trusted(old, old_place, x, y, low, high, then);
+				for (int c = 0; c < 3; c++) m[c] = then[c] * then[3] + fade * (m[c] - then[c] * then[3]);
+				m[3] = then[3] + fade * (m[3] - then[3]);
+			}
+			for (int c = 0; c < 3; c++) m[4 + c] = own[c];
+		}
+	for (int cy = 0; cy < CELLS_H; cy++)
+		for (int cx = 0; cx < CELLS_W; cx++) {
+			float *s = sums + ((size_t)cy * CELLS_W + cx) * 7;
+			for (int c = 0; c < 7; c++) s[c] = 0;
+			for (int y = cy * CELL; y < (cy + 1) * CELL && y < IN_H; y++)
+				for (int x = cx * CELL; x < (cx + 1) * CELL && x < IN_W; x++) {
+					const float *m = matched + ((size_t)y * IN_W + x) * 7;
+					for (int c = 0; c < 4; c++) s[c] += m[c];
+					for (int c = 4; c < 7; c++) s[c] += m[3] * m[c];
+				}
+		}
+	for (int y = 0; y < IN_H; y++)
+		for (int x = 0; x < IN_W; x++) {
+			const float *m = matched + ((size_t)y * IN_W + x) * 7;
+			float *out = delta + ((size_t)y * IN_W + x) * 3;
+			float fill[3] = { 0, 0, 0 }, total = 0;
+			for (int c = 0; c < 3; c++) out[c] = m[c];
+			if (m[3] >= 1) continue;
+			for (int dy = -1; dy <= 1; dy++)
+				for (int dx = -1; dx <= 1; dx++) {
+					int cx = x / CELL + dx, cy = y / CELL + dy;
+					if (cx < 0 || cy < 0 || cx >= CELLS_W || cy >= CELLS_H) continue;
+					const float *s = sums + ((size_t)cy * CELLS_W + cx) * 7;
+					if (s[3] < 1e-3f) continue;
+					float apart = 0;
+					for (int c = 0; c < 3; c++) {
+						float alike = s[4 + c] / s[3] - m[4 + c];
+						apart += alike * alike;
+					}
+					float ex = x - ((cx + 0.5f) * CELL - 0.5f), ey = y - ((cy + 0.5f) * CELL - 0.5f);
+					float closeness = clampf(1.5f - sqrtf(ex * ex + ey * ey) / CELL, 0, 1);
+					float weight = s[3] * closeness * expf(-apart / (0.04f * 0.04f));
+					for (int c = 0; c < 3; c++) fill[c] += weight * s[c] / s[3];
+					total += weight;
+				}
+			if (total > 1e-4f)
+				for (int c = 0; c < 3; c++) out[c] += (1 - m[3]) * fill[c] / total;
+		}
+}
+
+/* ---- the cases ---- */
+
+/* The colour an execute handed XeSS, against its own colour plus `delta`. */
+static int compare(const char *name, int kind, UINT texel, const uint8_t *mixed, int sx, int sy,
+		   float strength, const float *delta, int exact_where_zero)
+{
+	int failures = 0;
+	double worst = 0, added = 0;
+	for (int y = 0; y < IN_H; y++)
+		for (int x = 0; x < IN_W; x++) {
+			float o[4], got[4] = { 0 }, white = config.white;
+			colour_at(kind, x, y, sx, sy, o);
+			load_texel(mixed + nr.footprint.Offset + (size_t)y * nr.footprint.Footprint.RowPitch
+				   + (size_t)x * texel, kind, got);
+			float lit = (0.2126f * o[0] + 0.7152f * o[1] + 0.0722f * o[2]) / white;
+			float gain = lit > 0.75f ? lit / (0.75f + 0.25f * (1 - expf(-(lit - 0.75f) / 0.25f))) : 1;
+			for (int c = 0; c < 3; c++) {
+				float d = delta[((size_t)y * IN_W + x) * 3 + c];
+				float want = o[c] + white * strength * gain * d;
+				if (want < 0) want = 0;
+				double tolerance = kind == KIND_RGBA16F ? 2e-3 * (1 + fabs(want)) : 4e-2 * (1 + fabs(want));
+				double error = fabs(got[c] - want);
+				if (exact_where_zero && (strength == 0 || d == 0) && got[c] != o[c]) error = 1e9;
+				if (error > worst) worst = error;
+				added += fabs(got[c] - o[c]);
+				if (error > tolerance && failures++ < 3)
+					printf("FAIL %s: (%d, %d) channel %d is %.5f, expected %.5f\n",
+					       name, x, y, c, got[c], want);
+			}
+		}
+	printf("%s %s: the colour moved by %.4f on average; worst error %.2g\n",
+	       failures ? "FAIL" : "ok  ", name, added / (IN_W * IN_H * 3), worst);
+	return failures;
+}
+
+static xess_d3d12_execute_params_t params_for(ID3D12Resource *tex, ID3D12Resource *motion,
+					      const float *jitter)
+{
+	xess_d3d12_execute_params_t p = { .pColorTexture = tex, .pVelocityTexture = motion,
+		.exposureScale = 1, .inputWidth = IN_W, .inputHeight = IN_H,
+		.inputColorBase = { BASE_X, BASE_Y },
+		.jitterOffsetX = jitter ? jitter[0] : 0, .jitterOffsetY = jitter ? jitter[1] : 0 };
+	return p;
+}
+
+/* One case: execute on the first frame, wait for NR, execute on the second — the picture
+ * moved by (sx, sy), with its own vectors and jitter — and compare what XeSS was handed
+ * with the CPU's apply pass. */
+static int run(DXGI_FORMAT format, const char *name, float strength, int sx, int sy,
+	       ID3D12Resource *motion1, ID3D12Resource *motion2, const float *jitter1,
+	       const float *jitter2, place_fn place)
+{
+	UINT texel;
+	int kind = kind_of(format, &texel), failures = 0;
+	struct colour_how first = { kind, 0, 0 }, second = { kind, sx, sy };
+	ID3D12Resource *tex1 = texture(format, W, H, texel, fill_colour, &first);
+	ID3D12Resource *tex2 = sx || sy ? texture(format, W, H, texel, fill_colour, &second) : tex1;
+	if (!tex1 || !tex2) {
+		printf("FAIL %s: no texture\n", name);
+		return 1;
+	}
+	nr.width = 0;                       /* start over: a rebuild, as at a resolution change */
+	config.strength = strength;
+
+	/* first execute: captured, and XeSS gets the game's own colour */
+	xess_d3d12_execute_params_t params = params_for(tex1, motion1, jitter1);
+	uint32_t before = nr.sequence;
+	xessD3D12Execute((xess_context_handle_t)1, gpu.list, &params);
+	if (submit() || wait_change(before)) return 1;
+	if (seen.pColorTexture != tex1 || seen.inputColorBase.x != BASE_X) {
+		printf("FAIL %s: the first execute did not hand XeSS the game's colour\n", name);
+		failures++;
+	}
+	uint8_t *raw;
+	D3D12_RANGE all = { 0, (SIZE_T)nr.bytes }, none = { 0, 0 };
+	ID3D12Resource_Map(nr.readback, 0, &all, (void **)&raw);
+	for (int y = 0; y < IN_H; y++)
+		for (int x = 0; x < IN_W; x++) {
+			float c[4];
+			uint8_t want[8];
+			pattern(x + BASE_X, y + BASE_Y, c);
+			pack(kind, c, want);
+			if (memcmp(raw + nr.footprint.Offset + (size_t)y * nr.footprint.Footprint.RowPitch
+				   + (size_t)x * texel, want, texel) && failures++ < 3)
+				printf("FAIL %s: captured texel (%d, %d) differs\n", name, x, y);
+		}
+	ID3D12Resource_Unmap(nr.readback, 0, &none);
+	static struct snapshot change;
+	take(&change);
+
+	/* second execute: XeSS gets the colour with the change added */
+	params = params_for(tex2, motion2, jitter2);
+	xessD3D12Execute((xess_context_handle_t)1, gpu.list, &params);
+	if (seen.pColorTexture != nr.mixed || seen.inputColorBase.x || seen.inputColorBase.y) {
+		printf("FAIL %s: the second execute did not hand XeSS the changed colour\n", name);
+		return 1;
+	}
+	uint8_t *mixed = read_mixed();
+	if (!mixed) return 1;
+	static float delta[IN_W * IN_H * 3];
+	expected(&change, place, NULL, NULL, 1, kind, sx, sy, delta);
+	failures += compare(name, kind, texel, mixed, sx, sy, strength, delta, !place);
+	free(mixed);
+	if (tex2 != tex1) ID3D12Resource_Release(tex2);
+	ID3D12Resource_Release(tex1);
+	return failures != 0;
+}
+
+/* The surface at p was at p + (3, -2), and the picture moved so: its change is read there. */
+static void moved_uniformly(int x, int y, float *gx, float *gy)
+{
+	*gx = x + 3.0f;
+	*gy = y - 2.0f;
+}
+
+/* No motion, the first frame drawn half a pixel left of the second: its grid is read half a
+ * pixel to the right. */
+static void jittered(int x, int y, float *gx, float *gy)
+{
+	*gx = x + 0.5f;
+	*gy = (float)y;
+}
+
+/* A block of texels whose vectors say it moved by 10 colour pixels, over a picture that did
+ * not move: its pixels look where it says, see something else, and are filled from around. */
+#define BLOCK_X0 50
+#define BLOCK_Y0 30
+#define BLOCK_X1 66     /* through the middle of the spot: half of it takes the change */
+#define BLOCK_Y1 60
+static void claimed(int x, int y, float *gx, float *gy)
+{
+	int tx = 2 * x + 1, ty = 2 * y + 1;           /* the texel nearest the pixel's centre */
+	int inside = tx >= BLOCK_X0 && ty >= BLOCK_Y0 && tx < BLOCK_X1 && ty < BLOCK_Y1;
+	*gx = x + (inside ? 10.0f : 0.0f);
+	*gy = (float)y;
+}
+
+static void still(int x, int y, float *gx, float *gy)
+{
+	*gx = (float)x;
+	*gy = (float)y;
+}
+
+/* Two answers that differ, and the third execute shows the first giving way to the second:
+ * a third of the way, since a change came every execute or so. */
+static int run_fade(ID3D12Resource *motion)
+{
+	UINT texel;
+	int kind = kind_of(DXGI_FORMAT_R16G16B16A16_FLOAT, &texel), failures = 0;
+	struct colour_how how = { kind, 0, 0 };
+	ID3D12Resource *tex = texture(DXGI_FORMAT_R16G16B16A16_FLOAT, W, H, texel, fill_colour, &how);
+	nr.width = 0;
+	config.strength = 1;
+	static struct snapshot first, second;
+	xess_d3d12_execute_params_t params = params_for(tex, motion, NULL);
+
+	spot_level = 60;
+	uint32_t before = nr.sequence;
+	xessD3D12Execute((xess_context_handle_t)1, gpu.list, &params);
+	if (submit() || wait_change(before)) return 1;
+	take(&first);
+
+	spot_level = 20;
+	before = nr.sequence;
+	xessD3D12Execute((xess_context_handle_t)1, gpu.list, &params);
+	if (submit() || wait_change(before)) return 1;
+	take(&second);
+
+	xessD3D12Execute((xess_context_handle_t)1, gpu.list, &params);
+	float fade = (float)(nr.sequence - nr.fade_start + 1) / (nr.period > 1 ? nr.period : 1);
+	if (nr.fading < 0 || fade >= 1) {
+		printf("FAIL fade: the first change is not fading (fade %.2f)\n", fade);
+		return 1;
+	}
+	uint8_t *mixed = read_mixed();
+	if (!mixed) return 1;
+	static float delta[IN_W * IN_H * 3];
+	expected(&second, still, &first, still, fade, kind, 0, 0, delta);
+	char name[80];
+	snprintf(name, sizeof name, "one answer giving way to the next, %.0f%% of the way", 100 * fade);
+	failures += compare(name, kind, texel, mixed, 0, 0, 1, delta, 0);
+	free(mixed);
+	ID3D12Resource_Release(tex);
+	spot_level = 60;
+	return failures != 0;
+}
+
+int main(int argc, char **argv)
+{
+	_snwprintf(log_path, MAX_PATH + 16, L"test_nr_xess.log");
+	build_tables();
+	real_execute = stub_execute;
+	real_init = stub_init;
+	if (argc > 1) {
+		snprintf(config.pipe, sizeof config.pipe, "%s", argv[1]);
+		exchange = exchange_pipe;
+	} else {
+		exchange = brighten;
+	}
+	if (FAILED(D3D12CreateDevice(NULL, D3D_FEATURE_LEVEL_11_0, &IID_ID3D12Device, (void **)&gpu.device))) {
+		printf("FAIL: no D3D12 device\n");
+		return 1;
+	}
+	D3D12_COMMAND_QUEUE_DESC queue = { .Type = D3D12_COMMAND_LIST_TYPE_DIRECT };
+	ID3D12Device_CreateCommandQueue(gpu.device, &queue, &IID_ID3D12CommandQueue, (void **)&gpu.queue);
+	ID3D12Device_CreateCommandAllocator(gpu.device, D3D12_COMMAND_LIST_TYPE_DIRECT,
+					    &IID_ID3D12CommandAllocator, (void **)&gpu.allocator);
+	ID3D12Device_CreateCommandList(gpu.device, 0, D3D12_COMMAND_LIST_TYPE_DIRECT, gpu.allocator, NULL,
+				       &IID_ID3D12GraphicsCommandList, (void **)&gpu.list);
+	ID3D12Device_CreateFence(gpu.device, 0, D3D12_FENCE_FLAG_NONE, &IID_ID3D12Fence, (void **)&gpu.fence);
+	gpu.event = CreateEventW(NULL, FALSE, FALSE, NULL);
+
+	int failed = run(DXGI_FORMAT_R16G16B16A16_FLOAT, "R16G16B16A16_FLOAT", 1, 0, 0, NULL, NULL,
+			 NULL, NULL, NULL);
+	failed += run(DXGI_FORMAT_R11G11B10_FLOAT, "R11G11B10_FLOAT", 1, 0, 0, NULL, NULL, NULL, NULL, NULL);
+	failed += run(DXGI_FORMAT_R16G16B16A16_FLOAT, "R16G16B16A16_FLOAT, strength 0", 0, 0, 0, NULL,
+		      NULL, NULL, NULL, NULL);
+	if (argc > 1) {
+		printf(failed ? "FAILED\n" : "all passed\n");
+		return failed != 0;
+	}
+
+	xess_d3d12_init_params_t init = { .outputResolution = { MOTION_W, MOTION_H },
+					  .initFlags = XESS_INIT_FLAG_HIGH_RES_MV };
+	xessD3D12Init((xess_context_handle_t)1, &init);
+	exchange = spot;
+	float rest[2] = { 0, 0 }, uniform[2] = { 6, -4 };             /* texels: (3, -2) pixels */
+	float block[6] = { 20, 0, BLOCK_X0, BLOCK_Y0, BLOCK_X1, BLOCK_Y1 }; /* 10 pixels, in it only */
+	ID3D12Resource *none = texture(DXGI_FORMAT_R16G16_FLOAT, MOTION_W, MOTION_H, 4, fill_motion, rest);
+	ID3D12Resource *moving = texture(DXGI_FORMAT_R16G16_FLOAT, MOTION_W, MOTION_H, 4, fill_motion, uniform);
+	ID3D12Resource *partly = texture(DXGI_FORMAT_R16G16_FLOAT, MOTION_W, MOTION_H, 4, fill_motion, block);
+	float half_left[2] = { 0.5f, 0 };
+	failed += run(DXGI_FORMAT_R16G16B16A16_FLOAT, "motion (3, -2), the picture with it", 1, 3, -2,
+		      moving, moving, NULL, NULL, moved_uniformly);
+	/* The second execute captured too, with the first frame's tracker: the daemon is told
+	 * each pixel's offset back to the first frame NR was given, (3, -2) where it is known. */
+	for (ULONGLONG until = GetTickCount64() + 5000; GetTickCount64() < until && !motion_known; Sleep(5)) {}
+	for (ULONGLONG until = GetTickCount64() + 5000; GetTickCount64() < until && nr.capture; Sleep(5)) {}
+	double mean_x = motion_known ? motion_sum[0] / motion_known : 0;
+	double mean_y = motion_known ? motion_sum[1] / motion_known : 0;
+	int told = motion_known > IN_W * IN_H / 2 && fabs(mean_x - 3) < 1e-6 && fabs(mean_y + 2) < 1e-6;
+	printf("%s the daemon is told the motion: (%.3f, %.3f) over %zu pixels\n", told ? "ok  " : "FAIL",
+	       mean_x, mean_y, motion_known);
+	failed += !told;
+	failed += run(DXGI_FORMAT_R16G16B16A16_FLOAT, "jitter (0.5, 0) then (0, 0)", 1, 0, 0, none, none,
+		      half_left, rest, jittered);
+	failed += run(DXGI_FORMAT_R16G16B16A16_FLOAT, "vectors claiming a move the picture did not make",
+		      1, 0, 0, none, partly, NULL, NULL, claimed);
+	failed += run_fade(none);
+	printf(failed ? "FAILED\n" : "all passed\n");
+	return failed != 0;
+}
