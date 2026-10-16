@@ -8,6 +8,9 @@
  *     --off             XeSS alone: the proxy hands every frame straight on
  *     --warp 0|1, --match FROM TO, --history 0|1   the proxy's own settings
  *     --every N         write every Nth frame (default 1)
+ *     --inputs DIR      also the colour XeSS was handed, the proxy's change in it, to
+ *                       DIR\%04u.ppm: whether something in the output came in with the
+ *                       change or grew in XeSS's own history
  *
  * Writes <out>\%04u.ppm: XeSS's output for each frame through the proxy's display encode,
  * so a change to the proxy can be seen, and compared with XeSS alone, without anyone
@@ -104,9 +107,9 @@ static int read_file(const char *path, uint8_t *data, size_t bytes)
 	return got == bytes ? 0 : -1;
 }
 
-/* XeSS's output, RGBA16F, through the proxy's encode, as a PPM. */
+/* XeSS's output (RGBA16F), or the colour it was handed, through the proxy's encode, as a PPM. */
 static void write_frame(const char *path, const uint8_t *mapped, D3D12_PLACED_SUBRESOURCE_FOOTPRINT f,
-			UINT width, UINT height)
+			UINT width, UINT height, int kind, UINT texel)
 {
 	FILE *file = fopen(path, "wb");
 	if (!file) return;
@@ -117,7 +120,7 @@ static void write_frame(const char *path, const uint8_t *mapped, D3D12_PLACED_SU
 	for (UINT y = 0; y < height; y++) {
 		const uint8_t *line = mapped + f.Offset + (size_t)y * f.Footprint.RowPitch;
 		for (UINT x = 0; x < width; x++) {
-			load_texel(line + (size_t)x * 8, KIND_RGBA16F, rgb);
+			load_texel(line + (size_t)x * texel, kind, rgb);
 			encode_proxy(rgb, inverse_white, px);
 			memcpy(row + (size_t)x * 3, px, 3);
 		}
@@ -133,7 +136,7 @@ int main(int argc, char **argv)
 		printf("usage: replay_nr_xess <recording> <out> <Intel's libxess.dll> [options]\n");
 		return 2;
 	}
-	const char *recording = argv[1], *out = argv[2], *intel = argv[3];
+	const char *recording = argv[1], *out = argv[2], *intel = argv[3], *inputs = NULL;
 	int interval = 28, every = 1, off = 0;
 	snprintf(config.pipe, sizeof config.pipe, "\\\\.\\pipe\\nr-xess-replay");
 	for (int i = 4; i < argc; i++) {
@@ -142,6 +145,7 @@ int main(int argc, char **argv)
 		else if (!strcmp(argv[i], "--strength") && i + 1 < argc) config.strength = (float)atof(argv[++i]);
 		else if (!strcmp(argv[i], "--every") && i + 1 < argc) every = atoi(argv[++i]);
 		else if (!strcmp(argv[i], "--off")) off = 1;
+		else if (!strcmp(argv[i], "--inputs") && i + 1 < argc) inputs = argv[++i];
 		else if (!strcmp(argv[i], "--warp") && i + 1 < argc) config.warp = atoi(argv[++i]);
 		else if (!strcmp(argv[i], "--history") && i + 1 < argc) config.motion_history = atoi(argv[++i]);
 		else if (!strcmp(argv[i], "--match") && i + 2 < argc) {
@@ -266,6 +270,13 @@ int main(int argc, char **argv)
 						D3D12_RESOURCE_STATE_GENERIC_READ);
 	ID3D12Resource *readback = make_buffer(D3D12_HEAP_TYPE_READBACK, output_bytes, D3D12_RESOURCE_FLAG_NONE,
 					       D3D12_RESOURCE_STATE_COPY_DEST);
+	UINT64 input_bytes;
+	D3D12_PLACED_SUBRESOURCE_FOOTPRINT input_layout = footprint_of(colour, &input_bytes);
+	ID3D12Resource *input_readback = inputs ? make_buffer(D3D12_HEAP_TYPE_READBACK, input_bytes,
+				D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST) : NULL;
+	UINT input_texel;
+	int input_kind = kind_of((DXGI_FORMAT)format, &input_texel);
+	if (inputs) CreateDirectoryA(inputs, NULL);
 	nr.device = NULL;                       /* the hook takes it from the command list */
 	size_t colour_size = (size_t)width * height * texel, motion_size = (size_t)motion_width * motion_height * 4;
 	uint8_t *data = malloc(colour_size + motion_size);
@@ -298,14 +309,35 @@ int main(int argc, char **argv)
 		ID3D12GraphicsCommandList_CopyTextureRegion(gpu.list, &to, 0, 0, 0, &from, NULL);
 		b = transition(output, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 		ID3D12GraphicsCommandList_ResourceBarrier(gpu.list, 1, &b);
+		/* the hook handed XeSS its mixed colour when it applied a change, else the game's */
+		int input = inputs && i % every == 0;
+		if (input) {
+			ID3D12Resource *handed = config.enabled && nr.applied >= 0 && nr.mixed ? nr.mixed : colour;
+			b = transition(handed, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE);
+			ID3D12GraphicsCommandList_ResourceBarrier(gpu.list, 1, &b);
+			D3D12_TEXTURE_COPY_LOCATION into = { .pResource = input_readback,
+				.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT, .PlacedFootprint = input_layout };
+			D3D12_TEXTURE_COPY_LOCATION taken = { .pResource = handed, .Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX };
+			ID3D12GraphicsCommandList_CopyTextureRegion(gpu.list, &into, 0, 0, 0, &taken, NULL);
+			b = transition(handed, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+			ID3D12GraphicsCommandList_ResourceBarrier(gpu.list, 1, &b);
+		}
 		if (submit()) return 1;
 		if (i % every == 0) {
 			uint8_t *mapped;
 			D3D12_RANGE all = { 0, (SIZE_T)output_bytes }, none = { 0, 0 };
 			ID3D12Resource_Map(readback, 0, &all, (void **)&mapped);
 			snprintf(path, sizeof path, "%s\\%04zu.ppm", out, i);
-			write_frame(path, mapped, output_layout, out_width, out_height);
+			write_frame(path, mapped, output_layout, out_width, out_height, KIND_RGBA16F, 8);
 			ID3D12Resource_Unmap(readback, 0, &none);
+		}
+		if (input) {
+			uint8_t *mapped;
+			D3D12_RANGE all = { 0, (SIZE_T)input_bytes }, none = { 0, 0 };
+			ID3D12Resource_Map(input_readback, 0, &all, (void **)&mapped);
+			snprintf(path, sizeof path, "%s\\%04zu.ppm", inputs, i);
+			write_frame(path, mapped, input_layout, width, height, input_kind, input_texel);
+			ID3D12Resource_Unmap(input_readback, 0, &none);
 		}
 		/* the game's own pace, so the daemon keeps up with the frames as it did there */
 		do {

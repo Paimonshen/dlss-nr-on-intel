@@ -41,6 +41,8 @@
 
 #include "../layer/nr_transport.h"
 /* nr_xess.hlsl, compiled by fxc once for each pass, each with the root signature */
+#include "nr_xess_clear.h"
+#include "nr_xess_claim.h"
 #include "nr_xess_track.h"
 #include "nr_xess_match.h"
 #include "nr_xess_reduce.h"
@@ -384,7 +386,7 @@ struct constants {
 	float motion_texels[2];
 	float jitter[2];
 	float previous_jitter[2];
-	uint32_t unused, fading;
+	uint32_t vectors, fading;
 	float old_shift[2];
 	float fade;
 	uint32_t cell;
@@ -402,9 +404,11 @@ static struct {
 	ID3D12Device *device;
 	ID3D12RootSignature *signature;
 	ID3D12PipelineState *pipeline;
+	ID3D12PipelineState *clear_pipeline, *claim_pipeline;
 	ID3D12PipelineState *track_pipeline, *match_pipeline, *reduce_pipeline;
-	ID3D12Resource *matched;     /* MATCH's five floats a pixel */
-	ID3D12Resource *sums;        /* ... summed over each cell by REDUCE */
+	ID3D12Resource *claims;      /* CLAIM's sixteen bytes a pixel, read by TRACK */
+	ID3D12Resource *matched;     /* MATCH's seven floats a pixel */
+	ID3D12Resource *sums;        /* ... summed over each cell by REDUCE, with the vectors */
 	/* sized to the colour, and rebuilt when it changes */
 	UINT width, height, texel;
 	DXGI_FORMAT format;
@@ -447,6 +451,8 @@ static struct {
 	int applied;
 	uint32_t fade_start, arrived;
 	float period;                /* executes between changes, smoothed */
+	int rising;                  /* a cut came: the next change comes in from nothing ... */
+	uint32_t rise_start;         /* ... from this execute */
 	UINT cells_width, cells_height;
 	/* The warp checked on the game's own frames: with a capture comes the tracker of the
 	 * change in use, and the worker compares the frame NR had, moved by it, with this one. */
@@ -730,6 +736,7 @@ static void release_sized(void)
 		nr.tracker[t].live = 0;
 	}
 	drop(&nr.check_readback);
+	drop(&nr.claims);
 	drop(&nr.matched);
 	drop(&nr.sums);
 	free(nr.frame);
@@ -752,9 +759,9 @@ static void release_motion(void)
 
 static int build_device(ID3D12Device *device)
 {
-	ID3D12PipelineState **pipelines[4] = { &nr.track_pipeline, &nr.match_pipeline,
-						&nr.reduce_pipeline, &nr.pipeline };
-	for (int i = 0; i < 4; i++)
+	ID3D12PipelineState **pipelines[6] = { &nr.clear_pipeline, &nr.claim_pipeline, &nr.track_pipeline,
+						&nr.match_pipeline, &nr.reduce_pipeline, &nr.pipeline };
+	for (int i = 0; i < 6; i++)
 		if (*pipelines[i]) {
 			ID3D12PipelineState_Release(*pipelines[i]);
 			*pipelines[i] = NULL;
@@ -773,10 +780,11 @@ static int build_device(ID3D12Device *device)
 		say("the compute passes' root signature was refused\n");
 		return -1;
 	}
-	const void *code[4] = { nr_xess_track, nr_xess_match, nr_xess_reduce, nr_xess_apply };
-	SIZE_T sizes[4] = { sizeof nr_xess_track, sizeof nr_xess_match, sizeof nr_xess_reduce,
-			    sizeof nr_xess_apply };
-	for (int i = 0; i < 4; i++) {
+	const void *code[6] = { nr_xess_clear, nr_xess_claim, nr_xess_track, nr_xess_match,
+				nr_xess_reduce, nr_xess_apply };
+	SIZE_T sizes[6] = { sizeof nr_xess_clear, sizeof nr_xess_claim, sizeof nr_xess_track,
+			    sizeof nr_xess_match, sizeof nr_xess_reduce, sizeof nr_xess_apply };
+	for (int i = 0; i < 6; i++) {
 		D3D12_COMPUTE_PIPELINE_STATE_DESC desc = {
 			.pRootSignature = nr.signature, .CS = { code[i], sizes[i] },
 		};
@@ -818,11 +826,13 @@ static int build_sized(UINT width, UINT height, DXGI_FORMAT format, int kind, UI
 	if (!nr.readback || !nr.staging || !nr.output) return -1;
 	nr.cells_width = (width + CELL - 1) / CELL;
 	nr.cells_height = (height + CELL - 1) / CELL;
+	nr.claims = make_buffer(D3D12_HEAP_TYPE_DEFAULT, (UINT64)width * height * 16,
+				D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
 	nr.matched = make_buffer(D3D12_HEAP_TYPE_DEFAULT, (UINT64)width * height * 28,
 				 D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
-	nr.sums = make_buffer(D3D12_HEAP_TYPE_DEFAULT, (UINT64)nr.cells_width * nr.cells_height * 28,
+	nr.sums = make_buffer(D3D12_HEAP_TYPE_DEFAULT, (UINT64)nr.cells_width * nr.cells_height * 36,
 			      D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
-	if (!nr.matched || !nr.sums) return -1;
+	if (!nr.claims || !nr.matched || !nr.sums) return -1;
 	for (int k = 0; k < CHANGES; k++) {
 		nr.change[k] = make_buffer(D3D12_HEAP_TYPE_UPLOAD, (UINT64)width * height * 16,
 					   D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
@@ -948,9 +958,16 @@ static void record_write(int s)
 	UINT row_bytes[2] = { rec.width * nr.texel, rec.motion_width * 4 };
 	for (int i = 0; i < 2; i++) {
 		const uint8_t *mapped = NULL;
-		D3D12_RANGE all = { 0, (SIZE_T)(layout[i]->Offset + (UINT64)rows[i] * layout[i]->Footprint.RowPitch) };
+		/* To the last row's last texel: the colour's buffer ends there, short of a whole
+		 * pitch, and a range past its end is refused. */
+		D3D12_RANGE all = { 0, (SIZE_T)(layout[i]->Offset + (UINT64)(rows[i] - 1) * layout[i]->Footprint.RowPitch
+						+ row_bytes[i]) };
 		D3D12_RANGE none = { 0, 0 };
-		if (FAILED(ID3D12Resource_Map(parts[i], 0, &all, (void **)&mapped))) continue;
+		if (FAILED(ID3D12Resource_Map(parts[i], 0, &all, (void **)&mapped))) {
+			say("the recording could not read frame %u's %s back\n", rec.slot[s].index,
+			    i ? "vectors" : "colour");
+			continue;
+		}
 		for (UINT y = 0; y < rows[i]; y++) {
 			DWORD written;
 			WriteFile(file, mapped + layout[i]->Offset + (size_t)y * layout[i]->Footprint.RowPitch,
@@ -1206,6 +1223,7 @@ static ID3D12Resource *record(ID3D12GraphicsCommandList *list, const xess_d3d12_
 	if (p->resetHistory) {                  /* a cut: the change belongs to the old shot */
 		nr.ready = -1;
 		nr.epoch++;
+		nr.rising = 1;
 	}
 	uint32_t in_flight = nr.capture ? nr.capture_sequence : 0;
 	int capture = nr.capture == 0;
@@ -1228,6 +1246,7 @@ static ID3D12Resource *record(ID3D12GraphicsCommandList *list, const xess_d3d12_
 			if (nr.arrived)
 				nr.period = 0.75f * nr.period + 0.25f * (float)(sequence - nr.arrived);
 		}
+		if (change >= 0 && nr.applied < 0) nr.rise_start = sequence;
 		nr.applied = change;
 		nr.arrived = sequence;
 	}
@@ -1237,6 +1256,17 @@ static ID3D12Resource *record(ID3D12GraphicsCommandList *list, const xess_d3d12_
 		if (fade >= 1) {
 			nr.fading = -1;
 			fade = 1;
+		}
+	}
+	/* The first change after a cut comes in over a period from nothing, as later ones turn
+	 * into each other: a few frames of the plain shot, then NR's look all at once, a few times
+	 * a cutscene, read as the picture jumping. */
+	float rise = 1;
+	if (nr.rising && change >= 0) {
+		rise = (float)(sequence - nr.rise_start + 1) / (nr.period > 1 ? nr.period : 1);
+		if (rise >= 1) {
+			nr.rising = 0;
+			rise = 1;
 		}
 	}
 	int old = nr.fading;
@@ -1278,6 +1308,7 @@ static ID3D12Resource *record(ID3D12GraphicsCommandList *list, const xess_d3d12_
 					? nr.motion[1 - nr.motion_next] : NULL;
 	int apply = change >= 0;
 	int jobs = update_count + (fresh >= 0);
+	int claiming = warp && update_count > 0;      /* CLAIM, for the trackers TRACK carries on */
 
 	ID3D12GraphicsCommandList *l = list;
 	struct batch b = { .count = 0 };
@@ -1338,6 +1369,7 @@ static ID3D12Resource *record(ID3D12GraphicsCommandList *list, const xess_d3d12_
 		add(&b, nr.tracker[t].buffer[1 - c], common, write);
 	}
 	if (fresh >= 0) add(&b, nr.tracker[fresh].buffer[1 - nr.tracker[fresh].current], common, write);
+	if (claiming) add(&b, nr.claims, common, write);
 	if (apply) {
 		add(&b, nr.staging, dest, read);
 		add(&b, nr.matched, common, write);
@@ -1358,12 +1390,26 @@ static ID3D12Resource *record(ID3D12GraphicsCommandList *list, const xess_d3d12_
 			.motion_texels = { (float)motion_width / width, (float)motion_height / height },
 			.jitter = { jitter[0], jitter[1] },
 			.previous_jitter = { nr.previous_jitter[0], nr.previous_jitter[1] },
+			.vectors = (uint32_t)claiming | (claiming && motion_before ? 2u : 0u),
 		};
+		if (claiming) {
+			/* CLEAR, then CLAIM: which surfaces came from each of the last frame's pixels */
+			ID3D12Resource *vectors[5] = { motion_now, motion_now, motion_now, motion_now, motion_now };
+			ID3D12GraphicsCommandList_SetPipelineState(l, nr.clear_pipeline);
+			bind(l, &k, vectors, nr.claims);
+			D3D12_RESOURCE_BARRIER cleared = { .Type = D3D12_RESOURCE_BARRIER_TYPE_UAV,
+							   .UAV = { .pResource = nr.claims } };
+			ID3D12GraphicsCommandList_ResourceBarrier(l, 1, &cleared);
+			ID3D12GraphicsCommandList_SetPipelineState(l, nr.claim_pipeline);
+			bind(l, &k, vectors, nr.claims);
+			add(&b, nr.claims, write, read);
+			flush(l, &b);
+		}
 		ID3D12GraphicsCommandList_SetPipelineState(l, nr.track_pipeline);
 		for (int i = 0; i < update_count; i++) {
 			int t = updates[i], c = nr.tracker[t].current;
-			ID3D12Resource *read_by[5] = { motion_now, nr.tracker[t].buffer[c], motion_now,
-						       motion_now, motion_now };
+			ID3D12Resource *read_by[5] = { motion_now, nr.tracker[t].buffer[c], nr.claims,
+						       motion_before ? motion_before : motion_now, motion_now };
 			bind(l, &k, read_by, nr.tracker[t].buffer[1 - c]);
 		}
 		if (fresh >= 0) {
@@ -1392,12 +1438,22 @@ static ID3D12Resource *record(ID3D12GraphicsCommandList *list, const xess_d3d12_
 		int fading = old >= 0 && (!warped || use_old >= 0);
 		struct constants k = {
 			.width = width, .height = height, .pitch = nr.footprint.Footprint.RowPitch,
-			.kind = (uint32_t)nr.kind, .white = white, .strength = config.strength,
+			.kind = (uint32_t)nr.kind, .white = white, .strength = config.strength * rise,
 			.change_pitch = width * 16, .warp = (uint32_t)warped, .shift = { shift[0], shift[1] },
 			.fading = (uint32_t)fading, .old_shift = { old_shift[0], old_shift[1] },
 			.fade = fade, .cell = CELL, .cells = { nr.cells_width, nr.cells_height },
 			.match_from = config.match_from, .match_to = config.match_to,
+			.jitter = { jitter[0], jitter[1] }, .vectors = (uint32_t)warp,
 		};
+		if (warp) {             /* REDUCE and APPLY fill by the vectors too */
+			k.motion_pitch = nr.motion_footprint.Footprint.RowPitch;
+			k.motion_size[0] = motion_width;
+			k.motion_size[1] = motion_height;
+			k.motion_scale[0] = xess.velocity[0] * width / motion_width;
+			k.motion_scale[1] = xess.velocity[1] * height / motion_height;
+			k.motion_texels[0] = (float)motion_width / width;
+			k.motion_texels[1] = (float)motion_height / height;
+		}
 		/* MATCH: each change where its tracker says, and how far to trust it */
 		ID3D12Resource *matching[5] = {
 			nr.staging, nr.change[change],
@@ -1410,13 +1466,15 @@ static ID3D12Resource *record(ID3D12GraphicsCommandList *list, const xess_d3d12_
 		add(&b, nr.matched, write, read);
 		flush(l, &b);
 		/* REDUCE: what was trusted, summed over cells, one thread a cell */
-		ID3D12Resource *reducing[5] = { nr.matched, nr.matched, nr.matched, nr.matched, nr.matched };
+		ID3D12Resource *reducing[5] = { nr.matched, warp ? motion_now : nr.matched, nr.matched,
+						nr.matched, nr.matched };
 		ID3D12GraphicsCommandList_SetPipelineState(l, nr.reduce_pipeline);
 		bind_extent(l, &k, reducing, nr.sums, nr.cells_width, nr.cells_height);
 		add(&b, nr.sums, write, read);
 		flush(l, &b);
 		/* APPLY: the change, and the fill where it was not trusted, into the colour */
-		ID3D12Resource *applying[5] = { nr.staging, nr.matched, nr.sums, nr.staging, nr.staging };
+		ID3D12Resource *applying[5] = { nr.staging, nr.matched, nr.sums, warp ? motion_now : nr.staging,
+						nr.staging };
 		ID3D12GraphicsCommandList_SetPipelineState(l, nr.pipeline);
 		bind(l, &k, applying, nr.output);
 	}
@@ -1428,6 +1486,7 @@ static ID3D12Resource *record(ID3D12GraphicsCommandList *list, const xess_d3d12_
 		add(&b, nr.tracker[t].buffer[1], read, common);
 	}
 	if (fresh >= 0) add(&b, nr.tracker[fresh].buffer[nr.tracker[fresh].current], read, common);
+	if (claiming) add(&b, nr.claims, read, common);
 	if (warp) {
 		add(&b, motion_now, read, common);
 		if (motion_before) add(&b, motion_before, read, common);

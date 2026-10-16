@@ -134,12 +134,26 @@ static void pack(int kind, const float *c, uint8_t *out)
 	memcpy(out, &v, 4);
 }
 
+/* A block of the picture that moved by (dx, dy) colour pixels on the second frame of
+ * `run_uncovered`: its pixels show what was (dx, dy) behind them, and the strip it left
+ * shows the background — the same as the block showed there, so the picture alone cannot
+ * tell them apart. Empty outside that case. */
+static struct { int x0, y0, x1, y1, dx, dy; } moved;
+
+/* The pattern at texel (x, y) of the colour texture, the moved block in it. */
+static void scene(int x, int y, float *rgba)
+{
+	int cx = x - BASE_X, cy = y - BASE_Y;
+	int inside = cx >= moved.x0 && cy >= moved.y0 && cx < moved.x1 && cy < moved.y1;
+	pattern(x - (inside ? moved.dx : 0), y - (inside ? moved.dy : 0), rgba);
+}
+
 /* The colour of input pixel (x, y) as the format holds it, the picture moved so that the
  * pixel shows the pattern at (x + sx, y + sy). */
 static void colour_at(int kind, int x, int y, int sx, int sy, float *rgba)
 {
 	uint8_t packed[8];
-	pattern(x + BASE_X + sx, y + BASE_Y + sy, rgba);
+	scene(x + BASE_X + sx, y + BASE_Y + sy, rgba);
 	pack(kind, rgba, packed);
 	load_texel(packed, kind, rgba);
 }
@@ -191,7 +205,7 @@ static void fill_colour(int x, int y, uint8_t *out, const void *how)
 {
 	const struct colour_how *c = how;
 	float rgba[4];
-	pattern(x + c->sx, y + c->sy, rgba);
+	scene(x + c->sx, y + c->sy, rgba);
 	pack(c->kind, rgba, out);
 }
 
@@ -321,13 +335,104 @@ static void trusted(const struct snapshot *s, place_fn place, int x, int y, cons
 #define CELLS_W ((IN_W + CELL - 1) / CELL)
 #define CELLS_H ((IN_H + CELL - 1) / CELL)
 
+/* The vectors of the frame a change is applied to, as the test drew them (`fill_motion`'s
+ * `how`), and the last frame's (NULL when it had none), with both frames' jitter: what CLAIM,
+ * TRACK, REDUCE and APPLY read of them. */
+struct field {
+	const float *how, *previous_how;
+	float jitter[2], previous_jitter[2];
+};
+
+/* nr_xess.hlsl's `vector_in`: the nearest texel to an unjittered position, in colour pixels. */
+static void field_vector(const float *how, float ux, float uy, float *m)
+{
+	int tx = (int)floorf((ux + 0.5f) * ((float)MOTION_W / IN_W));
+	int ty = (int)floorf((uy + 0.5f) * ((float)MOTION_H / IN_H));
+	tx = tx < 0 ? 0 : tx > MOTION_W - 1 ? MOTION_W - 1 : tx;
+	ty = ty < 0 ? 0 : ty > MOTION_H - 1 ? MOTION_H - 1 : ty;
+	uint8_t texel[4];
+	uint16_t h[2];
+	fill_motion(tx, ty, texel, how);
+	memcpy(h, texel, 4);
+	m[0] = half_value[h[0]] * ((float)IN_W / MOTION_W);
+	m[1] = half_value[h[1]] * ((float)IN_H / MOTION_H);
+}
+
+static float spread(const float *m)
+{
+	return 1.5f + 0.15f * sqrtf(m[0] * m[0] + m[1] * m[1]);
+}
+
+/* CLAIM, then TRACK's `contested`, for every pixel: 1 where the tracker gives up. */
+static void contested_map(const struct field *f, uint8_t *out)
+{
+	static float low[IN_H][IN_W][2], high[IN_H][IN_W][2];
+	static uint8_t claimed_at[IN_H][IN_W];
+	memset(claimed_at, 0, sizeof claimed_at);
+	float m[2];
+	for (int y = 0; y < IN_H; y++)
+		for (int x = 0; x < IN_W; x++) {
+			float ux = x - f->jitter[0], uy = y - f->jitter[1];
+			field_vector(f->how, ux, uy, m);
+			int ix = (int)floorf(ux + m[0] + f->previous_jitter[0] + 0.5f);
+			int iy = (int)floorf(uy + m[1] + f->previous_jitter[1] + 0.5f);
+			if (ix < 0 || iy < 0 || ix >= IN_W || iy >= IN_H) continue;
+			for (int c = 0; c < 2; c++) {
+				if (!claimed_at[iy][ix] || m[c] < low[iy][ix][c]) low[iy][ix][c] = m[c];
+				if (!claimed_at[iy][ix] || m[c] > high[iy][ix][c]) high[iy][ix][c] = m[c];
+			}
+			claimed_at[iy][ix] = 1;
+		}
+	for (int y = 0; y < IN_H; y++)
+		for (int x = 0; x < IN_W; x++) {
+			float ux = x - f->jitter[0], uy = y - f->jitter[1];
+			field_vector(f->how, ux, uy, m);
+			int nx = (int)floorf(ux + m[0] + f->previous_jitter[0] + 0.5f);
+			int ny = (int)floorf(uy + m[1] + f->previous_jitter[1] + 0.5f);
+			nx = nx < 0 ? 0 : nx > IN_W - 1 ? IN_W - 1 : nx;
+			ny = ny < 0 ? 0 : ny > IN_H - 1 ? IN_H - 1 : ny;
+			float lo[2] = { m[0], m[1] }, hi[2] = { m[0], m[1] }, apart = 0;
+			for (int dy = -1; dy <= 1; dy++)
+				for (int dx = -1; dx <= 1; dx++) {
+					int qx = nx + dx < 0 ? 0 : nx + dx > IN_W - 1 ? IN_W - 1 : nx + dx;
+					int qy = ny + dy < 0 ? 0 : ny + dy > IN_H - 1 ? IN_H - 1 : ny + dy;
+					if (!claimed_at[qy][qx]) continue;
+					for (int c = 0; c < 2; c++) {
+						lo[c] = low[qy][qx][c] < lo[c] ? low[qy][qx][c] : lo[c];
+						hi[c] = high[qy][qx][c] > hi[c] ? high[qy][qx][c] : hi[c];
+					}
+				}
+			for (int c = 0; c < 2; c++) {
+				apart = m[c] - lo[c] > apart ? m[c] - lo[c] : apart;
+				apart = hi[c] - m[c] > apart ? hi[c] - m[c] : apart;
+			}
+			int lost = apart > spread(m);
+			if (lost && f->previous_how) {       /* the surface that was there keeps it */
+				float then[2], bar = spread(m) > 0.5f * apart ? spread(m) : 0.5f * apart;
+				field_vector(f->previous_how, ux + m[0], uy + m[1], then);
+				lost = !(sqrtf((then[0] - m[0]) * (then[0] - m[0]) + (then[1] - m[1]) * (then[1] - m[1])) < bar);
+			}
+			out[(size_t)y * IN_W + x] = (uint8_t)lost;
+		}
+}
+
 /* The change each pixel of a frame whose picture moved by (sx, sy) takes: the newest change
  * through `place`, the one before it through `old_place` given way `fade` of the way, and the
- * fill where neither was trusted. */
+ * fill where neither was trusted. `f`, the frame's vectors, NULL for an execute without:
+ * where they contest the trackers, and how alike the fill's cells move. */
 static void expected(const struct snapshot *newest, place_fn place, const struct snapshot *old,
-		     place_fn old_place, float fade, int kind, int sx, int sy, float *delta)
+		     place_fn old_place, float fade, int kind, int sx, int sy, const struct field *f,
+		     float *delta)
 {
-	static float matched[IN_W * IN_H * 7], sums[CELLS_W * CELLS_H * 7];
+	static float matched[IN_W * IN_H * 7], sums[CELLS_W * CELLS_H * 9], velocity[IN_W * IN_H * 2];
+	static uint8_t contested[IN_W * IN_H];
+	memset(contested, 0, sizeof contested);
+	if (f) {
+		if (place) contested_map(f, contested);
+		for (int y = 0; y < IN_H; y++)
+			for (int x = 0; x < IN_W; x++)
+				field_vector(f->how, x - f->jitter[0], y - f->jitter[1], velocity + ((size_t)y * IN_W + x) * 2);
+	}
 	for (int y = 0; y < IN_H; y++)
 		for (int x = 0; x < IN_W; x++) {
 			float low[3] = { 1, 1, 1 }, high[3] = { 0, 0, 0 }, rgba[4], own[3] = { 0 }, l[3];
@@ -345,11 +450,14 @@ static void expected(const struct snapshot *newest, place_fn place, const struct
 					}
 				}
 			trusted(newest, place, x, y, low, high, now);
+			int lost = contested[(size_t)y * IN_W + x];    /* the trackers hold UNKNOWN */
+			if (lost) now[0] = now[1] = now[2] = now[3] = 0;
 			float *m = matched + ((size_t)y * IN_W + x) * 7;
 			for (int c = 0; c < 3; c++) m[c] = now[c] * now[3];
 			m[3] = now[3];
 			if (old) {
 				trusted(old, old_place, x, y, low, high, then);
+				if (lost && old_place) then[0] = then[1] = then[2] = then[3] = 0;
 				for (int c = 0; c < 3; c++) m[c] = then[c] * then[3] + fade * (m[c] - then[c] * then[3]);
 				m[3] = then[3] + fade * (m[3] - then[3]);
 			}
@@ -357,27 +465,29 @@ static void expected(const struct snapshot *newest, place_fn place, const struct
 		}
 	for (int cy = 0; cy < CELLS_H; cy++)
 		for (int cx = 0; cx < CELLS_W; cx++) {
-			float *s = sums + ((size_t)cy * CELLS_W + cx) * 7;
-			for (int c = 0; c < 7; c++) s[c] = 0;
+			float *s = sums + ((size_t)cy * CELLS_W + cx) * 9;
+			for (int c = 0; c < 9; c++) s[c] = 0;
 			for (int y = cy * CELL; y < (cy + 1) * CELL && y < IN_H; y++)
 				for (int x = cx * CELL; x < (cx + 1) * CELL && x < IN_W; x++) {
 					const float *m = matched + ((size_t)y * IN_W + x) * 7;
 					for (int c = 0; c < 4; c++) s[c] += m[c];
 					for (int c = 4; c < 7; c++) s[c] += m[3] * m[c];
+					for (int c = 0; c < 2 && f; c++) s[7 + c] += m[3] * velocity[((size_t)y * IN_W + x) * 2 + c];
 				}
 		}
 	for (int y = 0; y < IN_H; y++)
 		for (int x = 0; x < IN_W; x++) {
 			const float *m = matched + ((size_t)y * IN_W + x) * 7;
+			const float *mine = velocity + ((size_t)y * IN_W + x) * 2;
 			float *out = delta + ((size_t)y * IN_W + x) * 3;
-			float fill[3] = { 0, 0, 0 }, total = 0;
+			float fill[3] = { 0, 0, 0 }, total = 0, reach = f ? spread(mine) : 1;
 			for (int c = 0; c < 3; c++) out[c] = m[c];
 			if (m[3] >= 1) continue;
 			for (int dy = -1; dy <= 1; dy++)
 				for (int dx = -1; dx <= 1; dx++) {
 					int cx = x / CELL + dx, cy = y / CELL + dy;
 					if (cx < 0 || cy < 0 || cx >= CELLS_W || cy >= CELLS_H) continue;
-					const float *s = sums + ((size_t)cy * CELLS_W + cx) * 7;
+					const float *s = sums + ((size_t)cy * CELLS_W + cx) * 9;
 					if (s[3] < 1e-3f) continue;
 					float apart = 0;
 					for (int c = 0; c < 3; c++) {
@@ -387,11 +497,14 @@ static void expected(const struct snapshot *newest, place_fn place, const struct
 					float ex = x - ((cx + 0.5f) * CELL - 0.5f), ey = y - ((cy + 0.5f) * CELL - 0.5f);
 					float closeness = clampf(1.5f - sqrtf(ex * ex + ey * ey) / CELL, 0, 1);
 					float weight = s[3] * closeness * expf(-apart / (0.04f * 0.04f));
+					if (f) {
+						float vx = s[7] / s[3] - mine[0], vy = s[8] / s[3] - mine[1];
+						weight *= expf(-(vx * vx + vy * vy) / (reach * reach));
+					}
 					for (int c = 0; c < 3; c++) fill[c] += weight * s[c] / s[3];
 					total += weight;
 				}
-			if (total > 1e-4f)
-				for (int c = 0; c < 3; c++) out[c] += (1 - m[3]) * fill[c] / total;
+			for (int c = 0; c < 3; c++) out[c] += (1 - m[3]) * fill[c] / (total > 8 ? total : 8);
 		}
 }
 
@@ -441,11 +554,11 @@ static xess_d3d12_execute_params_t params_for(ID3D12Resource *tex, ID3D12Resourc
 }
 
 /* One case: execute on the first frame, wait for NR, execute on the second — the picture
- * moved by (sx, sy), with its own vectors and jitter — and compare what XeSS was handed
- * with the CPU's apply pass. */
+ * moved by (sx, sy), with its own vectors (`how2`, as `motion2` was drawn) and jitter — and
+ * compare what XeSS was handed with the CPU's apply pass. */
 static int run(DXGI_FORMAT format, const char *name, float strength, int sx, int sy,
-	       ID3D12Resource *motion1, ID3D12Resource *motion2, const float *jitter1,
-	       const float *jitter2, place_fn place)
+	       ID3D12Resource *motion1, ID3D12Resource *motion2, const float *how1, const float *how2,
+	       const float *jitter1, const float *jitter2, place_fn place)
 {
 	UINT texel;
 	int kind = kind_of(format, &texel), failures = 0;
@@ -495,7 +608,9 @@ static int run(DXGI_FORMAT format, const char *name, float strength, int sx, int
 	uint8_t *mixed = read_mixed();
 	if (!mixed) return 1;
 	static float delta[IN_W * IN_H * 3];
-	expected(&change, place, NULL, NULL, 1, kind, sx, sy, delta);
+	struct field f = { how2, motion1 ? how1 : NULL, { jitter2 ? jitter2[0] : 0, jitter2 ? jitter2[1] : 0 },
+			   { jitter1 ? jitter1[0] : 0, jitter1 ? jitter1[1] : 0 } };
+	expected(&change, place, NULL, NULL, 1, kind, sx, sy, motion2 ? &f : NULL, delta);
 	failures += compare(name, kind, texel, mixed, sx, sy, strength, delta, !place);
 	free(mixed);
 	if (tex2 != tex1) ID3D12Resource_Release(tex2);
@@ -572,13 +687,221 @@ static int run_fade(ID3D12Resource *motion)
 	uint8_t *mixed = read_mixed();
 	if (!mixed) return 1;
 	static float delta[IN_W * IN_H * 3];
-	expected(&second, still, &first, still, fade, kind, 0, 0, delta);
+	static const float none_drawn[6] = { 0 };
+	struct field f = { none_drawn, none_drawn, { 0, 0 }, { 0, 0 } };
+	expected(&second, still, &first, still, fade, kind, 0, 0, &f, delta);
 	char name[80];
 	snprintf(name, sizeof name, "one answer giving way to the next, %.0f%% of the way", 100 * fade);
 	failures += compare(name, kind, texel, mixed, 0, 0, 1, delta, 0);
 	free(mixed);
 	ID3D12Resource_Release(tex);
 	spot_level = 60;
+	return failures != 0;
+}
+
+/* Where the second frame of `run_uncovered` sends its pixels: the moved block's by the
+ * texel nearest each pixel's centre, as `claimed`. */
+static void uncovered_place(int x, int y, float *gx, float *gy)
+{
+	int tx = 2 * x + 1, ty = 2 * y + 1;
+	int inside = tx >= 2 * moved.x0 && ty >= 2 * moved.y0 && tx < 2 * moved.x1 && ty < 2 * moved.y1;
+	*gx = x - (inside ? (float)moved.dx : 0.0f);
+	*gy = (float)y;
+}
+
+/* A block of the picture moves on and uncovers background that looks just as the block did
+ * there — as hair can look like dark wood. The vectors trace the uncovered background back
+ * to the block, whose change the tracker used to carry onto it: the trail behind a moving
+ * character. Now the background's pixels and the block's that came from the same place are
+ * contested and filled, each from the surfaces round it that move as it does, and the strip
+ * the block left takes nothing of the block's spot. */
+static int run_uncovered(void)
+{
+	UINT texel;
+	int kind = kind_of(DXGI_FORMAT_R16G16B16A16_FLOAT, &texel), failures = 0;
+	struct colour_how how = { kind, 0, 0 };
+	ID3D12Resource *first = texture(DXGI_FORMAT_R16G16B16A16_FLOAT, W, H, texel, fill_colour, &how);
+	moved.x0 = 32;          /* from 26-41 to 32-47, the spot's 30-35 on it */
+	moved.y0 = 14;
+	moved.x1 = 48;
+	moved.y1 = 28;
+	moved.dx = 6;
+	moved.dy = 0;
+	ID3D12Resource *second = texture(DXGI_FORMAT_R16G16B16A16_FLOAT, W, H, texel, fill_colour, &how);
+	/* In texels: the block's pixels were 6 pixels to their left, on both frames — it was
+	 * moving already, as a character walking on is. */
+	float drawn1[6] = { -12, 0, (float)(2 * (moved.x0 - moved.dx)), (float)(2 * moved.y0),
+			    (float)(2 * (moved.x1 - moved.dx)), (float)(2 * moved.y1) };
+	float drawn[6] = { -12, 0, (float)(2 * moved.x0), (float)(2 * moved.y0), (float)(2 * moved.x1),
+			   (float)(2 * moved.y1) };
+	ID3D12Resource *motion1 = texture(DXGI_FORMAT_R16G16_FLOAT, MOTION_W, MOTION_H, 4, fill_motion, drawn1);
+	ID3D12Resource *motion = texture(DXGI_FORMAT_R16G16_FLOAT, MOTION_W, MOTION_H, 4, fill_motion, drawn);
+	if (!first || !second || !motion1 || !motion) {
+		printf("FAIL uncovered: no texture\n");
+		memset(&moved, 0, sizeof moved);
+		return 1;
+	}
+	nr.width = 0;
+	config.strength = 1;
+	spot_level = 60;
+	xess_d3d12_execute_params_t params = params_for(first, motion1, NULL);
+	uint32_t before = nr.sequence;
+	xessD3D12Execute((xess_context_handle_t)1, gpu.list, &params);
+	uint8_t *mixed = NULL;
+	static struct snapshot change;
+	if (!submit() && !wait_change(before)) {
+		take(&change);
+		params = params_for(second, motion, NULL);
+		xessD3D12Execute((xess_context_handle_t)1, gpu.list, &params);
+		mixed = read_mixed();
+	}
+	if (!mixed) {
+		memset(&moved, 0, sizeof moved);
+		return 1;
+	}
+	static float delta[IN_W * IN_H * 3];
+	struct field f = { drawn, drawn1, { 0, 0 }, { 0, 0 } };
+	expected(&change, uncovered_place, NULL, NULL, 1, kind, 0, 0, &f, delta);
+	failures += compare("a block moving on over background that looks as it did", kind, texel, mixed,
+			    0, 0, 1, delta, 0);
+	double leaked = 0;
+	for (int y = SPOT_Y; y < SPOT_Y + 6; y++)
+		for (int x = moved.x0 - moved.dx; x < moved.x0; x++) {
+			float o[4], got[4];
+			colour_at(kind, x, y, 0, 0, o);
+			load_texel(mixed + nr.footprint.Offset + (size_t)y * nr.footprint.Footprint.RowPitch
+				   + (size_t)x * texel, kind, got);
+			for (int c = 0; c < 3; c++) leaked = fmax(leaked, fabs(got[c] - o[c]));
+		}
+	printf("%s the strip it uncovered takes %.4f of its spot\n", leaked < 0.01 ? "ok  " : "FAIL", leaked);
+	failures += leaked >= 0.01;
+	free(mixed);
+	memset(&moved, 0, sizeof moved);
+	ID3D12Resource_Release(motion);
+	ID3D12Resource_Release(motion1);
+	ID3D12Resource_Release(second);
+	ID3D12Resource_Release(first);
+	return failures != 0;
+}
+
+/* A cut, and the first change after it comes in over the period a change takes to come
+ * rather than all at once. */
+static int run_rise(ID3D12Resource *still_motion)
+{
+	UINT texel;
+	int kind = kind_of(DXGI_FORMAT_R16G16B16A16_FLOAT, &texel);
+	struct colour_how how = { kind, 0, 0 };
+	ID3D12Resource *tex = texture(DXGI_FORMAT_R16G16B16A16_FLOAT, W, H, texel, fill_colour, &how);
+	if (!tex) {
+		printf("FAIL rise: no texture\n");
+		return 1;
+	}
+	nr.width = 0;
+	config.strength = 1;
+	spot_level = 60;
+	xess_d3d12_execute_params_t params = params_for(tex, still_motion, NULL);
+	params.resetHistory = 1;
+	uint32_t before = nr.sequence;
+	xessD3D12Execute((xess_context_handle_t)1, gpu.list, &params);
+	if (submit() || wait_change(before)) return 1;
+	static struct snapshot change;
+	take(&change);
+	params.resetHistory = 0;
+	xessD3D12Execute((xess_context_handle_t)1, gpu.list, &params);
+	float rise = (float)(nr.sequence - nr.rise_start + 1) / (nr.period > 1 ? nr.period : 1);
+	if (!(rise < 1)) {
+		printf("FAIL rise: the first change after a cut came in whole (%.2f)\n", rise);
+		return 1;
+	}
+	uint8_t *mixed = read_mixed();
+	if (!mixed) return 1;
+	static float delta[IN_W * IN_H * 3];
+	static const float none_drawn[6] = { 0 };
+	struct field f = { none_drawn, none_drawn, { 0, 0 }, { 0, 0 } };
+	expected(&change, still, NULL, NULL, 1, kind, 0, 0, &f, delta);
+	char name[80];
+	snprintf(name, sizeof name, "after a cut, the first change %.0f%% of the way in", 100 * rise);
+	int failures = compare(name, kind, texel, mixed, 0, 0, rise, delta, 0);
+	free(mixed);
+	ID3D12Resource_Release(tex);
+	return failures != 0;
+}
+
+/* `record=2`: two frames on disk as the game handed them, the colour's rows and then the
+ * vectors' rows, packed tight. In R11G11B10, whose rows a copy pads: the game's format, and
+ * the one whose colour went missing from the first recording out of Hogwarts. */
+static int run_record(ID3D12Resource *motion)
+{
+	UINT texel;
+	int kind = kind_of(DXGI_FORMAT_R11G11B10_FLOAT, &texel), failures = 0;
+	struct colour_how how = { kind, 0, 0 };
+	ID3D12Resource *tex = texture(DXGI_FORMAT_R11G11B10_FLOAT, W, H, texel, fill_colour, &how);
+	if (!tex) {
+		printf("FAIL recording: no texture\n");
+		return 1;
+	}
+	nr.width = 0;
+	snprintf(config.record_dir, sizeof config.record_dir, "test_nr_xess_recording");
+	InterlockedExchange(&record_asked, 2);
+	xess_d3d12_execute_params_t params = params_for(tex, motion, NULL);
+	for (int i = 0; i < 2; i++) {
+		xessD3D12Execute((xess_context_handle_t)1, gpu.list, &params);
+		if (submit()) return 1;
+	}
+	for (ULONGLONG until = GetTickCount64() + 10000;
+	     GetTickCount64() < until && (rec.left || rec.slot[0].full || rec.slot[1].full); Sleep(5)) {}
+
+	size_t colour_bytes = (size_t)IN_W * IN_H * texel, motion_bytes = (size_t)MOTION_W * MOTION_H * 4;
+	uint8_t *data = malloc(colour_bytes + motion_bytes + 1);
+	uint16_t vector[2] = { to_half(6), to_half(-4) };
+	wchar_t path[MAX_PATH + 32];
+	for (int frame = 0; frame < 2; frame++) {
+		_snwprintf(path, MAX_PATH + 32, L"%ls\\%04d.bin", rec.dir, frame);
+		FILE *file = _wfopen(path, L"rb");
+		size_t got = file ? fread(data, 1, colour_bytes + motion_bytes + 1, file) : 0;
+		if (file) fclose(file);
+		if (got != colour_bytes + motion_bytes) {
+			printf("FAIL recording: frame %d holds %zu bytes, not %zu\n", frame, got,
+			       colour_bytes + motion_bytes);
+			failures++;
+			continue;
+		}
+		for (int y = 0; y < IN_H; y++)
+			for (int x = 0; x < IN_W; x++) {
+				float c[4];
+				uint8_t want[8];
+				pattern(x + BASE_X, y + BASE_Y, c);
+				pack(kind, c, want);
+				if (memcmp(data + ((size_t)y * IN_W + x) * texel, want, texel) && failures++ < 3)
+					printf("FAIL recording: frame %d's texel (%d, %d) differs\n", frame, x, y);
+			}
+		for (size_t i = 0; i < (size_t)MOTION_W * MOTION_H; i++)
+			if (memcmp(data + colour_bytes + i * 4, vector, 4) && failures++ < 3)
+				printf("FAIL recording: frame %d's vector %zu differs\n", frame, i);
+	}
+	free(data);
+	char line[160] = "";
+	_snwprintf(path, MAX_PATH + 32, L"%ls\\meta.txt", rec.dir);
+	FILE *meta = _wfopen(path, L"r");
+	if (meta) {
+		if (!fgets(line, sizeof line, meta)) line[0] = '\0';
+		fclose(meta);
+	}
+	char want[64];
+	snprintf(want, sizeof want, "colour %d %d %d %u\n", IN_W, IN_H, (int)DXGI_FORMAT_R11G11B10_FLOAT, texel);
+	if (strcmp(line, want) && failures++ < 3) printf("FAIL recording: meta.txt begins \"%s\"\n", line);
+
+	const wchar_t *names[] = { L"0000.bin", L"0001.bin", L"frames.txt", L"meta.txt" };
+	for (int i = 0; i < 4; i++) {
+		_snwprintf(path, MAX_PATH + 32, L"%ls\\%ls", rec.dir, names[i]);
+		DeleteFileW(path);
+	}
+	RemoveDirectoryW(rec.dir);
+	RemoveDirectoryW(L"test_nr_xess_recording");
+	config.record_dir[0] = '\0';
+	ID3D12Resource_Release(tex);
+	printf("%s recording: two frames of %dx%d R11G11B10 colour and %dx%d vectors, as handed\n",
+	       failures ? "FAIL" : "ok  ", IN_W, IN_H, MOTION_W, MOTION_H);
 	return failures != 0;
 }
 
@@ -608,10 +931,11 @@ int main(int argc, char **argv)
 	gpu.event = CreateEventW(NULL, FALSE, FALSE, NULL);
 
 	int failed = run(DXGI_FORMAT_R16G16B16A16_FLOAT, "R16G16B16A16_FLOAT", 1, 0, 0, NULL, NULL,
-			 NULL, NULL, NULL);
-	failed += run(DXGI_FORMAT_R11G11B10_FLOAT, "R11G11B10_FLOAT", 1, 0, 0, NULL, NULL, NULL, NULL, NULL);
+			 NULL, NULL, NULL, NULL, NULL);
+	failed += run(DXGI_FORMAT_R11G11B10_FLOAT, "R11G11B10_FLOAT", 1, 0, 0, NULL, NULL, NULL, NULL, NULL,
+		      NULL, NULL);
 	failed += run(DXGI_FORMAT_R16G16B16A16_FLOAT, "R16G16B16A16_FLOAT, strength 0", 0, 0, 0, NULL,
-		      NULL, NULL, NULL, NULL);
+		      NULL, NULL, NULL, NULL, NULL, NULL);
 	if (argc > 1) {
 		printf(failed ? "FAILED\n" : "all passed\n");
 		return failed != 0;
@@ -621,14 +945,15 @@ int main(int argc, char **argv)
 					  .initFlags = XESS_INIT_FLAG_HIGH_RES_MV };
 	xessD3D12Init((xess_context_handle_t)1, &init);
 	exchange = spot;
-	float rest[2] = { 0, 0 }, uniform[2] = { 6, -4 };             /* texels: (3, -2) pixels */
+	/* fill_motion reads six: the block's corners are left zero, for vectors everywhere */
+	float rest[6] = { 0, 0 }, uniform[6] = { 6, -4 };             /* texels: (3, -2) pixels */
 	float block[6] = { 20, 0, BLOCK_X0, BLOCK_Y0, BLOCK_X1, BLOCK_Y1 }; /* 10 pixels, in it only */
 	ID3D12Resource *none = texture(DXGI_FORMAT_R16G16_FLOAT, MOTION_W, MOTION_H, 4, fill_motion, rest);
 	ID3D12Resource *moving = texture(DXGI_FORMAT_R16G16_FLOAT, MOTION_W, MOTION_H, 4, fill_motion, uniform);
 	ID3D12Resource *partly = texture(DXGI_FORMAT_R16G16_FLOAT, MOTION_W, MOTION_H, 4, fill_motion, block);
 	float half_left[2] = { 0.5f, 0 };
 	failed += run(DXGI_FORMAT_R16G16B16A16_FLOAT, "motion (3, -2), the picture with it", 1, 3, -2,
-		      moving, moving, NULL, NULL, moved_uniformly);
+		      moving, moving, uniform, uniform, NULL, NULL, moved_uniformly);
 	/* The second execute captured too, with the first frame's tracker: the daemon is told
 	 * each pixel's offset back to the first frame NR was given, (3, -2) where it is known. */
 	for (ULONGLONG until = GetTickCount64() + 5000; GetTickCount64() < until && !motion_known; Sleep(5)) {}
@@ -640,10 +965,13 @@ int main(int argc, char **argv)
 	       mean_x, mean_y, motion_known);
 	failed += !told;
 	failed += run(DXGI_FORMAT_R16G16B16A16_FLOAT, "jitter (0.5, 0) then (0, 0)", 1, 0, 0, none, none,
-		      half_left, rest, jittered);
+		      rest, rest, half_left, rest, jittered);
 	failed += run(DXGI_FORMAT_R16G16B16A16_FLOAT, "vectors claiming a move the picture did not make",
-		      1, 0, 0, none, partly, NULL, NULL, claimed);
+		      1, 0, 0, none, partly, rest, block, NULL, NULL, claimed);
 	failed += run_fade(none);
+	failed += run_uncovered();
+	failed += run_rise(none);
+	failed += run_record(moving);
 	printf(failed ? "FAILED\n" : "all passed\n");
 	return failed != 0;
 }

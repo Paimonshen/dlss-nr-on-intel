@@ -177,17 +177,39 @@ one brightness both passed, then through the daemon's own history; per-channel m
 and `STALE` remove the trail from a synthetic replay (a square over a panning texture). Not yet seen
 in the game.
 
-**Tools.** `test_nr_xess.exe` (8 cases on the device against a CPU transcription of the shader:
+**The trail in the game, recorded and found (2026-10-16 evening).** The owner saw it worse in
+the game; a 300-frame recording of Hogwarts (the first one held only the vectors — `record_write`
+mapped a whole pitch past the colour's buffer, refused; fixed and tested) showed copies of the
+character's head on the wall behind it, one for each frame since the capture. NR's own answers
+were clean, and so was the daemon's history: the copies were in the colour the proxy handed XeSS.
+The tracker carries each pixel back one frame at a time, so background uncovered behind the head
+steps onto the head on the frame before and follows it back to the capture: it takes the head's
+change, and hair passes the picture's match against dark wood. Holding a surface's vector to the
+last frame's does not tell them apart: in this recording the camera's own vectors change by 20-40
+px from frame to frame (the game ran at 12 fps while recording). What does: CLAIM marks, on the
+last frame's pixels, the vectors of this frame's surfaces that came from each; where two that move
+apart by more than `spread` came from about the same place, only the one whose vector matches the
+last frame's vector there keeps its tracker (the surface that was there), and the other holds
+UNKNOWN. APPLY's fill now weighs cells by how alike they move as well, and fills less where little
+round a pixel was trusted. On the replay the copies are gone; the cost is NR's change on surfaces
+uncovered within the frames since the capture, which in a fast orbit at 12 fps is a large part of
+the frame (mean change 4.3 -> 2.7 levels there, 7.5 -> 5.7 on a slow walk). After a cut the first
+change now rises in over a period instead of all at once. `--inputs DIR` in the replay writes the
+colour handed to XeSS, to tell the proxy's doing from XeSS's own history.
+
+**Tools.** `test_nr_xess.exe` (12 cases on the device against a CPU transcription of the shader:
 formats, strength 0 exact, motion, jitter, untrusted vectors, the fade, the motion the daemon is
-told); `record=N` + `record_dir=` in `nr-xess.txt` record colour, vectors and jitter;
+told, background uncovered by a moving block that looks as the block did, the rise after a cut,
+a recording); `record=N` + `record_dir=` in `nr-xess.txt` record colour, vectors and jitter;
 `replay_nr_xess.exe <recording> <out> work\xess-replay\libxess_intel.dll` runs them through the
 proxy, a daemon and Intel's XeSS without the game (`--off`, `--strength`, `--warp`, `--history`,
 `--match`); `make_synthetic_recording.py`, `replay_view.py`. The game test script is
 `D:\NRonWindows\nr-game\hogwarts-xess-test.ps1` (outside the repo): it stops itself after 30 min.
 
-**Next on Windows:** record ~5 s of Hogwarts with the owner (waving characters, camera turns),
-replay with and without NR, show the owner. Later: frames by GPU sharing instead of the pipe, the
-FFX and DLSS entry points, OptiScaler.
+**Next on Windows:** the owner to see the claim test in the game; a coarser fill (cells of cells)
+for what the 3x3 cells cannot reach, so uncovered background takes the background's change rather
+than none. Later: frames by GPU sharing instead of the pipe, the FFX and DLSS entry points,
+OptiScaler.
 **Next on Linux:** `make test`, with `test_native_image.py` and `test_temporal.py`.
 
 ## Issue #17: the GPU image path falls back instead of turning NR off (2026-10-16)

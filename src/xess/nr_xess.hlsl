@@ -1,6 +1,8 @@
 /* nr_xess.hlsl — the proxy's compute passes, one root signature.
  *
- * Built four times (build_xess.bat), one pass each:
+ * Built six times (build_xess.bat), one pass each:
+ *   CLEAR   empties the claims;
+ *   CLAIM   marks, on the last frame's pixels, the vectors of the surfaces that came from each;
  *   TRACK   follows the game's motion vectors, frame by frame, back to the frame NR was given;
  *   MATCH   reads each change where the tracker says, and how far to trust it there;
  *   REDUCE  sums what MATCH trusted over CELL-pixel squares;
@@ -20,8 +22,10 @@
  * the frame NR was given: unjittered position then, minus unjittered position now. It is
  * zero on the frame NR was given, and each frame adds that frame's vector to the tracker of
  * the frame before, read where the surface was — at the nearest edge for a surface that was
- * off screen then. Whether the surface found there is the same one is not the tracker's to
- * say: MATCH asks the picture.
+ * off screen then. Whether the surface found there is the same one, MATCH asks the picture;
+ * the tracker only gives up where two surfaces that move differently came from the same place
+ * (CLAIM, `contested`): a surface uncovered behind something that moved. There it holds
+ * UNKNOWN, which reads as off screen from then on.
  */
 #define RS "RootConstants(num32BitConstants=32, b0), SRV(t0), SRV(t1), SRV(t2), SRV(t3), SRV(t4), UAV(u0)"
 
@@ -36,14 +40,15 @@ cbuffer Constants : register(b0)
     uint change_pitch;     /* match: bytes between rows of a change */
     uint warp;             /* match: 1 reads each change where its tracker says */
     float2 shift;          /* match: the newest change's frame's jitter, minus this frame's */
-    uint motion_pitch;     /* track: bytes between rows of the motion copy */
+    uint motion_pitch;     /* the vectors' passes: bytes between rows of the motion copy */
     uint reset;            /* track: 1 starts the tracker afresh, on the frame NR is given */
-    uint2 motion_size;     /* track: the motion region, in its texels */
-    float2 motion_scale;   /* track: a texel's value to colour pixels (velocity scale, extents) */
-    float2 motion_texels;  /* track: motion texels per colour pixel */
-    float2 jitter;         /* track: this frame's */
-    float2 previous_jitter;/* track: the last frame's */
-    uint unused;
+    uint2 motion_size;     /* ... the motion region, in its texels */
+    float2 motion_scale;   /* ... a texel's value to colour pixels (velocity scale, extents) */
+    float2 motion_texels;  /* ... motion texels per colour pixel */
+    float2 jitter;         /* ... this frame's */
+    float2 previous_jitter;/* claim, track: the last frame's */
+    uint vectors;          /* track: 1 t2 holds this frame's claims, 2 t3 the last frame's vectors;
+                              reduce, apply: 1 this frame's vectors are bound */
     uint fading;           /* match: t3 and t4 hold the change before the newest, fading out */
     float2 old_shift;      /* match: its frame's jitter, minus this frame's */
     float fade;            /* match: 0 all the older change, 1 all the newest */
@@ -55,8 +60,36 @@ cbuffer Constants : register(b0)
 
 /* What MATCH leaves for each pixel, seven floats: the change it trusted times the trust
  * (rgb), the trust (0-1), and the pixel's own `likeness` (rgb). REDUCE leaves the same seven
- * summed over a cell, the last three weighted by the trust. */
+ * summed over a cell, the last three weighted by the trust, and two more: the cell's vectors,
+ * weighted by the trust too. */
 #define MATCHED 28
+#define SUMMED 36
+
+/* A tracker's value for a surface it cannot follow: far off any screen, so MATCH reads no
+ * change for it and the daemon is told nothing of where it was. */
+#define UNKNOWN 1e30
+
+#if defined(CLAIM) || defined(TRACK) || defined(REDUCE) || defined(APPLY)
+
+/* The vector at an unjittered colour position, to where its surface was the frame before, in
+ * colour pixels: the nearest texel, because high-resolution vectors are dilated to the
+ * foremost surface and blending them across an edge invents a motion neither side has. */
+float2 vector_in(ByteAddressBuffer vectors_of, float2 u)
+{
+    int2 t = clamp(int2(floor((u + 0.5) * motion_texels)), 0, int2(motion_size) - 1);
+    uint v = vectors_of.Load(t.y * motion_pitch + t.x * 4);
+    return float2(f16tof32(v), f16tof32(v >> 16)) * motion_scale;
+}
+
+/* How far apart two vectors may be and still be one surface's: a little for the vectors' own
+ * precision, and more for a fast surface, whose vectors spread across it as it turns or nears
+ * the camera. Two surfaces that part faster than this are told apart. */
+float spread(float2 m)
+{
+    return 1.5 + 0.15 * length(m);
+}
+
+#endif
 
 #if defined(MATCH) || defined(APPLY)
 
@@ -95,25 +128,115 @@ float3 likeness(float3 c)
 
 #endif
 
+/* Claims: for each pixel of the last frame, the least and the most of each component of the
+ * vectors that came from it this frame, sixteen bytes, as unsigned integers that keep the
+ * floats' order (`ordered`), so the atomics can take them. Nobody came from a pixel whose
+ * least x is still CLEAR's 0xFFFFFFFF. */
+
+#if defined(CLAIM) || defined(TRACK)
+
+uint ordered(float f)
+{
+    uint u = asuint(f);
+    return (u & 0x80000000) ? ~u : u | 0x80000000;
+}
+
+float unordered(uint u)
+{
+    return asfloat((u & 0x80000000) ? u & 0x7FFFFFFF : ~u);
+}
+
+#endif
+
+#ifdef CLEAR
+
+RWByteAddressBuffer claims : register(u0);
+
+[RootSignature(RS)]
+[numthreads(8, 8, 1)]
+void main(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= width || id.y >= height)
+        return;
+    claims.Store4((id.y * width + id.x) * 16, uint4(0xFFFFFFFF, 0, 0xFFFFFFFF, 0));
+}
+
+#endif
+
+#ifdef CLAIM
+
+ByteAddressBuffer motion : register(t0);    /* this frame's vectors, R16G16_FLOAT */
+RWByteAddressBuffer claims : register(u0);
+
+/* Each pixel of this frame claims the last frame's pixel nearest to where its surface was,
+ * and leaves its vector there. */
+[RootSignature(RS)]
+[numthreads(8, 8, 1)]
+void main(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= width || id.y >= height)
+        return;
+    float2 u = float2(id.xy) - jitter;
+    float2 m = vector_in(motion, u);
+    int2 i = int2(floor(u + m + previous_jitter + 0.5));
+    if (any(i < 0) || any(i >= int2(width, height)))
+        return;
+    uint at = (i.y * width + i.x) * 16;
+    claims.InterlockedMin(at, ordered(m.x));
+    claims.InterlockedMax(at + 4, ordered(m.x));
+    claims.InterlockedMin(at + 8, ordered(m.y));
+    claims.InterlockedMax(at + 12, ordered(m.y));
+}
+
+#endif
+
 #ifdef TRACK
 
 ByteAddressBuffer motion : register(t0);    /* this frame's vectors, R16G16_FLOAT */
 ByteAddressBuffer before : register(t1);    /* the tracker as of the last frame */
+ByteAddressBuffer claims : register(t2);    /* this frame's claims, when `vectors & 1` */
+ByteAddressBuffer last_motion : register(t3);  /* the last frame's vectors, when `vectors & 2` */
 RWByteAddressBuffer after : register(u0);   /* the tracker as of this frame */
-
-/* The vector at an unjittered colour position: the nearest texel, because high-resolution
- * vectors are dilated to the foremost surface and blending them across an edge invents a
- * motion neither side has. */
-float2 vector_at(float2 u)
-{
-    int2 t = clamp(int2(floor((u + 0.5) * motion_texels)), 0, int2(motion_size) - 1);
-    uint v = motion.Load(t.y * motion_pitch + t.x * 4);
-    return float2(f16tof32(v), f16tof32(v >> 16)) * motion_scale;
-}
 
 float2 tracker_at(int2 i)
 {
     return asfloat(before.Load2((i.y * width + i.x) * 8));
+}
+
+/* Whether a surface that moves otherwise came from about where this one did — the last
+ * frame's pixels within one of where this surface was, claimed by vectors further from its
+ * own than `spread` — and this one is not the surface that was there. So it is for a surface
+ * uncovered behind something that moved: the vectors trace it back to the thing in front,
+ * the thing in front came from there too, and the tracker there would carry the thing in
+ * front's change onto it, which the picture alone cannot always refuse: hair looks like dark
+ * wood. The surface that was there moves on much as it moved then, so the one whose vector
+ * is near the last frame's vector there, nearer than half the claims' spread, keeps its
+ * tracker; the other is not followed, and APPLY fills it from the surfaces round it that move
+ * as it does. Without the last frame's vectors neither keeps it. The claims are one frame's
+ * vectors, so how the camera sped up since the last does not count against them; only the
+ * owner's own vector is held to the last frame's, against the claims' own spread. A thing
+ * that starts to move from rest loses the race to what it uncovers, for that frame. */
+bool contested(float2 g, float2 was, float2 m)
+{
+    int2 n = clamp(int2(floor(g + 0.5)), 0, int2(width, height) - 1);
+    float2 low = m, high = m;
+    for (int dy = -1; dy <= 1; dy++)
+        for (int dx = -1; dx <= 1; dx++) {
+            int2 q = clamp(n + int2(dx, dy), 0, int2(width, height) - 1);
+            uint4 c = claims.Load4((q.y * width + q.x) * 16);
+            if (c.x != 0xFFFFFFFF) {
+                low = min(low, float2(unordered(c.x), unordered(c.z)));
+                high = max(high, float2(unordered(c.y), unordered(c.w)));
+            }
+        }
+    float2 apart2 = max(m - low, high - m);
+    float apart = max(apart2.x, apart2.y);
+    bool lost = apart > spread(m);
+    if (lost && (vectors & 2)) {
+        float2 then = vector_in(last_motion, was);
+        lost = !(length(then - m) < max(spread(m), 0.5 * apart));
+    }
+    return lost;
 }
 
 [RootSignature(RS)]
@@ -129,8 +252,12 @@ void main(uint3 id : SV_DispatchThreadID)
     }
     float2 extent = float2(width, height);
     float2 u = float2(id.xy) - jitter;          /* this pixel's surface, unjittered */
-    float2 m = vector_at(u);                    /* to where it was the frame before */
+    float2 m = vector_in(motion, u);            /* to where it was the frame before */
     float2 g = u + m + previous_jitter;         /* ... on the last frame's pixel grid */
+    if ((vectors & 1) && contested(g, u + m, m)) {
+        after.Store2(at, asuint(float2(UNKNOWN, UNKNOWN)));
+        return;
+    }
     /* Off screen then: the nearest edge's tracker, as a pan carries it on. */
     float2 c = clamp(g, 0, extent - 1);
     int2 i = int2(floor(c));
@@ -245,10 +372,11 @@ void main(uint3 id : SV_DispatchThreadID)
 #ifdef REDUCE
 
 ByteAddressBuffer matched : register(t0);
+ByteAddressBuffer motion : register(t1);       /* this frame's vectors, when `vectors` */
 RWByteAddressBuffer sums : register(u0);
 
-/* One thread a cell: the trusted change, the trust and the trust-weighted likeness, summed
- * row by row over the cell's pixels. */
+/* One thread a cell: the trusted change, the trust, and the trust-weighted likeness and
+ * vectors, summed row by row over the cell's pixels. */
 [RootSignature(RS)]
 [numthreads(8, 8, 1)]
 void main(uint3 id : SV_DispatchThreadID)
@@ -256,6 +384,7 @@ void main(uint3 id : SV_DispatchThreadID)
     if (id.x >= cells.x || id.y >= cells.y)
         return;
     float3 change_sum = 0, alike = 0;
+    float2 moving = 0;
     float trust = 0;
     for (uint y = id.y * cell; y < min((id.y + 1) * cell, height); y++)
         for (uint x = id.x * cell; x < min((id.x + 1) * cell, width); x++) {
@@ -264,10 +393,13 @@ void main(uint3 id : SV_DispatchThreadID)
             change_sum += m.rgb;
             trust += m.a;
             alike += m.a * asfloat(matched.Load3(at + 16));
+            if (vectors)
+                moving += m.a * vector_in(motion, float2(x, y) - jitter);
         }
-    uint at = (id.y * cells.x + id.x) * MATCHED;
+    uint at = (id.y * cells.x + id.x) * SUMMED;
     sums.Store4(at, asuint(float4(change_sum, trust)));
     sums.Store3(at + 16, asuint(alike));
+    sums.Store2(at + 28, asuint(moving));
 }
 
 #endif
@@ -276,7 +408,13 @@ void main(uint3 id : SV_DispatchThreadID)
 
 ByteAddressBuffer matched : register(t1);
 ByteAddressBuffer sums : register(t2);
+ByteAddressBuffer motion : register(t3);       /* this frame's vectors, when `vectors` */
 RWByteAddressBuffer result : register(u0);     /* the colour XeSS gets */
+
+/* The trusted pixels' worth of support below which a fill is weaker than the change it reads:
+ * a surface with little of its own trusted round it takes little, rather than all of what
+ * some unlike cell happened to hold. */
+#define SUPPORT 8
 
 void store_texel(uint at, float4 c)
 {
@@ -299,13 +437,15 @@ void store_texel(uint at, float4 c)
 }
 
 /* The change where MATCH did not trust its own: the trusted change of the cells round the
- * pixel, each by how much of it was trusted, how near its centre is, and how alike its
- * pixels are to this one — so a background uncovered behind something that moved takes the
- * background's change, not the change of what moved. Nothing where nothing round it was
- * trusted. */
+ * pixel, each by how much of it was trusted, how near its centre is, how alike its pixels
+ * are to this one and how alike they move — so a background uncovered behind something that
+ * moved takes the background's change, not the change of what moved, however alike the two
+ * look. Less where little round it was trusted, nothing where nothing was. */
 float3 fill(int2 p, float3 own)
 {
     int2 home = int2(uint2(p) / cell);
+    float2 mine = vectors ? vector_in(motion, float2(p) - jitter) : 0;
+    float reach = spread(mine);
     float3 sum = 0;
     float total = 0;
     for (int cy = -1; cy <= 1; cy++)
@@ -313,7 +453,7 @@ float3 fill(int2 p, float3 own)
             int2 c = home + int2(cx, cy);
             if (any(c < 0) || any(c >= int2(cells)))
                 continue;
-            uint at = (c.y * cells.x + c.x) * MATCHED;
+            uint at = (c.y * cells.x + c.x) * SUMMED;
             float4 s = asfloat(sums.Load4(at));
             if (s.a < 1e-3)
                 continue;
@@ -321,10 +461,14 @@ float3 fill(int2 p, float3 own)
             float2 centre = (float2(c) + 0.5) * cell - 0.5;
             float near = saturate(1.5 - length(float2(p) - centre) / cell);
             float weight = s.a * near * exp(-dot(alike, alike) / (0.04 * 0.04));
+            if (vectors) {
+                float2 apart = asfloat(sums.Load2(at + 28)) / s.a - mine;
+                weight *= exp(-dot(apart, apart) / (reach * reach));
+            }
             sum += weight * s.rgb / s.a;
             total += weight;
         }
-    return total > 1e-4 ? sum / total : 0;
+    return sum / max(total, SUPPORT);
 }
 
 /* Where the proxy's knee compressed a pixel the change is scaled back up by the same ratio,

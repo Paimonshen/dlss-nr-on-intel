@@ -21,8 +21,8 @@ if not defined VSROOT (
 call "%VSROOT%\VC\Auxiliary\Build\vcvars64.bat" >nul
 :have_msvc
 rem cs_5_1 carries the root signature written in the shader, so the C side needs no
-rem serialiser; fxc is on PATH once vcvars has run. One source, four passes.
-for %%P in (track match reduce apply) do call :pass %%P
+rem serialiser; fxc is on PATH once vcvars has run. One source, six passes.
+for %%P in (clear claim track match reduce apply) do call :pass %%P
 if errorlevel 1 exit /b 1
 ml64 /nologo /c /Fo"%OUT%\nr_xess_thunks.obj" "%HERE%nr_xess_thunks.asm" >nul
 if errorlevel 1 ( echo ERROR: nr_xess_thunks.asm failed & exit /b 1 )
@@ -38,7 +38,7 @@ exit /b 0
 rem One pass: nr_xess.hlsl with the pass's name defined, upper-cased, to nr_xess_<pass>.h.
 :pass
 set "NAME=%~1"
-for %%U in (TRACK MATCH REDUCE APPLY) do if /i "%%U"=="%NAME%" set "UPPER=%%U"
+for %%U in (CLEAR CLAIM TRACK MATCH REDUCE APPLY) do if /i "%%U"=="%NAME%" set "UPPER=%%U"
 fxc /nologo /T cs_5_1 /E main /O3 /D %UPPER% /Fh "%OUT%\nr_xess_%NAME%.h" /Vn nr_xess_%NAME% "%HERE%nr_xess.hlsl" >nul
 if errorlevel 1 ( echo ERROR: nr_xess.hlsl's %UPPER% pass failed & exit /b 1 )
 exit /b 0
