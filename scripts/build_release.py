@@ -36,11 +36,28 @@ IGNORE = shutil.ignore_patterns(
 
 
 def required_shaders(root: Path) -> set[str]:
-    """Use the filenames the runtime loads, plus the daemon's startup probe."""
+    """Use the filenames the runtime loads, plus the daemon's startup probe.
+
+    Every source that NAMES a shader is scanned, not just the graph's. The list used to be the
+    three GPU files only, and that missed the menu: `menu.spv` and `menu_rgb10a2.spv` are named in
+    `src/layer/nr_menu.c`, which nothing looked at. A release therefore carried the layer and the
+    graph's shaders, and not the panel's - so the in-game menu could not load its shader and
+    silently did not draw, with the file it wanted simply absent from the package.
+
+    `src/layer` is scanned whole rather than by filename, so a shader named in the layer's own
+    sources cannot be forgotten again.
+    """
     names = {"half_probe.spv"}
-    for source in ("src/gpu/libxmx.c", "src/gpu/xmx.py", "src/gpu/xmxres.py"):
-        names.update(re.findall(r"([A-Za-z0-9_]+\.spv)",
-                                (root / source).read_text(encoding="utf-8")))
+    sources = ["src/gpu/libxmx.c", "src/gpu/xmx.py", "src/gpu/xmxres.py"]
+    sources += [str(p.relative_to(root)).replace("\\", "/")
+                for p in sorted((root / "src" / "layer").glob("*.c"))]
+    sources += [str(p.relative_to(root)).replace("\\", "/")
+                for p in sorted((root / "src" / "layer").glob("*.h"))]
+    for source in sources:
+        path = root / source
+        if path.is_file():
+            names.update(re.findall(r"([A-Za-z0-9_]+\.spv)",
+                                    path.read_text(encoding="utf-8", errors="replace")))
     return names
 
 

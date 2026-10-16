@@ -11,6 +11,12 @@ rem    work\libnr_image.dll the host passes around the network
 rem    work\libnr_alloc.dll the daemon's NumPy allocator, which keeps a frame's large blocks
 rem    work\*.spv           the compute shaders
 rem
+rem  work\mlx-dlss is NOT built here and must NOT be deleted with the artifacts. It is the
+rem  extracted MLX-DLSS runtime - `features.py`, `composition.py`, the weights - and
+rem  src/ref/nr_frame.py imports it at run time. `rmdir /s work` as a "clean build" therefore
+rem  breaks the daemon: it starts, cannot import the network's pure-numpy half, and the layer
+rem  reports a daemon that never answers. Delete the .dll/.spv/obj files instead.
+rem
 rem  Two things here are not obvious and both cost an afternoon if missed:
 rem
 rem    * libxmx.c needs /std:c11. It uses _Static_assert, which MSVC's default C
@@ -86,6 +92,11 @@ call :shader_def gemm_f16acc  gemm_coopmat_f16acc  ""
 call :shader_def gemm_tiled   gemm_resident        "-DRM=2 -DRN=2"
 call :shader_def gemm_staged32      gemm_staged "-DSTAGED_BM=32"
 call :shader_def gemm_staged32_deep gemm_staged "-DSTAGED_BM=32" "-DSTAGED_BK=64"
+rem The menu, twice: a storage image's declared format has to match the image's, so the HDR
+rem surface Aperture Desk Job presents (A2B10G10R10) cannot be written with the rgba8 build. The
+rem loop above already produced menu.spv without the define; this is the 10-bit one. A game on a
+rem BGRA8 surface gets the first, and `nr_menu_create` picks by the swapchain's format.
+call :shader_def menu_rgb10a2 menu "-DNR_MENU_TARGET_RGB10A2"
 call :shader_def attention_rows     attention   "-DROW_LANES=256"
 call :shader_def attention_ab       attention   "-DSOFTMAX_AB"
 rem The daemon's start-up probe, whose source is a bench tool rather than a graph shader.
@@ -107,10 +118,45 @@ echo   libxmx.dll
 if "%ONLY%"=="shaders" goto :done
 rem The layer calls no Vulkan function by name: the loader hands it every pointer, so it
 rem links no vulkan-1.lib, and its exports are its own functions (nr_layer.def).
+rem
+rem The menu sources come with it. /utf-8 because their strings are Chinese, Russian and Spanish as
+rem well as English, and MSVC otherwise reads the source in the system codepage: on a GBK machine
+rem that is "newline in constant" at compile time and mojibake in the literal at run time, which
+rem looks like a font bug long after it stopped being one. user32 is GetAsyncKeyState, gdi32 is
+rem GetGlyphOutlineW - the two the menu needs and the layer did not.
+rem
+rem No /Fo with more than one source: D8036, "cannot specify multiple source files with this
+rem option". The objects land beside their sources and the .def names what is exported.
+rem ImGui (third_party\imgui, MIT) is C++ and this layer is C, so the UI lives in one C++
+rem translation unit behind a plain-C interface (nr_menu_ui.h) and is compiled /TP into the same
+rem DLL. It links no Vulkan import library either: the backend's function pointers all come from
+rem the vkGetDeviceProcAddr the layer already carries. The .cpp files are compiled to objects
+rem first, because /TP on a mixed-source command line would force the C files through the C++
+rem front end.
 echo [3/6] building nr_layer.dll ...
-cl /nologo /O2 /TC /D_WIN32 /I"%VULKAN_SDK%\Include" /I"%REPO%\src\layer" /Fo:"%WORK%\nr_layer.obj" /Fe:"%WORK%\nr_layer.dll" /LD "%REPO%\src\layer\nr_layer.c" /link /DEF:"%REPO%\src\layer\nr_layer.def"
+cl /nologo /O2 /TP /utf-8 /EHsc /DNDEBUG /DVK_NO_PROTOTYPES /D_WIN32 /D_IMGUI_DEFINE_MATH_OPERATORS /I"%VULKAN_SDK%\Include" /I"%REPO%\third_party\imgui" /I"%REPO%\src\layer" /Fd"%REPO%\imgui.pdb" /c "%REPO%\third_party\imgui\imgui.cpp" "%REPO%\third_party\imgui\imgui_draw.cpp" "%REPO%\third_party\imgui\imgui_tables.cpp" "%REPO%\third_party\imgui\imgui_widgets.cpp" "%REPO%\third_party\imgui\imgui_impl_vulkan.cpp" "%REPO%\src\layer\nr_menu_ui.cpp"
+if errorlevel 1 ( echo ERROR: imgui objects failed & exit /b 1 )
+rem The objects landed in the current directory (cl /c with no /Fo). Move each by name and fail
+rem loudly if any is missing: a stale object from an earlier build, linked in place of a fresh one,
+rem cost this menu a full day of symptoms that matched no source change.
+for %%F in (imgui.obj imgui_draw.obj imgui_tables.obj imgui_widgets.obj imgui_impl_vulkan.obj nr_menu_ui.obj) do (
+  if exist "%%F" ( move /Y "%%F" "%REPO%\" >nul ) else if exist "%REPO%\third_party\imgui\%%F" (
+    move /Y "%REPO%\third_party\imgui\%%F" "%REPO%\" >nul
+  ) else if exist "%REPO%\src\layer\%%F" (
+    move /Y "%REPO%\src\layer\%%F" "%REPO%\" >nul
+  ) else (
+    echo ERROR: %%F was not produced by the compile & exit /b 1
+  )
+)
+cl /nologo /O2 /TC /utf-8 /D_WIN32 /I"%VULKAN_SDK%\Include" /I"%REPO%\third_party\imgui" /I"%REPO%\src\layer" /c "%REPO%\src\layer\nr_layer.c" "%REPO%\src\layer\nr_menu.c" "%REPO%\src\layer\nr_menu_font.c" "%REPO%\src\layer\nr_menu_strings.c" "%REPO%\src\layer\nr_menu_strings_lookup.c" "%REPO%\src\layer\nr_menu_bridge.c" "%REPO%\src\layer\nr_file.c" "%REPO%\src\layer\nr_focus.c"
+if errorlevel 1 ( echo ERROR: layer C objects failed & exit /b 1 )
+rem link.exe, not cl, for the mixed C/C++ link: cl with /TC recompiles .obj inputs it is handed
+rem on the same command line (C2018, reading the binary as source), which is not a link at all.
+link /nologo /DLL /OUT:"%WORK%\nr_layer.dll" /DEF:"%REPO%\src\layer\nr_layer.def" "%REPO%\nr_layer.obj" "%REPO%\nr_menu.obj" "%REPO%\nr_menu_font.obj" "%REPO%\nr_menu_strings.obj" "%REPO%\nr_menu_strings_lookup.obj" "%REPO%\nr_menu_bridge.obj" "%REPO%\nr_file.obj" "%REPO%\nr_focus.obj" "%REPO%\imgui.obj" "%REPO%\imgui_draw.obj" "%REPO%\imgui_tables.obj" "%REPO%\imgui_widgets.obj" "%REPO%\imgui_impl_vulkan.obj" "%REPO%\nr_menu_ui.obj" user32.lib gdi32.lib
 if errorlevel 1 ( echo ERROR: nr_layer.dll failed & exit /b 1 )
+del /Q "%REPO%\*.obj" >nul 2>&1
 echo   nr_layer.dll
+echo   nr_layer.dll  (with the INS settings menu: user32, gdi32)
 rem What setup puts beside a game as vulkan-1.dll: it sets the layer's environment in the
 rem game's own process, so NR is there however the game is started (nr_vulkan_proxy.c).
 cl /nologo /O2 /TC /D_WIN32 /I"%VULKAN_SDK%\Include" /I"%REPO%\src\layer" /Fo:"%WORK%\nr_vulkan_proxy.obj" /Fe:"%WORK%\nr_vulkan_proxy.dll" /LD "%REPO%\src\layer\nr_vulkan_proxy.c" /link /DEF:"%REPO%\src\layer\nr_vulkan_proxy.def"
@@ -133,9 +179,24 @@ echo   skipped: no x86 tools
 echo     %VCX86%
 goto :image
 :have_x86
-cmd /c ""%VCX86%" >nul && cl /nologo /O2 /TC /D_WIN32 /I"%VULKAN_SDK%\Include" /I"%REPO%\src\layer" /Fo:"%WORK%\nr_layer32.obj" /Fe:"%WORK%\nr_layer32.dll" /LD "%REPO%\src\layer\nr_layer.c" /link /DEF:"%REPO%\src\layer\nr_layer.def" /MACHINE:X86"
+rem The same sources as the 64-bit step, /utf-8 included. No /Fo with more than one source
+rem (D8036), so the objects land beside their sources and the .def names what is exported.
+rem
+rem The UI is C++ and the layer is C, so the x86 build needs its own ImGui objects: an amd64
+rem .obj cannot be linked into an x86 DLL (LNK1112), and the C++ objects are not
+rem interchangeable the way the C ones are. Compiled first, with the same flags and the same
+rem /TP, into a scratch directory of their own - an x86 imgui.obj in the repo root would be
+rem picked up by the 64-bit link on the next run and fail there instead.
+set "X86OBJ=%WORK%\obj32"
+if not exist "%X86OBJ%" mkdir "%X86OBJ%"
+cmd /c ""%VCX86%" >nul && cl /nologo /O2 /TP /utf-8 /EHsc /DNDEBUG /DVK_NO_PROTOTYPES /D_WIN32 /D_IMGUI_DEFINE_MATH_OPERATORS /I"%VULKAN_SDK%\Include" /I"%REPO%\third_party\imgui" /I"%REPO%\src\layer" /Fo:"%X86OBJ%\\" /c "%REPO%\third_party\imgui\imgui.cpp" "%REPO%\third_party\imgui\imgui_draw.cpp" "%REPO%\third_party\imgui\imgui_tables.cpp" "%REPO%\third_party\imgui\imgui_widgets.cpp" "%REPO%\third_party\imgui\imgui_impl_vulkan.cpp" "%REPO%\src\layer\nr_menu_ui.cpp""
+if errorlevel 1 ( echo ERROR: imgui x86 objects failed & exit /b 1 )
+cmd /c ""%VCX86%" >nul && cl /nologo /O2 /TC /utf-8 /D_WIN32 /I"%VULKAN_SDK%\Include" /I"%REPO%\src\layer" /Fo:"%X86OBJ%\\" /c "%REPO%\src\layer\nr_layer.c" "%REPO%\src\layer\nr_menu.c" "%REPO%\src\layer\nr_menu_font.c" "%REPO%\src\layer\nr_menu_strings.c" "%REPO%\src\layer\nr_menu_strings_lookup.c" "%REPO%\src\layer\nr_menu_bridge.c" "%REPO%\src\layer\nr_file.c" "%REPO%\src\layer\nr_focus.c""
+if errorlevel 1 ( echo ERROR: layer x86 C objects failed & exit /b 1 )
+cmd /c ""%VCX86%" >nul && link /nologo /DLL /MACHINE:X86 /OUT:"%WORK%\nr_layer32.dll" /DEF:"%REPO%\src\layer\nr_layer.def" "%X86OBJ%\nr_layer.obj" "%X86OBJ%\nr_menu.obj" "%X86OBJ%\nr_menu_font.obj" "%X86OBJ%\nr_menu_strings.obj" "%X86OBJ%\nr_menu_strings_lookup.obj" "%X86OBJ%\nr_menu_bridge.obj" "%X86OBJ%\nr_file.obj" "%X86OBJ%\nr_focus.obj" "%X86OBJ%\imgui.obj" "%X86OBJ%\imgui_draw.obj" "%X86OBJ%\imgui_tables.obj" "%X86OBJ%\imgui_widgets.obj" "%X86OBJ%\imgui_impl_vulkan.obj" "%X86OBJ%\nr_menu_ui.obj" user32.lib gdi32.lib"
 if errorlevel 1 ( echo ERROR: nr_layer32.dll failed & exit /b 1 )
 echo   nr_layer32.dll
+echo   nr_layer32.dll  (with the INS settings menu)
 cmd /c ""%VCX86%" >nul && cl /nologo /O2 /TC /D_WIN32 /I"%VULKAN_SDK%\Include" /I"%REPO%\src\layer" /Fo:"%WORK%\nr_vulkan_proxy32.obj" /Fe:"%WORK%\nr_vulkan_proxy32.dll" /LD "%REPO%\src\layer\nr_vulkan_proxy.c" /link /DEF:"%REPO%\src\layer\nr_vulkan_proxy.def" /MACHINE:X86"
 if errorlevel 1 ( echo ERROR: nr_vulkan_proxy32.dll failed & exit /b 1 )
 echo   nr_vulkan_proxy32.dll
