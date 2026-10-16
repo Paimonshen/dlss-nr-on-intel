@@ -961,9 +961,7 @@ void ImGui_ImplVulkan_UpdateTexture(ImTextureData* tex)
             check_vk_result(err);
         }
 
-        fprintf(stderr, "[ui] font upload submitted, waiting for queue\n");
         err = vkQueueWaitIdle(v->Queue); // FIXME-OPT: Suboptimal!
-        fprintf(stderr, "[ui] queue idle\n");
         check_vk_result(err);
         vkDestroyBuffer(v->Device, upload_buffer, v->Allocator);
         vkFreeMemory(v->Device, upload_buffer_memory, v->Allocator);
@@ -1448,7 +1446,6 @@ bool    ImGui_ImplVulkan_Init(ImGui_ImplVulkan_InitInfo* info)
     vkGetPhysicalDeviceProperties(info->PhysicalDevice, &properties);
     bd->NonCoherentAtomSize = properties.limits.nonCoherentAtomSize;
 
-    fprintf(stderr, "[ui] creating device objects\n");
     if (!ImGui_ImplVulkan_CreateDeviceObjects())
         IM_ASSERT(0 && "ImGui_ImplVulkan_CreateDeviceObjects() failed!"); // <- Can't be hit yet.
 
