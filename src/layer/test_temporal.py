@@ -169,6 +169,48 @@ def holder_checks():
           history.take("a", inner, -1.0) == (None, None, None) and history.output is None,
           "so switching the path back on does not resurrect a stale frame")
 
+    # With the client's own motion the history follows it, the hold floor asks the game's
+    # last frame moved here, and a surface the frame shows something else on has none.
+    history = nr_daemon.History()
+    yy, xx = np.indices((64, 96), dtype=np.float32)
+    output = np.stack([xx / 96, yy / 64, ((xx * yy) % 7) / 7], -1).astype(np.float32)
+    game = np.stack([xx / 96, 1 - yy / 64, (xx % 5) / 5], -1).astype(np.float32)
+    history.keep("m", output, np.ascontiguousarray(game[::2, ::2]), game)
+    motion = np.zeros((64, 96, 2), np.float32)
+    motion[..., 0] = 3                       # every surface was 3 pixels to the right
+    motion[:, -3:] = np.nan                  # ... and these came in from off the edge
+    now = np.empty_like(game)
+    now[:, :93] = game[:, 3:]                # the game's frame, moved as the motion says
+    now[:, 93:] = rng.random((64, 3, 3), dtype=np.float32)
+    block = (slice(10, 20), slice(40, 50))   # ... but for a block showing something else
+    now[block] = np.where(now[block] > 0.5, 0.0, 1.0)
+    got_inner, got_full, got_pixels = history.take("m", np.ascontiguousarray(now[::2, ::2]),
+                                                   0.15, motion=motion, colour=now)
+    kept = np.ones((64, 93), bool)
+    kept[block] = False
+    # Exact but for float32 normalised coordinates, which land a hair off the pixel.
+    gap = (float(np.abs(got_full[:, :93] - output[:, 3:])[kept].max())
+           if got_full is not None else 1.0)
+    check("motion carries the history along it", gap < 1e-4,
+          f"a whole-pixel offset reads the earlier output to {gap:.1e}")
+    check("where something else is, there is no history",
+          got_full is not None and np.array_equal(got_full[block], now[block]),
+          "a surface uncovered behind what moved does not take the history of what moved")
+    check("where nothing was, the frame is its own history",
+          got_full is not None and np.array_equal(got_full[:, 93:], now[:, 93:]),
+          "nothing old blended in at the edge it came from")
+    floor_gap = (float(np.abs(got_pixels[:, :93] - game[:, 3:]).max())
+                 if got_pixels is not None else 1.0)
+    check("the hold floor asks the game's last frame moved here",
+          floor_gap < 1e-4 and np.array_equal(got_pixels[:, 93:], now[:, 93:])
+          and got_inner is not None and got_inner.shape == (32, 48, 3),
+          f"to {floor_gap:.1e}; cut {history.cut:.3f} measured against the moved frame")
+    history.keep("m", output, np.ascontiguousarray(game[::2, ::2]), game)
+    check("with nothing known there is no history",
+          history.take("m", np.ascontiguousarray(now[::2, ::2]), 0.15,
+                       motion=np.full((64, 96, 2), np.nan, np.float32),
+                       colour=now) == (None, None, None), "a reset on the client's side")
+
 
 # --------------------------------------------------------------------------
 # the daemon, over the real socket

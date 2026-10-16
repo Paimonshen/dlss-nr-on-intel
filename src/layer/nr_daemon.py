@@ -61,6 +61,10 @@ except ImportError:  # pragma: no cover - the NumPy path is the fallback
 MAGIC = 0x304E524E
 MASK_COVERAGE_LIMIT = 0.55   # above this the mask is the scene, not the interface
 MAGIC_MASKED = 0x314E524E     # the same, with a one-byte-per-pixel interface mask after the colour
+# The same, then for each pixel two float32: the offset in pixels to where its surface was on
+# the frame before, NaN where it was not on screen. From a client that has the game's own
+# motion vectors (src/xess/nr_xess.c); the history then follows them (`History.follow`).
+MAGIC_MOTION = 0x324E524E
 MAGIC_GPU = 0x3147524E       # control metadata for same-device external GPU resources
 
 # The swapchain formats a compositor or VKD3D actually hands out. A game writes
@@ -458,15 +462,19 @@ class History:
         self.inner = None       # `output` at the network's input extent, taken ahead
         self.frames = 0
         self.cut = 0.0
+        self.grids = {}         # each pixel's centre, normalised, per extent
 
-    def take(self, key, source, limit):
+    def take(self, key, source, limit, motion=None, colour=None):
         """History for this frame: at the network's extent, at the output's, and the
-        game's own frame behind it. `(None, None, None)` when there is nothing to trust."""
+        game's own frame behind it. `(None, None, None)` when there is nothing to trust.
+        With `motion` (and this frame's `colour`), carried along it: `follow`."""
         previous, self.cut = self.output, 0.0
         if key != self.key or previous is None or self.source.shape != source.shape:
             self.key, self.output, self.source, self.pixels, self.frames = key, None, None, None, 0
             self.inner = None
             return None, None, None
+        if motion is not None:
+            return self.follow(source, previous, motion, colour, limit)
         self.cut = float(np.abs(source - self.source).mean())
         if self.cut > limit:
             # A round transition, a replay cut or a menu. The gate rejects wrong history
@@ -481,6 +489,69 @@ class History:
             inner = previous if previous.shape[:2] == source.shape[:2] else resample(previous, source.shape[:2])
         return inner, previous, self.pixels
 
+    def grid(self, height, width):
+        grid = self.grids.get((height, width))
+        if grid is None:
+            yy, xx = np.indices((height, width), dtype=np.float32)
+            grid = ((xx + np.float32(0.5)) / np.float32(width),
+                    (yy + np.float32(0.5)) / np.float32(height))
+            self.grids[(height, width)] = grid
+        return grid
+
+    def drop(self):
+        self.output = self.source = self.pixels = self.inner = None
+        self.frames = 0
+        return None, None, None
+
+    def follow(self, source, previous, motion, colour, limit):
+        """History carried along motion the client measured, which is what the network's
+        temporal path was trained on (`notes/phase12-temporal.md`): for each pixel of this
+        frame, the offset in pixels to where its surface was on the frame before, NaN where
+        it was not on screen. The identity history stands in for this where there is no
+        motion. The hold floor comes along: its "the game handed back the same pixel" is
+        asked of the game's last frame moved here, so a surface that kept its look as it
+        moved holds its history. Where the frame moved here does not look like this one at
+        all — a surface uncovered behind something that moved, which the vectors trace back
+        to the thing in front — the history is of something else, and the model is given
+        none there rather than trusted to see it. Where nothing was, the frame itself is
+        the history, so nothing old is blended in there; with nothing known anywhere, there
+        is no history at all."""
+        known = np.isfinite(motion[..., 0]) & np.isfinite(motion[..., 1])
+        if not known.any():
+            return self.drop()
+        height, width = previous.shape[:2]
+        dx = np.where(known, motion[..., 0], np.float32(0)) / np.float32(width)
+        dy = np.where(known, motion[..., 1], np.float32(0)) / np.float32(height)
+        u, v = self.grid(height, width)
+        full = sample_history(previous, u + dx, v + dy)
+        full[~known] = colour[~known]
+        pixels = None
+        if self.pixels is not None and self.pixels.shape == colour.shape:
+            pixels = sample_history(self.pixels, u + dx, v + dy)
+            pixels[~known] = colour[~known]
+            other = np.abs(colour - pixels).max(axis=-1) > STALE
+            full[other] = colour[other]
+        # The network's extent reads the motion of the nearest full-size pixel.
+        rows, columns = source.shape[:2]
+        near = np.ix_(
+            np.minimum(((np.arange(rows) + 0.5) * (height / rows)).astype(np.intp), height - 1),
+            np.minimum(((np.arange(columns) + 0.5) * (width / columns)).astype(np.intp), width - 1))
+        known_inner = known[near]
+        u, v = self.grid(rows, columns)
+        u, v = u + dx[near], v + dy[near]
+        earlier = (self.inner if self.inner is not None and self.inner.shape[:2] == source.shape[:2]
+                   else resample(previous, source.shape[:2]))
+        inner = sample_history(earlier, u, v)
+        inner[~known_inner] = source[~known_inner]
+        moved = sample_history(self.source, u, v)
+        other = np.abs(source - moved).max(axis=-1) > STALE
+        inner[other] = source[other]
+        # A camera move is not a cut: the test is against the last frame moved here.
+        self.cut = float(np.abs(source - moved)[known_inner].mean()) if known_inner.any() else 0.0
+        if self.cut > limit:
+            return self.drop()
+        return inner, full, pixels
+
     def keep(self, key, output, source, pixels):
         self.key, self.output, self.source, self.pixels = key, output, source, pixels
         self.frames += 1
@@ -490,6 +561,23 @@ class History:
         # same bytes. A different extent next time falls back to resampling then.
         self.inner = (output if output.shape[:2] == source.shape[:2]
                       else resample(output, source.shape[:2]))
+
+
+# How far, in any channel, the game's last frame moved here may differ from this one before
+# what is there counts as another surface and its history is dropped (`History.follow`).
+# Jitter and the reprojection's own filter move textured pixels by a few levels; a surface
+# uncovered behind something that moved differs by far more.
+STALE = 0.12
+
+
+def sample_history(history, u, v):
+    """The vendor's five-tap Catmull-Rom reprojection at normalised coordinates: in C where
+    the library is built, MLX-DLSS's NumPy otherwise, the same bytes either way
+    (`src/ref/test_native_image.py`)."""
+    sampled = nr_image.history_sample(history, u, v) if nr_image is not None else None
+    if sampled is None:
+        sampled = nr_frame.load_mlx_numpy_modules(("temporal",))[0].sample_history(history, u, v)
+    return sampled
 
 
 # Over how many levels of 255 the hold lets go. A pixel the game handed back unchanged
@@ -633,12 +721,13 @@ def process_connection(connection, backend, args):
             mode = "gpu-shared-fence" if metrics.get("sync") == "fence" else "gpu-shared"
             print_gpu_frame(width, height, vk_format, args.live, metrics, mode)
         return
-    if magic not in (MAGIC, MAGIC_MASKED):
+    if magic not in (MAGIC, MAGIC_MASKED, MAGIC_MOTION):
         raise ValueError(f"bad magic {magic:#x}")
-    return process(connection, backend, args, width, height, vk_format, masked=magic == MAGIC_MASKED)
+    return process(connection, backend, args, width, height, vk_format,
+                   masked=magic == MAGIC_MASKED, moving=magic == MAGIC_MOTION)
 
 
-def process(connection, backend, args, width, height, vk_format, *, masked=False):
+def process(connection, backend, args, width, height, vk_format, *, masked=False, moving=False):
     """Legacy host image processing, guarded even when invoked directly."""
     if os.environ.get("NR_GPU_ONLY") == "1":
         raise ValueError("GPU-only: host frame processing is forbidden")
@@ -647,6 +736,9 @@ def process(connection, backend, args, width, height, vk_format, *, masked=False
     payload = receive(connection, width * height * 4, keep="frame")
     interface = (receive(connection, width * height, keep="interface")
                  if masked else None)
+    motion = (np.frombuffer(receive(connection, width * height * 8, keep="motion"),
+                            np.float32).reshape(height, width, 2)
+              if moving else None)
     if vk_format not in FORMATS:
         print(f"unsupported VkFormat {vk_format}; passing the frame through",
               flush=True)
@@ -692,6 +784,8 @@ def process(connection, backend, args, width, height, vk_format, *, masked=False
     top, bottom, left, right = args.letterbox.region(whole, (width, height, vk_format))
     boxed = (top, bottom, left, right) != (0, height, 0, width)
     colour = whole[top:bottom, left:right] if boxed else whole
+    if motion is not None and boxed:
+        motion = motion[top:bottom, left:right]
     active_height, active_width = colour.shape[:2]
     # The network's cost follows the extent it is given and nothing else, so a smaller
     # internal frame is the only lever that changes the frame rate (notes/phase37,
@@ -713,7 +807,7 @@ def process(connection, backend, args, width, height, vk_format, *, masked=False
     # this function already.
     shot = (width, height, vk_format, top, bottom, left, right, live.profile)
     history_inner, history_full, history_pixels = args.history.take(
-        shot, inner, live.cut_limit if live.temporal > 0 else -1.0)
+        shot, inner, live.cut_limit if live.temporal > 0 else -1.0, motion=motion, colour=colour)
     # Built in the graph's own mapped input where the backend offers it, so nothing is
     # copied on the way in — on Linux that is measured and clean (test_input_fp16.py).
     #
