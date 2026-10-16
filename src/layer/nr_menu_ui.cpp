@@ -27,6 +27,29 @@
 #include <stdio.h>
 #include <string.h>
 #include <cstring>
+
+/* ------------------------------------------------------------------ diagnostics
+ *
+ * Two kinds of message, and they must not be confused.
+ *
+ * NREX_ERROR is a real failure the person running the game needs to know about: a backend that
+ * would not start, an image that would not resize. It always prints.
+ *
+ * NREX_TRACE is development chatter - "backend functions loaded", "queue idle", the pointer's
+ * position every time it moves. It used to print unconditionally, which meant a released layer wrote
+ * a line to the game's stderr on every mouse move and dumped Vulkan function pointers and a queue
+ * handle while starting. That is noise at best and a small information leak at worst, in somebody
+ * else's process. It compiles to nothing unless NREX_TRACE_LOGGING is defined, which is how this
+ * file was developed and is not how it ships.
+ *
+ * The one that mattered most is the pointer trace: it was per-move, unthrottled, and it is what
+ * made the menu feel like it was doing work while the pointer was nowhere near it. */
+#ifndef NREX_TRACE_LOGGING
+#define NREX_TRACE(...) ((void)0)
+#else
+#define NREX_TRACE(...) fprintf(stderr, __VA_ARGS__)
+#endif
+#define NREX_ERROR(...) fprintf(stderr, __VA_ARGS__)
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -292,7 +315,7 @@ extern "C" NREX_API nrex_ui *nrex_create(void *device_v, void *physical_v, void 
     u->vk.mem_props = reinterpret_cast<PFN_vkGetPhysicalDeviceMemoryProperties>(
         gpa_i(instance_v, "vkGetPhysicalDeviceMemoryProperties"));
     if (!u->vk.mem_props) {
-        fprintf(stderr, "[menu ui] instance-resolver gave NULL for vkGetPhysicalDeviceMemoryProperties\n");
+        NREX_ERROR("[menu ui] instance-resolver gave NULL for vkGetPhysicalDeviceMemoryProperties\n");
         *why = "no vkGetPhysicalDeviceMemoryProperties"; delete u; return nullptr;
     }
     NREX_RESOLVE(create_view, "vkCreateImageView")
@@ -334,12 +357,12 @@ extern "C" NREX_API nrex_ui *nrex_create(void *device_v, void *physical_v, void 
     setvbuf(stderr, NULL, _IONBF, 0);   /* a layer's stderr is redirected; block buffering ate
                                              every log after the last flush and made the freeze
                                              look like it happened somewhere it did not */
-    fprintf(stderr, "[ui] target made\n");
+    NREX_TRACE("[ui] target made\n");
 
-    fprintf(stderr, "[ui] creating ImGui context\n");
+    NREX_TRACE("[ui] creating ImGui context\n");
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
-    fprintf(stderr, "[ui] context ok, loading font\n");
+    NREX_TRACE("[ui] context ok, loading font\n");
     ImGuiIO &io = ImGui::GetIO();
     io.IniFilename = nullptr;              /* a layer must not write an imgui.ini beside the game */
 
@@ -434,9 +457,9 @@ extern "C" NREX_API nrex_ui *nrex_create(void *device_v, void *physical_v, void 
     init.UseDynamicRendering = false;
     init.CheckVkResultFn = [](VkResult err) {
         if (err != VK_SUCCESS)
-            fprintf(stderr, "[menu ui] ImGui Vulkan backend: VkResult %d\n", (int)err);
+            NREX_ERROR("[menu ui] ImGui Vulkan backend: VkResult %d\n", (int)err);
     };
-    fprintf(stderr, "[ui] loading backend functions through the layer's resolvers\n");
+    NREX_TRACE("[ui] loading backend functions through the layer's resolvers\n");
     /* Device commands first - nearly all of them - and instance commands from the instance
      * resolver when the device one declines, which is the case for the handful of physical-device
      * queries: a resolver handed no instance refuses them, so it is the second resolver's job. */
@@ -455,7 +478,7 @@ extern "C" NREX_API nrex_ui *nrex_create(void *device_v, void *physical_v, void 
                  * that does nothing is the honest answer: the menu never creates a surface. */
                 if (strstr(name, "SurfaceKHR")) f = (PFN_vkVoidFunction)(uintptr_t)&nrex_noop;
             }
-            fprintf(stderr, "[ui]   load '%s' -> %p\n", name, (void *)f);
+            NREX_TRACE("[ui]   load '%s' -> %p\n", name, (void *)f);
             return f;
         }
     };
@@ -467,8 +490,8 @@ extern "C" NREX_API nrex_ui *nrex_create(void *device_v, void *physical_v, void 
         delete u;
         return nullptr;
     }
-    fprintf(stderr, "[ui] backend functions loaded\n");
-    fprintf(stderr, "[ui] init backend (queue=%p)\n", (void *)init.Queue);
+    NREX_TRACE("[ui] backend functions loaded\n");
+    NREX_TRACE("[ui] init backend (queue=%p)\n", (void *)init.Queue);
     if (!ImGui_ImplVulkan_Init(&init)) {
         *why = "the ImGui Vulkan backend would not start";
         ImGui::DestroyContext();
@@ -477,7 +500,7 @@ extern "C" NREX_API nrex_ui *nrex_create(void *device_v, void *physical_v, void 
         return nullptr;
     }
 
-    fprintf(stderr, "[ui] backend started\n");
+    NREX_TRACE("[ui] backend started\n");
     return u;
 }
 
@@ -974,8 +997,11 @@ static void nrex_dump_ui(nrex_ui *u)
                         fwrite(row.data(), 3, u->width, f);
                     }
                     fclose(f);
-                    fprintf(stderr, "[ui] wrote %s (%ux%u, %s)\n", path, u->width, u->height,
-                            ten_bit ? "rgb10a2" : "rgba8");
+                    /* A NREX_ERROR rather than a trace, and the only one that is not a failure:
+                     * this line can only run when somebody set NR_MENU_DUMP, and the whole point of
+                     * that switch is to be told where the file went. Silence would defeat it. */
+                    NREX_ERROR("[ui] wrote %s (%ux%u, %s)\n", path, u->width, u->height,
+                               ten_bit ? "rgb10a2" : "rgba8");
                 }
                 u->vk.unmap_memory(u->device, mem);
             }
@@ -1171,13 +1197,17 @@ extern "C" NREX_API void nrex_mouse(nrex_ui *ui, float x, float y, int down)
         return;
     }
     /* Trace the pointer in ImGui's coordinates when it moves or clicks. The next report then says
-     * whether coordinates arrive at all and where they land, instead of a guess. */
+     * whether coordinates arrive at all and where they land, instead of a guess.
+     *
+     * Behind NREX_TRACE, which is off in a release. It was on, unthrottled, on every pointer move -
+     * in somebody else's process, writing to the game's stderr while they played. It earned its keep
+     * while the pointer conversion was being worked out and it costs nothing to keep it there. */
     static float last_x = -1.0f, last_y = -1.0f;
     static int last_down = 0;
     if (x != last_x || y != last_y || down != last_down) {
         last_x = x; last_y = y; last_down = down;
-        fprintf(stderr, "[mouse] x=%.0f y=%.0f down=%d display=%.0fx%.0f\n",
-                x, y, down, io.DisplaySize.x, io.DisplaySize.y);
+        NREX_TRACE("[mouse] x=%.0f y=%.0f down=%d display=%.0fx%.0f\n",
+                   x, y, down, io.DisplaySize.x, io.DisplaySize.y);
     }
     io.AddMousePosEvent(x, y);
     io.AddMouseButtonEvent(0, down != 0);

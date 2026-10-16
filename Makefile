@@ -117,6 +117,13 @@ IMGUI_SOURCES := third_party/imgui/imgui.cpp third_party/imgui/imgui_draw.cpp \
 # positionally, so a reordered knob or a language index off by one pairs every knob with the
 # wrong explanation - and a tooltip that confidently describes the wrong control is worse than
 # none. The strings come from the same generated table the installer uses.
+# A save leaves valid JSON, and a file that is not a JSON object is replaced rather than
+# left broken. The writer's clamp is here too: `nr_json_put` refuses to write an object it
+# knows is short, because a truncated one would make the daemon log a parse error and keep its
+# old values - a save that looks like it worked and did nothing.
+work/test_settings_writer: src/layer/test_settings_writer.c $(MENU_SOURCES)
+	$(CC) $(CFLAGS) -o $@ src/layer/test_settings_writer.c $(MENU_SOURCES) $(MENU_LIBS)
+
 work/test_menu_hints: src/layer/test_menu_hints.c $(MENU_SOURCES)
 	$(CC) $(CFLAGS) -o $@ src/layer/test_menu_hints.c $(MENU_SOURCES) $(MENU_LIBS)
 
@@ -236,6 +243,7 @@ test: all work/attention_ab.spv work/test_exchange work/test_settled work/test_p
 	python3 src/gpu/test_joint_qkv.py
 	work/test_soft_cursor
 	work/test_focus_gate
+	work/test_settings_writer
 	work/test_menu_hints
 	python3 src/layer/test_daemon.py
 	python3 src/layer/test_daemon_owner.py

@@ -32,6 +32,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdarg.h>   /* the JSON writer below is variadic */
 #include <math.h>
 
 #ifdef _WIN32
@@ -396,18 +397,61 @@ static void live_settings_path(const nr_menu_bridge *b, char *out, size_t size)
  * never calls destroy. The PID is what the daemon checks to tell a live preview from a leftover,
  * and it is the difference between "these are the settings right now" and "these were the settings
  * the last time somebody pressed Reset". */
+/* Append to a bounded buffer, keeping the running length honest.
+ *
+ * `snprintf` returns the length it WOULD have written, so a truncating call pushes `n` past the end
+ * of the buffer - and the next call's `sizeof out - n` then underflows to a huge size_t and writes
+ * past the end. It cannot happen with the current bounds (the worst case is 12 741 bytes into
+ * 16 384, measured against the parser's own limits), but that is arithmetic on the present field
+ * widths rather than a guarantee, and a knob with a longer key would turn a wrong note into an
+ * out-of-bounds write in somebody else's process.
+ *
+ * Clamping costs one comparison per field and makes the truncation loud instead: `truncated` is
+ * reported by the caller, which refuses to write a file it knows is short rather than handing the
+ * daemon a half object. */
+typedef struct {
+    char *buf;
+    size_t cap;
+    size_t len;
+    int truncated;
+} nr_json_out;
+
+static void nr_json_init(nr_json_out *o, char *buf, size_t cap)
+{
+    o->buf = buf; o->cap = cap; o->len = 0; o->truncated = 0;
+    if (cap) buf[0] = '\0';
+}
+
+/* No `__attribute__((format))` here: MSVC does not have it, and this file is built by cl on
+ * Windows and gcc on Linux. The format string is checked by eye instead - every call site is a
+ * literal in this file, so there is nowhere for a mismatch to come from. */
+static void nr_json_put(nr_json_out *o, const char *fmt, ...)
+{
+    if (o->truncated) return;
+    if (o->len >= o->cap) { o->truncated = 1; return; }
+    va_list ap;
+    va_start(ap, fmt);
+    int wrote = vsnprintf(o->buf + o->len, o->cap - o->len, fmt, ap);
+    va_end(ap);
+    if (wrote < 0) { o->truncated = 1; return; }
+    size_t got = (size_t)wrote;
+    if (got >= o->cap - o->len) { o->truncated = 1; o->len = o->cap - 1; return; }
+    o->len += got;
+}
+
 static int write_live_settings(nr_menu_bridge *b)
 {
     if (!b->settings_path[0]) return 0;
     char out[4096];
     char path[sizeof b->settings_path + 8];
-    size_t n = 0;
-    n += (size_t)snprintf(out + n, sizeof out - n, "{\n");
+    nr_json_out o;
+    nr_json_init(&o, out, sizeof out);
+    nr_json_put(&o, "{\n");
     int emitted = 0;
 #define NR_EMIT(...)                                                        \
     do {                                                                    \
-        if (emitted) n += (size_t)snprintf(out + n, sizeof out - n, ",\n");  \
-        n += (size_t)snprintf(out + n, sizeof out - n, __VA_ARGS__);         \
+        if (emitted) nr_json_put(&o, ",\n");                                \
+        nr_json_put(&o, __VA_ARGS__);                                       \
         emitted = 1;                                                        \
     } while (0)
 #ifdef _WIN32
@@ -436,27 +480,16 @@ static int write_live_settings(nr_menu_bridge *b)
             NR_EMIT("  \"%s\": %g", k->key, (double)b->values[i]);
     }
 #undef NR_EMIT
-    n += (size_t)snprintf(out + n, sizeof out - n, "%s}\n", emitted ? "\n" : "");
+    nr_json_put(&o, "%s}\n", emitted ? "\n" : "");
     live_settings_path(b, path, sizeof path);
     /* Atomic, for the same reason the settings file is: the daemon polls by mtime and a reader
-     * that caught a half-written object would log a parse error and keep the old values. */
-    return nr_write_file_atomic(path, out, n);
+     * that caught a half-written object would log a parse error and keep the old values. A short
+     * object is not written at all: the daemon would see malformed JSON and keep the values it has,
+     * which looks like the menu stopped working. */
+    if (o.truncated) return 0;
+    return nr_write_file_atomic(path, out, o.len);
 }
 
-/* Rebuild the settings object, substituting the menu's values for the keys it owns, and write it.
- *
- * This is the ONLY writer of the user's settings file - reached by the Save button and by nothing
- * else. Everything else the user does lives in `b->values` / `b->choice` / `b->moved` and reaches
- * the picture through `write_live_settings`, which is a different file.
- *
- * Not "write an object with these keys": the tools and the daemon share this file, the daemon may
- * accept more knobs than this table knows, and anything else in it belongs to whoever put it
- * there. So the object that was found is re-emitted with its own keys in their own order and its
- * own values as the exact text they had - except the ones the user moved - and a key the file did
- * not have is appended only if the user moved it.
- *
- * That last part is the render-scale case: a key absent from the JSON keeps its default in the
- * menu's memory and is not written, so opening the menu and saving changes nothing. */
 /* The settings file with only `menu_language` changed.
  *
  * The same shape as `save_settings` - the object that was found, re-emitted with its own keys and
@@ -474,14 +507,15 @@ static int save_language_only(nr_menu_bridge *b)
     int parsed = have && nr_settings_parse(existing, &settings);
 
     char out[16384];
-    size_t n = 0;
-    n += (size_t)snprintf(out + n, sizeof out - n, "{\n");
+    nr_json_out o;
+    nr_json_init(&o, out, sizeof out);
+    nr_json_put(&o, "{\n");
     int emitted = 0;
     int wrote = 0;
 #define NR_EMIT(...)                                                        \
     do {                                                                    \
-        if (emitted) n += (size_t)snprintf(out + n, sizeof out - n, ",\n");  \
-        n += (size_t)snprintf(out + n, sizeof out - n, __VA_ARGS__);         \
+        if (emitted) nr_json_put(&o, ",\n");                                \
+        nr_json_put(&o, __VA_ARGS__);                                       \
         emitted = 1;                                                        \
     } while (0)
 
@@ -498,9 +532,9 @@ static int save_language_only(nr_menu_bridge *b)
     }
     if (!wrote) NR_EMIT("  \"menu_language\": %d", b->language);
 #undef NR_EMIT
-    n += (size_t)snprintf(out + n, sizeof out - n, "%s}\n", emitted ? "\n" : "");
+    nr_json_put(&o, "%s}\n", emitted ? "\n" : "");
 
-    int ok = nr_write_file_atomic(b->settings_path, out, n);
+    int ok = o.truncated ? 0 : nr_write_file_atomic(b->settings_path, out, o.len);
     free(existing);
     if (!ok) return 0;
     b->stamp = nr_file_stamp(b->settings_path);
@@ -516,8 +550,9 @@ static int save_settings(nr_menu_bridge *b)
     int parsed = have && nr_settings_parse(existing, &settings);
 
     char out[16384];
-    size_t n = 0;
-    n += (size_t)snprintf(out + n, sizeof out - n, "{\n");
+    nr_json_out o;
+    nr_json_init(&o, out, sizeof out);
+    nr_json_put(&o, "{\n");
 
     int written[NR_KNOBS_COUNT];
     memset(written, 0, sizeof written);
@@ -531,8 +566,8 @@ static int save_settings(nr_menu_bridge *b)
     int emitted = 0;
 #define NR_EMIT(...)                                                        \
     do {                                                                    \
-        if (emitted) n += (size_t)snprintf(out + n, sizeof out - n, ",\n");  \
-        n += (size_t)snprintf(out + n, sizeof out - n, __VA_ARGS__);         \
+        if (emitted) nr_json_put(&o, ",\n");                                \
+        nr_json_put(&o, __VA_ARGS__);                                       \
         emitted = 1;                                                        \
     } while (0)
 
@@ -592,12 +627,12 @@ static int save_settings(nr_menu_bridge *b)
     }
 #undef NR_EMIT
 
-    n += (size_t)snprintf(out + n, sizeof out - n, "%s}\n", emitted ? "\n" : "");
+    nr_json_put(&o, "%s}\n", emitted ? "\n" : "");
 
     /* Atomic: the daemon polls this file's stamp, so a reader that caught a half-written object
      * would log a parse error and keep its old values. `nr_write_file_atomic` writes beside it and
-     * renames over it. */
-    int ok = nr_write_file_atomic(b->settings_path, out, n);
+     * renames over it. A short object is not written at all - see `nr_json_put`. */
+    int ok = o.truncated ? 0 : nr_write_file_atomic(b->settings_path, out, o.len);
     free(existing);
     if (!ok) return 0;
 

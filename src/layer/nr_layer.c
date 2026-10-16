@@ -52,6 +52,27 @@
 #include "nr_menu_strings.h"
 #include "nr_menu_font.h"
 
+/* ------------------------------------------------------------------ diagnostics
+ *
+ * Two kinds of message, on the same rule nr_menu_ui.cpp follows.
+ *
+ * LAYER_ERROR is a real failure worth reporting to whoever is running the game. It always prints.
+ *
+ * LAYER_TRACE is development chatter - which of the menu's guards shut, a window handle, a swapchain
+ * pointer, how many rows were built. It compiles to nothing unless LAYER_TRACE_LOGGING is defined.
+ * These were written while the pointer conversion and the composite were being worked out, and they
+ * were `fprintf`s into the game's stderr: a released layer should not narrate itself into somebody
+ * else's process, and a handle plus a PID is not something to hand out for no reason.
+ *
+ * The per-frame ones matter most. `[mouse] x=... y=...` fired on every pointer move, unthrottled,
+ * while the user was playing. */
+#ifndef LAYER_TRACE_LOGGING
+#define LAYER_TRACE(...) ((void)0)
+#else
+#define LAYER_TRACE(...) fprintf(stderr, __VA_ARGS__)
+#endif
+#define LAYER_ERROR(...) fprintf(stderr, __VA_ARGS__)
+
 #ifdef _WIN32
 #  include <io.h>
 #  ifndef R_OK
@@ -63,8 +84,7 @@
 #  ifndef F_OK
 #    define F_OK 0
 #  endif
-#  ifndef access
-#    define access(p, m) _access(p, m)
+#  ifndef access#    define access(p, m) _access(p, m)
 #  endif
 #else
 #  include <pthread.h>
@@ -2361,7 +2381,7 @@ static void menu_ui_mouse(struct device_data *data, struct swapchain_data *chain
 	 * them is exactly the shape of a bug that costs an evening: the log says "nothing arrived" and
 	 * says nothing about which of the four doors was shut. */
 	static int said[8];
-#define UI_MOUSE_STOP(n, msg) do { if (!said[n]) { said[n] = 1; fprintf(stderr, "[mouse] stopped: " msg "\n"); } return; } while (0)
+#define UI_MOUSE_STOP(n, msg) do { if (!said[n]) { said[n] = 1; LAYER_TRACE("[mouse] stopped: " msg "\n"); } return; } while (0)
 
 	if (!data->menu_ui) UI_MOUSE_STOP(0, "no UI");
 
@@ -2400,7 +2420,7 @@ static void menu_ui_mouse(struct device_data *data, struct swapchain_data *chain
 	if (cw <= 0.0f || ch <= 0.0f) {
 		if (!said[4]) {
 			said[4] = 1;
-			fprintf(stderr, "[mouse] stopped: client area is %.0fx%.0f\n", cw, ch);
+			LAYER_TRACE("[mouse] stopped: client area is %.0fx%.0f\n", cw, ch);
 		}
 		return;
 	}
@@ -2408,7 +2428,7 @@ static void menu_ui_mouse(struct device_data *data, struct swapchain_data *chain
 		said[5] = 1;
 		DWORD pid = 0;
 		GetWindowThreadProcessId(hwnd, &pid);
-		fprintf(stderr, "[mouse] window ok: hwnd=%p pid=%lu client=%.0fx%.0f "
+		LAYER_TRACE("[mouse] window ok: hwnd=%p pid=%lu client=%.0fx%.0f "
 				"origin=(%ld,%ld) cursor=(%ld,%ld)\n",
 				(void *)hwnd, (unsigned long)pid, cw, ch,
 				(long)origin.x, (long)origin.y, (long)screen.x, (long)screen.y);
@@ -2783,7 +2803,7 @@ static int menu_composite(struct device_data *data, struct swapchain_data *chain
 			static int shown = 0;
 			if (!shown) {
 				shown = 1;
-				fprintf(stderr, "[ov] menu=%p ui=%p view=%p img=%p cmd=%p target=%p %ux%u rows=%d\n",
+				LAYER_TRACE("[ov] menu=%p ui=%p view=%p img=%p cmd=%p target=%p %ux%u rows=%d\n",
 					(void *)data->menu, (void *)data->menu_ui,
 					nrex_image_view(data->menu_ui), nrex_image(data->menu_ui),
 					(void *)data->menu_commands, (void *)chain->images[index],
