@@ -472,19 +472,19 @@ The average change between two frames above which the scene is taken to have cut
 
 <!-- rates:begin -->
 
-Measured through the socket on 2026-10-14 by `python3 src/bench/live_rates.py` — the whole round trip a game waits for, median of nine frames, not graph time alone:
+Measured through the socket on 2026-10-18 by `python3 src/bench/live_rates.py` — the whole round trip a game waits for, median of nine frames, not graph time alone:
 
 | swapchain | render scale | ms | fps |
 | --- | ---: | ---: | ---: |
-| 512x288 | 0.35 | 26 | 38.6 |
-| 512x288 | 0.50 | 26 | 39.1 |
-| 640x360 | 0.35 | 27 | 37.6 |
-| 640x360 | 0.50 | 27 | 37.6 |
-| 854x480 | 0.50 | 33 | 30.2 |
-| 1024x768 | 0.55 | 52 | 19.4 |
+| 512x288 | 0.35 | 25 | 40.7 |
+| 512x288 | 0.50 | 25 | 39.8 |
+| 640x360 | 0.35 | 26 | 38.8 |
+| 640x360 | 0.50 | 26 | 38.8 |
+| 854x480 | 0.50 | 31 | 32.5 |
+| 1024x768 | 0.55 | 50 | 20.0 |
 | 1920x1080 | 0.55 | 111 | 9.0 |
 
-Medians of six runs of `live_rates.py --warmup 3` with swap empty; a row's runs spread up to 13 %. The tool's default warm-up of 25 frames reads the middle rows slower on this laptop. On 2026-09-23, with 5.5 GiB in zram and the kernel's memory-pressure figures rising, 1920x1080 ran anywhere from 322 to 463 ms: if that row is much slower for you, look at swap before anything else.
+Medians of six runs of `live_rates.py --warmup 3`, with 1.3 GiB in zram and 9.7 GiB available; a row's runs spread up to 6 %, and the tool's default warm-up of 25 frames reads the same. On 2026-09-23, with 5.5 GiB in zram and the kernel's memory-pressure figures rising, 1920x1080 ran anywhere from 322 to 463 ms: if that row is much slower for you, look at swap before anything else.
 
 That is the daemon's own cost with nothing else on the GPU. A game adds its own frame to it: **Tekken 7** ran at **30 fps at 800x450** with the render scale at 0.35, and 27 at 0.6, in a live session on 2026-09-27 — against 10.5 fps at 640x360 on 2026-09-16 (`notes/phase59`).
 
@@ -577,6 +577,17 @@ installed; `make LAYER32=1` says what is missing. `prepare_layer.py` writes both
 **It is unbearably slow.** Look at the swapchain size before the render scale. See the
 table above; at 1920x1080 the daemon alone manages about 3 fps at full scale and 9 at 0.55,
 and nothing will fix that but a smaller window.
+
+**The frame time swings from one run to the next.** Look at the GPU's clock. Between the
+daemon's frames the GPU has nothing to do, and on Linux's xe driver its governor takes that
+for time to spare and clocks down, to 700-1200 MHz of the Arc 140V's 1950, the more so the
+lighter the frame: 1280x720 at render scale 0.4, with the client waiting 25 ms between frames
+as a game would, took 62 ms a frame that way and 36 at the full clock. So libxmx asks Mesa for
+the driver's low-latency strategy (`force_guc_low_latency`, which puts the kernel's
+`DRM_XE_EXEC_QUEUE_LOW_LATENCY_HINT` on the daemon's queue), and the daemon's log says
+`GPU clock: the driver's low-latency strategy`. It costs power while the GPU works;
+`XMX_LOW_LATENCY=0` leaves the driver's default. Checked on Linux 7.2 with Mesa 26.2.4; a
+kernel or a Mesa without the hint runs as before.
 
 **`GPU lost, stopping` in the daemon's log** — or, from a clone older than 2026-09-17,
 `frame rejected/failed ... xmx_graph_run: resident submit (-4)` on every frame. `-4` is

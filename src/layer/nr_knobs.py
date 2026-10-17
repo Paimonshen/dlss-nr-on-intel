@@ -130,19 +130,19 @@ DEFAULTS = {knob.name: knob.default for knob in KNOBS}
 # by `src/tools/knob_doc.py`, because the hand-written one went two days out of date the
 # moment the host passes moved to C and then stayed wrong for a week.
 RATES = (
-    (512, 288, 0.35, 25.9),
-    (512, 288, 0.50, 25.6),
-    (640, 360, 0.35, 26.6),
-    (640, 360, 0.50, 26.6),
-    (854, 480, 0.50, 33.1),
-    (1024, 768, 0.55, 51.5),
-    (1920, 1080, 0.55, 111.0),
+    (512, 288, 0.35, 24.6),
+    (512, 288, 0.50, 25.1),
+    (640, 360, 0.35, 25.8),
+    (640, 360, 0.50, 25.8),
+    (854, 480, 0.50, 30.8),
+    (1024, 768, 0.55, 50.1),
+    (1920, 1080, 0.55, 110.6),
 )
-RATES_MEASURED = "2026-10-14"
+RATES_MEASURED = "2026-10-18"
 # What a reader of the table needs and the numbers cannot say. Empty when there is nothing.
-RATES_NOTE = ("Medians of six runs of `live_rates.py --warmup 3` with swap empty; a row's "
-              "runs spread up to 13 %. The tool's default warm-up of 25 frames reads the middle "
-              "rows slower on this laptop. On 2026-09-23, with 5.5 GiB in zram and the kernel's "
+RATES_NOTE = ("Medians of six runs of `live_rates.py --warmup 3`, with 1.3 GiB in zram and 9.7 "
+              "GiB available; a row's runs spread up to 6 %, and the tool's default warm-up of 25 "
+              "frames reads the same. On 2026-09-23, with 5.5 GiB in zram and the kernel's "
               "memory-pressure figures rising, 1920x1080 ran anywhere from 322 to 463 ms: if "
               "that row is much slower for you, look at swap before anything else.")
 

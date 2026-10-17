@@ -1356,6 +1356,10 @@ def run_owned(args):
     print(f"network preset {nr_frame.PRESET}, {backend.topology.block_count} blocks,"
           f" history ceiling {backend.blend_scale}", flush=True)
     print(f"buffers in {xmx.memory_note()}", flush=True)
+    if xmx.low_latency():
+        # without it the GPU's governor clocks down between frames (libxmx, xmx_init)
+        print("GPU clock: the driver's low-latency strategy (XMX_LOW_LATENCY=0 leaves its default)",
+              flush=True)
     rt = backend.runtime
     print("runtime options " + " ".join(
         f"{name}={int(getattr(rt, attr))}" for name, attr in (

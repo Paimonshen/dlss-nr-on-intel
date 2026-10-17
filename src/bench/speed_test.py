@@ -11,11 +11,12 @@ release starts at (0.4) and at full scale (1.0). Two times for each:
 No game runs, so these are the best NR does on this PC. In a game the layer also captures each
 frame and writes the answer back, and the game draws on the same GPU, so its frame rate is lower.
 
-    python src/bench/speed_test.py [--root RELEASE] [--json FILE]
+    python src/bench/speed_test.py [--root RELEASE] [--json FILE] [--preset A|B]
 
-Writes JSON: the GPU the daemon took and how long it took to load, and for each case the
-network's field and both times. A named pipe on Windows, a Unix socket elsewhere. live_rates.py
-is the README table's measure, with its own plan; this one is short enough for a first install.
+Writes JSON: the GPU the daemon took, how long it took to load and the network preset it runs,
+and for each case the network's field and both times. A named pipe on Windows, a Unix socket
+elsewhere. live_rates.py is the README table's measure, with its own plan; this one is short
+enough for a first install.
 """
 import argparse
 import json
@@ -151,6 +152,9 @@ def main():
     parser.add_argument("--json", type=pathlib.Path, help="write the result here as well as to stdout")
     parser.add_argument("--frames", type=int, default=FRAMES)
     parser.add_argument("--warmup", type=int, default=WARMUP)
+    # The test takes no NR_ setting from its own environment (below), so the preset is asked for.
+    parser.add_argument("--preset", type=str.upper, choices=("A", "B"),
+                        help="the network the daemon runs (NR_PRESET); A if left out")
     args = parser.parse_args()
     root = args.root.resolve()
     result = {"ok": False, "error": None, "min_extent": MIN_EXTENT, "scales": list(SCALES),
@@ -173,6 +177,8 @@ def main():
                    if not key.upper().startswith("NR_") and key.upper() != "VK_INSTANCE_LAYERS"}
     environment.update(NR_KEEP_BLOCKS="1", PYTHONUTF8="1", PYTHONDONTWRITEBYTECODE="1",
                        NR_LAYER_SPAWNED=str(os.getpid()))
+    if args.preset:
+        environment["NR_PRESET"] = args.preset
     hidden = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
     started = time.perf_counter()
     with log.open("wb") as output:
@@ -195,6 +201,9 @@ def main():
         ready = re.search(r"model ready in ([0-9.]+)s on (.+)", text)
         if ready:
             result["model_ready_s"], result["device"] = float(ready.group(1)), ready.group(2).strip()
+        preset = re.search(r"network preset (\S+), (\d+) blocks", text)
+        if preset:
+            result["preset"], result["blocks"] = preset.group(1), int(preset.group(2))
         memory = re.search(r"buffers in (.+)", text)
         if memory:
             result["memory"] = memory.group(1).strip()

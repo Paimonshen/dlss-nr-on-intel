@@ -82,6 +82,11 @@ def memory_note():
     return _load().xmx_memory().decode()
 
 
+def low_latency():
+    """Whether libxmx asked the driver for its low-latency clock strategy (XMX_LOW_LATENCY)."""
+    return bool(_load().xmx_low_latency())
+
+
 def _shift(x):
     """The exact 2^k that lifts |x| just under the FP16 ceiling.
 

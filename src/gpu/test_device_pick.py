@@ -4,8 +4,9 @@
 The choice first, on machines this one is not: an older Intel iGPU before an Arc card,
 another vendor's card first, a virtual or a software device, XMX_DEVICE by index and by
 name. Then this machine's own devices through xmx_init, in a child process each, with
-XMX_DEVICE unset, naming device 0, and naming nothing here. Last the queue: each family
-XMX_QUEUE_FAMILY can name and each XMX_QUEUE_PRIORITY, a GEMM checked on every one.
+XMX_DEVICE unset, naming device 0, and naming nothing here. Then the queue: each family
+XMX_QUEUE_FAMILY can name and each XMX_QUEUE_PRIORITY, a GEMM checked on every one. Last the
+clock strategy libxmx asks the driver for, and XMX_LOW_LATENCY.
 """
 import ctypes
 import os
@@ -129,6 +130,40 @@ def queues():
         check(f"{name}: says so", any(part in line for line in lines for part in said), True)
 
 
+# What a child sees after xmx_init: whether libxmx asked for the low-latency strategy, and the
+# driver's option as the process's own environment has it, which Python's copy does not show.
+CLOCK = """
+import ctypes, os, sys
+sys.path.insert(0, sys.argv[1])
+import xmx
+asked = int(xmx.low_latency())
+if os.name == "nt":
+    value = os.environ.get("force_guc_low_latency")      # libxmx sets nothing there
+else:
+    libc = ctypes.CDLL(None)
+    libc.getenv.restype = ctypes.c_char_p
+    value = libc.getenv(b"force_guc_low_latency")
+    value = value.decode() if value else None
+print(asked, value or "unset", flush=True)
+"""
+
+
+def clock():
+    print("this machine's clock strategy:")
+    asked = ("0", "unset") if os.name == "nt" else ("1", "true")
+    for settings, want in (({}, asked), ({"XMX_LOW_LATENCY": "1"}, asked),
+                           ({"XMX_LOW_LATENCY": "0"}, ("0", "unset")),
+                           ({"force_guc_low_latency": "false"}, ("0", "false"))):
+        env = {k: v for k, v in os.environ.items()
+               if not k.startswith("XMX_") and k != "force_guc_low_latency"}
+        env.update(settings)
+        got = subprocess.run([sys.executable, "-c", CLOCK, str(ROOT / "src" / "gpu")], env=env,
+                             capture_output=True, text=True, timeout=300)
+        name = " ".join(f"{k}={v}" for k, v in settings.items()) or "nothing set"
+        check(f"{name}: asked, and the option", tuple(got.stdout.split()[-2:])
+              if got.returncode == 0 else f"exit {got.returncode}", want)
+
+
 def this_machine():
     print("this machine, through xmx_init:")
     code, name, lines = start(None)
@@ -157,5 +192,6 @@ def this_machine():
 choices()
 this_machine()
 queues()
+clock()
 print("FAIL: " + ", ".join(failures) if failures else "all device choices OK")
 sys.exit(1 if failures else 0)

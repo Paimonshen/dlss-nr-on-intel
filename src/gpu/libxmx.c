@@ -65,6 +65,7 @@ static struct {
 	char name[256]; char err[256]; char memory[256]; char memory_read[256];
 	int ready, lost, discrete, unmapped, external, external_semaphore, external_pending, resident_pending, transfer_pending;
 	int driver;                /* the device's VkDriverId, 0 where Vulkan 1.2 cannot say (xmx_init) */
+	int low_latency;           /* the driver asked for its low-latency clock strategy (xmx_init) */
 	unsigned char device_uuid[VK_UUID_SIZE], driver_uuid[VK_UUID_SIZE];
 	int pin32;                /* pipelines require 32-lane subgroups (build_pipeline_spec) */
 	int half_by_cast;         /* half_round's spelling, constant 1 on every pipeline (xmx_init) */
@@ -630,6 +631,10 @@ int xmx_half_by_cast(void) { return g.half_by_cast; }
  * was proved on with one driver's compiler. */
 int xmx_driver(void) { return g.driver; }
 
+/* Whether the driver was asked for its low-latency clock strategy (xmx_init). Asked, not
+ * granted: a kernel without the hint, or a driver without the option, runs as before. */
+int xmx_low_latency(void) { return g.low_latency; }
+
 /* Whether the device is a card with memory of its own rather than the host's (memtype). */
 int xmx_discrete(void) { return g.discrete; }
 
@@ -747,6 +752,22 @@ int xmx_pick_device(unsigned n, const int *types, const int *able, const char *c
 int xmx_init(const char *spv_path)
 {
 	if (g.ready) return 0;
+	/* The GPU's clock. On Linux's xe driver the GuC's governor reads the gaps between a
+	 * daemon's frames (the decode, the composition, the transport) as a GPU with time to
+	 * spare, and settles at 700-1200 MHz of 1950 while every frame waits on the network:
+	 * preset B at 1280x720 and render scale 0.4 took 42-53 ms a frame, and 21-22 at the full
+	 * clock (notes/phase72). Mesa's Intel driver asks the kernel for the low-latency strategy
+	 * on its queues (DRM_XE_EXEC_QUEUE_LOW_LATENCY_HINT) when its driconf option
+	 * `force_guc_low_latency` is set, and reads that from the environment when an instance
+	 * is made: so it is set here, before ours, in this process alone. A value already in the
+	 * environment is kept, and XMX_LOW_LATENCY=0 leaves the driver's default. */
+#ifndef _WIN32
+	const char *latency = getenv("XMX_LOW_LATENCY");
+	if (!latency || strcmp(latency, "0"))
+		setenv("force_guc_low_latency", "true", 0);
+	const char *strategy = getenv("force_guc_low_latency");
+	g.low_latency = strategy && !strcmp(strategy, "true");
+#endif
 	VkApplicationInfo app = { .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
 				  .pApplicationName = "libxmx", .apiVersion = VK_API_VERSION_1_3 };
 	VkInstanceCreateInfo ici = { .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &app };

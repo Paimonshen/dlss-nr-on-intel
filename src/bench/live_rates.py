@@ -13,6 +13,13 @@ and the temporal path has no history yet.
     python3 src/bench/live_rates.py                       # the published table
     python3 src/bench/live_rates.py 800x600@0.5 --frames 9
     python3 src/bench/live_rates.py 640x360@0.5 --set min_extent=128
+    python3 src/bench/live_rates.py 1280x720@0.4 --gap 25
+
+`--gap` adds that long between an answer and the next frame, as a game takes for its own.
+Making each test frame takes a while already (5 ms at 640x360, 23 at 1280x720, 56 at
+1920x1080 here), and the GPU waits through both: on this laptop's xe driver its governor
+clocks down through such gaps unless libxmx asks for the low-latency strategy
+(XMX_LOW_LATENCY), and the round trip follows the clock.
 
 Prints the table and the literal for `nr_knobs.RATES`, so the number in the README has a
 program behind it rather than a memory of one.
@@ -65,13 +72,17 @@ def round_trip(path, payload, header, want):
     return time.perf_counter() - started
 
 
-def measure(daemon_socket, settings, width, height, scale, frames, warmup, extra=None):
+def measure(daemon_socket, settings, width, height, scale, frames, warmup, extra=None, gap=0.0):
     settings.write_text(json.dumps(dict(extra or {}, render_scale=scale)))
     payload_bytes = 4 * width * height
     header = struct.pack("<4I", MAGIC, width, height, FORMAT_B8G8R8A8)
     times = []
     for i in range(frames + warmup):
-        took = round_trip(str(daemon_socket), frame(width, height, i), header, payload_bytes)
+        payload = frame(width, height, i)
+        if gap:
+            # the game's own frame, on top of the time this frame took to make
+            time.sleep(gap)
+        took = round_trip(str(daemon_socket), payload, header, payload_bytes)
         if i >= warmup:
             times.append(took)
     return sorted(times)[len(times) // 2], min(times), max(times)
@@ -91,6 +102,8 @@ def main():
                              "(notes/windows-dump-measurements-20261010.md, its rules for measuring performance)")
     parser.add_argument("--set", action="append", default=[], metavar="KNOB=VALUE",
                         help="any other setting for the daemon, e.g. min_extent=128")
+    parser.add_argument("--gap", type=float, default=0.0, metavar="MS",
+                        help="wait this long before each frame, as a game does for its own")
     args = parser.parse_args()
     extra = {}
     for item in args.set:
@@ -124,7 +137,7 @@ def main():
             measured = []
             for width, height, scale in plan:
                 middle, low, high = measure(daemon_socket, settings, width, height, scale,
-                                            args.frames, args.warmup, extra)
+                                            args.frames, args.warmup, extra, args.gap / 1000)
                 measured.append((width, height, scale, 1000 * middle))
                 print("  %-14s %6.2f %8.0f %8.1f %18s"
                       % ("%dx%d" % (width, height), scale, 1000 * middle, 1 / middle,
