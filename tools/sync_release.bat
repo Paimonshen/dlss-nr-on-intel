@@ -78,6 +78,16 @@ xcopy /E /I /Y /Q "%REPO%\src" "%REL%\src" >nul
 if errorlevel 1 ( echo ERROR: copying src failed & exit /b 1 )
 echo   src\ (whole tree)
 
+rem The installer's own scripts. `setup.bat` and `setup.sh` run
+rem `%HERE%\scripts\get_weights.py`, which in turn runs `scripts\nr_weights.py`, and a release
+rem without them can install a game but cannot extract weights into it - the failure reads as a
+rem missing Python module rather than as a missing file. The ZIP build has always carried them
+rem (`build_release.py` lists both); this local shortcut did not, so a tree synced here could only
+rem ever be installed with --skip-weights.
+xcopy /E /I /Y /Q "%REPO%\scripts" "%REL%\scripts" >nul
+if errorlevel 1 ( echo ERROR: copying scripts failed & exit /b 1 )
+echo   scripts\ (get_weights.py, nr_weights.py, build_release.py)
+
 for /d /r "%REL%\src" %%J in (__pycache__) do @if exist "%%J" rmdir /S /Q "%%J" 2>nul
 
 rem ---- the setup window, and the strings it is translated from ----
