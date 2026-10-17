@@ -74,9 +74,9 @@ under that date. When an item is done, strike it through here and name the commi
   For #17 the owner's reading: when the whole frame waits on the network, the game has nothing to
   render past the network's own frame rate, so its load stays low. #12 and #15 work after a reinstall, and #12 waits for the next release. #16 is
   Paimonshen's in-game menu.
-- The clock hint in a game (`XMX_LOW_LATENCY`, on by default on Linux since 10-18): whether it
-  holds beside a game, and what it costs in power and heat on battery and on mains. Whether it
-  stays on by default is the owner's to say before it goes anywhere. Below, 10-18.
+- ~~The clock hint in a game (`XMX_LOW_LATENCY`, on by default on Linux since 10-18): whether it
+  stays on by default~~: the owner looked on 10-18 and keeps it on. What it costs in power and
+  heat, on battery above all, is unmeasured. Below, 10-18.
 - Preset B against the vendor's own B: a capture on the RTX 5060 Ti with
   `DLSSNR.Hint.Render.Preset` set to B, when the owner opens that machine. Below, 10-17 later.
 - The two files that came with the 310.9.16 DLL (`nvngx_dlssnr_compat-fp16-310.9.16-cuda13.4.3.rar`
@@ -89,6 +89,9 @@ under that date. When an item is done, strike it through here and name the commi
   graph at depths `{2,2,2,2,2}`, running on CPU and on the device (`2bb16f6`, below, 10-17
   later; phase72).
 - Preset B in a game: `NR_PRESET=B` beside A, the look and the frame rate. Below, 10-17 later.
+- A slight flicker of the network's own, which the owner saw on 10-18 and puts down to the
+  network's low resolution. `src/bench/flicker.py` on `work/good` at two render scales, and for
+  A and B, would say. Not run.
 - ~~Preset B's frame: the full-resolution blocks and the bottleneck are 45% of it at 1280x736.
   They are the next place to look for its speed~~: looked at on 10-18. Those passes are where
   the earlier work left them, and what was holding B's live frame back was the GPU's clock,
