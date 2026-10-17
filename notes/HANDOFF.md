@@ -40,13 +40,16 @@ When the dated entries grow long, move the older ones into the archive the same 
 - **NVIDIA's faster model is out** (`nvngx_dlssnr.dll` 310.9.16.0, 10-16): preset A is our model
   byte for byte. **Preset B (`hnet-crazy-cuckoo-small-fp8`) is A's graph with every stage at depth
   2**, 31 blocks against 71, with its own weights. On 10-17 it was read out of `.text` with REA,
-  unpacked, and run here, on CPU and on the device, at 0.54-0.58 of A's time. That is on branch
-  `newnr`, local; `NR_PRESET=B` picks it (below, 10-17; phase72).
+  unpacked, and run here, on CPU and on the device, at 0.54-0.58 of A's time. Through the daemon
+  its round trip is 0.5-0.8 of A's once the GPU's clock is held up (below, 10-18). That is on
+  branch `newnr`, local; `NR_PRESET=B` picks it (below, 10-17; phase72).
 - **Speed on this laptop**, `src/bench/speed_test.py`, network and round trip: 640x360 at 0.4 is
   23 ms and 26-27 ms on both systems; 1920x1080 at 1.0 is 273 and 299 ms on Linux, 384 and 409 on
   Windows, where Intel's compiler loses time in the staged GEMM's loop. The README's table
-  (`nr_knobs.RATES`) was measured with `live_rates.py --warmup 3`. The default is 25 now, and it
-  reads this laptop slower.
+  (`nr_knobs.RATES`) was measured with `live_rates.py --warmup 3`, again on 10-18 with the clock
+  hint, and the default warm-up of 25 now reads the same. On Linux libxmx asks the driver for its
+  low-latency clock strategy since 10-18 (`XMX_LOW_LATENCY`): without it the GPU's governor
+  clocked a frame with gaps around it down to 700-1200 MHz of 1950 (below, 10-18).
 - **Working rules.** Nothing goes to GitHub without the owner's word, and nothing untested at all:
   `make test` in both memory modes (`XMX_STAGING=1` is the second), CTest, and on Windows the MSVC
   build. Commits use the noreply address. NVIDIA's DLL, and anything derived from it, never enters
@@ -71,6 +74,9 @@ under that date. When an item is done, strike it through here and name the commi
   For #17 the owner's reading: when the whole frame waits on the network, the game has nothing to
   render past the network's own frame rate, so its load stays low. #12 and #15 work after a reinstall, and #12 waits for the next release. #16 is
   Paimonshen's in-game menu.
+- The clock hint in a game (`XMX_LOW_LATENCY`, on by default on Linux since 10-18): whether it
+  holds beside a game, and what it costs in power and heat on battery and on mains. Whether it
+  stays on by default is the owner's to say before it goes anywhere. Below, 10-18.
 - Preset B against the vendor's own B: a capture on the RTX 5060 Ti with
   `DLSSNR.Hint.Render.Preset` set to B, when the owner opens that machine. Below, 10-17 later.
 - The two files that came with the 310.9.16 DLL (`nvngx_dlssnr_compat-fp16-310.9.16-cuda13.4.3.rar`
@@ -83,8 +89,11 @@ under that date. When an item is done, strike it through here and name the commi
   graph at depths `{2,2,2,2,2}`, running on CPU and on the device (`2bb16f6`, below, 10-17
   later; phase72).
 - Preset B in a game: `NR_PRESET=B` beside A, the look and the frame rate. Below, 10-17 later.
-- Preset B's frame: the full-resolution blocks and the bottleneck are 45% of it at 1280x736.
-  They are the next place to look for its speed. Phase72.
+- ~~Preset B's frame: the full-resolution blocks and the bottleneck are 45% of it at 1280x736.
+  They are the next place to look for its speed~~: looked at on 10-18. Those passes are where
+  the earlier work left them, and what was holding B's live frame back was the GPU's clock,
+  which libxmx now holds up (`fe00b06`, below, 10-18). In the graph, the two bottleneck GEMMs
+  improve-b measured on 32-row blocks are worth 2 % of B's frame at 320x320. Phase72.
 - ~~`improve-e4m3`'s four red tests on Linux~~: green here on `newnr`, which holds all of
   `improve-e4m3` (`bad7bcf`). `gpu_device_pick` takes Mesa's answer, and the image path's three
   parity tests skip with the reason, as `1a146c2` meant (10-18).
@@ -104,6 +113,9 @@ under that date. When an item is done, strike it through here and name the commi
 - ~~The README's live table~~: re-measured at `--warmup 3`, 10-14.
 
 **Windows**
+- The GPU's clock: whether Intel's Windows driver also clocks a light network down between
+  frames, as Linux's governor did (below, 10-18). The power mode moved the host passes there
+  already (10-15). libxmx's hint is Mesa's alone and does nothing on Windows.
 - Preset B: the setup window extracts preset A only. For a 310.9.16 DLL it could also run
   `src/tools/unpack_preset.py`, and offer `NR_PRESET` (A or B) in `nr-env.txt`. Below, 10-17 later.
 - ~~The unmerged window attention hangs Intel's Windows driver from 32 windows up~~: found and
@@ -159,6 +171,53 @@ under that date. When an item is done, strike it through here and name the commi
   runs one subgroup to a workgroup (archive, 09-25).
 
 ---
+
+## Preset B through the daemon, and the GPU's clock (2026-10-18, branch `newnr`)
+
+The owner asked for B's speed. The figures, the profile and the commands are in phase72's
+section of 10-18.
+
+**Through the daemon.** `speed_test.py --preset B` (new: the test keeps no `NR_` setting of its
+own environment, so it asks for the preset), network and round trip, before the clock hint:
+640x360 at 0.4 is 22-23 / 25-26 ms on A and 15-18 / 19-22 on B; 1280x720 at 1.0 139-140 / 151
+and 75 / 85; 1920x1080 at 1.0 270 / 298 and 152 / 175-178. Over the network field A is 11 ms
++ 118 ms a megapixel, B 4.8 + 67.
+
+**Where B's frame goes.** At 320x320, 11.6 ms of device time: the bottleneck 3.6 (31 %), the
+two full-resolution blocks 2.4. At 1280x736, 65.7: the full-resolution blocks 21-22, the
+bottleneck 8.8. Those passes are where the earlier work left them: the bottleneck at 64 tokens
+waits on its K loop (`notes/improve-b.md`), the window block is its element-wise work. Of what
+improve-b measured and did not route, the two N = 1024 GEMMs on 32-row blocks with a 64-deep
+step (0.25 ms a frame) are 2 % of B's. Not done.
+
+**The clock.** At 640x360 and 0.4, with the gaps a client leaves between frames, the GPU ran at
+1636 MHz on average while busy under A and at 1157 under B, of 1950, with no throttle reason
+set: the GuC's governor reads the idle time between frames as time to spare, and the lighter
+network leaves more of it. Mesa's driconf option `force_guc_low_latency` puts the kernel's
+`DRM_XE_EXEC_QUEUE_LOW_LATENCY_HINT` on its queues, and with it the GPU ran at 1908-1936.
+**`fe00b06`:** libxmx sets it before it makes its instance, in its own process only; a value
+already in the environment is kept, and `XMX_LOW_LATENCY=0` leaves the driver's default. The
+daemon's log says `GPU clock: the driver's low-latency strategy`; `test_device_pick.py` checks
+the four cases. `live_rates.py --gap MS` waits before each frame, as a game takes for its own.
+
+| `live_rates.py`, 25 warm-up frames, 30 timed | A: default → hint | B: default → hint |
+| --- | --- | --- |
+| 1280x720 at 0.4 | 62 → 35 ms | 30 → 22 |
+| the same, 25 ms between frames | 91 → 37 | 38 → 27 |
+| 640x360 at 0.4, 25 ms between frames | 33 → 28 | 27 → 23 |
+
+Without the hint a case reads differently from run to run (the 91 was 62 in another run); with
+it, a few milliseconds apart. Back-to-back frames (`speed_test.py`) do not need it, and A on
+the README's table moved by at most 2 ms: the table is re-measured with it (`nr_knobs.RATES`),
+its runs now 2-6 % apart.
+
+**Not tested:** what it costs in power and heat, and whether it holds beside a game. CPU and
+GPU share one power budget on this laptop. On Windows nothing changes: the option is Mesa's.
+
+**Checked** at `fe00b06`: `make test` green in both memory modes (56 scripts each), CTest
+64 of 64; `claims_check`, `publish_check` and the README's generated table pass.
+
+**Next on Linux:** B in a game beside A, with the clock held, and the owner to judge the hint.
 
 ## Preset B read out of `.text`, unpacked and running here (2026-10-17, later, branch `newnr`)
 
@@ -1102,7 +1161,11 @@ followed from the wrong gate form), the leading-region projection, and "1.01x pa
 - **Measure with empty swap, a quiet CPU, and the clock warmed.** zram under load spread 1080p
   live runs over 322-463 ms (archive, 09-23). The GPU clock climbs through the first frames
   (`frame_profile.py --warm`), and the graph's time moves up to 44 % between daemon processes while
-  staying steady within one (archive, 10-02). Pair and alternate, and quote a band.
+  staying steady within one (archive, 10-02). Pair and alternate, and quote a band. On Linux the
+  governor also clocks down through the gaps between frames, and where it settled carries into
+  the next process (B's 320x320 without the hint: 11 ms right after runs with it, 15-18 after A's
+  without). libxmx holds the clock since `fe00b06`, so a run with `XMX_LOW_LATENCY=0` measures
+  the governor as much as the code (10-18).
 - **Shared memory comes in allocation sizes.** A 64-byte array beside a 2 KB stage took every
   tiled GEMM to 4 KB and cost 23 ms of a 720p frame. Mesa rounds each declaration up, and a core
   holds 128 KB between its workgroups: declare exactly an allocation size. Archive, 09-23 and

@@ -116,7 +116,7 @@ Why not the 0.44 the block count suggests: at 1280x736, one submit per block, A'
 86.8 window stages, 18.1 split, 10.9 bottleneck, 10.8 last block and head and 10.6 stem and
 block 0. B's 72 ms is 35.7, 4.3, 10.9, 10.9 and 10.5. **The full-resolution blocks and the
 bottleneck do not shrink, and they are 45% of B's frame.** They are the next place to look
-for B's speed.
+for B's speed. (Looked at on 10-18, below: what moved B's frame there was the GPU's clock.)
 
 On Dead or Alive 5's 1280x720 frame (`work/doa5/in.png`, through `--gpu`), B changes the
 frame by 0.0351 on average against A's 0.0364. On the two faces, luma with fine detail as
@@ -187,6 +187,92 @@ and UltraQuality 0.85, in `ComputeScalingRatioCommon`. 310.8's per-frame parser 
 `DLSSNR.ScalingRatio` and overwrote it with 1.0, and 310.9.16's does not read it. Not
 followed further.)
 
+## Through the daemon, and the GPU's clock (2026-10-18)
+
+**B through the daemon.** `speed_test.py --preset B` (the test takes no `NR_` setting from its
+own environment, so the preset is asked for), presets alternating, two runs each, network and
+round trip in ms. This was before the clock hint below, which these back-to-back frames do
+not need:
+
+| window | scale | network field | A | B |
+| --- | --- | --- | --- | --- |
+| 640x360 | 0.4 | 320x320 | 22-23 / 25-26 | 15-18 / 19-22 |
+| 800x450 | 0.4 | 320x320 | 22 / 27 | 13-16 / 15-19 |
+| 1280x720 | 0.4 | 512x320 | 29 / 34-35 | 18-21 / 24-28 |
+| 1920x1080 | 0.4 | 768x448 | 52 / 63-65 | 28 / 40-41 |
+| 640x360 | 1.0 | 640x384 | 41 / 45-46 | 22 / 26 |
+| 800x450 | 1.0 | 832x512 | 61 / 66-67 | 33 / 39-40 |
+| 1280x720 | 1.0 | 1344x768 | 139-140 / 151 | 75 / 85 |
+| 1920x1080 | 1.0 | 1920x1152 | 270-271 / 298 | 152 / 175-178 |
+
+Over the network field, four runs a preset later in the day: A is **11 ms + 118 ms a
+megapixel**, B **4.8 ms + 67**. B's fixed part is under half of A's, so at the vendor's
+smallest field, 320x320, B's network takes 11 ms against A's 22 when the clock stays up. Its
+scatter at the small fields, 11 to 18 ms in one day, is the clock, below.
+
+**Where B's frame goes**, `frame_profile.py --weights` after 10-20 warm frames:
+
+- **320x320, 11.6 ms of device time.** The bottleneck is 3.6 ms, 31 %: eight blocks of four
+  GEMMs at 64 tokens, 162 + 128 + 88 + 48 us a block, and 17 us of attention. The two
+  full-resolution blocks are 2.4 ms: the window blocks 0.74 and 0.72, their feed-forwards
+  0.48 and 0.43. The rest is the sixteen blocks of the levels between, over 179 passes.
+- **1280x736, 65.7 ms.** The full-resolution blocks are 21-22 ms (window blocks 6.3 and 6.2,
+  feed-forwards 4.1 and 3.9, the last upsample 0.75), the bottleneck 8.8, the four
+  half-resolution window blocks 6.2.
+
+The full-resolution window block runs ~2.5 TFLOP/s of multiply-adds and its feed-forward
+~3.75, where the earlier work left them: the window block is its element-wise work, the cosine
+trees, the E4M3 publishes and the softmax's transform (the HANDOFF archive, 09-26). The
+bottleneck at 64 tokens waits on its K loop, not on its weights (`notes/improve-b.md`, where
+E4M3 weights, a kernel without the shared-memory round trip and other block shapes were
+measured). Of what improve-b measured and did not route, the two N = 1024 GEMMs on 32-row
+blocks with a 64-deep step (0.25 ms a frame at 64 tokens) are now worth twice the share of
+B's frame that they were of A's: 2 %. Not done.
+
+**The clock.** `live_rates.py 640x360@0.4` with 25 warm-up frames and 60 timed, and the GPU's
+`act_freq` read every 2 ms (`/sys/class/drm/card0/device/tile0/gt0/freq0`): **A ran at 1636 MHz
+on average while busy, B at 1157.** The Arc 140V's maximum is 1950 (`rp0_freq`), its
+efficient frequency 500 (`rpe_freq`), and `throttle/reasons` said `none` throughout: nothing
+throttled. The GuC's governor (power profile `base`) reads the GPU's idle time between
+frames, the client making its next frame and the daemon's host passes, as time to spare,
+and B leaves more of it. The same plan, B at 1280x720 and 0.4 after 640x360: 42-53 ms a frame.
+
+Mesa's Intel driver has a driconf option for this, `force_guc_low_latency`
+(`src/intel/vulkan/anv_drirc_gen.py`). With it, it puts `DRM_XE_EXEC_QUEUE_LOW_LATENCY_HINT`
+on its exec queues where the kernel offers the hint (`xe/anv_queue.c`, which the kernel's
+`xe_drm.h` says will cost power), and driconf reads its options from the environment when an
+instance is made (`util/xmlconfig.c`). Set for the daemon alone, the busy mean was 1908-1936
+MHz for both presets, and B's 1280x720 at 0.4 took 21-22 ms.
+
+So **libxmx sets `force_guc_low_latency=true` before it makes its instance** (`xmx_init`),
+in its own process only, keeps a value already in the environment, and leaves the driver's
+default with `XMX_LOW_LATENCY=0`; the daemon's log says `GPU clock: the driver's low-latency
+strategy`. Nothing is computed differently: only the clock moves. `test_device_pick.py` checks
+the four cases. `live_rates.py --gap MS` waits that long before each frame, as a game takes
+for its own frame; making each test frame takes 5 ms at 640x360 and 23 at 1280x720 already.
+
+Back-to-back frames do not need it (`speed_test.py`, four runs a preset: the same times with
+and without, to a millisecond), and neither does preset A on the README's table, whose
+medians moved by at most 2 ms (`nr_knobs.RATES`, re-measured with it). Where the GPU waits:
+
+| the client between frames | case | A: default → hint | B: default → hint |
+| --- | --- | --- | --- |
+| making the frame (5 or 23 ms) | 640x360 at 0.4 | 27 → 26 ms | 14 → 14 |
+| | 1280x720 at 0.4 | 62 → 35 | 30 → 22 |
+| making it, then waiting 25 ms | 640x360 at 0.4 | 33 → 28 | 27 → 23 |
+| | 1280x720 at 0.4 | 91 → 37 | 38 → 27 |
+
+`live_rates.py --gap 0` and `25`, 25 warm-up frames and 30 timed, one run a cell, B's before
+A's. Without the hint the same case reads differently from run to run: in an earlier run with
+the frames made in advance, A's 1280x720 with the 25 ms wait took 62 ms and B's 55, against
+91 and 38 here. With it, a case's frames spread over a few milliseconds, and B's round trip at
+1280x720 and 0.4 is 0.6-0.7 of A's.
+
+**Not tested:** what it costs in power and heat, and whether it holds beside a game. On a
+laptop the CPU and the GPU share one power budget, and a game that leans on the CPU could
+lose by it. In a game the GPU also draws the game's frames, so the governor sees less idle
+time there than here.
+
 ## Not established
 
 - **The vendor's own output for B.** Nothing here was compared with NVIDIA's B. That needs
@@ -194,7 +280,8 @@ followed further.)
 - Whether the attention's new loop bound changes what the default path computes. The port
   follows 310.8 there, for A and for B. (The pre-block's new arithmetic does not: it is the
   mask blend modes, above.)
-- B in a game. The daemon runs it with `NR_PRESET=B`, which has not been tried in a game.
+- B in a game. The daemon runs it with `NR_PRESET=B`, which has not been tried in a game, and
+  neither has the clock hint.
 - Windows. The setup window extracts preset A only.
 
 ## Reproduce
@@ -209,4 +296,7 @@ python3 src/gpu/test_resident.py                                 # both presets'
 python3 src/ref/nr_frame.py IN.png OUT.png --gpu --weights work/mlxw/dlssnr-b-logical.safetensors
 python3 src/bench/frame_profile.py --weights work/mlxw/dlssnr-b-logical.safetensors
 NR_PRESET=B ...                                                  # the daemon, on B
+python3 src/bench/speed_test.py --preset B
+NR_PRESET=B XMX_LOW_LATENCY=0 python3 src/bench/live_rates.py 1280x720@0.4 --gap 25 --warmup 25
+cat /sys/class/drm/card0/device/tile0/gt0/freq0/act_freq             # while it runs
 ```
