@@ -515,6 +515,7 @@ $script:Strings=@{
   'Done.uninstall-steam'='Steam''s launch options restored and NR removed. The game folder is as it was before installation.'
   UninstallConfirm='Remove NR from this game? Setup deletes the dlss-nr folder and the files it put beside the game, and puts back the game files it set aside. If Steam still starts the game through an earlier setup''s launch options, they go back first, and Steam restarts. Your weights and settings stay in the DLSS-NR folder.'
   'Profile.standard'='Standard'; 'Profile.natural'='Natural'; 'Profile.cinematic'='Cinematic'
+  'Choice.weights.ht'='HT (the model this project reproduces)'; 'Choice.weights.cc_small_fp8'='CC small FP8 (not loadable yet)'
  }
  ru=@{
   Title='DLSS-NR — установка и запуск'; LanguageTip='Выберите язык мастера.'
@@ -610,6 +611,7 @@ $script:Strings=@{
   'Done.uninstall-steam'='Параметры запуска Steam возвращены, NR удалён. Папка игры такая же, как до установки.'
   UninstallConfirm='Удалить NR из этой игры? Мастер удалит папку dlss-nr и файлы, которые положил рядом с игрой, и вернёт отложенные файлы игры. Если Steam ещё запускает игру с параметрами от прежней версии мастера, сначала вернутся они, и Steam перезапустится. Веса и настройки останутся в папке DLSS-NR.'
   'Profile.standard'='Стандартный'; 'Profile.natural'='Естественный'; 'Profile.cinematic'='Кинематографический'
+  'Choice.weights.ht'='HT (модель, которую воспроизводит проект)'; 'Choice.weights.cc_small_fp8'='CC small FP8 (пока не загружается)'
  }
  es=@{
   Title='DLSS-NR — instalación e inicio'; LanguageTip='Cambie el idioma del instalador.'
@@ -705,6 +707,7 @@ $script:Strings=@{
   'Done.uninstall-steam'='Se restauraron las opciones de inicio de Steam y se quitó NR. La carpeta del juego está como antes de la instalación.'
   UninstallConfirm='¿Quitar NR de este juego? El instalador borra la carpeta dlss-nr y los archivos que puso junto al juego, y devuelve los archivos del juego que guardó aparte. Si Steam todavía inicia el juego con las opciones de un instalador anterior, primero se restauran, y Steam se reinicia. Sus pesos y su configuración se quedan en la carpeta de DLSS-NR.'
   'Profile.standard'='Estándar'; 'Profile.natural'='Natural'; 'Profile.cinematic'='Cinematográfico'
+  'Choice.weights.ht'='HT (el modelo que reproduce el proyecto)'; 'Choice.weights.cc_small_fp8'='CC small FP8 (aún no se puede cargar)'
  }
  zh=@{
    Title='DLSS-NR — 安装与启动'; LanguageTip='更改安装程序语言。'
@@ -800,6 +803,7 @@ $script:Strings=@{
    'Done.uninstall-steam'='Steam 启动选项已恢复，NR 已移除。游戏文件夹恢复如初。'
    UninstallConfirm='要从本游戏移除 NR 吗？安装程序会删除 dlss-nr 文件夹和它放到游戏旁的文件，并还原它收起来的游戏文件。如果 Steam 仍通过此前安装的启动选项启动游戏，它们会先被恢复，然后 Steam 重启。你的权重和设置保留在 DLSS-NR 文件夹中。'
    'Profile.standard'='标准'; 'Profile.natural'='自然'; 'Profile.cinematic'='电影'
+   'Choice.weights.ht'='HT（本项目复现的模型）'; 'Choice.weights.cc_small_fp8'='CC small FP8（暂不可加载）'
   }
 }
 $script:TextBindings=@{
@@ -823,6 +827,18 @@ $script:TipBindings=@{DllPath='DllTip'; GamePath='GameTip'; PythonPath='PythonTi
 function T([string]$Key) {
     if(-not $script:Strings[$script:Language].ContainsKey($Key)) { throw "Missing translation: $Key" }
     return [string]$script:Strings[$script:Language][$Key]
+}
+# The label of one value of a `choice` knob. A choice knob's values are not always profiles: the
+# weight model's are `ht` and `cc_small_fp8`, so the general key is `Choice.<knob>.<value>` and
+# `Profile.<value>` stays what `profile` reads. A value with neither key is shown as it is spelled,
+# because a missing translation throws above and a settings page that will not open is worse than a
+# row that says `ht`.
+function ChoiceLabel([string]$Name,[string]$Value) {
+    $key='Choice.'+$Name+'.'+$Value
+    if($script:Strings[$script:Language].ContainsKey($key)) { return [string]$script:Strings[$script:Language][$key] }
+    $key='Profile.'+$Value
+    if($script:Strings[$script:Language].ContainsKey($key)) { return [string]$script:Strings[$script:Language][$key] }
+    return $Value
 }
 function Set-Progress([string]$Key) {
     $script:ProgressKey=$Key
@@ -888,12 +904,12 @@ function Update-KnobLanguage {
         # The description once, on the name: it was printed under the slider and was the
         # slider's tooltip as well.
         $row.Label.ToolTip=T ('Hint.'+$name)
-        $defaultLabel=$(if($row.Model.kind -eq 'choice'){T ('Profile.'+[string]$row.Model.default)}else{Format-KnobValue $row.Model.default})
+        $defaultLabel=$(if($row.Model.kind -eq 'choice'){ChoiceLabel $name ([string]$row.Model.default)}else{Format-KnobValue $row.Model.default})
         $row.Default.ToolTip=(T 'DefaultKnob')+': '+$defaultLabel
         [Windows.Automation.AutomationProperties]::SetName($row.Default,(T 'DefaultKnob')+' '+$defaultLabel)
         if($row.Choice) {
             [Windows.Automation.AutomationProperties]::SetName($row.Choice,(T ('Knob.'+$name)))
-            foreach($item in $row.Choice.Items) { $item.Content=T ('Profile.'+[string]$item.Tag) }
+            foreach($item in $row.Choice.Items) { $item.Content=ChoiceLabel $name ([string]$item.Tag) }
         } else {
             $row.Input.ToolTip=(T ('Knob.'+$name))+' ['+$row.Model.runtime_low+' – '+$row.Model.runtime_high+']'
             [Windows.Automation.AutomationProperties]::SetName($row.Input,(T ('Knob.'+$name)))
