@@ -74,8 +74,9 @@ under that date. When an item is done, strike it through here and name the commi
 - Preset B against the vendor's own B: a capture on the RTX 5060 Ti with
   `DLSSNR.Hint.Render.Preset` set to B, when the owner opens that machine. Below, 10-17 later.
 - The two files that came with the 310.9.16 DLL (`nvngx_dlssnr_compat-fp16-310.9.16-cuda13.4.3.rar`
-  and `renodx-dlss.addon64`, in the Windows Downloads) were to wait until B's weights were
-  extracted. They are extracted now; what each is for is the owner's to say.
+  and `renodx-dlss.addon64`, in the Windows Downloads). The owner says, as their source claims,
+  that the first is the DLL patched for RTX 30 and 40 cards, with FP16 kernels, and the second
+  lets RenoDX pick preset A or B. Untrusted and unopened; they wait until one is needed.
 
 **Linux**
 - ~~**Preset B, the new model: recover its graph**, then the CPU reference against it~~: A's
@@ -84,8 +85,9 @@ under that date. When an item is done, strike it through here and name the commi
 - Preset B in a game: `NR_PRESET=B` beside A, the look and the frame rate. Below, 10-17 later.
 - Preset B's frame: the full-resolution blocks and the bottleneck are 45% of it at 1280x736.
   They are the next place to look for its speed. Phase72.
-- `improve-e4m3`'s four red tests on Linux: changed on Windows to pass there (`1a146c2`, below,
-  10-15), and not yet run on Linux. `make test` in both memory modes and CTest, please.
+- ~~`improve-e4m3`'s four red tests on Linux~~: green here on `newnr`, which holds all of
+  `improve-e4m3` (`bad7bcf`). `gpu_device_pick` takes Mesa's answer, and the image path's three
+  parity tests skip with the reason, as `1a146c2` meant (10-18).
 - ~~`dx12` changes the shared daemon (`MAGIC_MOTION`, `History.follow`) and `nr_image.c`
   (`nr_history_sample`): `make test`, and `src/ref/test_native_image.py` with
   `src/layer/test_temporal.py` in particular, please~~: green on `newnr`, which holds `dx12`,
