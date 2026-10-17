@@ -145,6 +145,14 @@ def assemble(root: Path, target: Path, platform: str) -> Path:
             json.dumps({"render_scale": 0.4, "min_extent": 320}) + "\n", encoding="utf-8")
         shutil.copy2(root / "src/layer/VkLayer_dlss_nr.json", stage / "VkLayer_dlss_nr.json")
         shutil.copy2(root / "scripts/get_weights.py", stage / "scripts/get_weights.py")
+        # `get_weights.py` runs `nr_weights.py` beside it: that is what detects which weight
+        # resources a DLL carries and extracts all of them. It is in `files` above so a missing one
+        # fails the build, and it is copied here so the release has it - the two are separate
+        # lists, and adding it to only the first shipped a package whose installer could not
+        # extract weights.
+        shutil.copy2(root / "scripts/nr_weights.py", stage / "scripts/nr_weights.py")
+        # The weight architecture doc, beside the quick start a release already carries.
+        shutil.copy2(root / "docs/WEIGHTS.md", stage / "WEIGHTS.md")
         for name in ("setup.sh", "setup.bat"):
             shutil.copy2(root / "dist-tools" / name, stage / name)
         if windows:
