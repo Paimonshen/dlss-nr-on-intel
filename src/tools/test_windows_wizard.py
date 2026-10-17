@@ -669,6 +669,29 @@ class WizardFixture(unittest.TestCase):
         self.assertFalse(any(destination.rglob("nvngx_dlssnr.dll")))
         self.assertTrue(self.weights.is_file())
 
+    def test_the_panels_own_shaders_are_installed(self):
+        """`menu.spv` and `menu_rgb10a2.spv` come from `src/layer/nr_menu.c`, not `src/gpu`.
+
+        They were left out of an install once: the shader list scanned `src/gpu` alone, so the
+        game got a layer whose menu could not load its shader. The layer said so - "no settings
+        menu: the menu's shader was not found beside the layer" - and INS did nothing, while the
+        release itself carried both files.
+        """
+        source = self.root / "src/layer/nr_menu.c"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text('{ VK_FORMAT_R8G8B8A8_UNORM, "menu.spv", 0 },\n'
+                          '{ VK_FORMAT_A2B10G10R10_UNORM_PACK32, "menu_rgb10a2.spv", 1 },\n',
+                          encoding="utf-8")
+        for name in ("menu.spv", "menu_rgb10a2.spv"):
+            (self.root / "work" / name).write_bytes(b"SPIR-V fixture")
+        self.assertIn("menu.spv", core._shader_names(self.root))
+        self.assertIn("menu_rgb10a2.spv", core._shader_names(self.root))
+        result = core.install(self.profile)
+        self.assertTrue(result["ok"], result)
+        installed = core.installed_path(self.profile) / "work"
+        for name in ("menu.spv", "menu_rgb10a2.spv"):
+            self.assertTrue((installed / name).is_file(), name)
+
     def test_first_install_sets_candidate_defaults_only_when_missing(self):
         result = core.install(self.profile)
         self.assertTrue(result["ok"], result)

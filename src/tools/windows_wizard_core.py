@@ -652,8 +652,25 @@ def discover_python():
 
 
 def _shader_names(root):
+    """Every shader the installed runtime has to carry, from the sources that name them.
+
+    `src/gpu` was the whole list, and that left the panel's two shaders out: `menu.spv` and
+    `menu_rgb10a2.spv` are named in `src/layer/nr_menu.c` and nowhere else. A release carried
+    them - `scripts/build_release.py` scans `src/layer` whole for exactly this reason - but an
+    install copied only this list, so the game got a layer whose menu could not load its shader
+    and silently drew nothing. The log said it plainly: "no settings menu: the menu's shader was
+    not found beside the layer", and INS did nothing.
+
+    `src/layer` is scanned whole rather than by filename, as the release builder does, so a
+    shader named in the layer's own sources cannot be forgotten here again.
+    """
     names = set(SHADERS)
-    for name in ("src/gpu/libxmx.c", "src/gpu/xmx.py", "src/gpu/xmxres.py"):
+    sources = ["src/gpu/libxmx.c", "src/gpu/xmx.py", "src/gpu/xmxres.py"]
+    sources += [str(path.relative_to(root)).replace("\\", "/")
+                for path in sorted((root / "src" / "layer").glob("*.c"))]
+    sources += [str(path.relative_to(root)).replace("\\", "/")
+                for path in sorted((root / "src" / "layer").glob("*.h"))]
+    for name in sources:
         path = root / name
         if path.is_file():
             names.update(re.findall(r"([A-Za-z0-9_]+\.spv)", path.read_text(encoding="utf-8")))
