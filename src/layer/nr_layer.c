@@ -229,6 +229,15 @@ struct device_data {
 	int menu_ui_l_was_down;         /* L's previous state: the language key is level-polled, so
 	                                 * cycling it needs an edge of its own */
 	int menu_ui_ins_was_down;       /* the same, for INS: the panel's only way in */
+	/* When this device's panel was last drawn, in seconds from the same clock `nrex_repeat`
+	 * uses, so ImGui's keyboard repeat is timed on the real interval between presents.
+	 *
+	 * Per device, not a file static: the layer runs several devices in one process (the
+	 * Vulkan loader hands a game's devices to the same layer), and two devices presenting
+	 * alternately would otherwise make each one's delta the time since the OTHER one drew
+	 * a panel - a value with nothing to do with its own present rate. Zero means "not drawn
+	 * yet", which is what makes the first frame fall back to the fixed step. */
+	double menu_ui_last_draw;
 };
 
 struct swapchain_data {
@@ -2762,8 +2771,43 @@ static int menu_composite(struct device_data *data, struct swapchain_data *chain
 
 		/* The pointer, before NewFrame: ImGui consumes queued input when the frame opens. */
 		menu_ui_mouse(data, chain);
+		/* Seconds since THIS device's panel was last drawn, not a fixed step.
+		 *
+		 * ImGui's OWN keyboard repeat is timed on `io.DeltaTime`, and a fixed 1/60 here ties that
+		 * repeat to the present rate: measured on the panel's own frames, a held Down moved the
+		 * selection once per second at 240 frames and about ten times per second at 60 - so the
+		 * selection's speed depends on how many frames a second the game draws, which is not what a
+		 * keypress means. The panel's value repeat (`nrex_repeat`) is unaffected: it is already on a
+		 * wall clock, so this changes only the half that was wrong.
+		 *
+		 * The stamp is `data->menu_ui_last_draw`, per device: two devices presenting alternately
+		 * would otherwise feed each one the other's interval. Clamped at a quarter second, so a load
+		 * hitch or an alt-tab does not arrive as a multi-second delta that re-targets focus half the
+		 * panel away. */
+		float dt = 1.0f / 60.0f;
+		{
+			static int have_frequency;
+			static LARGE_INTEGER cached;
+			LARGE_INTEGER counter;
+			double now = 0.0;
+			if (!have_frequency) {
+				QueryPerformanceFrequency(&cached);
+				have_frequency = 1;
+			}
+			if (QueryPerformanceCounter(&counter) && cached.QuadPart > 0)
+				now = (double)counter.QuadPart / (double)cached.QuadPart;
+			if (data->menu_ui_last_draw != 0.0 && now > data->menu_ui_last_draw) {
+				double elapsed = now - data->menu_ui_last_draw;
+				if (elapsed < 0.000001) elapsed = 0.000001;
+				if (elapsed > 0.25) elapsed = 0.25;
+				dt = (float)elapsed;
+			}
+			/* Held across frames, and left alone when the counter is unavailable so a machine without
+			 * one falls back to the fixed step above rather than moving nothing. */
+			data->menu_ui_last_draw = now;
+		}
 		nrex_new_frame(data->menu_ui, (float)chain->extent.width,
-			       (float)chain->extent.height, 1.0f / 60.0f);
+			       (float)chain->extent.height, dt);
 		/* The menu's CURRENT language, not the one this device started with.
 		 *
 		 * `data->menu_language` is read once, when the bridge is created, and never updated - so

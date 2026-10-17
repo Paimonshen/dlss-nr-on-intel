@@ -10,6 +10,9 @@ rem    work\nr_layer32.dll  the same layer for a 32-bit game, if the x86 tools a
 rem    work\libnr_image.dll the host passes around the network
 rem    work\libnr_alloc.dll the daemon's NumPy allocator, which keeps a frame's large blocks
 rem    work\*.spv           the compute shaders
+rem    work\test_exchange.exe   the layer's own exchange(), as a fixture
+rem    work\test_menu_panel.exe the panel's own reporting, headless
+rem    work\test_menu_side.exe  the menu's C side against the same panel, headless
 rem
 rem  work\mlx-dlss is NOT built here and must NOT be deleted with the artifacts. It is the
 rem  extracted MLX-DLSS runtime - `features.py`, `composition.py`, the weights - and
@@ -133,13 +136,19 @@ rem DLL. It links no Vulkan import library either: the backend's function pointe
 rem the vkGetDeviceProcAddr the layer already carries. The .cpp files are compiled to objects
 rem first, because /TP on a mixed-source command line would force the C files through the C++
 rem front end.
+rem
+rem The two menu tests go through the same /TP pass: they are C++ (they drive ImGui), they link the
+rem REAL nr_menu_ui.cpp and the REAL menu sources, and they need no Vulkan device - which is what
+rem makes the panel's reporting and the bridge's handoff checkable on any machine that builds this
+rem file. `test_exchange.c` is the opposite shape and stays in the /TC block below: it is C, and it
+rem #includes nr_layer.c so its symbols are already inside its own object.
 echo [3/6] building nr_layer.dll ...
-cl /nologo /O2 /TP /utf-8 /EHsc /DNDEBUG /DVK_NO_PROTOTYPES /D_WIN32 /D_IMGUI_DEFINE_MATH_OPERATORS /I"%VULKAN_SDK%\Include" /I"%REPO%\third_party\imgui" /I"%REPO%\src\layer" /Fd"%REPO%\imgui.pdb" /c "%REPO%\third_party\imgui\imgui.cpp" "%REPO%\third_party\imgui\imgui_draw.cpp" "%REPO%\third_party\imgui\imgui_tables.cpp" "%REPO%\third_party\imgui\imgui_widgets.cpp" "%REPO%\third_party\imgui\imgui_impl_vulkan.cpp" "%REPO%\src\layer\nr_menu_ui.cpp"
+cl /nologo /O2 /TP /utf-8 /EHsc /DNDEBUG /DVK_NO_PROTOTYPES /D_WIN32 /D_IMGUI_DEFINE_MATH_OPERATORS /I"%VULKAN_SDK%\Include" /I"%REPO%\third_party\imgui" /I"%REPO%\src\layer" /Fd"%REPO%\imgui.pdb" /c "%REPO%\third_party\imgui\imgui.cpp" "%REPO%\third_party\imgui\imgui_draw.cpp" "%REPO%\third_party\imgui\imgui_tables.cpp" "%REPO%\third_party\imgui\imgui_widgets.cpp" "%REPO%\third_party\imgui\imgui_impl_vulkan.cpp" "%REPO%\src\layer\nr_menu_ui.cpp" "%REPO%\src\layer\test_menu_panel.cpp" "%REPO%\src\layer\test_menu_side.cpp"
 if errorlevel 1 ( echo ERROR: imgui objects failed & exit /b 1 )
 rem The objects landed in the current directory (cl /c with no /Fo). Move each by name and fail
 rem loudly if any is missing: a stale object from an earlier build, linked in place of a fresh one,
 rem cost this menu a full day of symptoms that matched no source change.
-for %%F in (imgui.obj imgui_draw.obj imgui_tables.obj imgui_widgets.obj imgui_impl_vulkan.obj nr_menu_ui.obj) do (
+for %%F in (imgui.obj imgui_draw.obj imgui_tables.obj imgui_widgets.obj imgui_impl_vulkan.obj nr_menu_ui.obj test_menu_panel.obj test_menu_side.obj) do (
   if exist "%%F" ( move /Y "%%F" "%REPO%\" >nul ) else if exist "%REPO%\third_party\imgui\%%F" (
     move /Y "%REPO%\third_party\imgui\%%F" "%REPO%\" >nul
   ) else if exist "%REPO%\src\layer\%%F" (
@@ -162,6 +171,16 @@ rem built it on Windows, which is why the daemon's exchange tests could not run 
 link /nologo /OUT:"%WORK%\test_exchange.exe" "%REPO%\test_exchange.obj" "%REPO%\nr_menu.obj" "%REPO%\nr_menu_font.obj" "%REPO%\nr_menu_strings.obj" "%REPO%\nr_menu_strings_lookup.obj" "%REPO%\nr_menu_bridge.obj" "%REPO%\nr_file.obj" "%REPO%\nr_focus.obj" "%REPO%\imgui.obj" "%REPO%\imgui_draw.obj" "%REPO%\imgui_tables.obj" "%REPO%\imgui_widgets.obj" "%REPO%\imgui_impl_vulkan.obj" "%REPO%\nr_menu_ui.obj" user32.lib gdi32.lib
 if errorlevel 1 ( echo ERROR: test_exchange.exe failed & exit /b 1 )
 echo   test_exchange.exe
+rem The menu's own two fixtures, headless. Same object set as the DLL's link, with nr_layer.obj left
+rem out: neither test touches the layer, they drive `nrex_*` and `nr_menu_bridge_*` directly, and
+rem imgui_impl_vulkan.obj is in the line anyway because nr_menu_ui.cpp includes its header. No Vulkan
+rem device is created, so these run on any machine this file builds on.
+link /nologo /OUT:"%WORK%\test_menu_panel.exe" "%REPO%\test_menu_panel.obj" "%REPO%\nr_menu.obj" "%REPO%\nr_menu_font.obj" "%REPO%\nr_menu_strings.obj" "%REPO%\nr_menu_strings_lookup.obj" "%REPO%\nr_menu_bridge.obj" "%REPO%\nr_file.obj" "%REPO%\nr_focus.obj" "%REPO%\imgui.obj" "%REPO%\imgui_draw.obj" "%REPO%\imgui_tables.obj" "%REPO%\imgui_widgets.obj" "%REPO%\imgui_impl_vulkan.obj" "%REPO%\nr_menu_ui.obj" user32.lib gdi32.lib
+if errorlevel 1 ( echo ERROR: test_menu_panel.exe failed & exit /b 1 )
+echo   test_menu_panel.exe
+link /nologo /OUT:"%WORK%\test_menu_side.exe" "%REPO%\test_menu_side.obj" "%REPO%\nr_menu.obj" "%REPO%\nr_menu_font.obj" "%REPO%\nr_menu_strings.obj" "%REPO%\nr_menu_strings_lookup.obj" "%REPO%\nr_menu_bridge.obj" "%REPO%\nr_file.obj" "%REPO%\nr_focus.obj" "%REPO%\imgui.obj" "%REPO%\imgui_draw.obj" "%REPO%\imgui_tables.obj" "%REPO%\imgui_widgets.obj" "%REPO%\imgui_impl_vulkan.obj" "%REPO%\nr_menu_ui.obj" user32.lib gdi32.lib
+if errorlevel 1 ( echo ERROR: test_menu_side.exe failed & exit /b 1 )
+echo   test_menu_side.exe
 del /Q "%REPO%\*.obj" >nul 2>&1
 echo   nr_layer.dll
 echo   nr_layer.dll  (with the INS settings menu: user32, gdi32)
@@ -273,6 +292,7 @@ echo   libnr_image.dll the host passes around the network
 echo   libnr_alloc.dll the daemon's NumPy allocator
 echo   *.spv         the compute shaders
 echo   NR-Setup.exe  the Windows setup window
+echo   test_exchange.exe, test_menu_panel.exe, test_menu_side.exe  the native fixtures
 echo.
 echo Next: tools\deploy.bat --game ^<game dir^> installs the layer and points the
 echo daemon at this checkout, so nothing has to be copied into the game folder.

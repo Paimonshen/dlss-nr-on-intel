@@ -36,6 +36,10 @@
 #include <stdint.h>
 #include <stddef.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Opaque. One per device, created on the first present and kept for the process. */
 typedef struct nr_menu nr_menu;
 
@@ -268,5 +272,9 @@ void nr_menu_draw_compare(nr_menu *menu, uint64_t cmd, uint64_t image, uint64_t 
 
 /* Whether the atlas was built. A menu without one draws nothing and says why. */
 int nr_menu_font_ready(const nr_menu *menu);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* NR_MENU_H */

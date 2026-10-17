@@ -613,18 +613,21 @@ static void nrex_hint_tooltip(const char *hint)
  *           `NREX_REPEAT_MIN`.
  *
  * A 175 ms press - longer than most clicks - is therefore still one step and only one, while a
- * third of a second of holding is already moving at ~75 steps/s. Slow enough at the start to stop
- * on the number you meant, fast enough that a 0..2 knob is not a fight.
+ * third of a second of holding is already walking at a useful rate. The ceiling is what matters:
+ * the first version of this reached ~75 steps/s, which is a knob that crosses its whole range in a
+ * quarter second and cannot be stopped on a number - the report that sent this comment back. It
+ * now tops out at 20 steps/s, so a 0.05..1.0 range (19 steps) takes about a second to cross while
+ * still being quicker than tapping.
  *
- * Timed on a WALL CLOCK, not `ImGui::GetTime()`. The layer feeds ImGui a fixed 1/60 step (the
- * upstream Vulkan example does the same), so ImGui's clock runs at the frame rate rather than in
- * seconds: at 30 FPS every interval would double here and at 144 FPS nearly halve. A hold is felt
- * in real seconds, so it is measured in them. */
+ * Timed on a WALL CLOCK, not `ImGui::GetTime()`. ImGui's clock runs at whatever step the layer
+ * feeds it - a fixed 1/60 once, now the real seconds between presents - so at 30 FPS every
+ * interval would double here and at 144 FPS nearly halve. A hold is felt in real seconds, so it
+ * is measured in them. */
 #define NREX_REPEAT_WARMUP 0.140f
-#define NREX_REPEAT_FIRST  0.035f
-#define NREX_REPEAT_ACCEL  0.800f
-#define NREX_REPEAT_MIN    0.013f
-#define NREX_REPEAT_BURST  4      /* steps one frame may apply, so a hitch cannot fling the value */
+#define NREX_REPEAT_FIRST  0.075f
+#define NREX_REPEAT_ACCEL  0.850f
+#define NREX_REPEAT_MIN    0.050f      /* 20 steps/s at the ceiling */
+#define NREX_REPEAT_BURST  2           /* steps one frame may apply, so a hitch cannot fling the value */
 
 struct nrex_repeat {
     int    dir;      /* -1 = left, +1 = right, 0 = idle */
