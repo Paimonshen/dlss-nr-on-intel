@@ -83,10 +83,10 @@ class Request:
 
 
 def request_tests():
-    args = SimpleNamespace(max_pixels=1024, profile='standard', intensity=1,
+    args = SimpleNamespace(profile='standard', intensity=1,
                            detail_strength=1, colour_strength=1, dump=None)
     for magic, width, height in ((0, 1, 1), (daemon.MAGIC, 0, 8),
-                                 (daemon.MAGIC, 8, 0), (daemon.MAGIC, 1024, 1024)):
+                                 (daemon.MAGIC, 8, 0)):
         request = Request(struct.pack('<4I', magic, width, height, 44))
         try:
             daemon.process_connection(request, None, args)
@@ -94,6 +94,16 @@ def request_tests():
             assert request.reads == 1 and request.reply is None
         else:
             raise AssertionError('invalid header accepted')
+    # A large extent is NOT one of the invalid headers. 3360x2100 is a real 3.5K swapchain and a
+    # pixel ceiling used to refuse it, which silently turned NR off for every frame of that game.
+    # What fails here is the body read: there is no 28 MB payload behind this header.
+    request = Request(struct.pack('<4I', daemon.MAGIC, 3360, 2100, 44), b'')
+    try:
+        daemon.process_connection(request, None, args)
+    except EOFError:
+        assert request.reply is None
+    else:
+        raise AssertionError('a frame header with no payload was accepted')
     raw = bytes(range(64))
     request = Request(struct.pack('<4I', daemon.MAGIC, 4, 4, 999), raw)
     with contextlib.redirect_stdout(io.StringIO()):

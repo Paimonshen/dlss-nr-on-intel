@@ -239,8 +239,7 @@ def main():
         parser.error("selected Python environment lacks NumPy")
     daemon_command = [str(native_python), "-u", str(ROOT / "src/layer/nr_daemon.py"),
                       "--socket", endpoint, "--root", str(ROOT), "--settings", str(settings),
-                      "--render-scale", str(args.render_scale), "--min-extent", "128", "--max-pixels",
-                      str(max(w * h for w, h in (args.extent, args.resize_extent)))]
+                      "--render-scale", str(args.render_scale), "--min-extent", "128"]
     fixture_command = [str(fixture), "--frames", str(args.frames), "--pause-ms", str(pause_ms),
                        "--extent", "%dx%d" % args.extent, "--resize-extent", "%dx%d" % args.resize_extent]
     if not args.no_validation:

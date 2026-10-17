@@ -790,7 +790,7 @@ def process_connection(connection, backend, args):
             enabled = (os.environ.get("NR_GPU_IMAGE") == "1" and
                        os.environ.get("NR_GPU_TRANSPORT") == "1")
             transport = args.gpu_transport = nr_gpu_transport.GPUSharedTransport(
-                backend, args.max_pixels, enabled=enabled)
+                backend, enabled=enabled)
         if getattr(args, "image_transport", None) != "gpu-shared":
             transport.reset_history()
         metrics = transport.handle(connection, width, height, vk_format, receive, args.live,
@@ -810,8 +810,14 @@ def process(connection, backend, args, width, height, vk_format, *, masked=False
     """Legacy host image processing, guarded even when invoked directly."""
     if os.environ.get("NR_GPU_ONLY") == "1":
         raise ValueError("GPU-only: host frame processing is forbidden")
-    if not width or not height or width * height > args.max_pixels:
-        raise ValueError(f"rejected extent {width}x{height}; limit {args.max_pixels} pixels")
+    # No pixel ceiling, on purpose. There used to be one (`--max-pixels`, 1 << 22) and a real
+    # 3.5K swapchain - 3360x2100 - exceeded it, so every frame of a correctly configured game was
+    # refused and the layer kept the original picture: the menu worked, NR silently did nothing,
+    # and the log repeated "rejected extent ... limit ..." once a frame. A ceiling on a frame the
+    # game actually presents can only be wrong; the guard that matters is that the header has an
+    # extent at all, since `width * height * 4` is the read that follows.
+    if not width or not height:
+        raise ValueError(f"rejected extent {width}x{height}; the header has no extent")
     payload = receive(connection, width * height * 4, keep="frame")
     interface = (receive(connection, width * height, keep="interface")
                  if masked else None)
@@ -1360,8 +1366,6 @@ def main():
     parser.add_argument("--cut-limit", type=float, default=0.15,
                         help="mean absolute frame-to-frame change above which the shot is "
                              "taken to have cut and the history is dropped")
-    parser.add_argument("--max-pixels", type=int, default=1 << 22,
-                        help="refuse frames larger than this, rather than thrash")
     parser.add_argument("--dump", help="write frames in and out as raw, for a look; "
                                        "convert with src/tools/dump_to_png.py")
     parser.add_argument("--dump-every", type=int, default=1, metavar="N",
@@ -1376,8 +1380,8 @@ def main():
     parser.add_argument("--timeout", type=float, default=60,
                         help="socket inactivity timeout in seconds")
     args = parser.parse_args()
-    if args.max_pixels <= 0 or args.timeout <= 0:
-        parser.error("--max-pixels and --timeout must be positive")
+    if args.timeout <= 0:
+        parser.error("--timeout must be positive")
     if not 0.05 <= args.render_scale <= 1.0:
         parser.error("--render-scale must be between 0.05 and 1")
     for knob in ("temporal", "cut_limit", "hold"):
