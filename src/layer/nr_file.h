@@ -11,6 +11,10 @@
 
 #include <stddef.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Read the whole file into a malloc'd buffer, NUL-terminated, and report its length.
  *
  * Returns 1 on success, 0 when the file is not there or cannot be read - a missing settings file
@@ -28,5 +32,9 @@ long long nr_file_stamp(const char *path);
  * log a parse error and keep its old values - so the rename is not a nicety. Returns 1 on
  * success. */
 int nr_write_file_atomic(const char *path, const void *data, size_t size);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* NR_FILE_H */

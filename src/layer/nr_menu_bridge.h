@@ -21,6 +21,10 @@
 
 #include <stddef.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct nr_menu_bridge nr_menu_bridge;
 typedef struct nr_menu nr_menu;
 
@@ -168,5 +172,9 @@ int nr_menu_bridge_knob_choice_index(const nr_menu_bridge *bridge, int index);
 
 int nr_menu_bridge_knob_range(int index, float *low, float *high, float *step,
                               float *default_value);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* NR_MENU_BRIDGE_H */
