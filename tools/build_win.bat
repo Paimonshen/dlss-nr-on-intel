@@ -148,12 +148,20 @@ for %%F in (imgui.obj imgui_draw.obj imgui_tables.obj imgui_widgets.obj imgui_im
     echo ERROR: %%F was not produced by the compile & exit /b 1
   )
 )
-cl /nologo /O2 /TC /utf-8 /D_WIN32 /I"%VULKAN_SDK%\Include" /I"%REPO%\third_party\imgui" /I"%REPO%\src\layer" /c "%REPO%\src\layer\nr_layer.c" "%REPO%\src\layer\nr_menu.c" "%REPO%\src\layer\nr_menu_font.c" "%REPO%\src\layer\nr_menu_strings.c" "%REPO%\src\layer\nr_menu_strings_lookup.c" "%REPO%\src\layer\nr_menu_bridge.c" "%REPO%\src\layer\nr_file.c" "%REPO%\src\layer\nr_focus.c"
+cl /nologo /O2 /TC /utf-8 /D_WIN32 /I"%VULKAN_SDK%\Include" /I"%REPO%\third_party\imgui" /I"%REPO%\src\layer" /c "%REPO%\src\layer\nr_layer.c" "%REPO%\src\layer\nr_menu.c" "%REPO%\src\layer\nr_menu_font.c" "%REPO%\src\layer\nr_menu_strings.c" "%REPO%\src\layer\nr_menu_strings_lookup.c" "%REPO%\src\layer\nr_menu_bridge.c" "%REPO%\src\layer\nr_file.c" "%REPO%\src\layer\nr_focus.c" "%REPO%\src\layer\test_exchange.c"
 if errorlevel 1 ( echo ERROR: layer C objects failed & exit /b 1 )
 rem link.exe, not cl, for the mixed C/C++ link: cl with /TC recompiles .obj inputs it is handed
 rem on the same command line (C2018, reading the binary as source), which is not a link at all.
 link /nologo /DLL /OUT:"%WORK%\nr_layer.dll" /DEF:"%REPO%\src\layer\nr_layer.def" "%REPO%\nr_layer.obj" "%REPO%\nr_menu.obj" "%REPO%\nr_menu_font.obj" "%REPO%\nr_menu_strings.obj" "%REPO%\nr_menu_strings_lookup.obj" "%REPO%\nr_menu_bridge.obj" "%REPO%\nr_file.obj" "%REPO%\nr_focus.obj" "%REPO%\imgui.obj" "%REPO%\imgui_draw.obj" "%REPO%\imgui_tables.obj" "%REPO%\imgui_widgets.obj" "%REPO%\imgui_impl_vulkan.obj" "%REPO%\nr_menu_ui.obj" user32.lib gdi32.lib
 if errorlevel 1 ( echo ERROR: nr_layer.dll failed & exit /b 1 )
+rem The layer's own exchange(), as a fixture: `test_exchange.c` INCLUDES nr_layer.c, so nr_layer.obj
+rem is left out of THIS link - its symbols are already in test_exchange.obj. The masked case in
+rem src/layer/test_daemon.py exists nowhere else: the request carries a mask plane the answer does
+rem not, so send and receive have different sizes. CMake builds this on the Linux line and nothing
+rem built it on Windows, which is why the daemon's exchange tests could not run here at all.
+link /nologo /OUT:"%WORK%\test_exchange.exe" "%REPO%\test_exchange.obj" "%REPO%\nr_menu.obj" "%REPO%\nr_menu_font.obj" "%REPO%\nr_menu_strings.obj" "%REPO%\nr_menu_strings_lookup.obj" "%REPO%\nr_menu_bridge.obj" "%REPO%\nr_file.obj" "%REPO%\nr_focus.obj" "%REPO%\imgui.obj" "%REPO%\imgui_draw.obj" "%REPO%\imgui_tables.obj" "%REPO%\imgui_widgets.obj" "%REPO%\imgui_impl_vulkan.obj" "%REPO%\nr_menu_ui.obj" user32.lib gdi32.lib
+if errorlevel 1 ( echo ERROR: test_exchange.exe failed & exit /b 1 )
+echo   test_exchange.exe
 del /Q "%REPO%\*.obj" >nul 2>&1
 echo   nr_layer.dll
 echo   nr_layer.dll  (with the INS settings menu: user32, gdi32)
@@ -233,6 +241,22 @@ echo [6/6] building libnr_alloc.dll ...
 cl /nologo /O2 /TC /Fo:"%WORK%\nr_alloc.obj" /Fe:"%WORK%\libnr_alloc.dll" /LD "%REPO%\src\layer\nr_alloc.c"
 if errorlevel 1 ( echo ERROR: libnr_alloc.dll failed & exit /b 1 )
 echo   libnr_alloc.dll
+
+rem ---- the native GPU fixtures ----
+rem
+rem The two suites CMake runs on the Linux line and nothing ran on Windows:
+rem   test_gpu_present.exe  a hidden Win32 window presenting through the real layer
+rem   test_gpu_interop.exe  a same-device shared-resource bridge, in and out
+rem Their Python harnesses (src/layer/test_gpu_present.py, test_gpu_interop.py) start the daemon
+rem and set the layer's environment themselves, so the fixtures need the Vulkan SDK and nothing
+rem from this build beyond it.
+echo building the native GPU fixtures ...
+cl /nologo /O2 /TC /utf-8 /I"%VULKAN_SDK%\Include" /I"%REPO%\src\layer" /Fo:"%WORK%\\" /Fe:"%WORK%\test_gpu_interop.exe" "%REPO%\src\layer\test_gpu_interop.c" /link "%VULKAN_SDK%\Lib\vulkan-1.lib" user32.lib
+if errorlevel 1 ( echo ERROR: test_gpu_interop.exe failed & exit /b 1 )
+echo   test_gpu_interop.exe
+cl /nologo /O2 /TC /utf-8 /I"%VULKAN_SDK%\Include" /I"%REPO%\src\layer" /Fo:"%WORK%\\" /Fe:"%WORK%\test_gpu_present.exe" "%REPO%\src\layer\test_gpu_present.c" /link "%VULKAN_SDK%\Lib\vulkan-1.lib" user32.lib gdi32.lib
+if errorlevel 1 ( echo ERROR: test_gpu_present.exe failed & exit /b 1 )
+echo   test_gpu_present.exe
 
 :done
 
