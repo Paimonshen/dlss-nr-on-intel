@@ -36,7 +36,7 @@ MODULE = REPO / "src" / "layer" / "nr_menu_strings.py"
 
 # The knobs, in `nr_knobs.py`'s order - which is the order the menu shows them.
 KNOBS = ("render_scale", "min_extent", "profile", "intensity", "detail_strength",
-         "colour_strength", "temporal", "hold", "release", "cut_limit")
+         "colour_strength", "temporal", "hold", "release", "cut_limit", "weights")
 
 # The wizard's key for each of the menu's non-knob strings. `None` means the wizard has no such
 # key and the value comes from OWN below. The names are the wizard's, so a rename there fails

@@ -15,6 +15,11 @@ Knob = collections.namedtuple("Knob", "name label kind low high step default sum
 
 PROFILES = ("standard", "natural", "cinematic")
 
+# The choices behind a `choice` knob other than `profile`. `profile` reads PROFILES; this names a
+# weight model, and both places that render a choice - the wizard's settings page and the panel -
+# read it through the catalogue rather than keeping a list of their own.
+CHOICES = {"weights": ("ht", "cc_small_fp8")}
+
 KNOBS = (
     Knob(
         "render_scale", "render scale", "number", 0.05, 1.0, 0.05, 1.0,
@@ -115,6 +120,17 @@ KNOBS = (
         "The average change between two frames above which the scene is taken to have cut "
         "— a camera cut, a menu, a replay — and the previous frame is dropped entirely "
         "instead of pixel by pixel. Lower cuts more readily; 1 never cuts.",
+    ),
+    Knob(
+        "weights", "weights model", "choice", None, None, None, "ht",
+        "which weight model the daemon runs",
+        "Which model the network runs, by name. `ht` is the model this project reproduces, "
+        "extracted from the `WEIGHTS_HT` resource of the NVIDIA DLL, and it is the only one "
+        "that can be loaded today. A 310.9.16 DLL also carries `WEIGHTS_CC_SMALL_FP8`, a "
+        "smaller model of a different shape: it is detected and extracted so nothing is "
+        "hidden about what a DLL holds, but its block layout is not one the loader can read, "
+        "so selecting it keeps `ht` and says so once. A change here reloads the model in the "
+        "daemon without restarting the game; expect one present to wait for that load.",
     ),
 )
 

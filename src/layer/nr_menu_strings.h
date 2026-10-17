@@ -16,13 +16,13 @@
 #define NR_MENU_STRINGS_H
 
 #define NR_MENU_LANG_COUNT 4
-#define NR_MENU_KEY_COUNT 22
+#define NR_MENU_KEY_COUNT 23
 #define NR_MENU_COMPARE_COUNT 3
 /* The hints are one per KNOB, which is fewer than the keys: a key like `title` or `on` is
  * a string the menu shows, not a knob it explains. Declaring them with the key count left
  * the tail of each row zero-initialised, and the atlas builder walked into those NULLs -
  * which cost the menu its Chinese and Russian glyphs and faulted on the first real game. */
-#define NR_MENU_KNOB_COUNT 10
+#define NR_MENU_KNOB_COUNT 11
 enum { NR_LANG_EN = 0, NR_LANG_ZH, NR_LANG_RU, NR_LANG_ES };
 
 enum {
@@ -36,18 +36,19 @@ enum {
     NR_STR_HOLD = 7,
     NR_STR_RELEASE = 8,
     NR_STR_CUT_LIMIT = 9,
-    NR_STR_TITLE = 10,
-    NR_STR_SAVED = 11,
-    NR_STR_RESET = 12,
-    NR_STR_HINT = 13,
-    NR_STR_TOGGLE_NR = 14,
-    NR_STR_COMPARE = 15,
-    NR_STR_COMPARE_SPLIT = 16,
-    NR_STR_COMPARE_ZOOM = 17,
-    NR_STR_LANGUAGE = 18,
-    NR_STR_SHORTCUT = 19,
-    NR_STR_ON = 20,
-    NR_STR_OFF = 21,
+    NR_STR_WEIGHTS = 10,
+    NR_STR_TITLE = 11,
+    NR_STR_SAVED = 12,
+    NR_STR_RESET = 13,
+    NR_STR_HINT = 14,
+    NR_STR_TOGGLE_NR = 15,
+    NR_STR_COMPARE = 16,
+    NR_STR_COMPARE_SPLIT = 17,
+    NR_STR_COMPARE_ZOOM = 18,
+    NR_STR_LANGUAGE = 19,
+    NR_STR_SHORTCUT = 20,
+    NR_STR_ON = 21,
+    NR_STR_OFF = 22,
 };
 
 /* [language][key] */

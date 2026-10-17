@@ -199,13 +199,19 @@ def _runtime_knobs():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     knobs = []
+    per_knob_choices = getattr(module, "CHOICES", {})
     for knob in module.KNOBS:
         high = {"min_extent": 4096.0, "release": 255.0}.get(knob.name, knob.high)
+        choices = None
+        if knob.kind == "choice":
+            # `profile` is the profile table; `weights` names a model. One map in the catalogue
+            # keeps both the wizard and the panel reading the same list.
+            choices = list(per_knob_choices.get(knob.name, module.PROFILES))
         knobs.append({"name": knob.name, "label": knob.label, "kind": knob.kind,
                       "low": knob.low, "high": knob.high, "step": knob.step,
                       "default": knob.default, "summary": knob.summary, "detail": knob.detail,
                       "runtime_low": knob.low, "runtime_high": high,
-                      "choices": list(module.PROFILES) if knob.kind == "choice" else None})
+                      "choices": choices})
     return knobs
 
 
