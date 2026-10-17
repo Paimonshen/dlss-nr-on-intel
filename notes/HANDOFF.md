@@ -89,9 +89,12 @@ under that date. When an item is done, strike it through here and name the commi
   graph at depths `{2,2,2,2,2}`, running on CPU and on the device (`2bb16f6`, below, 10-17
   later; phase72).
 - Preset B in a game: `NR_PRESET=B` beside A, the look and the frame rate. Below, 10-17 later.
-- A slight flicker of the network's own, which the owner saw on 10-18 and puts down to the
-  network's low resolution. `src/bench/flicker.py` on `work/good` at two render scales, and for
-  A and B, would say. Not run.
+- ~~A slight flicker of the network's own, which the owner saw on 10-18 and puts down to the
+  network's low resolution~~: not the resolution. `flicker.py work/good`: what the network makes
+  up on pixels the game left as they were is the same at the 320 floor and at full scale (A
+  0.82 and 0.75 levels with history, B 0.39 and 0.44); B makes up half of A's and moves the
+  frame half as far. The history holds it down 4x; what is left is detail drawn again where a
+  pixel changed by a level or two, which the hold floor does not cover. Phase72.
 - ~~Preset B's frame: the full-resolution blocks and the bottleneck are 45% of it at 1280x736.
   They are the next place to look for its speed~~: looked at on 10-18. Those passes are where
   the earlier work left them, and what was holding B's live frame back was the GPU's clock,
@@ -105,10 +108,12 @@ under that date. When an item is done, strike it through here and name the commi
   `src/layer/test_temporal.py` in particular, please~~: green on `newnr`, which holds `dx12`,
   in both memory modes and in CTest (`2bb16f6`, 10-17).
 - No Linux release has been published, but `deploy.sh --release` would build one without a 32-bit
-  layer, so a 32-bit game under Proton (DoA5) could not use it. Archive, 10-07.
+  layer, so a 32-bit game under Proton (DoA5) could not use it. Archive, 10-07. Left until a
+  Linux release is planned (10-18).
 - A daemon started by a short-lived process (a launcher that makes a Vulkan instance before the
   game) ends with that process, and a game whose instance found it alive gets none after: the
-  layer starts a daemon only in `vkCreateInstance`. The same on Windows. Not seen in a game.
+  layer starts a daemon only in `vkCreateInstance`. The same on Windows. Not seen in a game, and
+  left until it is (10-18).
 - Optional: `build_check.py` could hold `build_win.bat` to the same floor (`/DNR_F16C`,
   `/fp:precise`, `/openmp`). The owner does not mind either way. Archive, 10-07.
 - ~~Steam keeping a game "running" while its daemon lives~~: it did, and the daemon now ends with

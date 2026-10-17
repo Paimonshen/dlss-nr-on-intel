@@ -273,6 +273,27 @@ laptop the CPU and the GPU share one power budget, and a game that leans on the 
 lose by it. In a game the GPU also draws the game's frames, so the governor sees less idle
 time there than here.
 
+**Flicker.** The owner saw a slight flicker of the network's own in a game, and put it down
+to the network's low resolution. `flicker.py work/good` replays a 22-frame live capture
+(1024x768, 1024x576 of it active) through the daemon and takes, on the pixels the game left
+byte for byte as they were, the change the network made up. In levels of 255, without history
+and with it (`temporal` 0 and 1; 1 is the live default, with `hold` 1):
+
+| network field | A | B |
+| --- | --- | --- |
+| the 320 floor (scale 0.4, run as 0.56) | 3.35 / 0.82 | 1.55 / 0.39 |
+| scale 0.7 | 2.99 / 0.74 | 2.24 / 0.48 |
+| scale 1.0 | 3.02 / 0.75 | 2.03 / 0.44 |
+
+**The resolution is not it**: from the floor to the full frame A's figure falls by a tenth and
+B's does not fall at all. B makes up about half of A's, but it also moves these frames about
+half as far (9.3-9.8 levels from the game's own frame for A, 4.5-6.6 for B, with history), so
+per unit of effect the two are alike. The history is what holds it down, four times. What it
+leaves is the network drawing its detail again when a pixel changes by a level or two: those
+come back changed 2.0-2.2 times as much under A and 1.2-1.4 times under B. The hold floor
+covers only the byte-identical pixels (2.3 % of this capture, 7.7 % more within one level);
+whether a tolerance there would help is not tried. One capture, one game.
+
 ## Not established
 
 - **The vendor's own output for B.** Nothing here was compared with NVIDIA's B. That needs
