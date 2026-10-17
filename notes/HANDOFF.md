@@ -30,15 +30,18 @@ When the dated entries grow long, move the older ones into the archive the same 
   Windows line, merged into `master`. `improve-e4m3` is where new work goes, with `master` merged in
   on 10-15 (`7e7dfb5`): Codex's experimental GPU-only frame path on Windows and an E4M3 rounding
   experiment, both off by default, and what 0.0.1.2 is built from. The owner asked Paimonshen to open his in-game menu (#16) against it.
-  `improve-int8` is kept for INT8 experiments; Codex's own branches are Codex's.
+  `improve-int8` is kept for INT8 experiments; Codex's own branches are Codex's. `newnr` is the
+  preset B work, made from `dx12` on 10-17, local until the owner's word.
 - **DirectX 12 on Windows, before the upscaler** (branch `dx12`, 10-16): a `libxess.dll` in front
   of Intel's hands the daemon the frame XeSS is about to upscale, in the game's own D3D12, and
   adds NR's change to it. It runs in Hogwarts Legacy. The trail behind moving things was found
   in a recording and fixed (`e803624`), **pushed on the owner's word before anyone saw it in the
   game**: what is untested is listed in the entry below, 10-16.
 - **NVIDIA's faster model is out** (`nvngx_dlssnr.dll` 310.9.16.0, 10-16): preset A is our model
-  byte for byte, preset B (`hnet-crazy-cuckoo-small-fp8`) is a new, smaller graph. The owner moved
-  the work to Linux to reverse it with REA (below, 10-17).
+  byte for byte. **Preset B (`hnet-crazy-cuckoo-small-fp8`) is A's graph with every stage at depth
+  2**, 31 blocks against 71, with its own weights. On 10-17 it was read out of `.text` with REA,
+  unpacked, and run here, on CPU and on the device, at 0.54-0.58 of A's time. That is on branch
+  `newnr`, local; `NR_PRESET=B` picks it (below, 10-17; phase72).
 - **Speed on this laptop**, `src/bench/speed_test.py`, network and round trip: 640x360 at 0.4 is
   23 ms and 26-27 ms on both systems; 1920x1080 at 1.0 is 273 and 299 ms on Linux, 384 and 409 on
   Windows, where Intel's compiler loses time in the staged GEMM's loop. The README's table
@@ -68,15 +71,25 @@ under that date. When an item is done, strike it through here and name the commi
   For #17 the owner's reading: when the whole frame waits on the network, the game has nothing to
   render past the network's own frame rate, so its load stays low. #12 and #15 work after a reinstall, and #12 waits for the next release. #16 is
   Paimonshen's in-game menu.
+- Preset B against the vendor's own B: a capture on the RTX 5060 Ti with
+  `DLSSNR.Hint.Render.Preset` set to B, when the owner opens that machine. Below, 10-17 later.
+- The two files that came with the 310.9.16 DLL (`nvngx_dlssnr_compat-fp16-310.9.16-cuda13.4.3.rar`
+  and `renodx-dlss.addon64`, in the Windows Downloads) were to wait until B's weights were
+  extracted. They are extracted now; what each is for is the owner's to say.
 
 **Linux**
-- **Preset B, the new model: recover its graph** (REA on the DLL's `.text`, the container's
-  shapes, the PTX templates), then the CPU reference against it. Below, 10-17.
+- ~~**Preset B, the new model: recover its graph**, then the CPU reference against it~~: A's
+  graph at depths `{2,2,2,2,2}`, running on CPU and on the device (`2bb16f6`, below, 10-17
+  later; phase72).
+- Preset B in a game: `NR_PRESET=B` beside A, the look and the frame rate. Below, 10-17 later.
+- Preset B's frame: the full-resolution blocks and the bottleneck are 45% of it at 1280x736.
+  They are the next place to look for its speed. Phase72.
 - `improve-e4m3`'s four red tests on Linux: changed on Windows to pass there (`1a146c2`, below,
   10-15), and not yet run on Linux. `make test` in both memory modes and CTest, please.
-- `dx12` changes the shared daemon (`MAGIC_MOTION`, `History.follow`) and `nr_image.c`
+- ~~`dx12` changes the shared daemon (`MAGIC_MOTION`, `History.follow`) and `nr_image.c`
   (`nr_history_sample`): `make test`, and `src/ref/test_native_image.py` with
-  `src/layer/test_temporal.py` in particular, please. Below, 10-16.
+  `src/layer/test_temporal.py` in particular, please~~: green on `newnr`, which holds `dx12`,
+  in both memory modes and in CTest (`2bb16f6`, 10-17).
 - No Linux release has been published, but `deploy.sh --release` would build one without a 32-bit
   layer, so a 32-bit game under Proton (DoA5) could not use it. Archive, 10-07.
 - A daemon started by a short-lived process (a launcher that makes a Vulkan instance before the
@@ -89,6 +102,8 @@ under that date. When an item is done, strike it through here and name the commi
 - ~~The README's live table~~: re-measured at `--warmup 3`, 10-14.
 
 **Windows**
+- Preset B: the setup window extracts preset A only. For a 310.9.16 DLL it could also run
+  `src/tools/unpack_preset.py`, and offer `NR_PRESET` (A or B) in `nr-env.txt`. Below, 10-17 later.
 - ~~The unmerged window attention hangs Intel's Windows driver from 32 windows up~~: found and
   avoided on 10-15, and `gpu_window_attention` is in CTest on Windows again. Below, 10-15;
   phase71.
@@ -143,6 +158,66 @@ under that date. When an item is done, strike it through here and name the commi
 
 ---
 
+## Preset B read out of `.text`, unpacked and running here (2026-10-17, later, branch `newnr`)
+
+REA 6.5.0 with Ghidra 12.1.2 on the 310.9.16 DLL. Everything below is in phase72 with its
+addresses.
+
+**What B is.** One function, `FUN_18005c5a0`, builds both networks from five stage depths in
+`.rdata`: preset A `{4, 4, 6, 8, 8}` and preset B `{2, 2, 2, 2, 2}`. The bottleneck is a loop
+fixed at eight ViT blocks, so **B is A's graph with every stage at depth 2: 31 blocks**. The
+window phases follow `i & 3` in the encoder and `(depth + i) & 3` in the decoder. That rule
+reproduces this port's table for all of A's blocks. The skips are wired by role, as for A. The
+two registry entries are identical apart from the name, the id and the resource, so B uses
+A's style grades. Every one of B's 77 records has the size of one of A's record families, and
+none is byte-identical to A's, so B was trained separately. It has 113 342 375 parameters
+(A: 145 755 123), and the bottleneck is 100.7 M of them in both. Its `blend_scale` is
+0.76708984375 (A: 0.73974609375).
+
+**The code**, local on `newnr`:
+- `src/ref/nr_topology.py` (new) lays out a network from its five depths, and reads the depths
+  back from a set of weight names. `src/ref/test_topology.py` is new and runs in `make test`
+  and CTest.
+- `src/tools/unpack_preset.py` (new) decodes each of B's records through MLX-DLSS's unpacker as
+  the A block of the same role. `--preset A` reproduces all 649 of A's logical tensors exactly.
+  B goes to `work/mlxw/dlssnr-b-logical.safetensors`, mode 600, local.
+- `nr_model`, `nr_frame_resident` and `nr_resident` take every index from the topology the
+  weights carry, so A's numbers are no longer written into them.
+  **A is unchanged bit for bit**: the CPU graph against `HEAD` at 320x320 and 352x416, the
+  device head against `HEAD` at 352x640, and `test_against_torch.py` bit-identical.
+- `NR_PRESET=A|B` picks the weights (`nr_frame.WEIGHTS`). The daemon, the GPU image path and
+  `nr_temporal.py` take the gate's ceiling from the weights (`nr_frame.blend_scale_of`), and
+  the daemon logs the preset on a line of its own. `test_resident.py` also runs B's whole
+  graph when B's weights are there. `frame_profile.py` has a `--weights` option.
+
+**Measured.** On the device B tracks its CPU reference at corr 0.9870 (A: 0.9809), in 179
+passes against 415. Resident, presets alternating, median of 7: 576x320 is 19.2 ms against
+34.0, 1280x736 is 70.3 against 124.3, and 1920x1088 is 154.1 against 267.6, so **0.54-0.58 of
+A's time** rather than half. Block 0, the last block with the head, and the bottleneck are
+A's own and cost the same: 32 ms of B's 72 at 1280x736. On Dead or Alive 5's frame B moves the
+picture as A does: the faces' level goes down 9-16% and level-normalised fine detail up 9-16%,
+within A's range.
+
+**310.9.16's kernels.** They are FP8 only now. 66 of the 120 are instruction for instruction
+310.8's, and the rest differ by registers, scheduling, fences and addressing. Float
+arithmetic changed only in the pre-block, which gained parameter fields; the one new hint in
+the DLL is `DLSSNR.MaskBlendMode`. The ViT attention gained a `ceil(tokens / 128)` loop bound.
+Both changes apply to A as well, and the port follows 310.8 in both.
+
+**Checked** at `2bb16f6`: `make test` green in both memory modes (56 scripts each), and
+CTest 64 of 64. `test_native_image.py` and `test_temporal.py` are among them, so `dx12`'s
+daemon changes have now run on Linux. `build_check`, `claims_check` and `publish_check` pass.
+
+**Not tested:**
+- B in a game, with `NR_PRESET=B`.
+- B against the vendor's own B, on the RTX 5060 Ti with `DLSSNR.Hint.Render.Preset`.
+- The Windows side of B. The setup window extracts A only, and nothing on Windows sets
+  `NR_PRESET`.
+
+**Next on Linux:** B in a game, set beside A. Then the full-resolution blocks, now 30% of B's
+frame. **Next on Windows:** run `unpack_preset.py` from the setup window for a 310.9.16 DLL,
+and offer `NR_PRESET` in it.
+
 ## NVIDIA's faster model: `nvngx_dlssnr.dll` 310.9.16.0, presets A and B (2026-10-17)
 
 NVIDIA announced on 10-13 a DLSS 5 model 24 % smaller ("roughly 118 million parameters"), with
@@ -158,8 +233,8 @@ sha256 `2BC19BC09A7B89DD44F73E2AC0108FCC586E2154BDD0830F242F4F040E28789F`, Authe
   (113,893,343 B) is the new one, in the same container format (`hnet_weights.py` walks it to EOF):
   77 packed records against 153, and laid out otherwise — `block10` has layers 0-4, `block11`
   layers 0-3 of ~2.1 M elements each. (`hnet_weights.py`'s element count reads the bytes as FP16,
-  the trap of phase61: the parameters are not half the bytes.) So the graph is new, not only the
-  weights.
+  the trap of phase61: the parameters are not half the bytes.) ~~So the graph is new, not only
+  the weights.~~ The same block families at other depths: the entry above, and phase72.
 - **Names.** Config `hnet-crazy-cuckoo-small-fp8`; the old one is `hnet-vigilant-squid`
   (`crazy-cuckoo` was a name in 310.8 already). The preset is chosen by
   `DLSSNR.Hint.Render.Preset` (`CG2RFindWeightByPreset`, `CG2RNetworkManager::ResolvePresetToDescriptor`;

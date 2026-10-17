@@ -47,6 +47,7 @@ disproved.
 | `phase5-attn-scale-fp32.md` | `attn_scale` is FP32 per head |
 | `phase5-*` (the rest) | stem, output head, channel order, resampling, I/O structs, narrow blocks |
 | `phase5-no-softmax.md` | **withdrawn** — kept so nobody re-derives it |
+| `phase72-preset-b.md` | 310.9.16's second network, preset B: one builder in `.text` makes both presets from five stage depths, A {4,4,6,8,8} and B {2,2,2,2,2}, so B is A's graph in 31 blocks with A's eight-block bottleneck; the window phases and skips by rule; B's 113.3 M weights unpacked through MLX-DLSS's decoders under A's block numbers; 0.54-0.58 of A's time here, the full-resolution blocks and the bottleneck unchanged; 66 of 120 kernels identical to 310.8's |
 
 ## Running it
 

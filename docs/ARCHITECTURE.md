@@ -29,6 +29,11 @@ shifted-window (Swin) attention, an eight-block ViT-1D bottleneck, and an upsamp
 them. **145 755 123 parameters**, the large matrices stored as FP8. Vendor codenames: feature `CG2R`,
 engine `HNet`, configs `crazy-cuckoo` and `hnet-vigilant-squid`.
 
+Since 310.9.16 the DLL carries a second network, **preset B** (`hnet-crazy-cuckoo-small-fp8`,
+the vendor's default there): the same graph with every stage at depth 2, **31 blocks** and
+**113 342 375 parameters**, trained separately (section 3, `notes/phase72`). What follows
+describes both; block numbers are preset A's.
+
 ## 2. The contract — this is the reusable part
 
 ### Extent
@@ -136,6 +141,16 @@ Five encoder stages at **32 / 64 / 128 / 256 / 512 channels**, head dimension **
 1/2/4/8/16 heads; an eight-block **ViT-1D** bottleneck at C = 1024; `dec_input_upsample
 1024 -> 512`; five decoder stages back. Attention is shifted-window over **8x8 windows, 64
 tokens**.
+
+**Five stage depths are all that tells two networks apart.** One function in the DLL builds every
+network from them. An encoder stage of depth d at 32-256 channels is d - 1 window blocks and a
+transition block that downsamples; the 512 stage is d blocks, the last also projecting to 1024;
+the bottleneck is always eight. The decoder mirrors the encoder: d blocks at 512 after the
+merge, then at each lower level an upsampling block that merges that level's transition output,
+and d - 1 window blocks. Preset A is {4, 4, 6, 8, 8}, 71 blocks; preset B is {2, 2, 2, 2, 2},
+31 blocks. A block's shifted window cycles none, both, x, y: position & 3 in an encoder stage,
+(depth + position) & 3 in a decoder one, phase 0 for the stem and 1 for the head
+(`src/ref/nr_topology.py`).
 
 One transformer layer at C = 256 (8 heads), exactly as the extraction gives it:
 
@@ -253,16 +268,19 @@ measures this and what to do about it when you have no motion vectors.
 - **Which named parameter occupies which slice of each packed blob.** The totals are
   pinned and the names are known; the internal assignment is not. It does not matter if
   you use a logical extraction, which is why this stopped being urgent.
-- **Which of `crazy-cuckoo` / `hnet-vigilant-squid` this blob is**, and whether both
-  configurations ship.
-- **The window shift offset.** Shifted windows are confirmed by `_shifted` kernel names
-  and the window is 8x8; the shift itself is inferred, not read.
+- ~~**Which of `crazy-cuckoo` / `hnet-vigilant-squid` this blob is**, and whether both
+  configurations ship.~~ Both presets are `crazy-cuckoo` networks from one builder, which names
+  them `hnet-vigilant-squid` until the caller renames them after their weights (`notes/phase72`).
+- **The window shift offset.** Which axes each block shifts is read from the builder
+  (section 3); the amount, half a window, is inferred, not read.
+- **Preset B against the vendor's own output.** It has not been compared with NVIDIA's.
 
 ## 8. Where the evidence is
 
 | question | note |
 | --- | --- |
 | the per-block table | `notes/MODEL-SPEC.txt` |
+| the stage depths, the window phases, preset B | `notes/phase72-preset-b.md` |
 | widths, stages, kernel inventory | `notes/phase3-architecture.md` |
 | kernel → layer class → template config | `notes/ptx-kernel-configs.md` |
 | the container format | `notes/phase3-weight-format.md` |
