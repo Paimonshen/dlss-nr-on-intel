@@ -190,6 +190,40 @@ def test_composition():
                          frame.history_weight(logits[::2]).view(np.uint32)))
 
 
+def test_mask_lanes():
+    """Channels 11-14 with a control mask, as the vendor's pre-block fills them (phase72)."""
+    print("control-mask lanes")
+    import nr_frame as frame
+    rng = np.random.default_rng(3)
+    colour = rng.random((48, 64, 3), dtype=np.float32)
+    values = dict(normalized_style=0.0, local_tone_strength=1.0, local_structure_strength=1.5)
+    for automatic in (None, frame.AutomaticMask(2.0, -1.0)):
+        ours = frame.make_features(colour, automatic_mask=automatic, **values)
+        theirs = frame.features_mod.make_features(colour, automatic_mask=automatic, **values)
+        check(f"without a mask it is MLX-DLSS's builder ({'auto mask' if automatic else 'none'})",
+              np.array_equal(ours, theirs))
+    mask = np.empty_like(colour)
+    mask[..., 0], mask[..., 1], mask[..., 2] = 1.0, 0.5, 0.2      # masked structure 0.3
+    skin = frame.AutomaticMask(0.5, -1.0)                          # automatic mask follows 1.5
+    off = frame.make_features(colour, control_mask=mask, **values)
+    lanes = lambda f: tuple(float(f[0, 0, c]) for c in (11, 12, 13, 14))
+    expect = lambda *v: tuple(float(np.float16(x)) for x in v)
+    check("a mask alone: tone and structure masked, -1 in the automatic lanes",
+          lanes(off) == expect(0.5, np.float32(0.2) * np.float32(1.5), -1, -1), str(lanes(off)))
+    zero = frame.make_features(colour, control_mask=mask, automatic_mask=skin, **values)
+    check("mode 0 with the automatic mask: the mask switches it off, as in 310.8",
+          np.array_equal(zero, off))
+    masked = np.float32(0.2) * np.float32(1.5)
+    for mode, combine in ((1, lambda a, b: (a + b) * np.float32(0.5)), (2, min), (3, max)):
+        got = lanes(frame.make_features(colour, control_mask=mask, automatic_mask=skin,
+                                        mask_blend_mode=mode, **values))
+        want = expect(0.5, 1.0, combine(masked, np.float32(0.5)), combine(masked, np.float32(1.5)))
+        check(f"mode {mode} ({frame.MASK_BLEND_MODES[mode]}): structure 1, both strengths "
+              f"blended with the masked structure", got == want, f"{got} vs {want}")
+    plain = frame.make_features(colour, control_mask=mask, mask_blend_mode=3, **values)
+    check("modes 1-3 do nothing while the automatic mask is off", np.array_equal(plain, off))
+
+
 def test_geometry():
     """The network's extent: the vendor's field by default, the graph's floor on request."""
     print("network geometry")
@@ -366,6 +400,7 @@ def main():
 
     test_primitives()
     test_composition()
+    test_mask_lanes()
     test_geometry()
     test_temporal()
     test_display_codec()

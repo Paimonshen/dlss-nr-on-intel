@@ -143,9 +143,9 @@ class VendorSession(temporal_mod.TemporalSession):
         geometry = NetworkGeometry.vendor_aligned(width, height)
         controls = self._controls()
         if self.history is None:
-            network = features_mod.make_features(processing, frame_index=self.frame_index,
-                                                 geometry=geometry, control_mask=control_mask,
-                                                 **controls)
+            network = nr_frame.make_features(processing, frame_index=self.frame_index,
+                                             geometry=geometry, control_mask=control_mask,
+                                             **controls)
             head = geometry.crop(self.pipeline.run_features(network))
             temporal = np.clip(processing + features_mod.half(head[..., :3]) * np.float32(0.25),
                                0, 1).astype(np.float32)
@@ -153,6 +153,8 @@ class VendorSession(temporal_mod.TemporalSession):
             features = temporal_mod.make_temporal_features(
                 processing, self.history, prepared.motion, frame_index=self.frame_index,
                 history_confidence=confidence, control_mask=control_mask, **controls)
+            if control_mask is not None:
+                features[..., 13:15] = -1      # the vendor's lanes, as in nr_frame.make_features
             network = temporal_mod.extend_features(features, geometry, self.frame_index)
             head = geometry.crop(self.pipeline.run_features(network))
             # at intensity 1 without a mask MLX-DLSS hands back the prediction itself

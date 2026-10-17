@@ -187,13 +187,58 @@ def _cached_noise(height, width, frame_index=0):
 
 features_mod.deterministic_noise = _cached_noise
 deterministic_noise = _cached_noise
-make_features = features_mod.make_features
 PROFILES = features_mod.PROFILES
 compose_head = composition_mod.compose_head
 compose_detail = composition_mod.compose_detail
 AutomaticMask = features_mod.AutomaticMask
 half = features_mod.half
 scaled_color = features_mod.scaled_color
+
+# `DLSSNR.MaskBlendMode`, new in 310.9.16: how a control mask's structure meets the automatic
+# mask's skin and automatic-mask strengths. 0 is 310.8's behaviour, a control mask switching
+# the automatic mask off.
+MASK_BLEND_MODES = {0: "off", 1: "average", 2: "minimum", 3: "maximum"}
+
+
+def make_features(color, *, control_mask=None, automatic_mask=None, mask_blend_mode=0,
+                  local_structure_strength=1.0, **values):
+    """MLX-DLSS's `make_features`, with the vendor's lanes for a control mask.
+
+    Without a control mask it is MLX-DLSS's, unchanged. With one, the vendor's pre-block
+    (310.8 and 310.9.16 alike, `notes/phase72`) puts -1, "no automatic mask", in channels
+    13 and 14, where MLX-DLSS puts 0. 310.9.16's mask blend modes 1-3 keep the automatic
+    mask on beside the control mask: structure is then 1, and the skin and automatic-mask
+    strengths are each averaged with (1), lowered to (2) or raised to (3) the masked
+    structure, the mask's blue times the local structure, in float32 as the kernel does.
+    """
+    if mask_blend_mode not in MASK_BLEND_MODES:
+        raise ValueError(f"mask blend mode {mask_blend_mode}: the modes are 0-3")
+    features = features_mod.make_features(
+        color, control_mask=control_mask, automatic_mask=automatic_mask,
+        local_structure_strength=local_structure_strength, **values)
+    if control_mask is None:
+        return features
+    enabled = (automatic_mask is not None and max(automatic_mask.skin_structure_strength,
+                                                  automatic_mask.automatic_mask_structure_strength) >= 0)
+    if not enabled or mask_blend_mode == 0:
+        features[..., 13:15] = -1
+        return features
+    geometry = values.get("geometry") or NetworkGeometry.identity(color.shape[1], color.shape[0])
+    rows, columns = geometry.source_rows(), geometry.source_columns()
+    structure = np.float32(local_structure_strength)
+    masked = np.asarray(control_mask, np.float32)[rows[:, None], columns[None, :], 2] * structure
+    for channel, strength in ((13, automatic_mask.skin_structure_strength),
+                              (14, automatic_mask.automatic_mask_structure_strength)):
+        own = np.full(masked.shape, structure if strength < 0 else strength, np.float32)
+        if mask_blend_mode == 1:
+            own = (masked + own) * np.float32(0.5)
+        elif mask_blend_mode == 2:
+            own = np.where(masked < own, masked, own)
+        else:
+            own = np.where(masked > own, masked, own)
+        features[..., channel] = half(own)
+    features[..., 12] = 1
+    return features
 
 try:
     import nr_image                      # the same passes in C, when they are built
@@ -533,7 +578,7 @@ class ResidentBackend:
 
 def run_head(model, color, *, profile="standard", frame_index=0, style_index=None,
              local_tone=None, local_structure=None, automatic_mask=None,
-             control_mask=None, verbose=False):
+             control_mask=None, mask_blend_mode=0, verbose=False):
     """The network alone: (H, W, 3) colour -> the cropped (H, W, 4) head.
 
     Everything that reaches the network is decided here — the conditioning scalars
@@ -545,7 +590,7 @@ def run_head(model, color, *, profile="standard", frame_index=0, style_index=Non
     values = controls(profile, style_index, local_tone, local_structure)
     features = make_features(color, frame_index=frame_index, geometry=geometry,
                              automatic_mask=automatic_mask, control_mask=control_mask,
-                             **values)
+                             mask_blend_mode=mask_blend_mode, **values)
     if verbose:
         print(f"  network extent {geometry.network_width}x{geometry.network_height} "
               f"for output {width}x{height}", flush=True)
@@ -781,6 +826,9 @@ def main():
     parser.add_argument("--auto-mask", type=float,
                         help="automatic-mask structure strength; -1 to follow local structure")
     parser.add_argument("--control-mask", help="per-pixel RGB mask: red intensity, green tone, blue structure")
+    parser.add_argument("--mask-blend-mode", type=int, default=0, choices=sorted(MASK_BLEND_MODES),
+                        help="with a control mask and the automatic mask, 310.9.16's "
+                             "DLSSNR.MaskBlendMode: 0 off, 1 average, 2 minimum, 3 maximum")
     parser.add_argument("--intensity", type=float, default=1.0,
                         help="blend of the model's picture against the source, 0..2; "
                              "above 1 extrapolates past the model's own picture")
@@ -844,7 +892,7 @@ def main():
         model, color, profile=args.profile, frame_index=args.frame_index,
         style_index=args.style_index, local_tone=args.local_tone,
         local_structure=args.local_structure, automatic_mask=automatic,
-        control_mask=mask, verbose=args.verbose)
+        control_mask=mask, mask_blend_mode=args.mask_blend_mode, verbose=args.verbose)
     print(f"network {elapsed:.1f}s")
     if backend is not None:
         print(backend.report())
