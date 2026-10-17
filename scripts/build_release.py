@@ -105,9 +105,12 @@ def assemble(root: Path, target: Path, platform: str) -> Path:
     files = [root / "work" / name for name in (layer, *libraries, *sorted(shaders))]
     files += [
         root / "src/layer/nr_daemon.py", root / "src/layer/nr_knobs.py", root / "src/ref/nr_frame.py",
+        # Which weight model an install has lives in one table; the daemon and the installer both
+        # import it, so a release without it installs weights and then cannot load them.
+        root / "src/ref/nr_weight_models.py", root / "scripts/nr_weights.py",
         root / "src/layer/VkLayer_dlss_nr.json", root / "scripts/get_weights.py",
         root / "dist-tools/setup.sh", root / "dist-tools/setup.bat",
-        root / "docs/RELEASE-QUICKSTART.md", root / "LICENSE", root / "NOTICE",
+        root / "docs/RELEASE-QUICKSTART.md", root / "docs/WEIGHTS.md", root / "LICENSE", root / "NOTICE",
         root / "work/mlx-dlss/LICENSE", package / "features.py",
         package / "tools/extract_dlssnr_weights.py",
         package / "tools/unpack_dlssnr_weights.py",

@@ -779,6 +779,10 @@ class WizardFixture(unittest.TestCase):
         # what the engine can run, not against what the UI lists, so a hand-edited file naming
         # `neutral` is still accepted. `nr_knobs.PROFILES` is the list the menu shows.
         namespace = {"os": os, "math": math, "json": json,
+                     # The class asks which weight models this build knows; a stub is enough here -
+                     # the table itself is `src/tools/test_nr_weights.py`'s subject.
+                     "nr_weight_models": SimpleNamespace(
+                         default_name=lambda: "ht", names=lambda: ["ht", "cc_small_fp8"]),
                      "nr_frame": SimpleNamespace(PROFILES={choice: {} for choice in ("standard", "natural", "cinematic", "neutral")})}
         exec(compile(ast.Module(body=[actual_class], type_ignores=[]), "nr_daemon.py", "exec"), namespace)
         path = self.root / "work/nr_settings.json"
