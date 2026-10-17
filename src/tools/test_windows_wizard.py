@@ -69,11 +69,12 @@ def write_pe_importing(path, imports=(), delayed=(), x64=True, text=b""):
     return path
 
 
-def write_weights(path):
+def write_weights(path, count=649):
     """Format-only zero-sized tensors; deliberately contain no real weights."""
+    path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     header = json.dumps({f"fixture_{n}": {"dtype": "F16", "shape": [0],
-                                         "data_offsets": [0, 0]} for n in range(649)}).encode()
+                                         "data_offsets": [0, 0]} for n in range(count)}).encode()
     path.write_bytes(len(header).to_bytes(8, "little") + header)
 
 
@@ -441,6 +442,132 @@ class WizardFixture(unittest.TestCase):
         self.assertEqual((values["NR_GPU_IMAGE"], values["NR_GPU_TRANSPORT"], values["NR_GPU_ONLY"]), ("0", "0", "0"))
         self.assertNotIn("NR_LAYER_TIMING", core.runtime_env(enabled))
         self.assertNotIn("NR_LAYER_TIMING_LOG", core.runtime_env(enabled))
+
+    def preset_b_weights(self):
+        return self.root / core.PRESETS["B"][0]
+
+    def test_the_network_preset_in_the_profile_the_environment_and_an_installed_game(self):
+        # A profile from before the presets runs A, the only network there was.
+        self.assertEqual(self.profile.preset, "A")
+        old = self.profile.to_dict()
+        del old["preset"]
+        self.assertEqual(core.Profile.from_dict(old), self.profile)
+        for value in ("C", "a", 1, None, ["B"]):
+            with self.assertRaises(ValueError, msg=value):
+                core.Profile.from_dict({**old, "preset": value})
+        self.assertEqual(core.runtime_env(self.profile)["NR_PRESET"], "A")
+        with patch.dict(os.environ, {"NR_PRESET": "B"}):
+            self.assertEqual(core.runtime_env(self.profile)["NR_PRESET"], "A")
+        chosen = replace(self.profile, preset="B")
+        self.assertEqual(core.Profile.from_dict(chosen.to_dict()), chosen)
+        self.assertEqual(core.status(self.profile)["presets"], {"A": True, "B": False})
+        self.assertTrue(core.install(self.profile)["ok"])
+        path = core.installed_path(self.profile) / core.ENV_FILE
+
+        def values():
+            return dict(line.split("=", 1) for line in path.read_text(encoding="utf-8").splitlines()
+                        if "=" in line and not line.startswith("#"))
+
+        self.assertEqual(values()["NR_PRESET"], "A")
+        # Without B's weights a daemon started for it would end at once, and the game run
+        # without NR: refused, and neither the profile nor the game's environment changes.
+        before = path.read_bytes()
+        result = core.set_pacing(chosen)
+        self.assertFalse(result["ok"])
+        self.assertIn("310.9.16.0", result["error"])
+        self.assertEqual(result["presets"], {"A": True, "B": False})
+        self.assertEqual(core.load_profile(self.root).preset, "A")
+        self.assertEqual(path.read_bytes(), before)
+        write_weights(self.preset_b_weights(), count=core.PRESETS["B"][1])
+        self.assertEqual(core.status(self.profile)["presets"], {"A": True, "B": True})
+        result = core.set_pacing(chosen)
+        self.assertEqual((result["ok"], result["applied"]), (True, True))
+        self.assertEqual(core.load_profile(self.root).preset, "B")
+        self.assertEqual(values()["NR_PRESET"], "B")
+        self.assertEqual(sum(line.startswith("NR_PRESET=") for line in path.read_text(encoding="utf-8").splitlines()), 1)
+        core.set_pacing(self.profile)
+        self.assertEqual(values()["NR_PRESET"], "A")
+        self.assertTrue(core.uninstall(self.profile)["ok"])
+
+    def test_preset_b_is_checked_for_its_weights_or_a_dll_that_carries_them(self):
+        chosen = replace(self.profile, preset="B")
+        check = self.checks(chosen)["preset"]
+        self.assertFalse(check["ok"])
+        self.assertIn("needs nvngx_dlssnr.dll 310.9.16.0 or later", check["detail"])
+        dll = write_pe(self.base / "owned DLL (fixture)" / "nvngx_dlssnr.dll")
+        for version, ok in (("310.8.0.0", False), ("310.9.16.0", True), ("310.10.0.0", True), (None, False)):
+            with patch.object(core, "_file_version", return_value=version):
+                check = self.checks(replace(chosen, dll=dll))["preset"]
+            self.assertEqual(check["ok"], ok, version)
+            self.assertIn("Install extracts preset B" if ok else f"this one is {version or 'of unknown'}",
+                          check["detail"])
+        write_weights(self.preset_b_weights(), count=core.PRESETS["B"][1])
+        self.assertTrue(self.checks(chosen)["preset"]["ok"])
+        # A count of A's is not B's.
+        write_weights(self.preset_b_weights())
+        self.assertFalse(self.checks(chosen)["preset"]["ok"])
+        self.assertTrue(self.checks(self.profile)["preset"]["ok"])
+
+    def unpacking(self, calls, succeed=True):
+        def run(command, timeout=10, env=None, emit=None, cwd=None):
+            command = [str(part) for part in command]
+            calls.append(command)
+            if succeed:
+                write_weights(command[4], count=core.PRESETS["B"][1])
+            return {"command": command, "returncode": 0 if succeed else 1, "stdout": "", "stderr": "",
+                    "output": "unpacked" if succeed else "no decoder", "timed_out": False}
+        return run
+
+    def test_install_takes_preset_b_out_of_a_dll_that_carries_it_beside_a(self):
+        dll = write_pe(self.base / "owned DLL (fixture)" / "nvngx_dlssnr.dll")
+        profile = replace(self.profile, dll=dll)
+        weights = self.weights.read_bytes()
+        calls = []
+        with patch.object(core, "_file_version", return_value="310.8.0.0"), \
+                patch.object(core, "_run", side_effect=self.unpacking(calls)):
+            self.assertTrue(core.install(profile)["ok"])
+        self.assertEqual(calls, [])
+        self.assertFalse(self.preset_b_weights().exists())
+        with patch.object(core, "_file_version", return_value="310.9.16.0"), \
+                patch.object(core, "_run", side_effect=self.unpacking(calls)):
+            result = core.install(profile)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["presets"], {"A": True, "B": True})
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][:4], [str(self.python), "-I", str(self.root / "src/tools/unpack_preset.py"), str(dll)])
+        # Written under a new name, then moved to the weights' own: nothing left beside them.
+        self.assertEqual(Path(calls[0][4]).parent, self.preset_b_weights().parent)
+        self.assertNotEqual(Path(calls[0][4]), self.preset_b_weights())
+        self.assertEqual([path.name for path in self.preset_b_weights().parent.iterdir()],
+                         sorted([self.weights.name, self.preset_b_weights().name]))
+        self.assertEqual(self.weights.read_bytes(), weights)
+        self.assertIn("unpacked", (self.root / core.WEIGHTS_LOG).read_text(encoding="utf-8"))
+        # Once there, not again.
+        with patch.object(core, "_file_version", return_value="310.9.16.0"), \
+                patch.object(core, "_run", side_effect=self.unpacking(calls)):
+            self.assertTrue(core.install(profile)["ok"])
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(core.uninstall(profile)["ok"])
+
+    def test_preset_bs_failed_extraction_stops_only_an_installation_that_runs_it(self):
+        dll = write_pe(self.base / "owned DLL (fixture)" / "nvngx_dlssnr.dll")
+        calls = []
+        with patch.object(core, "_file_version", return_value="310.9.16.0"), \
+                patch.object(core, "_run", side_effect=self.unpacking(calls, succeed=False)):
+            result = core.install(replace(self.profile, dll=dll, preset="B"))
+            self.assertFalse(result["ok"])
+            self.assertIn("Preset B's extraction failed, from nvngx_dlssnr.dll version 310.9.16.0", result["error"])
+            self.assertFalse(core.installed_path(self.profile).exists())
+            self.assertEqual(sorted(path.name for path in self.game.parent.iterdir()), [self.game.name])
+            # With A, NR is installed, and the window says B is not there.
+            result = core.install(replace(self.profile, dll=dll))
+        self.assertTrue(result["ok"], result)
+        self.assertEqual([warning["name"] for warning in result["warnings"]], ["preset_b_extraction"])
+        self.assertEqual(result["warnings"][0]["values"], ["310.9.16.0"])
+        self.assertEqual(result["presets"], {"A": True, "B": False})
+        self.assertFalse(list(self.preset_b_weights().parent.glob("*.new")))
+        self.assertEqual((self.root / core.WEIGHTS_LOG).read_text(encoding="utf-8"), "no decoder")
+        self.assertTrue(core.uninstall(self.profile)["ok"])
 
     def test_remove_takes_dxvks_first_log_from_the_folders_the_game_started_in(self):
         # DXVK opens its first log before it loads the proxy, so in the folder the game was
@@ -853,12 +980,13 @@ class WizardFixture(unittest.TestCase):
         self.weights.unlink()
         dll = write_pe(self.base / "owned DLL (fixture)" / "nvngx_dlssnr.dll")
         profile = replace(self.profile, dll=dll)
-        self.assertIn("version unknown; tested with 310.8.0.0", self.checks(profile)["local_model_input"]["detail"])
+        self.assertIn("version unknown; tested with 310.8.0.0 and 310.9.16.0",
+                      self.checks(profile)["local_model_input"]["detail"])
         with patch.object(core, "_run", return_value={"returncode": 0, "timed_out": False,
                          "output": "Done without usable weights"}) as run:
             result = core.install(profile)
         self.assertFalse(result["ok"])
-        self.assertIn("version unknown (tested: 310.8.0.0)", result["error"])
+        self.assertIn("version unknown (tested: 310.8.0.0, 310.9.16.0)", result["error"])
         self.assertEqual(run.call_args.args[0][3], dll)
         self.assertFalse(core.installed_path(profile).exists())
         # What the extractor said outlives the window's next action, for Save report.
@@ -1177,7 +1305,7 @@ class WizardFixture(unittest.TestCase):
     def test_the_speed_test_runs_the_releases_script_and_keeps_its_result(self):
         # NR alone on this PC, saved with the PC for Save report: testers' reports gather it.
         script = self.speed_script()
-        measured = {"ok": True, "error": None, "device": "Fixture GPU", "model_ready_s": 1.0,
+        measured = {"ok": True, "error": None, "device": "Fixture GPU", "model_ready_s": 1.0, "preset": "B",
                     "cases": [{"width": 640, "height": 360, "render_scale": 0.4, "network": [320, 320],
                                "network_ms": 23, "network_fps": 43.5, "round_trip_ms": 26.9,
                                "round_trip_min_ms": 25.0, "round_trip_max_ms": 29.0, "round_trip_fps": 37.2}]}
@@ -1186,6 +1314,8 @@ class WizardFixture(unittest.TestCase):
             command = [str(part) for part in command]
             self.assertEqual(command[:3], [str(self.python), "-I", str(script)])
             self.assertEqual(command[command.index("--root") + 1], str(self.root))
+            # The network a game started now would run.
+            self.assertEqual(command[command.index("--preset") + 1], "B")
             target = Path(command[command.index("--json") + 1])
             target.write_text(json.dumps(measured), encoding="utf-8")
             return {"command": command, "returncode": 0, "stdout": "", "stderr": "", "output": "",
@@ -1193,9 +1323,10 @@ class WizardFixture(unittest.TestCase):
 
         self.assertIsNone(core.status(self.profile)["speed_test"])
         self.assertTrue(core.install(self.profile)["speed_test_due"])
+        write_weights(self.preset_b_weights(), count=core.PRESETS["B"][1])
         with patch.object(core, "_run", side_effect=run), \
                 patch.object(core, "_system_metadata", return_value={"gpu": [{"Name": "fixture"}]}):
-            result = core.speed_test(self.profile)
+            result = core.speed_test(replace(self.profile, preset="B"))
         self.assertTrue(result["ok"], result)
         saved = core._read_json(self.root / core.SPEED_TEST)
         self.assertEqual((saved["device"], saved["cases"]), ("Fixture GPU", measured["cases"]))
@@ -1205,6 +1336,7 @@ class WizardFixture(unittest.TestCase):
         self.assertEqual(core.status(self.profile)["speed_test"]["cases"],
                          [{"width": 640, "height": 360, "render_scale": 0.4, "network_ms": 23, "network_fps": 43.5,
                            "round_trip_ms": 26.9, "round_trip_fps": 37.2}])
+        self.assertEqual(core.status(self.profile)["speed_test"]["preset"], "B")
         report = self.base / "speed report.json"
         with patch.object(core, "_system_metadata", return_value={}):
             self.assertTrue(core.export_report(self.profile, report)["ok"])

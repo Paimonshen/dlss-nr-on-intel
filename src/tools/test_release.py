@@ -29,7 +29,7 @@ class ReleaseTests(unittest.TestCase):
         # Minimal input tree with the real runtime's shader inventory and scripts.
         paths = ["src/gpu/libxmx.c", "src/gpu/xmx.py", "src/gpu/xmxres.py",
                  "src/layer/VkLayer_dlss_nr.json", "src/layer/nr_knobs.py",
-                 "src/layer/nr_setup_proxy.py", "scripts/get_weights.py",
+                 "src/layer/nr_setup_proxy.py", "scripts/get_weights.py", release.UNPACK_PRESET,
                  "scripts/build_release.py", "tools/deploy.sh", "dist-tools/setup.sh",
                  "dist-tools/setup.bat", "docs/RELEASE-QUICKSTART.md", "LICENSE", "NOTICE"]
         paths += ["dist-tools/" + name for name in release.WINDOWS_UI]
@@ -113,6 +113,9 @@ class ReleaseTests(unittest.TestCase):
         self.assertTrue((self.target / "windows-wizard.ps1").is_file())
         for name in release.WINDOWS_TOOLS:
             self.assertTrue((self.target / "scripts" / name).is_file())
+        # Preset B's unpacker where a checkout has it, from which it finds the release's root.
+        self.assertEqual((self.target / release.UNPACK_PRESET).read_bytes(),
+                         (self.root / release.UNPACK_PRESET).read_bytes())
         metadata = json.loads((self.target / "release-metadata.json").read_text())
         self.assertEqual(metadata["platform"], "windows")
         self.assertIsNone(metadata["source_commit"])

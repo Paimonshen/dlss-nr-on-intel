@@ -56,6 +56,22 @@ class BridgeTests(unittest.TestCase):
             self.assertTrue(data['profile']['gpu_image_path'])
             self.assertEqual((data['profile']['nr_async'], data['profile']['nr_every']), (True, 3))
 
+    def test_preset_bridge_sets_the_network_as_pacing_does(self):
+        with tempfile.TemporaryDirectory(prefix='nr preset bridge ') as room:
+            root = Path(room)
+            request = root / 'request.json'
+            result = root / 'result.json'
+            request.write_text(json.dumps({'python': sys.executable,
+                'game_exe': str(root / 'game.exe'), 'preset': 'B'}), encoding='utf-8')
+            with mock.patch.object(bridge.core, 'set_pacing', return_value={
+                    'ok': True, 'applied': True}) as pacing, \
+                 mock.patch.object(sys, 'argv', ['wizard', 'preset', '--root', str(root),
+                    '--input', str(request), '--output', str(result)]):
+                self.assertEqual(bridge.main(), 0)
+            self.assertEqual(pacing.call_args.args[0].preset, 'B')
+            data = json.loads(result.read_text(encoding='utf-8'))
+            self.assertEqual((data['action'], data['profile']['preset']), ('preset', 'B'))
+
     def test_no_profile_failure_is_reported_instead_of_silent_console_exit(self):
         with tempfile.TemporaryDirectory(prefix='nr no profile ') as room:
             output = Path(room) / 'result.json'

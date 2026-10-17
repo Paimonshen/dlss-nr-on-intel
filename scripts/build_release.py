@@ -20,6 +20,8 @@ ROOT = Path(__file__).resolve().parents[1]
 SOURCE_DIRS = ("layer", "ref", "gpu", "bench")
 WINDOWS_UI = ("NR-Setup.cmd", "windows-wizard.ps1")
 WINDOWS_TOOLS = ("windows_wizard.py", "windows_wizard_core.py", "windows_launch.py")
+# Preset B's weights out of a 310.9.16 or later DLL, beside A's (scripts/get_weights.py).
+UNPACK_PRESET = "src/tools/unpack_preset.py"
 PROXIES = ("nr_vulkan_proxy.dll", "nr_vulkan_proxy32.dll")
 # DXVK for DirectX 8-11 games, from scripts/fetch_dxvk.py: the setup window puts it beside them.
 DXVK = tuple(f"work/dxvk/{directory}/{name}" for directory in ("x64", "x32")
@@ -89,7 +91,7 @@ def assemble(root: Path, target: Path, platform: str) -> Path:
     files += [
         root / "src/layer/nr_daemon.py", root / "src/layer/nr_knobs.py", root / "src/ref/nr_frame.py",
         root / "src/layer/VkLayer_dlss_nr.json", root / "scripts/get_weights.py",
-        root / "dist-tools/setup.sh", root / "dist-tools/setup.bat",
+        root / UNPACK_PRESET, root / "dist-tools/setup.sh", root / "dist-tools/setup.bat",
         root / "docs/RELEASE-QUICKSTART.md", root / "LICENSE", root / "NOTICE",
         root / "work/mlx-dlss/LICENSE", package / "features.py",
         package / "tools/extract_dlssnr_weights.py",
@@ -125,6 +127,9 @@ def assemble(root: Path, target: Path, platform: str) -> Path:
             json.dumps({"render_scale": 0.4, "min_extent": 320}) + "\n", encoding="utf-8")
         shutil.copy2(root / "src/layer/VkLayer_dlss_nr.json", stage / "VkLayer_dlss_nr.json")
         shutil.copy2(root / "scripts/get_weights.py", stage / "scripts/get_weights.py")
+        # Where it is in a checkout, which is where it finds the release's root from.
+        (stage / UNPACK_PRESET).parent.mkdir(parents=True)
+        shutil.copy2(root / UNPACK_PRESET, stage / UNPACK_PRESET)
         for name in ("setup.sh", "setup.bat"):
             shutil.copy2(root / "dist-tools" / name, stage / name)
         if windows:

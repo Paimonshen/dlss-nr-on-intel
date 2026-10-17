@@ -50,10 +50,16 @@ DXVK_FILES = ("d3d8.dll", "d3d9.dll", "d3d10core.dll", "d3d11.dll", "dxgi.dll")
 PROXIES = {"x64": "nr_vulkan_proxy.dll", "x86": "nr_vulkan_proxy32.dll"}
 PROXY_NAME = "vulkan-1.dll"
 ENV_FILE = "nr-env.txt"
-# The pacing variables (Profile.nr_async, nr_every) set_pacing rewrites in ENV_FILE, and the
-# most presents one network frame may cover in the window.
-PACING = ("NR_LAYER_LIVE", "NR_LAYER_ASYNC", "NR_GPU_IMAGE", "NR_GPU_TRANSPORT", "NR_GPU_ONLY")
+# The variables set_pacing rewrites in ENV_FILE (Profile.nr_async, nr_every, gpu_image_path and
+# preset), and the most presents one network frame may cover in the window.
+PACING = ("NR_LAYER_LIVE", "NR_LAYER_ASYNC", "NR_GPU_IMAGE", "NR_GPU_TRANSPORT", "NR_GPU_ONLY",
+          "NR_PRESET")
 MAX_EVERY = 4
+# The networks nvngx_dlssnr.dll carries, which NR_PRESET picks (notes/phase72-preset-b.md): A, the
+# original, and B, the faster one, from 310.9.16.0 on. Each one's logical weights, and their count.
+PRESETS = {"A": ("work/mlxw/dlssnr-logical.safetensors", 649),
+           "B": ("work/mlxw/dlssnr-b-logical.safetensors", 281)}
+PRESET_B_SINCE = (310, 9, 16, 0)
 # Where the proxy lists the folders the game was started in, for DXVK's first log there.
 START_FOLDERS = "start-folders.txt"
 # In the game's dlss-nr folder: what NR put beside the game, and the game's own files it set
@@ -66,7 +72,7 @@ RUNTIME_MODULES = (
     "src/layer/nr_daemon_owner.py", "src/layer/nr_gpu_transport.py",
     "src/ref/nr_model.py", "src/ref/nr_topology.py", "src/ref/nr_image.py",
     "src/ref/image_io.py",
-    "src/gpu/xmx.py", "src/gpu/xmxres.py", "scripts/get_weights.py",
+    "src/gpu/xmx.py", "src/gpu/xmxres.py", "scripts/get_weights.py", "src/tools/unpack_preset.py",
     "src/gpu/gpu_image_pipeline.py", "src/gpu/gpu_image_preprocess.py",
     "src/gpu/gpu_image_compose.py", "src/gpu/gpu_image_stats.py",
     "work/mlx-dlss/python/mlxdlss/features.py",
@@ -98,6 +104,8 @@ class Profile:
     nr_async: bool = False
     nr_every: int = 1
     gpu_image_path: bool = False
+    # The network, NR_PRESET: one of PRESETS, read by the daemon when the game starts it.
+    preset: str = "A"
 
     def __post_init__(self):
         self.root = Path(self.root).expanduser().resolve()
@@ -113,7 +121,7 @@ class Profile:
                 "disable_fossilize": self.disable_fossilize,
                 "launch_mode": self.launch_mode, "steam_app_id": self.steam_app_id,
                 "nr_async": self.nr_async, "nr_every": self.nr_every,
-                "gpu_image_path": self.gpu_image_path}
+                "gpu_image_path": self.gpu_image_path, "preset": self.preset}
 
     @classmethod
     def from_dict(cls, values):
@@ -134,6 +142,10 @@ class Profile:
         every = values.get("nr_every", 1)
         if isinstance(every, bool) or not isinstance(every, int) or not 1 <= every <= MAX_EVERY:
             raise ValueError(f"nr_every must be a whole number from 1 to {MAX_EVERY}")
+        # A profile from before the presets ran A, the only network there was.
+        preset = values.get("preset", "A")
+        if not isinstance(preset, str) or preset not in PRESETS:
+            raise ValueError("preset must be one of " + ", ".join(PRESETS))
         return cls(root=Path(values.get("root") or Path(__file__).resolve().parents[2]),
                    python=Path(values.get("python") or sys.executable),
                    game_exe=Path(values.get("game_exe") or "."),
@@ -141,7 +153,8 @@ class Profile:
                    api=values.get("api", "vulkan"), game_args=arguments,
                    disable_fossilize=fossilize, launch_mode=values.get("launch_mode", "direct"),
                    steam_app_id=str(values.get("steam_app_id") or ""),
-                   nr_async=pipelined, nr_every=every, gpu_image_path=gpu_image_path)
+                   nr_async=pipelined, nr_every=every, gpu_image_path=gpu_image_path,
+                   preset=preset)
 
 
 def profile_path(root):
@@ -372,6 +385,8 @@ def layer_environment(profile):
     values["NR_GPU_IMAGE"] = "1" if gpu else "0"
     values["NR_GPU_TRANSPORT"] = "1" if gpu else "0"
     values["NR_GPU_ONLY"] = "0"
+    # The daemon the layer starts inherits it from the game's process.
+    values["NR_PRESET"] = profile.preset
     return values
 
 
@@ -661,8 +676,9 @@ def _shader_names(root):
     return sorted(names)
 
 
-def _weights_state(profile):
-    path = profile.root / "work/mlxw/dlssnr-logical.safetensors"
+def _weights_state(profile, preset="A"):
+    relative, count = PRESETS[preset]
+    path = profile.root / relative
     try:
         with path.open("rb") as handle:
             size_bytes = handle.read(8)
@@ -674,16 +690,21 @@ def _weights_state(profile):
             header = json.loads(handle.read(length))
         data_size = path.stat().st_size - 8 - length
         tensors = {key: value for key, value in header.items() if key != "__metadata__"}
-        if len(tensors) != 649 or data_size < 0:
-            raise ValueError("expected 649 logical tensors")
+        if len(tensors) != count or data_size < 0:
+            raise ValueError(f"expected {count} logical tensors")
         for value in tensors.values():
             offsets = value.get("data_offsets", [])
             if (len(offsets) != 2 or not all(isinstance(v, int) for v in offsets)
                     or not 0 <= offsets[0] <= offsets[1] <= data_size):
                 raise ValueError("invalid tensor data offsets")
-        return {"ready": True, "path": str(path), "detail": "649 local logical tensors"}
+        return {"ready": True, "path": str(path), "detail": f"{count} local logical tensors"}
     except (OSError, ValueError, TypeError, AttributeError) as error:
         return {"ready": False, "path": str(path), "detail": str(error)}
+
+
+def _presets_ready(profile):
+    """The networks this release has weights for, by name: those the window offers."""
+    return {name: _weights_state(profile, name)["ready"] for name in PRESETS}
 
 
 def _owned_installation(profile):
@@ -706,9 +727,10 @@ def _owned_installation(profile):
 VC_REDIST = "https://learn.microsoft.com/cpp/windows/latest-supported-vc-redist"
 # What the speed test measured, for Save report: src/bench/speed_test.py's result, with the PC.
 SPEED_TEST = "work/speed-test.json"
-# The DLL every test here extracted its weights from (notes/CLAUDE.md, Phase 0).
-TESTED_DLL_VERSION = "310.8.0.0"
-TESTED_DLL_SHA256 = "e16bcf15e16e13f527491cdf7845b2fe6521a738d8f7c9c721866a8496e1fc8e"
+# The DLLs the tests here extracted weights from, by version: 310.8.0.0 (notes/CLAUDE.md, Phase 0),
+# and 310.9.16.0, whose preset A is 310.8.0.0's byte for byte (notes/phase72-preset-b.md).
+TESTED_DLLS = {"310.8.0.0": "e16bcf15e16e13f527491cdf7845b2fe6521a738d8f7c9c721866a8496e1fc8e",
+               "310.9.16.0": "2bc19bc09a7b89dd44f73e2ac0108fcc586e2154bdd0830f242f4f040e28789f"}
 WEIGHTS_LOG = "work/logs/get-weights.log"
 
 
@@ -741,13 +763,22 @@ def _file_version(path):
     return f"{fixed[2] >> 16}.{fixed[2] & 0xFFFF}.{fixed[3] >> 16}.{fixed[3] & 0xFFFF}"
 
 
+def _carries_preset_b(path):
+    """Whether the user's DLL is one that carries preset B: 310.9.16.0 or later, by its version."""
+    version = _file_version(path)
+    try:
+        return version is not None and tuple(map(int, version.split("."))) >= PRESET_B_SINCE
+    except ValueError:
+        return False
+
+
 def _dll_info(path):
     """The user's DLL as a report gives it: its version and whether it is the one tested."""
     if not path or not Path(path).is_file():
         return {"present": False}
     digest = _sha256(path)
     return {"present": True, "size": Path(path).stat().st_size, "version": _file_version(path),
-            "sha256": digest, "tested": digest == TESTED_DLL_SHA256}
+            "sha256": digest, "tested": digest in TESTED_DLLS.values()}
 
 
 def _load_dependencies(profile, timeout=30):
@@ -838,10 +869,21 @@ def validate(profile):
     elif dll_ok:
         version = _file_version(profile.dll)
         model_detail = (f"Install extracts the weights from {profile.dll}, version {version or 'unknown'}"
-                        + ("" if version == TESTED_DLL_VERSION else f"; tested with {TESTED_DLL_VERSION}"))
+                        + ("" if version in TESTED_DLLS else f"; tested with {' and '.join(TESTED_DLLS)}"))
     else:
         model_detail = "Supply your own x64 nvngx_dlssnr.dll or 649-tensor local logical weights"
     check("local_model_input", weights["ready"] or dll_ok, model_detail)
+    # Preset B runs on weights of its own, which Install takes out of a DLL that carries them.
+    if profile.preset == "B":
+        own = _weights_state(profile, "B")
+        offered = dll_ok and _carries_preset_b(profile.dll)
+        check("preset", own["ready"] or offered,
+              "Preset B: " + own["detail"] if own["ready"]
+              else f"Install extracts preset B from {profile.dll}" if offered
+              else "Preset B needs nvngx_dlssnr.dll 310.9.16.0 or later"
+              + (f"; this one is {_file_version(profile.dll) or 'of unknown version'}" if dll_ok else ""))
+    else:
+        check("preset", profile.preset == "A", f"Preset {profile.preset}, the original network")
     owns, detail = _owned_installation(profile)
     check("installation_target", owns, detail)
     for name in ("windows-profile.json", "nr_settings.json", "nr_trigger"):
@@ -891,7 +933,8 @@ def validate(profile):
                  "launcher that starts it, without administrator rights")
     ok = all(item["ok"] for item in checks)
     return {"ok": ok, "error": None if ok else "Preflight checks failed", "checks": checks,
-            "warnings": warnings, "python_info": info, "weights": weights, "runtime_dependencies": dependency}
+            "warnings": warnings, "python_info": info, "weights": weights, "presets": _presets_ready(profile),
+            "runtime_dependencies": dependency}
 
 
 def ensure_dependencies(profile, emit=None):
@@ -1393,6 +1436,16 @@ def install(profile, emit=None):
     if not checked["ok"]:
         return checked
     commands = []
+
+    def keep_log():
+        # Kept for Save report: the window shows it only until the next action (issue #12).
+        try:
+            (profile.root / "work/logs").mkdir(parents=True, exist_ok=True)
+            (profile.root / WEIGHTS_LOG).write_text("\n".join(value["output"] for value in commands),
+                                                    encoding="utf-8")
+        except OSError:
+            pass
+
     if not checked["weights"]["ready"]:
         if emit:
             emit("Extracting logical weights from your local NVIDIA DLL\n")
@@ -1400,18 +1453,37 @@ def install(profile, emit=None):
                           profile.dll, "--work-dir", str(profile.root / "work")],
                          timeout=900, cwd=profile.root, emit=emit)
         commands.append(extracted)
-        # Kept for Save report: the window shows it only until the next action (issue #12).
-        try:
-            (profile.root / "work/logs").mkdir(parents=True, exist_ok=True)
-            (profile.root / WEIGHTS_LOG).write_text(extracted["output"], encoding="utf-8")
-        except OSError:
-            pass
+        keep_log()
         if extracted["returncode"] != 0 or extracted["timed_out"] or not _weights_state(profile)["ready"]:
             version = _file_version(profile.dll)
             return {"ok": False, "error": "Weight extraction failed or did not produce 649 logical tensors, "
-                    f"from nvngx_dlssnr.dll version {version or 'unknown'} (tested: {TESTED_DLL_VERSION}). "
+                    f"from nvngx_dlssnr.dll version {version or 'unknown'} (tested: {', '.join(TESTED_DLLS)}). "
                     "The extractor's output is in Check details and in Save report.",
                     "commands": commands, "output": extracted["output"]}
+    # Preset B beside A, from a DLL that carries it, whichever network the profile runs: the
+    # window then offers both.
+    preset_b_failed = None
+    if profile.dll and _carries_preset_b(profile.dll) and not _weights_state(profile, "B")["ready"]:
+        if emit:
+            emit("Extracting preset B's logical weights from your local NVIDIA DLL\n")
+        target = profile.root / PRESETS["B"][0]
+        # The unpacker writes no file over another: a new name, then the weights' own.
+        fresh = target.with_name(target.name + ".new")
+        fresh.unlink(missing_ok=True)
+        extracted = _run([profile.python, "-I", str(profile.root / "src/tools/unpack_preset.py"),
+                          profile.dll, fresh], timeout=900, cwd=profile.root, emit=emit)
+        commands.append(extracted)
+        keep_log()
+        if extracted["returncode"] == 0 and not extracted["timed_out"] and fresh.is_file():
+            os.replace(fresh, target)
+        fresh.unlink(missing_ok=True)
+        if not _weights_state(profile, "B")["ready"]:
+            preset_b_failed = (f"Preset B's extraction failed, from nvngx_dlssnr.dll version "
+                               f"{_file_version(profile.dll) or 'unknown'}. The extractor's output is in "
+                               "Check details and in Save report.")
+            if profile.preset == "B":
+                return {"ok": False, "error": preset_b_failed, "commands": commands,
+                        "output": extracted["output"]}
     # Recheck every input and destination after extraction, before any game write.
     checked = validate(profile)
     if not checked["ok"]:
@@ -1484,9 +1556,14 @@ def install(profile, emit=None):
     shutil.rmtree(destination / ".undo", ignore_errors=True)
     if emit:
         emit("Installation complete; the effect is off\n")
+    warnings = list(checked["warnings"])
+    if preset_b_failed:
+        # Preset A, which the profile runs, is there: the installation stands without B.
+        warnings.append({"name": "preset_b_extraction", "detail": preset_b_failed,
+                         "values": [_file_version(profile.dll) or "unknown"]})
     return {"ok": True, "error": None, "installed": str(destination), "root": str(profile.root),
             "profile": profile.to_dict(), "commands": commands, "trigger_exists": False,
-            "warnings": checked["warnings"],
+            "warnings": warnings, "presets": _presets_ready(profile),
             # The window runs the speed test after a first installation, once.
             "speed_test_due": not (profile.root / SPEED_TEST).is_file()}
 
@@ -1497,6 +1574,11 @@ def set_pacing(profile):
     layer reads them when the game starts, so a running game keeps the pacing it started with.
     Only the PACING lines change: the rest of the file stays as Install NR wrote it, with the
     Python and paths it checked."""
+    if profile.preset != "A" and not _weights_state(profile, profile.preset)["ready"]:
+        # A daemon started for it would find no weights and end, and the game run without NR.
+        return {"ok": False, "error": f"Preset {profile.preset}'s weights are not in this release: "
+                "Install NR with nvngx_dlssnr.dll 310.9.16.0 or later to take them out of it",
+                "presets": _presets_ready(profile)}
     save_profile(profile)
     folder = installed_path(profile)
     owns, _ = _owned_installation(profile)
@@ -1510,7 +1592,8 @@ def set_pacing(profile):
         temporary = env_file.with_name(ENV_FILE + ".new")
         temporary.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
         os.replace(temporary, env_file)
-    return {"ok": True, "error": None, "applied": bool(applied), "profile": profile.to_dict()}
+    return {"ok": True, "error": None, "applied": bool(applied), "profile": profile.to_dict(),
+            "presets": _presets_ready(profile)}
 
 
 def set_effect(profile, enabled):
@@ -1766,7 +1849,7 @@ def status(profile):
                   game_elevated=elevated, uac_enabled=_uac_enabled() if elevated else None,
                   fresh_frames=bool(active and fresh_processed > 0 and mtime is not None
                                     and time.time() - mtime < 10),
-                  speed_test=_speed_summary(profile))
+                  speed_test=_speed_summary(profile), presets=_presets_ready(profile))
     if process_error:
         result["process_observation_error"] = process_error
     return result
@@ -1778,6 +1861,7 @@ def _speed_summary(profile):
     try:
         measured = _read_json(profile.root / SPEED_TEST, limit=256 * 1024)
         return {"device": measured.get("device"), "created_utc": measured.get("created_utc"),
+                "preset": measured.get("preset"),
                 "cases": [{name: case.get(name) for name in ("width", "height", "render_scale", "network_ms",
                                                              "network_fps", "round_trip_ms", "round_trip_fps")}
                           for case in measured.get("cases", [])]}
@@ -1800,7 +1884,7 @@ def speed_test(profile, emit=None):
     """NR's own speed on this PC, the daemon alone with no game, at the settings a release starts
     at: src/bench/speed_test.py with the release's Python. Kept in SPEED_TEST, with the PC, for
     Save report, so testers' reports say what each GPU does at its best."""
-    if not _weights_state(profile)["ready"]:
+    if not _weights_state(profile, profile.preset)["ready"]:
         return {"ok": False, "error": "Install NR first: the speed test runs the model it extracts"}
     script = profile.root / "src/bench/speed_test.py"
     if not script.is_file():
@@ -1817,8 +1901,9 @@ def speed_test(profile, emit=None):
         emit("Measuring NR on this GPU, without a game\n")
     run = profile.root / "work/windows-wizard/speed-test-run.json"
     run.unlink(missing_ok=True)
-    got = _run([profile.python, "-I", script, "--root", profile.root, "--json", run],
-               timeout=900, emit=emit, cwd=profile.root)
+    # The network a game started now would run.
+    got = _run([profile.python, "-I", script, "--root", profile.root, "--json", run,
+                "--preset", profile.preset], timeout=900, emit=emit, cwd=profile.root)
     try:
         measured = _read_json(run, limit=256 * 1024)
     except (OSError, ValueError):
