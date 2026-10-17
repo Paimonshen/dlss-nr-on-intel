@@ -341,6 +341,23 @@ network at 26-30 ms against 16 back to back. With the gap, B's round trip at 128
 A's instead of 0.55. As on Linux without the hint, a case reads differently from run to run:
 B with fresh frames held 1950 MHz in one run and fell to 1105 / 656 in the other.
 
+**B in a game, from a release built at `26c5637`.** Install NR with the 310.9.16 DLL took
+both presets out of it. Mortal Kombat 11 at 1280x720, render scale 0.4 (network 512x320), was
+started from Steam with NR enabled. Frames the daemon processed in 40 s, two runs a cell, presets
+alternating:
+
+| frame path | A: processed/s, daemon frame, network | B |
+| --- | --- | --- |
+| host (the default) | 19.5-19.7, 48-53 ms, 32-35 ms | 18.5-20.0, 44-45 ms, 27-29 ms |
+| GPU image path (the window's option) | 22.8-23.9, 39-41 ms, 31-33 ms | 37.3-37.9, 24 ms, 16 ms |
+
+On the host path B's network is only 0.85 of A's: between the game's frames the GPU clocks
+down, as above. B saves 5-9 ms of the daemon's frame there, but the frames processed a second
+do not rise, and why is not established. On the GPU image path B's network takes its
+back-to-back time, 16 ms, and **B processes 1.6x A's frames**. Every run took every frame on its
+path, refused none, ended its daemon with the game, and left the game's folder as it was.
+Dead or Alive 5 (32-bit, DirectX 9) on B: 22.0 a second at 1024x768, network 22 ms.
+
 No per-process hint like Mesa's `force_guc_low_latency` was found for Intel's Windows driver.
 Vulkan has none. Level Zero's `zesFrequencySetRange` would set the device's range for every
 program, and is a system setting. Not addressed. The reader stalls single frames by 0.5-1 s
@@ -355,9 +372,10 @@ program, and is a system setting. Not addressed. The reader stalls single frames
   mask blend modes, above.)
 - B in a game. The daemon runs it with `NR_PRESET=B`, which has not been tried in a game, and
   neither has the clock hint.
-- B in a game on Windows. The setup window takes B out of a 310.9.16 DLL and offers it
-  (`a75e5da`): checked from a release built here, on a stand-in game, with no game run.
+- Why B does not raise Mortal Kombat 11's frames on Windows' host path, where its daemon frame
+  is 5-9 ms shorter.
 - Holding the clock up on Windows.
+- How B looks in a game: the owner to judge.
 
 ## Reproduce
 

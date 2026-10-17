@@ -219,8 +219,17 @@ The owner brought the Linux agent's list of 10-18; here it is in its order. Inte
      (31 blocks); Remove NR left the folder as it was. `build_check`, `claims_check` and
      `publish_check` pass.
 
-**Not tested:** B in a game on Windows; the window clicked through by hand (its self-test and
-the bridge are tested); B from the Linux release's `setup.sh`, which extracts A only.
+**B in a game, later that night** (owner: "можешь пушить. А так же надо протестировать"; `newnr`
+pushed to `26c5637`). A release built from it, installed with the 310.9.16 DLL, Mortal Kombat 11
+at 1280x720 and 0.4 from Steam, frames processed a second, two runs each:
+- host path: A 19.5-19.7, B 18.5-20.0, though B's daemon frame is 44-45 ms against 48-53;
+- GPU image path: A 22.8-23.9, **B 37.3-37.9**, with B's network at 16 ms.
+
+Dead or Alive 5 (32-bit) on B: 22.0 a second. No frame refused, every daemon ended with its
+game, every folder as before. Phase72 has the table.
+
+**Not tested:** the window clicked through by hand (its self-test and the bridge are tested);
+how B looks, the owner's to judge; B from the Linux release's `setup.sh`, which extracts A only.
 
 **Next on Linux:** `make test` and CTest at the head. `build_release.py` and the setup window's
 suites changed; the Linux runtime did not. `live_rates.py` could take a named-pipe arm, as
