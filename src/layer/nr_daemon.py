@@ -51,6 +51,7 @@ sys.path.insert(0, str(ROOT / "src" / "ref"))
 sys.path.insert(0, str(ROOT / "src" / "gpu"))
 
 import nr_frame  # noqa: E402
+import nr_weight_models  # noqa: E402  (which model is installed, and which one the settings want)
 import xmx  # noqa: E402  (for the device name, once the model is up)
 from xmxres import DeviceLost  # noqa: E402
 try:
@@ -182,6 +183,13 @@ class Settings:
 
     KNOBS = ("profile", "intensity", "detail_strength", "colour_strength", "render_scale",
              "temporal", "cut_limit", "hold", "release", "min_extent")
+    # Knobs that are not numbers and are not in the wizard's catalogue: `weights` selects a model
+    # file. It is deliberately outside `KNOBS`, because `KNOBS` is checked equal to the shared
+    # catalogue (`nr_knobs.py`, the wizard's defaults and the panel) by test_windows_wizard, and a
+    # name in one and not the others is the drift that check exists to catch. Until the panel row
+    # exists (`docs/WEIGHTS.md` §6) the setting is written by hand or by anything that writes the
+    # JSON, and the daemon honours it either way.
+    MODEL_KNOBS = ("weights",)
 
     def __init__(self, args):
         self.path = args.settings
@@ -206,12 +214,16 @@ class Settings:
         # the saved file itself did not change. See `refresh`.
         self.saved_values = {}
         for knob in self.KNOBS:
-            setattr(self, knob, getattr(args, knob))
+            setattr(self, knob, getattr(args, knob, None))
+        # Which weight model the panel's knob asks for. Held as a string - it selects a file, not a
+        # number - and validated in `_apply` against the names this build knows. `serve` is what
+        # acts on a change: a different name there means a different model in memory.
+        self.weights = getattr(args, "model", None) or nr_weight_models.default_name()
 
     def _apply(self, given, source):
         """The knob values in `given`, validated. Returns the names it changed."""
         changed = []
-        for knob in self.KNOBS:
+        for knob in self.KNOBS + self.MODEL_KNOBS:
             if knob not in given:
                 continue
             value = given[knob]
@@ -219,6 +231,17 @@ class Settings:
                 if value not in nr_frame.PROFILES:
                     print(f"settings: no profile {value!r}", flush=True)
                     continue
+            elif knob == "weights":
+                # A name, not a number. An install that carries only one model still has to accept
+                # the name of the other - the settings file may have been written where both exist -
+                # and `nr_weight_models.resolve` is what falls back to the model that IS here.
+                if value not in nr_weight_models.names():
+                    print(f"settings: no weights model {value!r}", flush=True)
+                    continue
+                if getattr(self, "weights", None) != value:
+                    self.weights = value
+                    changed.append(f"weights={value}")
+                continue
             else:
                 try:
                     value = float(value)
@@ -821,6 +844,50 @@ def explain(error):
     return FAILURES.get(int(code.group(1)), "") if code else ""
 
 
+def refresh_model(args, backend):
+    """The model to answer this frame with, swapped when the settings asked for another one.
+
+    A swap is not a restart. `ResidentBackend.close` drops the weights uploaded to the device and
+    the next frame uploads the next model's; the GPU image engine caches the backend, so it goes
+    first, and the temporal history belongs to the model that made it, so it is dropped too. What
+    the layer sees is one present that waits for a model load.
+
+    Nothing here runs on a frame where the setting did not change: the name is remembered as
+    `requested`, so a value that cannot be honoured - a model this DLL does not carry, or one the
+    loader cannot read - is resolved once and explained once, not looked up once a frame.
+    """
+    model = getattr(args, "model", None)
+    live = getattr(args, "live", None)
+    if not isinstance(model, dict) or live is None:
+        return backend
+    want = getattr(live, "weights", None)
+    if not want or want == model.get("requested"):
+        return backend
+    model["requested"] = want
+    name, path = nr_weight_models.resolve(ROOT / "work", want)
+    if path is None:
+        print(f"weights: nothing on disk answers {want!r}; keeping {model.get('name')}", flush=True)
+        return backend
+    if name == model.get("name"):
+        if want != name:
+            print(f"weights: {want} is not loadable here ({name} is); keeping {name}", flush=True)
+        return backend
+    close_gpu_images(args)
+    args.history = History()
+    previous = model.get("backend")
+    if previous is not None and previous is not backend:
+        try:
+            previous.close()
+        except Exception as error:  # noqa: BLE001 - a failed close must not cost the swap
+            print(f"weights: closing {model.get('name')} failed: {error}", flush=True)
+    started = time.perf_counter()
+    fresh = nr_frame.ResidentBackend(path)
+    model.update(backend=fresh, name=name, path=path)
+    print(f"weights: {want} -> {name} ({path.name}) in {time.perf_counter() - started:.1f}s",
+          flush=True)
+    return fresh
+
+
 def serve(server, backend, args):
     """Answer frames until interrupted, or until the GPU is gone.
 
@@ -843,6 +910,7 @@ def serve(server, backend, args):
         connection, _ = server.accept()
         try:
             connection.settimeout(args.timeout)
+            backend = refresh_model(args, backend)
             process_connection(connection, backend, args)
         except DeviceLost as error:
             print(DEVICE_LOST.format(error=error), flush=True)
@@ -1507,7 +1575,8 @@ def run_owned(args):
     args.letterbox = Letterbox()
     args.meter = Meter() if args.meter else None
 
-    if not nr_frame.WEIGHTS.exists():
+    name, weights_path = nr_weight_models.resolve(ROOT / "work", args.live.weights)
+    if weights_path is None or not weights_path.exists():
         # The first thing a new clone hits, and a traceback is a poor way to say it.
         how = ("as the README's Build section describes" if nr_frame.PRESET == "A" else
                "with src/tools/unpack_preset.py, from a 310.9.16 or later DLL")
@@ -1520,7 +1589,15 @@ def run_owned(args):
     # while XMX_UNARY_SPV can still select the probe shader - the graph's own runtime is
     # built below and picks its shader then.
     check_half_rounding()
-    backend = nr_frame.ResidentBackend()
+    backend = nr_frame.ResidentBackend(weights_path)
+    # The model this daemon is running, and the one the settings asked for, so a change can be
+    # told apart from a repeat. `refresh_model` swaps it; the panel's knob is the only writer.
+    args.model = {"backend": backend, "name": name, "path": weights_path,
+                  "requested": name}
+    if name != nr_weight_models.default_name() or \
+            len(nr_weight_models.available(ROOT / "work")) > 1:
+        print(f"weights: {name} ({weights_path.name}), installed: "
+              f"{nr_weight_models.describe_available(ROOT / 'work')}", flush=True)
     # which GPU: a machine can have more than one, or a different one than the person
     # assumes. libxmx chooses one that can run the network (XMX_DEVICE names another).
     print(f"model ready in {time.perf_counter() - started:.1f}s"

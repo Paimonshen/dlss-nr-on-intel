@@ -39,6 +39,10 @@ class ReleaseTests(unittest.TestCase):
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(ROOT / name, dest)
         for name in ("src/layer/nr_daemon.py", "src/ref/nr_frame.py", "src/bench/probe.py",
+                     # The weights table and the tool an install extracts through: a release that
+                     # installs weights and then cannot name the model it installed is exactly what
+                     # `assemble` is meant to refuse.
+                     "src/ref/nr_weight_models.py", "scripts/nr_weights.py", "docs/WEIGHTS.md",
                      "work/mlx-dlss/LICENSE", "work/mlx-dlss/python/mlxdlss/features.py",
                      "work/mlx-dlss/python/mlxdlss/tools/extract_dlssnr_weights.py",
                      "work/mlx-dlss/python/mlxdlss/tools/unpack_dlssnr_weights.py"):
