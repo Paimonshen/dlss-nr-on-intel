@@ -1,6 +1,6 @@
 # HANDOFF — read this first
 
-State of the DLSS-NR on Intel Xe2 project as of **2026-10-14**. notes/CLAUDE.md holds the
+State of the DLSS-NR on Intel Xe2 project as of **2026-10-17**. notes/CLAUDE.md holds the
 original brief; **this file overrides it wherever they disagree**, and after
 2026-09-09 they disagree about something foundational.
 
@@ -16,7 +16,7 @@ When the dated entries grow long, move the older ones into the archive the same 
 
 ---
 
-## Where things stand (2026-10-15)
+## Where things stand (2026-10-17)
 
 - **It works on both systems of this laptop** (Arc 140V): Linux with Mesa, Windows with Intel's
   driver. A Vulkan layer hands each presented frame to a daemon that runs NVIDIA's network on the
@@ -33,11 +33,12 @@ When the dated entries grow long, move the older ones into the archive the same 
   `improve-int8` is kept for INT8 experiments; Codex's own branches are Codex's.
 - **DirectX 12 on Windows, before the upscaler** (branch `dx12`, 10-16): a `libxess.dll` in front
   of Intel's hands the daemon the frame XeSS is about to upscale, in the game's own D3D12, and
-  adds NR's change to it. It runs in Hogwarts Legacy; trails and halos in motion were still
-  visible there, and the fixes since are proven on a replay only (below, 10-16).
-- **Pace.** The owner is slowing development until NVIDIA's updated DLSS 5 model is available, and
-  will then check its architecture against this implementation before more model-specific work
-  (#16, 10-14).
+  adds NR's change to it. It runs in Hogwarts Legacy. The trail behind moving things was found
+  in a recording and fixed (`e803624`), **pushed on the owner's word before anyone saw it in the
+  game**: what is untested is listed in the entry below, 10-16.
+- **NVIDIA's faster model is out** (`nvngx_dlssnr.dll` 310.9.16.0, 10-16): preset A is our model
+  byte for byte, preset B (`hnet-crazy-cuckoo-small-fp8`) is a new, smaller graph. The owner moved
+  the work to Linux to reverse it with REA (below, 10-17).
 - **Speed on this laptop**, `src/bench/speed_test.py`, network and round trip: 640x360 at 0.4 is
   23 ms and 26-27 ms on both systems; 1920x1080 at 1.0 is 273 and 299 ms on Linux, 384 and 409 on
   Windows, where Intel's compiler loses time in the staged GEMM's loop. The README's table
@@ -69,6 +70,8 @@ under that date. When an item is done, strike it through here and name the commi
   Paimonshen's in-game menu.
 
 **Linux**
+- **Preset B, the new model: recover its graph** (REA on the DLL's `.text`, the container's
+  shapes, the PTX templates), then the CPU reference against it. Below, 10-17.
 - `improve-e4m3`'s four red tests on Linux: changed on Windows to pass there (`1a146c2`, below,
   10-15), and not yet run on Linux. `make test` in both memory modes and CTest, please.
 - `dx12` changes the shared daemon (`MAGIC_MOTION`, `History.follow`) and `nr_image.c`
@@ -103,8 +106,8 @@ under that date. When an item is done, strike it through here and name the commi
   (below, 10-16); the route taken instead is the game's own upscaler, `src/xess` on `dx12` (below,
   10-16), for games with XeSS. A game that runs elevated, or any game with UAC off, never gets the
   layer; the HKLM manifest that would reach it is kept for later. Below, 10-08 and 10-09.
-- `dx12`: record a real Hogwarts sequence with the owner (`record=N`), replay it, and show the
-  owner the replays before the next game test. Below, 10-16.
+- ~~`dx12`: record a real Hogwarts sequence with the owner~~: recorded and replayed on 10-16,
+  and the trail found in it fixed (`e803624`). Its look in the game is untested. Below, 10-16.
 - MSVC: the composition is not vectorised (0.5-1.8 ms behind gcc), and `_Pragma("GCC ivdep")`
   gives three C4068 warnings that an `NR_IVDEP` macro would silence. Archive, 10-02 and 10-07.
 - Housekeeping: each release root in `D:\NRonWindows\rel` holds ~440 MB of extracted weights, and
@@ -139,6 +142,44 @@ under that date. When an item is done, strike it through here and name the commi
   runs one subgroup to a workgroup (archive, 09-25).
 
 ---
+
+## NVIDIA's faster model: `nvngx_dlssnr.dll` 310.9.16.0, presets A and B (2026-10-17)
+
+NVIDIA announced on 10-13 a DLSS 5 model 24 % smaller ("roughly 118 million parameters"), with
+half the GPU overhead of September's, live in NBA 2K27 on 10-16 (Hogwarts Legacy gets DLSS 5 on
+11-05; the public DLSS SDK 310.9.16 of 10-16 still ships no NR, only dlss/dlssd/dlssg). The owner
+supplied the DLL from that update (`nvngx_dlssnr_2026_10_16.zip`, in the Windows Downloads
+folder; it goes into `work/`, never into the repository): **310.9.16.0**, 266,424,944 bytes,
+sha256 `2BC19BC09A7B89DD44F73E2AC0108FCC586E2154BDD0830F242F4F040E28789F`, Authenticode valid
+(NVIDIA Corporation), PE timestamp 2026-09-25. First look, on Windows, with our own tools:
+
+- **`.rsrc` holds two weight blobs.** `WEIGHTS_HT` (147,695,410 B) is byte-identical to
+  310.8.0.0's: **preset A is the model this project implements**. `WEIGHTS_CC_SMALL_FP8`
+  (113,893,343 B) is the new one, in the same container format (`hnet_weights.py` walks it to EOF):
+  77 packed records against 153, and laid out otherwise — `block10` has layers 0-4, `block11`
+  layers 0-3 of ~2.1 M elements each. (`hnet_weights.py`'s element count reads the bytes as FP16,
+  the trap of phase61: the parameters are not half the bytes.) So the graph is new, not only the
+  weights.
+- **Names.** Config `hnet-crazy-cuckoo-small-fp8`; the old one is `hnet-vigilant-squid`
+  (`crazy-cuckoo` was a name in 310.8 already). The preset is chosen by
+  `DLSSNR.Hint.Render.Preset` (`CG2RFindWeightByPreset`, `CG2RNetworkManager::ResolvePresetToDescriptor`;
+  B is the shipping default). Strings from the vendor's source mention a `.cursor/rules/crazy-cuckoo.mdc`.
+- **RTTI**: 35 HNetCpp classes became 40; the new ones are a buffer planner
+  (`NetworkRelationAlgebra`, `DescriptorTopology`, `NetworkTopologyView`) — the layer classes
+  (Swin, ViT, `CCDecInputUpsampleLayer`) are the same.
+- **`.data`**: 17.2 MB of cubins and Zstandard PTX became 3.7 MB of PTX only — 15 modules, 120
+  entries, `extract_modules.py` takes them out (it needs Python 3.14's `compression.zstd`; on
+  Windows MSYS2's `python3.14.exe`). The layers' configuration should read off their template
+  parameters, as phase3-ptx-unlock found for 310.8. `.text` grew from 700 to 873 KB.
+
+**Next on Linux** (the owner moved this work there): REA (`github.com/morluto/rea`, an MCP
+server; Node.js >= 22.19, JDK 21+, Ghidra 12.1.x, then `npx rea-agents setup` and a restart; its
+Ghidra provider on Windows is an experimental read-only subset, hence Linux) to read how the
+crazy-cuckoo-small network is built in `.text`: block order, connections, where the temporal
+channels enter. With the container's shapes and the PTX templates, that is the graph; then
+`src/ref` against preset B, and the vendor's own output on the RTX 5060 Ti with the preset hint
+for ground truth. If B runs about twice as fast here too, NR lands about twice as often beside
+a game, which is also what the trail in `dx12` needs.
 
 ## DirectX 12 through the game's own XeSS: NR before the upscaler (2026-10-16, branch `dx12`)
 
@@ -196,6 +237,19 @@ uncovered within the frames since the capture, which in a fast orbit at 12 fps i
 the frame (mean change 4.3 -> 2.7 levels there, 7.5 -> 5.7 on a slow walk). After a cut the first
 change now rises in over a period instead of all at once. `--inputs DIR` in the replay writes the
 colour handed to XeSS, to tell the proxy's doing from XeSS's own history.
+
+**Not tested yet** — `e803624` went to GitHub on the owner's word before any of this:
+- **In the game, nothing of `e803624`**: CLAIM and the owner rule, the motion-weighted fill
+  with its support floor, the rise after a cut. Evidence so far is `test_nr_xess.exe` (12 cases)
+  and one 300-frame replay of one scene, recorded while the game ran at ~12 fps.
+- **How much of NR's look survives at the game's own frame rate**: the loss on uncovered
+  background was measured only on that slowed recording.
+- **Cutscenes with many cuts**: the owner saw NR "go mad" at shot changes; the rise is the
+  answer to the jump after a cut, and it has been seen only in a unit test.
+- **Linux**: no test of any `dx12` commit has run there (`make test`, and
+  `test_native_image.py` with `test_temporal.py` for the daemon's `MAGIC_MOTION`).
+- **Other games**: the proxy has met only Hogwarts Legacy (XeSS 2.0.2, Performance, 835x522).
+- **Not built at all**: a coarser fill for the background the 3x3 cells cannot reach.
 
 **Tools.** `test_nr_xess.exe` (12 cases on the device against a CPU transcription of the shader:
 formats, strength 0 exact, motion, jitter, untrusted vectors, the fade, the motion the daemon is
