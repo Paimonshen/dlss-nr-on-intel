@@ -200,9 +200,26 @@ within A's range.
 
 **310.9.16's kernels.** They are FP8 only now. 66 of the 120 are instruction for instruction
 310.8's, and the rest differ by registers, scheduling, fences and addressing. Float
-arithmetic changed only in the pre-block, which gained parameter fields; the one new hint in
-the DLL is `DLSSNR.MaskBlendMode`. The ViT attention gained a `ceil(tokens / 128)` loop bound.
-Both changes apply to A as well, and the port follows 310.8 in both.
+arithmetic changed only in the pre-block, and that change is `DLSSNR.MaskBlendMode`, the one
+new hint. The ViT attention gained a `ceil(tokens / 128)` loop bound. Both changes apply to A
+as well.
+
+**`DLSSNR.MaskBlendMode`, and milder faces.** The owner asked after news that NVIDIA's October
+comparisons show milder faces.
+- **What the hint does.** It takes 0-3, default 0. In mode 0, as in 310.8, a game's control
+  mask switches the automatic (skin) mask off. In modes 1-3 the automatic mask stays on, and
+  its skin and automatic-mask strengths are averaged with, lowered to or raised to the mask's
+  structure. Both DLLs default to the automatic mask off, so **the default output did not
+  change**.
+- **Faces, measured** on five frames with eight faces: B is not milder on faces in particular.
+  Under the vendor panel's settings (automatic mask on, skin 2.0, structure 1.5) it changes the
+  whole frame about 30% less than A, faces included.
+- **A bug this exposed** in the `--control-mask` path. MLX-DLSS's builder put 0 in the
+  automatic lanes where the vendor puts -1, and an all-ones mask, which should change nothing,
+  moved the picture by two thirds of the pass. `nr_frame.make_features` now fills them as the
+  vendor does and takes `--mask-blend-mode`. The daemon never fed a mask to the network, so the
+  live path is unaffected. That is `f58a653`: `make test` green in both memory modes and
+  CTest 64 of 64. Phase72.
 
 **Checked** at `2bb16f6`: `make test` green in both memory modes (56 scripts each), and
 CTest 64 of 64. `test_native_image.py` and `test_temporal.py` are among them, so `dx12`'s

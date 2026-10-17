@@ -71,9 +71,9 @@ implementation's exact halvings cannot follow, and it rounds up there.
 | 7–9 | the **previous prediction** — the composed head before the grade and the intensity, in half — reprojected along motion, scaled the same way |
 | 10 | normalised style index |
 | 11 | local tone strength |
-| 12 | local structure strength |
+| 12 | local structure strength; 1 while the automatic mask is on |
 | 13 | skin structure strength, or −1 when the automatic mask is off |
-| 14 | automatic-mask structure strength, or −1 |
+| 14 | automatic-mask structure strength (the vendor passes the local structure strength), or −1 |
 | 15 | unused, zero |
 
 The colour scaling is three FP16 roundings and is **not** a single multiply:
@@ -88,7 +88,13 @@ so it is worth memoising; it is a Gaussian pair built from a hash of the pixel c
 and the frame index, rounded to FP16.
 
 With a per-pixel **control mask**, channels 11 and 12 become that mask's green and blue
-times the corresponding strength, and 13/14 go to zero.
+times the corresponding strength, and 13/14 are −1: a control mask switches the automatic
+mask off. MLX-DLSS's builder, and this one until 2026-10-17, put 0 there, and an all-ones
+mask then moved the picture by two thirds of the pass. Since 310.9.16,
+`DLSSNR.MaskBlendMode` 1, 2 or 3 keeps the automatic mask on beside the control mask: channel
+12 is then 1, and the skin and automatic-mask strengths are averaged with, lowered to or
+raised to the masked structure, the mask's blue times the local structure. Mode 0, the
+default, is 310.8's behaviour (`notes/phase72`).
 
 ### Output: a 4-channel head
 

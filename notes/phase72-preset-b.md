@@ -89,7 +89,8 @@ The other 54 differ by register numbering, scheduling, two memory fences, a stor
 bounds halved from 256 to 128, or integer addressing. Float arithmetic changed in
 one place, the pre-block (`cc_tinlayout_fused_pre_block_*`): its parameter struct grew by a
 pair of fields at +160, with new multiplies and selects around constants 0.5 and 1.0, and
-the only new hint string in the DLL is `DLSSNR.MaskBlendMode`. The bottleneck's
+the only new hint string in the DLL is `DLSSNR.MaskBlendMode`. That is the hint's
+arithmetic, and the default path is unchanged (below). The bottleneck's
 `cc_vit_1d_attention` gained a loop bound of `ceil(tokens / 128)`. Both kernels serve both
 presets, so these are differences between 310.8 and 310.9.16, not between A and B.
 
@@ -129,12 +130,70 @@ the residual of a sigma-2 blur, level-normalised as `phase42` asks:
 Both presets pull the level down by 9-16% and add 9-16% of fine detail for it. B sits
 within A's range on both faces, a little further on the level. The images stay local.
 
+## `DLSSNR.MaskBlendMode`, and whether faces are milder
+
+News of 10-13 say NVIDIA's revised comparison images show milder changes to faces, alongside
+the smaller model. The owner asked whether `DLSSNR.MaskBlendMode`, the only new hint, is
+behind it.
+
+**What the hint does.** 310.9.16's parameter parser (`FUN_18001a020`) reads it as 0-3, and
+anything else becomes 0, the default. 310.8's (`FUN_180019f30`) had no such hint: a control
+mask always switched the automatic mask off. 310.9.16 does so only in mode 0. The pre-block
+kernel then fills channels 11-14 per pixel; its feature filler is
+`HNetCpp::cc_fused_pre_swin_impl::CCPreBlockShmemFiller`:
+
+- tone is the mask's green times the tone strength, and structure the mask's blue times the
+  structure strength, with 1 where there is no mask;
+- with the automatic mask off, the skin and automatic-mask lanes are -1;
+- with the automatic mask on, structure is 1 and the lanes carry the two strengths;
+- with a control mask and mode 1, 2 or 3, the automatic mask stays on, and each strength is
+  averaged with, lowered to or raised to the masked structure.
+
+That is all of the pre-block's new float arithmetic: the two 0.5s, the selects and the
+compares. Both DLLs default to the automatic mask off and a skin strength of -1, so **310.9.16's
+default output is 310.8's**. The mode matters only to a game that sends a control mask and
+turns the automatic mask on.
+
+**A bug in our port that it exposed.** With a control mask, the vendor puts -1 in the two
+automatic lanes, in both versions. MLX-DLSS's feature builder, which `nr_frame.py
+--control-mask` used, put 0. An all-ones mask should change nothing, but with the 0 it
+moved Dead or Alive 5's frame by 0.025 on average under A (0.022 under B), max 0.40, which
+is two thirds of the pass. With -1 it reproduces the unmasked frame exactly.
+`nr_frame.make_features` now fills the lanes as the vendor does and takes the blend mode
+(`--mask-blend-mode`), and `nr_temporal.py` follows it. The live daemon never puts a mask
+into the features, so it is unaffected.
+
+The kernel writes -1 there only while a flag in its parameters (+200) is set. That the flag
+is set is an inference: OpenDLSS-NR, which claims the vendor's inputs bit for bit, writes -1
+or the strengths, never 0.
+
+**Is B milder on faces?** Measured here on five frames of Dead or Alive 5 and Mortal Kombat 1,
+with eight faces boxed by hand. The figures are the mean |change| in luma on the faces and on
+the rest of the frame, through the resident path:
+
+| setting | faces, A → B | rest, A → B | faces / rest, A and B |
+| --- | --- | --- | --- |
+| standard, no automatic mask (the live default) | 0.0751 → 0.0717 (−5 %) | 0.0372 → 0.0333 (−11 %) | 1.71-3.00, 1.70-3.21 |
+| the vendor panel's: structure 1.5, automatic mask, skin 2.0 | 0.0743 → **0.0553 (−26 %)** | 0.0377 → 0.0259 (−31 %) | 1.64-2.95, 1.73-2.99 |
+| automatic mask, skin structure 0 | 0.0504 → 0.0522 (+4 %) | 0.0338 → 0.0307 (−9 %) | 1.09-2.49, 1.13-2.73 |
+
+B is not milder on faces in particular. Under the vendor panel's settings it changes the
+whole frame about 30 % less than A, faces and environment alike, which a comparison of faces
+would show as milder faces. The skin control works in both, a little more selectively in A.
+Five frames from two games is a small sample, and the vendor's own output was not compared.
+
+(Both DLLs also map the app's quality mode to the network's scale, MaxQuality and DLAA 1.0
+and UltraQuality 0.85, in `ComputeScalingRatioCommon`. 310.8's per-frame parser read
+`DLSSNR.ScalingRatio` and overwrote it with 1.0, and 310.9.16's does not read it. Not
+followed further.)
+
 ## Not established
 
 - **The vendor's own output for B.** Nothing here was compared with NVIDIA's B. That needs
   the RTX 5060 Ti with `DLSSNR.Hint.Render.Preset` set to B.
-- Whether 310.9.16's new pre-block arithmetic, and the attention's new loop bound, change
-  what the default path computes. The port follows 310.8 in both, for A and for B.
+- Whether the attention's new loop bound changes what the default path computes. The port
+  follows 310.8 there, for A and for B. (The pre-block's new arithmetic does not: it is the
+  mask blend modes, above.)
 - B in a game. The daemon runs it with `NR_PRESET=B`, which has not been tried in a game.
 - Windows. The setup window extracts preset A only.
 
