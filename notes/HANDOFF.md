@@ -31,7 +31,7 @@ When the dated entries grow long, move the older ones into the archive the same 
   on 10-15 (`7e7dfb5`): Codex's experimental GPU-only frame path on Windows and an E4M3 rounding
   experiment, both off by default, and what 0.0.1.2 is built from. The owner asked Paimonshen to open his in-game menu (#16) against it.
   `improve-int8` is kept for INT8 experiments; Codex's own branches are Codex's. `newnr` is the
-  preset B work, made from `dx12` on 10-17, local until the owner's word.
+  preset B work, made from `dx12` on 10-17, on GitHub since 10-18 at the owner's word.
 - **DirectX 12 on Windows, before the upscaler** (branch `dx12`, 10-16): a `libxess.dll` in front
   of Intel's hands the daemon the frame XeSS is about to upscale, in the game's own D3D12, and
   adds NR's change to it. It runs in Hogwarts Legacy. The trail behind moving things was found
@@ -42,7 +42,7 @@ When the dated entries grow long, move the older ones into the archive the same 
   2**, 31 blocks against 71, with its own weights. On 10-17 it was read out of `.text` with REA,
   unpacked, and run here, on CPU and on the device, at 0.54-0.58 of A's time. Through the daemon
   its round trip is 0.5-0.8 of A's once the GPU's clock is held up (below, 10-18). That is on
-  branch `newnr`, local; `NR_PRESET=B` picks it (below, 10-17; phase72).
+  branch `newnr`, on GitHub since 10-18; `NR_PRESET=B` picks it (below, 10-17; phase72).
 - **Speed on this laptop**, `src/bench/speed_test.py`, network and round trip: 640x360 at 0.4 is
   23 ms and 26-27 ms on both systems; 1920x1080 at 1.0 is 273 and 299 ms on Linux, 384 and 409 on
   Windows, where Intel's compiler loses time in the staged GEMM's loop. The README's table
