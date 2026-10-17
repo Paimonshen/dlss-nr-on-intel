@@ -346,6 +346,16 @@ static int make_host_buffer(nr_menu *m, VkDeviceSize size, VkBufferUsageFlags us
     mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
     mai.allocationSize = req.size;
     mai.memoryTypeIndex = type;
+    /* The two host buffers are created with SHADER_DEVICE_ADDRESS_BIT because the shader takes
+     * their address in a push constant, and the spec then requires the memory to be allocated with
+     * the matching flag: VUID-vkBindBufferMemory-bufferDeviceAddress-03339, which named both of
+     * them. Bound on the buffer's own usage, so a buffer without the address bit is unaffected. */
+    VkMemoryAllocateFlagsInfo address_flags = {0};
+    if (usage & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT) {
+        address_flags.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO;
+        address_flags.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
+        mai.pNext = &address_flags;
+    }
     if (m->allocate_memory(m->device, &mai, NULL, memory) != VK_SUCCESS) {
         *why = "no memory for the menu";
         return 0;
