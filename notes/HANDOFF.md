@@ -22,10 +22,12 @@ When the dated entries grow long, move the older ones into the archive the same 
   driver. A Vulkan layer hands each presented frame to a daemon that runs NVIDIA's network on the
   GPU and writes the answer back into the swapchain. DirectX 8-11 games go through DXVK. DirectX 12
   runs on Linux through VKD3D-Proton and is not offered on Windows.
-- **The releases are Windows-only so far**: v0.0.1 (`7f9c364`) and v0.0.1.1 (`f9ec5f1`, the
-  latest), a ZIP with the setup window, DXVK 3.1.1, both layers and a `vulkan-1.dll` proxy.
-  **0.0.1.2 is built from `2f90064` and tested, and waits for the owner's word on the tag and the
-  release** (below, 10-15). Linux users build from source (README).
+- **The releases are Windows-only so far**: v0.0.1 (`7f9c364`), v0.0.1.1 (`f9ec5f1`) and v0.0.1.2
+  (`2f90064`, 10-15, the latest), a ZIP with the setup window, DXVK 3.1.1, both layers and a
+  `vulkan-1.dll` proxy. **v0.0.1.3 is experimental**, a GitHub pre-release from `newnr` at
+  `d89563f` (10-18): preset B in the setup window. It shipped without Linux's `make test` at
+  its head, on the owner's word, as a Windows-only release. Linux users build from source
+  (README).
 - **Branches.** `master` holds everything released and since (`d29b665`, PR #13). `windows` is the
   Windows line, merged into `master`. `improve-e4m3` is where new work goes, with `master` merged in
   on 10-15 (`7e7dfb5`): Codex's experimental GPU-only frame path on Windows and an E4M3 rounding
@@ -132,6 +134,8 @@ under that date. When an item is done, strike it through here and name the commi
   yet in a game. Below, 10-18, Windows.
 - Holding the GPU's clock up on Windows, as libxmx does on Linux: no per-process hint found.
   Below, 10-18, Windows.
+- PR #20 (Paimonshen, 10-16): the in-game settings menu on Insert, in four languages, with Dear
+  ImGui vendored, against `master`. The owner will take it up later.
 - ~~The unmerged window attention hangs Intel's Windows driver from 32 windows up~~: found and
   avoided on 10-15, and `gpu_window_attention` is in CTest on Windows again. Below, 10-15;
   phase71.
