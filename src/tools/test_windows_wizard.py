@@ -832,6 +832,33 @@ class WizardFixture(unittest.TestCase):
         self.assertEqual({knob["name"]: knob["default"] for knob in catalogue},
                          {knob["name"]: actual[knob["name"]] for knob in catalogue})
 
+    def test_every_choice_value_is_labelled_in_all_four_languages(self):
+        """A `choice` knob's combobox is filled with `Choice.<knob>.<value>`, falling back to
+        `Profile.<value>`.
+
+        `T` throws on a missing key, so a choice value with no label and no fallback takes the
+        SETUP WINDOW's settings page down with `Missing translation: Profile.ht` - which is exactly
+        what the weights knob would have done, because its values are not profiles. Nothing else
+        covers this: the tests drive the backend, and the label lookup lives in the script.
+        """
+        source = (Path(core.__file__).resolve().parent.parent.parent
+                  / "dist-tools" / "windows-wizard.ps1").read_text(encoding="utf-8")
+        catalogue = core._runtime_knobs()
+        checked = 0
+        for knob in catalogue:
+            if knob["kind"] != "choice":
+                continue
+            for value in knob["choices"]:
+                keys = (f"'Choice.{knob['name']}.{value}'", f"'Profile.{value}'")
+                if not any(source.count(key) == 4 for key in keys):
+                    self.fail(f"{knob['name']}={value} has no label in all four languages "
+                              f"(expected one of {keys} four times)")
+                checked += 1
+        self.assertGreater(checked, 0)
+        # And the lookup goes through the helper, not straight at `Profile.` - the line that made
+        # the weights values unresolvable.
+        self.assertNotIn("T ('Profile.'+", source)
+
     def test_reading_control_defaults_needs_no_game_profile_or_processes_and_writes_nothing(self):
         with patch.object(core, "_process_snapshot", side_effect=AssertionError("Controls do not inspect games")), \
                 patch.object(core, "_running_executable", side_effect=AssertionError("Controls do not inspect games")):
