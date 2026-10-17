@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-nr_model — the recovered DLSS-NR 71-block graph, in numpy.
+nr_model — the recovered DLSS-NR graph, in numpy.
 
 A faithful port of `iamwavecut/MLX-DLSS` `python/mlxdlss/model.py` (PyTorch) to
 numpy, because this machine has no torch and because the GEMM has to be
@@ -9,7 +9,10 @@ kept: the E4M3 publishes, the half-precision fragment-tree cosine normalise, and
 the bit-affine softmax approximation.
 
 Weights are the *logical* tensors (`work/mlxw/dlssnr-logical.safetensors`), not
-the packed container.  See notes/phase6-mlx-dlss-unpack.md.
+the packed container.  See notes/phase6-mlx-dlss-unpack.md.  The graph takes its
+stage depths from them (`nr_topology`): preset A's 71 blocks, the model of 310.8,
+or preset B's 31 (`work/mlxw/dlssnr-b-logical.safetensors`).  Block numbers in the
+comments are preset A's.
 
 The single GEMM entry point is `matmul()`; point `nr_model.MATMUL` at another
 callable to run the whole graph on different hardware.
@@ -22,6 +25,8 @@ import os
 import struct
 
 import numpy as np
+
+import nr_topology
 
 COSINE_NORM_FLOOR = 0.00006198883056640625
 GLOBAL_ATTENTION_LOGIT_CAP = 3.0
@@ -341,31 +346,9 @@ def uses_fragment_swizzle(block_index, head_count):
     return head_count in (1, 16)
 
 
-def recovered_window_origin(block_index):
-    """The vendor window origin as (y, x) for one graph block."""
-    if block_index == 0:
-        phase = 0
-    elif 1 <= block_index <= 4:
-        phase = block_index - 1
-    elif 5 <= block_index <= 8:
-        phase = block_index - 5
-    elif 9 <= block_index <= 14:
-        phase = block_index - 9
-    elif 15 <= block_index <= 22:
-        phase = block_index - 15
-    elif 23 <= block_index <= 30:
-        phase = block_index - 23
-    elif 40 <= block_index <= 55:
-        phase = block_index - (40 if block_index < 48 else 48)
-    elif 56 <= block_index <= 61:
-        phase = block_index - 54
-    elif 62 <= block_index <= 69:
-        phase = block_index - (62 if block_index < 66 else 66)
-    elif block_index == 70:
-        phase = 1
-    else:
-        return (0, 0)
-    return ((0, -4, 0, -4)[phase % 4], (0, -4, -4, 0)[phase % 4])
+def recovered_window_origin(block_index, topology=None):
+    """The vendor window origin as (y, x) for one graph block, of preset A by default."""
+    return (topology or nr_topology.PRESET_A).window_origin(block_index)
 
 
 # --------------------------------------------------------------------------
@@ -901,10 +884,11 @@ def load_logical(path):
 
 
 class NeuralRenderingModel:
-    """The fixed recovered 71-block graph over external logical weights."""
+    """The recovered graph over external logical weights, at the stage depths they carry."""
 
-    def __init__(self, weights):
+    def __init__(self, weights, topology=None):
         self.weights = weights
+        self.topology = topology or nr_topology.Topology.from_weights(weights)
 
     @classmethod
     def from_safetensors(cls, path):
@@ -932,7 +916,7 @@ class NeuralRenderingModel:
             attention_projection_weight=self.weight(f"{prefix}.projection_weight"),
             attention_cosine=self.weight(f"{prefix}.attn_cos_skip"),
             head_count=head_count, window_size=8,
-            window_origin=recovered_window_origin(index),
+            window_origin=self.topology.window_origin(index),
         )
         if f"{prefix}.ffn_expand_weight" in self.weights:
             output = branched_window_block(
@@ -947,8 +931,9 @@ class NeuralRenderingModel:
                 expansion_weight=self.weight(f"{prefix}.weight1"),
                 feed_forward_projection_weight=self.weight(f"{prefix}.weight2"),
                 **common)
-        # Block 0 is pooled before its publication and block 70 feeds the head.
-        return output if index in (0, 70) or not publish else e4m3(output)
+        # The stem is pooled before its publication and the last block feeds the head.
+        unpublished = (self.topology.stem, self.topology.head)
+        return output if index in unpublished or not publish else e4m3(output)
 
     def _split_window(self, value, index, publish=True):
         prefix = f"block{index}"
@@ -968,7 +953,7 @@ class NeuralRenderingModel:
             attention_projection_weight=self.weight(f"{prefix}.layer3.projection_weight"),
             attention_cosine=self.weight(f"{prefix}.layer3.attn_cos_skip"),
             head_count=16, window_size=8,
-            window_origin=recovered_window_origin(index))
+            window_origin=self.topology.window_origin(index))
         return e4m3(output) if publish else output
 
     def _global(self, value, index):
@@ -989,7 +974,7 @@ class NeuralRenderingModel:
         this level — and that output pooled and projected into the next level."""
         transformed = self._window(value, index, head_count=head_count, publish=False)
         skip = e4m3(transformed)
-        if index == 22:
+        if index == self.topology.encoder[-1][1]:
             transformed = pad_spatial_end(transformed, 8)
         return skip, e4m3(matmul(e4m3(average_pool2(transformed)),
                                  self.weight(f"block{index}.layer0.weight0")))
@@ -1027,10 +1012,9 @@ class NeuralRenderingModel:
         # Each level's skip is its transition block's own output (4, 8, 14, 22); MLX-DLSS's
         # graph took the block before it. Run on OpenDLSS-NR's inputs, our first decoder
         # blocks agree with it 18-25 % with that skip and 61-69 % with this one.
+        layout = self.topology
         skips = []
-        for regular, transition, head_count in ((range(1, 4), 4, 1), (range(5, 8), 8, 2),
-                                                (range(9, 14), 14, 4),
-                                                (range(15, 22), 22, 8)):
+        for regular, transition, head_count in layout.encoder:
             for index in regular:
                 value = self._window(value, index, head_count=head_count)
                 step(f"block{index}")
@@ -1039,63 +1023,57 @@ class NeuralRenderingModel:
             skips.append(before if MLX_DLSS_GRAPH else skip)
             step(f"block{transition}")
 
-        for index in range(23, 30):
+        *split, last = layout.split_encoder
+        for index in split:
             value = self._split_window(value, index)
             step(f"block{index}")
         if MLX_DLSS_GRAPH:
-            split_skip = value = self._split_window(value, 30)
+            split_skip = value = self._split_window(value, last)
             value = downsample(pad_spatial_end(value, 8),
-                               weight=self.weight("block30.layer4.weight"))
+                               weight=self.weight(f"block{last}.layer4.weight"))
         else:
             # the bottleneck pools block 30's raw output, and publishes it for its GEMM
-            raw = self._split_window(value, 30, publish=False)
+            raw = self._split_window(value, last, publish=False)
             split_skip = e4m3(raw)
             value = matmul(e4m3(average_pool2(pad_spatial_end(raw, 8))),
-                           self.weight("block30.layer4.weight"))
+                           self.weight(f"block{last}.layer4.weight"))
             del raw
-        step("block30")
+        step(f"block{last}")
         value = e4m3(value)
-        step("block30.ds")
-        for index in range(31, 39):
+        step(f"block{last}.ds")
+        for index in layout.bottleneck:
             value = self._global(value, index)
             step(f"block{index}")
 
+        merge = f"block{layout.merge}.layer0"
         value = decoder_input_merge(
-            matmul(value, self.weight("block39.layer0.conv_weight")),
-            skip=split_skip, skip_sine=self.weight("block39.layer0.inp_upsample_sin"))
+            matmul(value, self.weight(f"{merge}.conv_weight")),
+            skip=split_skip, skip_sine=self.weight(f"{merge}.inp_upsample_sin"))
         value = e4m3(value)
-        step("block39")
-        for index in range(40, 48):
+        step(f"block{layout.merge}")
+        for index in layout.split_decoder:
             value = self._split_window(value, index)
             step(f"block{index}")
-        value = self._upsample_window(value, skips[3], 48, head_count=8)
-        step("block48")
-        for index in range(49, 56):
-            value = self._window(value, index, head_count=8)
-            step(f"block{index}")
-
-        for transition, regular, skip_index, head_count in (
-                (56, range(57, 62), 2, 4),
-                (62, range(63, 66), 1, 2),
-                (66, range(67, 70), 0, 1)):
-            value = self._upsample_window(value, skips[skip_index], transition,
+        for upsample, regular, skip_index, head_count in layout.decoder:
+            value = self._upsample_window(value, skips[skip_index], upsample,
                                           head_count=head_count)
-            step(f"block{transition}")
+            step(f"block{upsample}")
             for index in regular:
                 value = self._window(value, index, head_count=head_count)
                 step(f"block{index}")
 
+        head = f"block{layout.head}.layer0"
         value = nearest_upsample2_crop(value, height=full_resolution_skip.shape[1],
                                        width=full_resolution_skip.shape[2])
-        merge_sin = self.weight("block70.layer0.inp_merge_sin")
-        merge_cos = self.weight("block70.layer0.inp_merge_cos")
+        merge_sin = self.weight(f"{head}.inp_merge_sin")
+        merge_cos = self.weight(f"{head}.inp_merge_cos")
         value = _rows(lambda up, skip: up * merge_sin + skip * merge_cos,
                       value, full_resolution_skip)
         del full_resolution_skip
-        value = self._window(value, 70, head_count=1)
-        step("block70")
-        out_gain = self.weight("block70.layer0.out_gain")
-        out_conv = self.weight("block70.layer0.out_conv_weight")
+        value = self._window(value, layout.head, head_count=1)
+        step(f"block{layout.head}")
+        out_gain = self.weight(f"{head}.out_gain")
+        out_conv = self.weight(f"{head}.out_conv_weight")
         return _per_token(
             lambda tokens: matmul(tokens[..., :16], out_gain)
             + matmul(tokens[..., 16:], out_conv), value)

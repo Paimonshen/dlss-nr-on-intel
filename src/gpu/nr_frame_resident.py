@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """
-nr_frame_resident — the whole 71-block graph on the device.
+nr_frame_resident — the whole graph on the device.
 
 `nr_resident` records a block; this records a frame. Activations never come back to
 the host: the stem writes a device buffer, every block, transition and skip reads and
 writes device buffers, and only the head is read out.
 
 Levels, for a network extent (H, W). The encoder halves five times and the decoder
-mirrors it; the two deepest transitions pad to a multiple of the window first.
+mirrors it; the two deepest transitions pad to a multiple of the window first. The block
+numbers are preset A's; the weights carry their own stage depths (`nr_topology`), and
+preset B's 31 blocks have the same levels.
 
     L0  H     x W      C=32     block 0, and block 70 at the end
     L1  H/2   x W/2    C=32     blocks 1-3,   67-69
@@ -34,6 +36,7 @@ sys.path.insert(0, str(HERE.parent / "ref"))
 
 import nr_model  # noqa: E402
 import nr_resident as R  # noqa: E402
+import nr_topology  # noqa: E402
 import xmxres  # noqa: E402
 try:
     import nr_image  # noqa: E402  the host passes in C, when they are built
@@ -47,11 +50,6 @@ def _native_half(source, target):
 
 
 host_copy = xmxres.host_view          # diagnostics read buffers the graph never returns
-
-ENCODER = ((range(1, 4), 4, 1), (range(5, 8), 8, 2),
-           (range(9, 14), 14, 4), (range(15, 22), 22, 8))
-DECODER = ((48, range(49, 56), 4, 8), (56, range(57, 62), 3, 4),
-           (62, range(63, 66), 2, 2), (66, range(67, 70), 1, 1))
 
 
 def pad8(extent):
@@ -100,36 +98,41 @@ class DeviceWeights:
 
     def __init__(self, runtime, weights):
         self.rt, self.weights = runtime, weights
+        self.topology = nr_topology.Topology.from_weights(weights)
         self._blocks, self._edges = {}, {}
         self._upload_edges()
 
     def _upload_edges(self):
         take = lambda name: self.weights[name]
+        layout = self.topology
+        merge, last = f"block{layout.merge}.layer0", f"block{layout.head}.layer0"
         self.adapter = self.rt.buffer_from(take("block0.layer0.input_adapter_weight"),
                                            np.float16)
-        self.bottleneck = Edge(self.rt, take("block30.layer4.weight"))
-        self.decoder_input = Edge(self.rt, take("block39.layer0.conv_weight"),
-                                  take("block39.layer0.inp_upsample_sin"))
-        self.merge_sin = self.rt.buffer_from(take("block70.layer0.inp_merge_sin"))
-        self.merge_cos = self.rt.buffer_from(take("block70.layer0.inp_merge_cos"))
+        self.bottleneck = Edge(self.rt, take(f"block{layout.split_encoder[-1]}.layer4.weight"))
+        self.decoder_input = Edge(self.rt, take(f"{merge}.conv_weight"),
+                                  take(f"{merge}.inp_upsample_sin"))
+        self.merge_sin = self.rt.buffer_from(take(f"{last}.inp_merge_sin"))
+        self.merge_cos = self.rt.buffer_from(take(f"{last}.inp_merge_cos"))
         # both, one after the other, for the pass that applies them together
         self.merge_sincos = self.rt.buffer_from(np.concatenate([
-            np.asarray(take("block70.layer0.inp_merge_sin"), np.float32).reshape(-1),
-            np.asarray(take("block70.layer0.inp_merge_cos"), np.float32).reshape(-1)]))
+            np.asarray(take(f"{last}.inp_merge_sin"), np.float32).reshape(-1),
+            np.asarray(take(f"{last}.inp_merge_cos"), np.float32).reshape(-1)]))
         # the head is 32 -> 4, and the cooperative matrix wants a multiple of 16
         # columns; both halves go into one padded matrix and the first four columns
         # of the product are the head
         head = np.zeros((32, 16), dtype=np.float32)
-        head[:16, :4] = take("block70.layer0.out_gain")
-        head[16:, :4] = take("block70.layer0.out_conv_weight")
+        head[:16, :4] = take(f"{last}.out_gain")
+        head[16:, :4] = take(f"{last}.out_conv_weight")
         self.head = self.rt.buffer_from(head, np.float16)
 
     def block(self, index, heads, family="window"):
         if (index, family) not in self._blocks:
-            builder = {"split": lambda: R.SplitBlockWeights(self.rt, self.weights, index),
+            layout = self.topology
+            builder = {"split": lambda: R.SplitBlockWeights(self.rt, self.weights, index,
+                                                            layout),
                        "global": lambda: R.GlobalBlockWeights(self.rt, self.weights, index),
                        "window": lambda: R.BlockWeights(self.rt, self.weights, index,
-                                                        heads=heads)}[family]
+                                                        heads=heads, topology=layout)}[family]
             self._blocks[(index, family)] = builder()
         return self._blocks[(index, family)]
 
@@ -169,6 +172,7 @@ class ResidentFrame:
         self.w = weights if isinstance(weights, DeviceWeights) else DeviceWeights(runtime, weights)
         self._owns_weights = self.w is not weights
         self.rt, self.weights = runtime, self.w.weights
+        self.topology = self.w.topology
         self.height, self.width = height, width
         self.device_image_io = bool(device_image_io)
         self.levels = self._plan(height, width)
@@ -286,23 +290,24 @@ class ResidentFrame:
             self._edges.clear()
             self._arena.free()
             self._arena = xmxres.ScratchArena(self.rt)
-        for index in (0, 70):
+        layout = self.topology
+        for index in (layout.stem, layout.head):
             self.scratch(self.block(index, 1), self.height, self.width)
-        for level, (regular, transition, heads) in enumerate(ENCODER, 1):
+        for level, (regular, transition, heads) in enumerate(layout.encoder, 1):
             h, w, channels = self.levels[level]
             for index in (*regular, transition):
                 self.scratch(self.block(index, heads), h, w)
             self.transition_scratch(pad8(h) * pad8(w) * channels)
         h, w, channels = self.levels[5]
-        for index in (*range(23, 31), *range(40, 48)):
+        for index in (*layout.split_encoder, *layout.split_decoder):
             self.scratch(self.block(index, 16, "split"), h, w)
         self.transition_scratch(pad8(h) * pad8(w) * channels)
         self.transition_scratch(h * w * channels)
         gh, gw, _ = self.levels[6]
-        for index in range(31, 39):
+        for index in layout.bottleneck:
             self.scratch(self.block(index, 32, "global"), gh, gw, tokens=gh * gw)
-        for transition, regular, level, heads in DECODER:
-            sh, sw, schannels = self.levels[level]
+        for transition, regular, level, heads in layout.decoder:
+            sh, sw, schannels = self.levels[level + 1]
             self.transition_scratch(sh * sw * max(channels, schannels))
             for index in (transition, *regular):
                 self.scratch(self.block(index, heads), sh, sw)
@@ -500,8 +505,9 @@ class ResidentFrame:
         keep("full_skip", full_skip, pixels * 32, (1, height, width, 32), np.float16)
         keep("l1_in", value, h * w * 32, (1, h, w, 32), np.float16)
 
+        layout = self.topology
         skips, level = {}, 1
-        for regular, transition, heads in ENCODER:
+        for regular, transition, heads in layout.encoder:
             h, w, channels = self.levels[level]
             for index in regular:
                 stage[0] = f"encoder L{level} blocks (C={channels})"
@@ -529,8 +535,9 @@ class ResidentFrame:
             # once the transition block has: the decoder writes d1-d4, never l1-l4.
             rt.e4m3_half(unpublished, value, h * w * channels)
             skips[level] = value
+            deepest = transition == layout.encoder[-1][1]
             R.record_downsample(rt, edge, self.transition_scratch(padded), unpublished,
-                                nxt, h, w, channels, pad_to=8 if transition == 22 else 0,
+                                nxt, h, w, channels, pad_to=8 if deepest else 0,
                                 target_half=True)
             submit()
             value, level = nxt, level + 1
@@ -539,13 +546,14 @@ class ResidentFrame:
 
         # the split family, then the bottleneck
         h, w, channels = self.levels[5]
-        stage[0] = "split blocks 23-30 (C=512)"
+        split = layout.split_encoder
+        stage[0] = f"split blocks {split[0]}-{split[-1]} (C=512)"
         # Block 30's output has two readers: the decoder's skip takes it published, the
         # bottleneck's pool raw (notes/opendlss-reference.md).
         raw30 = self.buffer("raw30", h * w * channels)
-        for index in range(23, 31):
+        for index in split:
             block = self.block(index, 16, "split")
-            last = index == 30
+            last = index == split[-1]
             begin()
             R.record_block(rt, block, self.scratch(block, h, w), source=value,
                            target=raw30 if last else value,
@@ -564,7 +572,8 @@ class ResidentFrame:
         # With the glue fused the eight blocks run in their scratch's half value itself
         # (`record_global_block`, `chain`), and the downsample writes it.
         chain = rt.fuse_glue
-        deep = (self.scratch(self.block(31, 32, "global"), gh, gw, tokens=tokens).io16
+        bottleneck = layout.bottleneck
+        deep = (self.scratch(self.block(bottleneck[0], 32, "global"), gh, gw, tokens=tokens).io16
                 if chain else self.buffer("l6", gh * gw * gchannels, np.float16))
         begin()
         # pooled raw and published before its GEMM, as the encoder's transitions are
@@ -573,8 +582,8 @@ class ResidentFrame:
             target_half=True)
         submit()
 
-        stage[0] = "global blocks 31-38 (C=1024)"
-        for index in range(31, 39):
+        stage[0] = f"global blocks {bottleneck[0]}-{bottleneck[-1]} (C=1024)"
+        for index in bottleneck:
             block = self.block(index, 32, "global")
             scratch = self.scratch(block, gh, gw, tokens=tokens)
             begin()
@@ -607,8 +616,9 @@ class ResidentFrame:
             h * w * channels), deep, split_skip, value, gh, gw, h, w, gchannels, channels,
             source_half=True, skip_half=True, target_half=True)
         submit()
-        stage[0] = "split blocks 40-47 (C=512)"
-        for index in range(40, 48):
+        split = layout.split_decoder
+        stage[0] = f"split blocks {split[0]}-{split[-1]} (C=512)"
+        for index in split:
             block = self.block(index, 16, "split")
             begin()
             R.record_block(rt, block, self.scratch(block, h, w), source=value,
@@ -617,7 +627,8 @@ class ResidentFrame:
             submit()
         keep("d5", value, h * w * channels, (1, h, w, channels), np.float16)
 
-        for transition, regular, skip_level, heads in DECODER:
+        for transition, regular, skip_level, heads in layout.decoder:
+            skip_level += 1                     # the levels here count block 0's as L0
             stage[0] = f"decoder upsample -> L{skip_level}"
             sh, sw, schannels = self.levels[skip_level]
             edge = self.edge(transition, "up")
@@ -652,8 +663,8 @@ class ResidentFrame:
             keep(f"d{skip_level}", value, h * w * channels, (1, h, w, channels), np.float16)
 
         # back to full resolution, merged with block 0's output, then the head
-        stage[0] = "block70 + head"
-        block70 = self.block(70, 1)
+        stage[0] = f"block{layout.head} + head"
+        block70 = self.block(layout.head, 1)
         scratch70 = self.scratch(block70, height, width)
         # The head reads block 70's output as half, and nothing reads it as float32, so
         # the block's closing residual stores half itself: the same rounding the separate

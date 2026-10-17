@@ -30,9 +30,9 @@ import xmxres  # noqa: E402
 class SplitBlockWeights:
     """A split-family block (23-30, 40-47): four layers, sixteen heads, C=512."""
 
-    def __init__(self, runtime, weights, index):
+    def __init__(self, runtime, weights, index, topology=None):
         self.index, self.heads = index, 16
-        self.origin = nr_model.recovered_window_origin(index)
+        self.origin = nr_model.recovered_window_origin(index, topology)
         self.projection = weights[f"block{index}.layer3.projection_weight"]
         self.channels = self.projection.shape[0]
         self.groups = self.channels // 64
@@ -59,11 +59,11 @@ class SplitBlockWeights:
 class BlockWeights:
     """One block's weights, uploaded once and kept on the device."""
 
-    def __init__(self, runtime, weights, index, *, heads):
+    def __init__(self, runtime, weights, index, *, heads, topology=None):
         prefix = f"block{index}.layer0"
         self.split = False
         self.index, self.heads = index, heads
-        self.origin = nr_model.recovered_window_origin(index)
+        self.origin = nr_model.recovered_window_origin(index, topology)
         self.projection = weights[f"{prefix}.projection_weight"]
         self.channels = self.projection.shape[0]
 

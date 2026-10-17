@@ -47,7 +47,7 @@ TemporalOptions = temporal_mod.TemporalOptions
 normalize_pixel_motion = temporal_mod.normalize_pixel_motion
 sample_history = temporal_mod.sample_history
 
-WEIGHTS = ROOT / "work" / "mlxw" / "dlssnr-logical.safetensors"
+WEIGHTS = nr_frame.WEIGHTS               # the preset NR_PRESET picks, A by default
 
 
 class Pipeline:
@@ -335,8 +335,9 @@ def main():
         print(f"motion scaled by {scale[0]},{scale[1]}")
     options = {"profile": args.profile, "intensity": args.intensity,
                "scene_cut_threshold": args.scene_cut}
-    if args.blend_scale is not None:
-        options["blend_scale"] = args.blend_scale
+    # the gate's ceiling is the loaded model's own unless asked otherwise: preset B's differs
+    options["blend_scale"] = (args.blend_scale if args.blend_scale is not None else
+                              nr_frame.blend_scale_of(model.weights))
     outputs, _ = run_sequence(model, sequence, motions, **options)
     for index, output in enumerate(outputs):
         path = f"{args.output_prefix}_{index:02d}.png"

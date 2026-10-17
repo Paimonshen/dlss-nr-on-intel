@@ -305,7 +305,7 @@ if(NR_BUILD_TESTS)
   set_tests_properties(host_image_preprocess host_image_compose host_image_stats host_image_pipeline
     PROPERTIES LABELS "host;image")
   nr_test(gpu_ffn_batch "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/src/gpu/test_ffn_batch.py" --gpu)
-  foreach(name frame_cache native_image nr_model temporal_controls dump_raw dump_geometry)
+  foreach(name frame_cache native_image topology nr_model temporal_controls dump_raw dump_geometry)
     nr_test(ref_${name} "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/src/ref/test_${name}.py")
   endforeach()
   # The daemon ends with its game on both systems: a process handle there, a pidfd here.

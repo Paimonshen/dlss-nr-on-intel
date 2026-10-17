@@ -891,7 +891,8 @@ def process(connection, backend, args, width, height, vk_format, *, masked=False
             top=top, left=left, bgra=kind == "bgra8", intensity=live.intensity,
             control_mask=control, history=history_full, history_confidence=live.temporal,
             history_previous=previous, history_hold=live.hold,
-            history_release=live.release, samples=8, grade=grade, neural=neural)
+            history_release=live.release, blend_scale=backend.blend_scale, samples=8,
+            grade=grade, neural=neural)
     full = None
     if fused is not None:
         composed, samples = fused
@@ -906,7 +907,8 @@ def process(connection, backend, args, width, height, vk_format, *, masked=False
                                     control_mask=control, history=history_full,
                                     history_confidence=live.temporal,
                                     history_previous=previous, history_hold=live.hold,
-                                    history_release=live.release, grade=grade,
+                                    history_release=live.release,
+                                    blend_scale=backend.blend_scale, grade=grade,
                                     neural=neural)
         if boxed:
             # A copy, not a write into `whole`: aliasing the input and the output through
@@ -1029,7 +1031,7 @@ def process(connection, backend, args, width, height, vk_format, *, masked=False
         if history_full is None:
             note += f"  no history, cut {args.history.cut:.4f}"
         else:
-            gate = float(nr_frame.history_weight(samples).mean())
+            gate = float(nr_frame.history_weight(samples, blend_scale=backend.blend_scale).mean())
             hold = "" if previous is None else (
                 f", held {100 * float((hold_floor(colour[::8, ::8], previous[::8, ::8], live.hold) > 0).mean()):.0f}%")
             if previous is not None and live.release > 0:
@@ -1335,10 +1337,12 @@ def run_owned(args):
 
     if not nr_frame.WEIGHTS.exists():
         # The first thing a new clone hits, and a traceback is a poor way to say it.
+        how = ("as the README's Build section describes" if nr_frame.PRESET == "A" else
+               "with src/tools/unpack_preset.py, from a 310.9.16 or later DLL")
         raise SystemExit(
             f"no weights at {nr_frame.WEIGHTS}.\n"
             "They are NVIDIA's and are not distributed here: extract them from your own "
-            "copy of nvngx_dlssnr.dll as the README's Build section describes.")
+            f"copy of nvngx_dlssnr.dll {how}.")
     started = time.perf_counter()
     # Check the rounding the graph depends on before any frame is processed. Runs first,
     # while XMX_UNARY_SPV can still select the probe shader - the graph's own runtime is
@@ -1349,6 +1353,8 @@ def run_owned(args):
     # assumes. libxmx chooses one that can run the network (XMX_DEVICE names another).
     print(f"model ready in {time.perf_counter() - started:.1f}s"
           f" on {xmx.device_name()}", flush=True)
+    print(f"network preset {nr_frame.PRESET}, {backend.topology.block_count} blocks,"
+          f" history ceiling {backend.blend_scale}", flush=True)
     print(f"buffers in {xmx.memory_note()}", flush=True)
     rt = backend.runtime
     print("runtime options " + " ".join(

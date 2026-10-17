@@ -29,6 +29,9 @@ import nr_model as M  # noqa: E402
 import xmxres  # noqa: E402
 
 WEIGHTS = ROOT / "work" / "mlxw" / "dlssnr-logical.safetensors"
+# preset B, the 31-block network of 310.9.16, where it has been unpacked
+# (src/tools/unpack_preset.py): the same whole-graph check runs on it
+WEIGHTS_B = ROOT / "work" / "mlxw" / "dlssnr-b-logical.safetensors"
 FAILURES = []
 
 
@@ -352,7 +355,8 @@ def test_frame(runtime, weights, extent=320):
 
     import nr_frame_resident
 
-    print(f"the whole graph, {extent}x{extent}")
+    model = M.NeuralRenderingModel(weights)
+    print(f"the whole graph, {extent}x{extent}, {model.topology.block_count} blocks")
     rng = np.random.default_rng(5)
     features = np.zeros((extent, extent, 16), dtype=np.float32)
     yy, xx = np.mgrid[0:extent, 0:extent].astype(np.float32)
@@ -376,7 +380,7 @@ def test_frame(runtime, weights, extent=320):
     head = frame.run(features)
     device_seconds = time.perf_counter() - started
     started = time.perf_counter()
-    expected = M.NeuralRenderingModel(weights).forward(features[None])[0]
+    expected = model.forward(features[None])[0]
     host_seconds = time.perf_counter() - started
     M.FUSE_BRANCHED = previous
 
@@ -402,6 +406,9 @@ def main():
         test_frame(runtime, weights)
     else:
         print(f"weights not found at {WEIGHTS}; skipping the chain")
+    if WEIGHTS_B.exists():
+        weights = None                  # preset A's go before preset B's are read
+        test_frame(runtime, M.load_logical(WEIGHTS_B)[0])
     print()
     if FAILURES:
         print(f"{len(FAILURES)} FAILED: {', '.join(FAILURES)}")

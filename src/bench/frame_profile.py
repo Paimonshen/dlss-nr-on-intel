@@ -159,6 +159,9 @@ def main():
                              "next profile")
     parser.add_argument("--calls", type=int, default=0, metavar="N",
                         help="also list the N most expensive call sites")
+    parser.add_argument("--weights", type=pathlib.Path,
+                        default=ROOT / "work" / "mlxw" / "dlssnr-logical.safetensors",
+                        help="logical weights; preset B's are dlssnr-b-logical.safetensors")
     args = parser.parse_args()
     if args.tables:
         for family, table in (("unary", UNARY), ("row", ROW)):
@@ -166,8 +169,7 @@ def main():
         return
     height, width = args.size
 
-    model = nr_model.NeuralRenderingModel.from_safetensors(
-        ROOT / "work" / "mlxw" / "dlssnr-logical.safetensors")
+    model = nr_model.NeuralRenderingModel.from_safetensors(args.weights)
     runtime = xmxres.Runtime()
     xmxres.profile(True)
     frame = F.ResidentFrame(runtime, model.weights, height, width)

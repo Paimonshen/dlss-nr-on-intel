@@ -106,6 +106,7 @@ class GPUImagePipeline:
             self.history_key=hkey
         self.compose.configure(intensity=live.intensity,history_confidence=live.temporal,
             history_hold=live.hold,history_release=live.release,
+            blend_scale=getattr(self.backend,"blend_scale",nr_frame.BLEND_SCALE),
             grade=nr_frame.grade_for(**nr_frame.PROFILES[live.profile]),keep_neural=live.temporal>0)
         return ih,iw,ah,aw
 

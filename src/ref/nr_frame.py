@@ -29,9 +29,17 @@ ROOT = pathlib.Path(os.environ.get("NR_ROOT") or HERE.parent.parent)
 sys.path.insert(0, str(HERE))
 
 import nr_model  # noqa: E402
+import nr_topology  # noqa: E402
 import image_io  # noqa: E402
 
-WEIGHTS = ROOT / "work" / "mlxw" / "dlssnr-logical.safetensors"
+# nvngx_dlssnr.dll 310.9.16 carries two networks (`nr_topology`): preset A, the model of
+# 310.8 and of every release so far, and preset B, the 31-block one NVIDIA ships as its
+# default. NR_PRESET picks; B's weights come out of the DLL with src/tools/unpack_preset.py.
+PRESET_WEIGHTS = {"A": "dlssnr-logical.safetensors", "B": "dlssnr-b-logical.safetensors"}
+PRESET = (os.environ.get("NR_PRESET") or "A").upper()
+if PRESET not in PRESET_WEIGHTS:
+    raise ValueError(f"NR_PRESET={PRESET}: the presets are {', '.join(PRESET_WEIGHTS)}")
+WEIGHTS = ROOT / "work" / "mlxw" / PRESET_WEIGHTS[PRESET]
 _MLX = ROOT / "work" / "mlx-dlss" / "python" / "mlxdlss"
 
 
@@ -192,8 +200,15 @@ try:
 except ImportError:                      # pragma: no cover - the fallback is the point
     nr_image = None
 
-# half(blend_scale) of the recovered package, `notes/phase12-temporal.md`.
+# half(blend_scale) of the recovered package, `notes/phase12-temporal.md`: preset A's.
 BLEND_SCALE = 0.73974609375
+
+
+def blend_scale_of(weights):
+    """The history gate's ceiling of the model these logical weights are: its head block's
+    `blend_scale`, BLEND_SCALE for preset A and 0.76708984375 for preset B."""
+    head = nr_topology.Topology.from_weights(weights).head
+    return float(np.asarray(weights[f"block{head}.layer0.blend_scale"]).reshape(-1)[0])
 
 
 def build_features(colour, *, geometry, history=None, frame_index=0,
@@ -466,6 +481,8 @@ class ResidentBackend:
         self._module = nr_frame_resident
         self.runtime = xmxres.Runtime()
         self.weights, _ = nr_model.load_logical(weights_path or WEIGHTS)
+        self.topology = nr_topology.Topology.from_weights(self.weights)
+        self.blend_scale = blend_scale_of(self.weights)
         # one upload for as long as the backend is open: the extent changes under a knob
         # and the weights do not depend on it. Built on the first frame, not here, so that
         # constructing a backend still allocates nothing on the device.
