@@ -141,6 +141,12 @@ struct device_data {
 	VkPhysicalDevice physical;
 	VkQueue queue;
 	uint32_t queue_family;
+	/* A queue family the APPLICATION created, for the UI's own submissions. It is not necessarily
+	 * the presenting one - a submission there can sit behind a semaphore wait this layer has
+	 * already consumed - and it is not "the other number": a device may have been created with one
+	 * family only, which is what the present fixture does. Equal to `queue_family` when there is no
+	 * other family to use. See where it is filled in `nr_CreateDevice`. */
+	uint32_t ui_queue_family;
 	nr_mutex_t present_lock;
 	unsigned long frame_counter;
 	VkResult transfer_error, device_error;
@@ -1064,6 +1070,18 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateDevice(VkPhysicalDevice physical,
 		data->destroy_device = (PFN_vkDestroyDevice)next_device(*device, "vkDestroyDevice");
 		data->queue_family = info->queueCreateInfoCount
 			? info->pQueueCreateInfos[0].queueFamilyIndex : 0;
+		/* The UI's queue comes from a family the application actually created. It used to be
+		 * `queue_family == 0 ? 1 : 0` - a guess that family 1 exists, which held for the game
+		 * (both families are created there) and not for anything that creates one. Validation
+		 * named it twice: vkGetDeviceQueue(1) and the UI's command pool, on a device created with
+		 * family 0 alone. Picking from the create infos costs nothing and is the thing the spec
+		 * asks for. */
+		data->ui_queue_family = data->queue_family;
+		for (uint32_t i = 0; i < info->queueCreateInfoCount; i++)
+			if (info->pQueueCreateInfos[i].queueFamilyIndex != data->queue_family) {
+				data->ui_queue_family = info->pQueueCreateInfos[i].queueFamilyIndex;
+				break;
+			}
 	}
 	nr_mutex_unlock(&lock);
 	return r;
@@ -1511,6 +1529,20 @@ VKAPI_ATTR void VKAPI_CALL nr_DestroyDevice(VkDevice device,
 		if (data->menu_bridge) {
 			nr_menu_bridge_destroy(data->menu_bridge);
 			data->menu_bridge = NULL;
+		}
+		/* The panel's Vulkan objects belong to this device and outlive every swapchain: its image,
+		 * view and memory, the atlas and quad buffers with theirs, the backend's command buffer,
+		 * and the two shader modules. NOTHING destroyed them - `nr_menu_create` and `nrex_create`
+		 * had no matching call in the tree, and the `memset` below dropped both pointers - so
+		 * validation's Object Tracking listed all fifteen at vkDestroyDevice. The bridge goes
+		 * first because the panel reads its rows through it. */
+		if (data->menu_ui) {
+			nrex_destroy(data->menu_ui);
+			data->menu_ui = NULL;
+		}
+		if (data->menu) {
+			nr_menu_destroy(data->menu);
+			data->menu = NULL;
 		}
 		memset(data, 0, sizeof *data);
 	}
@@ -2120,13 +2152,15 @@ static void menu_build(struct device_data *data, struct swapchain_data *chain)
 		 * NULL makes the backend resolve a queue itself and wait forever on the font upload:
 		 * the game hung inside its present exactly there. */
 		VkQueue ui_queue = VK_NULL_HANDLE;
-		/* A queue from the OTHER family. The presenting family is the one this layer binds its
-		 * semaphore contract to - a submission that lands there can sit forever behind a wait the
-		 * layer has already consumed - and its index 1 does not exist: the device hands out one
-		 * queue per family, which is what 'families {0,1}' in the log means. The copy family has
-		 * no such contract, so the backend's font upload goes there, and the backend is told
-		 * that family too, so its command pool matches the queue it submits to. */
-		uint32_t ui_family = data->queue_family == 0 ? 1 : 0;
+		/* A queue from a family the device was created with, OTHER than the presenting family when
+		 * there is one. The presenting family is the one this layer binds its semaphore contract
+		 * to - a submission that lands there can sit forever behind a wait the layer has already
+		 * consumed - and the device hands out one queue per family, which is what 'families {0,1}'
+		 * in the log means. The copy family has no such contract, so the backend's font upload goes
+		 * there, and the backend is told that family too, so its command pool matches the queue it
+		 * submits to. When the device has only one family there is no such choice, and the
+		 * presenting one is used rather than a number that was never created. */
+		uint32_t ui_family = data->ui_queue_family;
 		data->get_device_queue(data->device, ui_family, 0, &ui_queue);
 		ui_family_out = ui_family;
 		data->menu_ui = nrex_create(data->device, data->physical, (void *)layer_instance,
