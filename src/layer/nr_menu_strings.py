@@ -19,6 +19,7 @@ LABELS = {
         'hold': 'Hold unchanged pixels',
         'release': 'Release moving pixels',
         'cut_limit': 'Scene-cut threshold',
+        'weights': 'Weights model',
         'title': 'DLSS-NR — setup and launch',
         'saved': 'Settings saved.',
         'reset': 'Reset all',
@@ -43,6 +44,7 @@ LABELS = {
         'hold': '保持未变像素',
         'release': '释放运动像素',
         'cut_limit': '转场阈值',
+        'weights': '权重模型',
         'title': 'DLSS-NR — 安装与启动',
         'saved': '设置已保存。',
         'reset': '全部重置',
@@ -67,6 +69,7 @@ LABELS = {
         'hold': 'Удержание неподвижных пикселей',
         'release': 'Освобождение при движении',
         'cut_limit': 'Порог смены сцены',
+        'weights': 'Модель весов',
         'title': 'DLSS-NR — установка и запуск',
         'saved': 'Параметры сохранены.',
         'reset': 'Сбросить всё',
@@ -91,6 +94,7 @@ LABELS = {
         'hold': 'Mantener píxeles sin cambios',
         'release': 'Liberar píxeles en movimiento',
         'cut_limit': 'Umbral de cambio de escena',
+        'weights': 'Modelo de pesos',
         'title': 'DLSS-NR — instalación e inicio',
         'saved': 'Configuración guardada.',
         'reset': 'Restablecer todo',
@@ -118,6 +122,7 @@ HINTS = {
         'hold': 'Keep the previous result where the game pixels did not change, reducing flicker in still areas.',
         'release': 'Pixel change in levels of 255 that releases history. 16–24 is a useful starting range; zero disables this protection.',
         'cut_limit': 'Average frame change that discards history for a scene cut. Lower reacts sooner; 1 never cuts.',
+        'weights': 'Which weight model the daemon runs. HT is the model this project reproduces; the small FP8 model newer DLLs carry is detected and extracted, and is not loadable yet.',
     },
     'zh': {
         'render_scale': '网络处理的每个维度的比例。越低越省，细节也更粗；最小补齐可能限制降低幅度。',
@@ -130,6 +135,7 @@ HINTS = {
         'hold': '在游戏像素未变处保留上一次结果，减少静止区域的闪烁。',
         'release': '以 255 级表示的像素变化量，达到则释放历史。16–24 是有用的起始范围；零则关闭该保护。',
         'cut_limit': '平均帧变化量，达到则因转场丢弃历史。越低反应越快；1 从不切换。',
+        'weights': '守护进程运行哪个权重模型。HT 是本项目复现的模型；新版 DLL 里的小型 FP8 模型会被识别并提取，其分块结构目前还不能加载。',
     },
     'ru': {
         'render_scale': 'Доля каждой стороны, которую обрабатывает сеть. Меньше — дешевле и грубее детали; минимальное дополнение может ограничить уменьшение.',
@@ -142,6 +148,7 @@ HINTS = {
         'hold': 'Сохраняет предыдущий результат там, где пиксели игры не менялись, уменьшая мерцание неподвижных участков.',
         'release': 'Изменение пикселя в уровнях из 255, которое освобождает историю. Начните с 16–24; ноль выключает эту защиту.',
         'cut_limit': 'Среднее изменение кадра для сброса истории при смене сцены. Меньше — быстрее реагирует; 1 никогда не сбрасывает.',
+        'weights': 'Какую модель весов запускает демон. HT — модель, которую воспроизводит проект; малая FP8-модель из новых DLL определяется и извлекается, но её раскладка блоков пока не загружается.',
     },
     'es': {
         'render_scale': 'Fracción de cada dimensión que procesa la red. Menos es más barato, con detalle más grueso; el relleno mínimo puede limitar la reducción.',
@@ -154,6 +161,7 @@ HINTS = {
         'hold': 'Mantiene el resultado anterior donde los píxeles del juego no cambiaron, lo que reduce el parpadeo en las zonas quietas.',
         'release': 'Cambio de un píxel, en niveles de 255, que libera el historial. 16–24 es un buen punto de partida; cero desactiva esta protección.',
         'cut_limit': 'Cambio medio del fotograma que descarta el historial en un cambio de escena. Menos reacciona antes; 1 nunca corta.',
+        'weights': 'Qué modelo de pesos ejecuta el demonio. HT es el modelo que reproduce este proyecto; el modelo FP8 pequeño de los DLL nuevos se detecta y se extrae, y aún no se puede cargar.',
     },
 }
 

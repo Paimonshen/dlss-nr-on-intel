@@ -469,7 +469,7 @@ static void test_every_knob_moves_and_survives(void)
     nr_menu_bridge *probe = nr_menu_bridge_create_headless(settings, NR_MENU_LANG_EN);
     assert(probe);
     int count = nr_menu_bridge_row_count(probe);
-    assert(count == 10);
+    assert(count == 11);
 
     for (int row = 0; row < count; ++row) {
         const char *before = nr_menu_bridge_row_value(probe, row);

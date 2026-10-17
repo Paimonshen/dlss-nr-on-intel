@@ -33,7 +33,7 @@ const char *nr_menu_text(int language, int key)
  * renamed there fails the build of the tables rather than silently vanishing from the menu. */
 static const char *const knob_names[] = {
     "render_scale", "min_extent", "profile", "intensity", "detail_strength",
-    "colour_strength", "temporal", "hold", "release", "cut_limit",
+    "colour_strength", "temporal", "hold", "release", "cut_limit", "weights",
 };
 
 int nr_menu_key_for(const char *knob_name)

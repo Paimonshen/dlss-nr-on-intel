@@ -178,14 +178,7 @@ class Settings:
     """
 
     KNOBS = ("profile", "intensity", "detail_strength", "colour_strength", "render_scale",
-             "temporal", "cut_limit", "hold", "release", "min_extent")
-    # Knobs that are not numbers and are not in the wizard's catalogue: `weights` selects a model
-    # file. It is deliberately outside `KNOBS`, because `KNOBS` is checked equal to the shared
-    # catalogue (`nr_knobs.py`, the wizard's defaults and the panel) by test_windows_wizard, and a
-    # name in one and not the others is the drift that check exists to catch. Until the panel row
-    # exists (`docs/WEIGHTS.md` §6) the setting is written by hand or by anything that writes the
-    # JSON, and the daemon honours it either way.
-    MODEL_KNOBS = ("weights",)
+             "temporal", "cut_limit", "hold", "release", "min_extent", "weights")
 
     def __init__(self, args):
         self.path = args.settings
@@ -211,15 +204,14 @@ class Settings:
         self.saved_values = {}
         for knob in self.KNOBS:
             setattr(self, knob, getattr(args, knob, None))
-        # Which weight model the panel's knob asks for. Held as a string - it selects a file, not a
-        # number - and validated in `_apply` against the names this build knows. `serve` is what
-        # acts on a change: a different name there means a different model in memory.
-        self.weights = getattr(args, "model", None) or nr_weight_models.default_name()
+        # `weights` came from `--weights` through the loop above, like every other knob. It is a
+        # name rather than a number; `_apply` validates it against what this build knows and
+        # `serve` swaps the model when it changes.
 
     def _apply(self, given, source):
         """The knob values in `given`, validated. Returns the names it changed."""
         changed = []
-        for knob in self.KNOBS + self.MODEL_KNOBS:
+        for knob in self.KNOBS:
             if knob not in given:
                 continue
             value = given[knob]
@@ -1410,6 +1402,10 @@ def main():
                         help="deployment root: work/ and src/ are looked for under it "
                              "(also read from NR_ROOT before this parser runs)")
     parser.add_argument("--profile", default="standard", choices=sorted(nr_frame.PROFILES))
+    # Which weight model to run, by name. The choices are the table's, not a second list: a model
+    # added to `nr_weight_models` is nameable here the same day, and one this build cannot load is
+    # still allowed as a value because the settings file may name it and `refresh_model` falls back.
+    parser.add_argument("--weights", default="ht", choices=nr_weight_models.names())
     parser.add_argument("--intensity", type=float, default=1.0)
     parser.add_argument("--detail-strength", type=float, default=1.0)
     parser.add_argument("--colour-strength", type=float, default=1.0)

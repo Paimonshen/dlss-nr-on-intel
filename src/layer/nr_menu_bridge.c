@@ -181,6 +181,11 @@ static const nr_knob_def knobs[] = {
     { "hold",            0, 0.0f, 1.0f,     0.05f, 1.0f,  NULL },
     { "release",         0, 0.0f, 64.0f,    1.0f,  24.0f, NULL },
     { "cut_limit",       0, 0.0f, 1.0f,     0.01f, 0.15f, NULL },
+    /* Which weight model the daemon runs. The choices are `nr_knobs.py`'s CHOICES entry; the
+     * daemon resolves the name against what the install actually carries and keeps the running
+     * model when the name cannot be honoured, so the list here is what MAY be chosen, not what
+     * this machine has. */
+    { "weights",         1, 0.0f, 1.0f,     1.0f,  0.0f,  "ht,cc_small_fp8" },
 };
 
 #define NR_KNOBS_COUNT ((int)(sizeof knobs / sizeof knobs[0]))

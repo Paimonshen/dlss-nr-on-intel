@@ -679,9 +679,10 @@ class WizardFixture(unittest.TestCase):
         catalogue = core._runtime_knobs()
         self.assertEqual([knob["name"] for knob in catalogue], [
             "render_scale", "min_extent", "profile", "intensity", "detail_strength",
-            "colour_strength", "temporal", "hold", "release", "cut_limit"])
+            "colour_strength", "temporal", "hold", "release", "cut_limit", "weights"])
         names = {knob["name"]: knob for knob in catalogue}
         self.assertEqual(names["profile"]["choices"], ["standard", "natural", "cinematic"])
+        self.assertEqual(names["weights"]["choices"], ["ht", "cc_small_fp8"])
         self.assertEqual((names["min_extent"]["high"], names["min_extent"]["runtime_high"]), (320, 4096))
         self.assertEqual((names["release"]["high"], names["release"]["runtime_high"]), (64, 255))
         daemon_source = (Path(core.__file__).resolve().parent.parent / "layer/nr_daemon.py").read_text(encoding="utf-8")
@@ -1368,3 +1369,4 @@ class RunningExecutableTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

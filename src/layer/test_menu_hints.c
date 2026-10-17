@@ -30,7 +30,7 @@ int main(void)
     assert(b);
 
     const int knobs = nr_menu_bridge_knob_count();
-    CHECK("the table has the ten knobs", knobs == 10);
+    CHECK("the table has every knob", knobs == 11);
 
     /* Every knob, every language: a hint that exists and is not blank. A knob with no explanation
      * is a tooltip that opens empty, which reads as a broken panel. */
