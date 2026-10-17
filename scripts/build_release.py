@@ -25,6 +25,19 @@ PROXIES = ("nr_vulkan_proxy.dll", "nr_vulkan_proxy32.dll")
 DXVK = tuple(f"work/dxvk/{directory}/{name}" for directory in ("x64", "x32")
              for name in ("d3d8.dll", "d3d9.dll", "d3d10core.dll", "d3d11.dll", "dxgi.dll"))
 DXVK_INFO = ("work/dxvk/LICENSE", "work/dxvk/VERSION")
+# Licences that must travel with the package, as (source in this checkout, path in a release).
+# `src/gpu/publish.glsl` and `src/bench/e4m3_probe.comp` both cite `licenses/rdna3-e4m3-MIT.txt`
+# by that path, and those two files ARE shipped - a release without it therefore points at
+# nothing. ImGui is linked into the layer, so its MIT notice travels with the binaries built on
+# it; a release carries no source tree, so NOTICE's `third_party/imgui/` wording is not a path
+# inside the package.
+LICENCES = (("licenses/rdna3-e4m3-MIT.txt", "licenses/rdna3-e4m3-MIT.txt"),
+            ("third_party/imgui/LICENSE.txt", "licenses/imgui-MIT.txt"))
+# A stub left where a fetch should have put a real file. `work/dxvk` and `work/mlx-dlss/LICENSE`
+# are populated by scripts/fetch_dxvk.py and scripts/get_weights.py; a tree where those did not
+# run carries short text files instead, which pass an is_file() check and would be packaged as
+# a release whose DXVK cannot load and whose third-party licence is not that licence.
+PLACEHOLDER = b"placeholder"
 IGNORE = shutil.ignore_patterns(
     ".git", ".venv", "__pycache__", "*.pyc", "*.pyo", "*.o", "*.obj",
     "*.lib", "*.exp", "*.dll", "*.exe", "*.so*", "*.spv", "*.safetensors",
@@ -59,6 +72,27 @@ def required_shaders(root: Path) -> set[str]:
             names.update(re.findall(r"([A-Za-z0-9_]+\.spv)",
                                     path.read_text(encoding="utf-8", errors="replace")))
     return names
+
+
+def placeholders(root: Path, files: list[Path]) -> list[str]:
+    """The named files that are a fetch stub rather than what they claim to be.
+
+    A release is assembled from `work/`, which is git-ignored and filled by scripts: the DXVK
+    DLLs by `scripts/fetch_dxvk.py`, the MLX-DLSS licence by `scripts/get_weights.py`. When one
+    of those has not run, the tree holds a few dozen bytes of text naming the script that should
+    have written it. That is a file, so a presence check passes, and the release ships a
+    `dxvk/d3d11.dll` no game can load and a third-party licence that is not one. Compare the
+    bytes instead: the stubs are the only files here that start with "placeholder".
+    """
+    stubs = []
+    for path in files:
+        try:
+            with path.open("rb") as handle:
+                if handle.read(len(PLACEHOLDER)).lower() == PLACEHOLDER:
+                    stubs.append(str(path.relative_to(root)))
+        except OSError:
+            continue
+    return stubs
 
 
 def source_commit(root: Path) -> str | None:
@@ -125,8 +159,12 @@ def assemble(root: Path, target: Path, platform: str) -> Path:
         files += [root / "dist-tools" / name for name in WINDOWS_UI]
         files += [root / "src/tools" / name for name in WINDOWS_TOOLS]
     missing = [str(path.relative_to(root)) for path in files if not path.is_file()]
+    missing += [source for source, _ in LICENCES if not (root / source).is_file()]
     if missing:
         raise ValueError("Incomplete build; missing: " + ", ".join(missing))
+    stubs = placeholders(root, files)
+    if stubs:
+        raise ValueError("Fetch these first - they are still placeholder stubs: " + ", ".join(stubs))
 
     target.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".nr-release-", dir=target.parent) as room:
@@ -179,6 +217,13 @@ def assemble(root: Path, target: Path, platform: str) -> Path:
         (stage / "setup.sh").chmod(0o755)
         for name in ("LICENSE", "NOTICE"):
             shutil.copy2(root / name, stage / name)
+        # Beside LICENSE and NOTICE, so a package carries every notice its binaries and sources
+        # point at - `src/gpu/publish.glsl` names `licenses/rdna3-e4m3-MIT.txt` from inside the
+        # release, and the layer links ImGui.
+        for source, destination in LICENCES:
+            path = stage / destination
+            path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(root / source, path)
         shutil.copy2(root / "docs/RELEASE-QUICKSTART.md", stage / "README.md")
         # All copying succeeds before the destination becomes a release. rmdir refuses
         # to remove a destination another process filled while we were assembling.
