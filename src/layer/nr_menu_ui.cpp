@@ -21,6 +21,14 @@
 #include "nr_menu_ui.h"
 
 #include "imgui.h"
+/* For `SetKeyOwner` only.
+ *
+ * It is `[Internal]` in 1.93, but the public shortcut `SetItemKeyOwner` registers an owner only
+ * while the item is hovered or active, and this needs the key claimed while the item is merely
+ * FOCUSED - which is the case the arrows have to work in. The header is a stock part of the
+ * vendored tree; nothing in `third_party/imgui` is patched, and `src/tools/check_imgui_pristine.py`
+ * still passes. */
+#include "imgui_internal.h"
 #include "imgui_impl_vulkan.h"
 
 #include <stdint.h>
@@ -366,11 +374,17 @@ extern "C" NREX_API nrex_ui *nrex_create(void *device_v, void *physical_v, void 
     ImGuiIO &io = ImGui::GetIO();
     io.IniFilename = nullptr;              /* a layer must not write an imgui.ini beside the game */
 
-    /* Key repeat, so holding an arrow walks a value instead of moving it once. These are Windows'
-     * own defaults; ImGui produces the repeat itself from a single press event, which is why the
-     * edge-triggered feed above is what makes this work at all. */
-    io.KeyRepeatDelay = 0.400f;
-    io.KeyRepeatRate  = 0.050f;
+    /* Key repeat, for the keyboard-navigation half of the panel only.
+     *
+     * This decides how fast a held arrow walks FOCUS from row to row (and Tab through the items).
+     * It does not touch value stepping inside a row: that is `nrex_repeat` below, with a delay and
+     * an acceleration of its own, because one fixed rate cannot both leave a single click alone and
+     * cross a knob's whole range in a second.
+     *
+     * Windows' defaults are 0.500 / 0.031. The delay is pulled in a little so a held key does not
+     * read as dead, and the rate is left near enough to the default that a held Tab does not blur. */
+    io.KeyRepeatDelay = 0.300f;
+    io.KeyRepeatRate  = 0.045f;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
 
     /* OptiScaler's look, read off its window: dark, slightly blue, compact rows. */
@@ -578,6 +592,58 @@ static void nrex_hint_tooltip(const char *hint)
     ImGui::PopStyleVar();
 }
 
+/* ------------------------------------------------- hold-to-repeat for the arrow keys
+ *
+ * How a held Left/Right steps a value, and why it is not ImGui's repeat.
+ *
+ * ImGui has a typematic repeat of its own, and 1.93 exposes presets for it
+ * (`ImGuiInputFlags_RepeatRate*`), but every one of them is a FIXED rate behind one global delay.
+ * A settings slider is exactly the shape that breaks, and it breaks in both directions at once:
+ *
+ *   - the stock 500 ms delay means the first repeat of a hold arrives late enough that the key reads
+ *     as "not working at all" (the report: press and hold, nothing happens, give up);
+ *   - winding that delay down globally makes a click land on the repeat, so one tap steps two or
+ *     three values instead of one, and the number jumps about instead of walking.
+ *
+ * So the repeat is computed here, as two rules rather than one number:
+ *
+ *   click   the press steps exactly once, immediately - no timer involved;
+ *   hold    nothing further for `NREX_REPEAT_WARMUP`, then an interval that starts at
+ *           `NREX_REPEAT_FIRST` and shrinks by `NREX_REPEAT_ACCEL` on every repeat down to
+ *           `NREX_REPEAT_MIN`.
+ *
+ * A 175 ms press - longer than most clicks - is therefore still one step and only one, while a
+ * third of a second of holding is already moving at ~75 steps/s. Slow enough at the start to stop
+ * on the number you meant, fast enough that a 0..2 knob is not a fight.
+ *
+ * Timed on a WALL CLOCK, not `ImGui::GetTime()`. The layer feeds ImGui a fixed 1/60 step (the
+ * upstream Vulkan example does the same), so ImGui's clock runs at the frame rate rather than in
+ * seconds: at 30 FPS every interval would double here and at 144 FPS nearly halve. A hold is felt
+ * in real seconds, so it is measured in them. */
+#define NREX_REPEAT_WARMUP 0.140f
+#define NREX_REPEAT_FIRST  0.035f
+#define NREX_REPEAT_ACCEL  0.800f
+#define NREX_REPEAT_MIN    0.013f
+#define NREX_REPEAT_BURST  4      /* steps one frame may apply, so a hitch cannot fling the value */
+
+struct nrex_repeat {
+    int    dir;      /* -1 = left, +1 = right, 0 = idle */
+    float  interval; /* the gap the NEXT repeat is due after */
+    double next;     /* when that repeat is due, in seconds */
+};
+
+static nrex_repeat s_repeat[NREX_MAX_ROWS];
+
+static double nrex_now_seconds(void)
+{
+    static LARGE_INTEGER frequency;
+    static int have_frequency;
+    if (!have_frequency) { QueryPerformanceFrequency(&frequency); have_frequency = 1; }
+    LARGE_INTEGER counter;
+    QueryPerformanceCounter(&counter);
+    return (double)counter.QuadPart / (double)frequency.QuadPart;
+}
+
 /* The panel: one window, a scrolled body of rows, a footer. OptiScaler's arrangement. */
 static void nrex_draw_panel(nrex_ui *u, const char *title, int language,
                             const nrex_row *rows, int count, int selected)
@@ -674,28 +740,69 @@ static void nrex_draw_panel(nrex_ui *u, const char *title, int language,
              *            works, right selects the number box".
              *
              * The second case is why this handler exists: a settings list where you Tab to a row and
-             * then have to press Enter before the arrows do anything reads as broken. `IsKeyPressed`
-             * and NOT `IsItemActive()`, so the two cases stay exclusive and this never fights
-             * ImGui's own slider.
+             * then have to press Enter before the arrows do anything reads as broken.
              *
-             * The step is the row's own `step`, so a value moves by the amount the knob declares
-             * rather than a fixed fraction of its range. ImGui's key repeat supplies hold-to-repeat:
-             * one press event, then KeyRepeatDelay and KeyRepeatRate. */
+             * `IsKeyPressed(key, false)` is the EDGE only, and the hold is timed by `nrex_repeat`
+             * above. `repeat = true` would add ImGui's own timer on top of this one - two
+             * independent repeats on one key, which is what makes a value tick back and forth
+             * instead of walking - and that is the bug this replaced. */
+            nrex_repeat &rep = s_repeat[i];
+            float dir = 0.0f;
+            int steps = 0;
             if (ImGui::IsItemFocused()) {
-                float dir = 0.0f;
-                if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow))  dir = -1.0f;
-                if (ImGui::IsKeyPressed(ImGuiKey_RightArrow)) dir =  1.0f;
-                if (dir != 0.0f) {
-                    float step = (r.step > 0.0f) ? r.step : 0.01f;
-                    float moved = held[i] + dir * step;
-                    if (moved < r.min) moved = r.min;
-                    if (moved > r.max) moved = r.max;
-                    if (moved != held[i]) {
-                        held[i] = moved;
-                        holding[i] = 0;
-                        g_actions |= NREX_ACT_CHANGED;
-                        if (g_rows) { g_rows[i].changed = 1; g_rows[i].value_f = moved; }
+                /* Both arrows belong to this row while it has focus, which is the other half of
+                 * keeping a hold inside the row: ImGui's nav asks for the directional keys with
+                 * `ImGuiKeyOwner_NoOwner` (`NavUpdateCreateMoveRequest`), so an owner is exactly
+                 * what stops it re-targeting focus halfway through a value. Claimed every frame -
+                 * ownership is dropped when the key is released - and harmless to ImGui's own
+                 * slider tweak, which reads the keys through `GetKeyPressedAmount` and does not
+                 * look at ownership at all. */
+                const ImGuiID row_id = ImGui::GetItemID();
+                ImGui::SetKeyOwner(ImGuiKey_LeftArrow,  row_id);
+                ImGui::SetKeyOwner(ImGuiKey_RightArrow, row_id);
+
+                const bool left_press  = ImGui::IsKeyPressed(ImGuiKey_LeftArrow,  false);
+                const bool right_press = ImGui::IsKeyPressed(ImGuiKey_RightArrow, false);
+                const bool left_down   = ImGui::IsKeyDown(ImGuiKey_LeftArrow);
+                const bool right_down  = ImGui::IsKeyDown(ImGuiKey_RightArrow);
+
+                if (left_press || right_press) {
+                    /* the click: one step, and the hold is armed from here */
+                    dir = right_press ? 1.0f : -1.0f;
+                    steps = 1;
+                    rep.dir = right_press ? 1 : -1;
+                    rep.interval = NREX_REPEAT_FIRST;
+                    rep.next = nrex_now_seconds() + NREX_REPEAT_WARMUP + NREX_REPEAT_FIRST;
+                } else if ((rep.dir < 0 && left_down) || (rep.dir > 0 && right_down)) {
+                    /* the hold: catch up on however many repeats are due */
+                    dir = (float)rep.dir;
+                    const double now = nrex_now_seconds();
+                    while (steps < NREX_REPEAT_BURST && now >= rep.next) {
+                        steps++;
+                        rep.interval *= NREX_REPEAT_ACCEL;
+                        if (rep.interval < NREX_REPEAT_MIN) rep.interval = NREX_REPEAT_MIN;
+                        rep.next += rep.interval;
                     }
+                    /* A stall - alt-tab, a load hitch - must not leave the timer seconds behind and
+                     * then fire a burst at full speed: rebase instead. */
+                    if (steps >= NREX_REPEAT_BURST && now > rep.next)
+                        rep.next = now + rep.interval;
+                } else {
+                    rep.dir = 0;
+                }
+            } else {
+                rep.dir = 0;
+            }
+            if (steps > 0) {
+                float step = (r.step > 0.0f) ? r.step : 0.01f;
+                float moved = held[i] + dir * step * (float)steps;
+                if (moved < r.min) moved = r.min;
+                if (moved > r.max) moved = r.max;
+                if (moved != held[i]) {
+                    held[i] = moved;
+                    holding[i] = 0;
+                    g_actions |= NREX_ACT_CHANGED;
+                    if (g_rows) { g_rows[i].changed = 1; g_rows[i].value_f = moved; }
                 }
             }
 
