@@ -42,7 +42,10 @@ When the dated entries grow long, move the older ones into the archive the same 
   2**, 31 blocks against 71, with its own weights. On 10-17 it was read out of `.text` with REA,
   unpacked, and run here, on CPU and on the device, at 0.54-0.58 of A's time. Through the daemon
   its round trip is 0.5-0.8 of A's once the GPU's clock is held up (below, 10-18). That is on
-  branch `newnr`, on GitHub since 10-18; `NR_PRESET=B` picks it (below, 10-17; phase72).
+  branch `newnr`, on GitHub since 10-18; `NR_PRESET=B` picks it (below, 10-17; phase72). On
+  Windows the setup window takes B out of a 310.9.16 DLL and offers it (`a75e5da`, local).
+  Intel's Windows driver clocks a gap-separated frame down too, B's to 865-956 MHz, and Windows
+  has no hint for it yet (below, 10-18, Windows).
 - **Speed on this laptop**, `src/bench/speed_test.py`, network and round trip: 640x360 at 0.4 is
   23 ms and 26-27 ms on both systems; 1920x1080 at 1.0 is 273 and 299 ms on Linux, 384 and 409 on
   Windows, where Intel's compiler loses time in the staged GEMM's loop. The README's table
@@ -124,8 +127,11 @@ under that date. When an item is done, strike it through here and name the commi
 - The GPU's clock: whether Intel's Windows driver also clocks a light network down between
   frames, as Linux's governor did (below, 10-18). The power mode moved the host passes there
   already (10-15). libxmx's hint is Mesa's alone and does nothing on Windows.
-- Preset B: the setup window extracts preset A only. For a 310.9.16 DLL it could also run
-  `src/tools/unpack_preset.py`, and offer `NR_PRESET` (A or B) in `nr-env.txt`. Below, 10-17 later.
+- ~~Preset B: the setup window extracts preset A only. For a 310.9.16 DLL it could also run
+  `src/tools/unpack_preset.py`, and offer `NR_PRESET` (A or B) in `nr-env.txt`~~: `a75e5da`, not
+  yet in a game. Below, 10-18, Windows.
+- Holding the GPU's clock up on Windows, as libxmx does on Linux: no per-process hint found.
+  Below, 10-18, Windows.
 - ~~The unmerged window attention hangs Intel's Windows driver from 32 windows up~~: found and
   avoided on 10-15, and `gpu_window_attention` is in CTest on Windows again. Below, 10-15;
   phase71.
@@ -179,6 +185,47 @@ under that date. When an item is done, strike it through here and name the commi
   runs one subgroup to a workgroup (archive, 09-25).
 
 ---
+
+## `newnr` on Windows: green, B measured, the same clock, and B in the setup window (2026-10-18, branch `newnr`)
+
+The owner brought the Linux agent's list of 10-18; here it is in its order. Intel's driver
+101.9150, mains, "best performance". The figures are in phase72's Windows section.
+
+1. **Build and tests at `9e94be7`.** MSVC build (only the three known C4068 warnings); MinGW
+   CTest 65 of 65; CTest's Python entries against the MSVC build 58 of 58; the Windows tool
+   suites 183 (6 skipped: symlinks need a privilege, the Linux scripts need bash); the window's
+   self-test. `test_resident.py`: B corr 0.987896 (179 passes), A 0.981917.
+2. **B extracted**, the same as Linux's by content: B 281 `72669f54…`, A 649 `6ea1305b…`.
+3. **Speed**, `speed_test.py`, network and round trip: 640x360 at 0.4 A 24-27 / 28-31 ms, B
+   12 / 15; 1920x1080 at 1.0 A 381-404 / 406-429, B 187-202 / 212-227. B's network takes
+   0.46-0.53 of A's.
+4. **The clock: yes, as on Linux.** Level Zero's sysman reads it here. Back to back both presets
+   hold 1950 MHz. With 25 ms between frames B runs at 865-956 MHz at 1280x720 (A at 1533-1740),
+   and its round trip goes from 22-23 ms to 37-39 (A from 39-42 to 42-45). No per-process hint
+   like Mesa's was found for Windows; not addressed.
+5. **B in the setup window, `a75e5da`.**
+   - Install NR takes B out of a DLL of 310.9.16.0 or later, beside A, through
+     `src/tools/unpack_preset.py`; the release now carries it at that path. If B fails while
+     the profile runs A, NR installs with A and a warning; with B chosen, B's failure stops the
+     install, as A's does.
+   - NR controls → Network offers A and B, B only when its weights are there. The choice is
+     saved as frame pacing is: `NR_PRESET` in `nr-env.txt`, which the proxy sets in the game's
+     process.
+   - The speed test runs the chosen preset and says which. 310.9.16.0 joins 310.8.0.0 as a
+     tested DLL.
+   - Checked: the tool suites 187 (four new tests), the self-test (73 controls, 171 keys), and
+     end to end from a release built here, on a stand-in game, with the real DLL. Both presets'
+     weights came out equal by content; `NR_PRESET` was A, then B; the speed test ran on B
+     (31 blocks); Remove NR left the folder as it was. `build_check`, `claims_check` and
+     `publish_check` pass.
+
+**Not tested:** B in a game on Windows; the window clicked through by hand (its self-test and
+the bridge are tested); B from the Linux release's `setup.sh`, which extracts A only.
+
+**Next on Linux:** `make test` and CTest at the head. `build_release.py` and the setup window's
+suites changed; the Linux runtime did not. `live_rates.py` could take a named-pipe arm, as
+`speed_test.py` has; Windows used a scratch copy. **Next on Windows:** B in a game, with the
+owner there.
 
 ## Preset B through the daemon, and the GPU's clock (2026-10-18, branch `newnr`)
 

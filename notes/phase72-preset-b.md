@@ -294,6 +294,58 @@ come back changed 2.0-2.2 times as much under A and 1.2-1.4 times under B. The h
 covers only the byte-identical pixels (2.3 % of this capture, 7.7 % more within one level);
 whether a tolerance there would help is not tried. One capture, one game.
 
+## On Windows: B's graph, its speed, and the same clock (2026-10-18)
+
+Intel's driver 101.9150, mains power, Windows' "best performance", quiet (`quiet-check.ps1`).
+
+**The weights and the graph.** `unpack_preset.py` on the same DLL gives Linux's tensors by
+content (B 281, `72669f54…`; A 649, `6ea1305b…`), and so does the setup window's Install NR
+from a release built here. `test_resident.py` on Intel's driver: B tracks its CPU reference at
+corr 0.987896 over 179 passes, A at 0.981917 over 415.
+
+**Speed**, `speed_test.py --preset` on the MSVC build with a release's Python 3.12, presets
+alternating, two runs each, network and round trip in ms:
+
+| window | scale | A | B |
+| --- | --- | --- | --- |
+| 640x360 | 0.4 | 24-27 / 28-31 | 12 / 15 |
+| 800x450 | 0.4 | 24-28 / 28-32 | 12 / 16 |
+| 1280x720 | 0.4 | 32-34 / 39-41 | 16 / 23 |
+| 1920x1080 | 0.4 | 60-64 / 75-79 | 31 / 45 |
+| 640x360 | 1.0 | 43-50 / 48-53 | 23 / 27 |
+| 800x450 | 1.0 | 69-73 / 75-79 | 36 / 42 |
+| 1280x720 | 1.0 | 169-185 / 181-198 | 87 / 99-100 |
+| 1920x1080 | 1.0 | 381-404 / 406-429 | 187-202 / 212-227 |
+
+B's network takes 0.46-0.53 of A's here, against 0.54-0.58 on Linux. At the small fields B
+matches Linux (12 ms against 11-15). At full scale both presets are slower than on Linux, A by
+1.4x at 1080p, as the graph has been on Intel's compiler (phase71).
+
+**The clock: Intel's Windows driver also clocks the GPU down between frames, and further for
+B.** `live_rates.py` speaks AF_UNIX only, so `work/tools-win/live_rates_pipe.py` (scratch, not
+tracked) runs its frames, warm-up and median over the daemon's named pipe. The daemon is
+started as `speed_test.py` starts it. The GPU's frequency and busy time come from Level Zero's
+sysman in Intel's driver (`ze_loader.dll`: `zesFrequencyGetState`, `zesEngineGetActivity`; GPU
+domain 100-1950 MHz). 1280x720 and 640x360 at 0.4, 25 warm-up frames and 30 timed, two runs
+each:
+
+| between frames | A: round trip, MHz while busy | B: round trip, MHz while busy |
+| --- | --- | --- |
+| none: frames made first, sent back to back | 39-42 / 30-32 ms, 1908-1950 / 1872-1950 | 22-23 / 15-16 ms, 1950 / 1949-1950 |
+| making each one (23 / 5 ms) | 40-43 / 28 ms, 1729-1878 / 1947-1950 | 24-34 / 17-36 ms, 1105-1950 / 656-1950 |
+| making it, then 25 ms | 42-45 / 30-32 ms, 1533-1740 / 1752-1896 | 37-39 / 25-28 ms, 865-956 / 901-1029 |
+
+Two runs without the clock reader, made earlier, gave the same round trips: at 1280x720, A 41-42
+→ 49-50 ms with the 25 ms wait and B 33-39 → 32-38. The daemon's own split there put B's
+network at 26-30 ms against 16 back to back. With the gap, B's round trip at 1280x720 is 0.9 of
+A's instead of 0.55. As on Linux without the hint, a case reads differently from run to run:
+B with fresh frames held 1950 MHz in one run and fell to 1105 / 656 in the other.
+
+No per-process hint like Mesa's `force_guc_low_latency` was found for Intel's Windows driver.
+Vulkan has none. Level Zero's `zesFrequencySetRange` would set the device's range for every
+program, and is a system setting. Not addressed. The reader stalls single frames by 0.5-1 s
+(the maxima of its runs), so its runs are for the clock, and the earlier runs for the times.
+
 ## Not established
 
 - **The vendor's own output for B.** Nothing here was compared with NVIDIA's B. That needs
@@ -303,7 +355,9 @@ whether a tolerance there would help is not tried. One capture, one game.
   mask blend modes, above.)
 - B in a game. The daemon runs it with `NR_PRESET=B`, which has not been tried in a game, and
   neither has the clock hint.
-- Windows. The setup window extracts preset A only.
+- B in a game on Windows. The setup window takes B out of a 310.9.16 DLL and offers it
+  (`a75e5da`): checked from a release built here, on a stand-in game, with no game run.
+- Holding the clock up on Windows.
 
 ## Reproduce
 
