@@ -46,6 +46,7 @@
 #include "nr_menu.h"
 #include "nr_menu_bridge.h"
 #include "nr_menu_ui.h"
+#include "nr_raw_mouse.h"
 #include "nr_focus.h"
 /* The string tables and the codepoint collector: the UI's font atlas is built from the menu's own
  * text, so this file needs to reach them. */
@@ -229,6 +230,34 @@ struct device_data {
 	int menu_ui_l_was_down;         /* L's previous state: the language key is level-polled, so
 	                                 * cycling it needs an edge of its own */
 	int menu_ui_ins_was_down;       /* the same, for INS: the panel's only way in */
+	/* The same, for the three keys the ImGui build has to own itself.
+	 *
+	 * `nr_menu_update` reads them inside `if (m->open && m->read_keys)`, and the ImGui build sets
+	 * `read_keys` to 0 so that the panel's own reader and this one do not both act on one
+	 * keypress. The consequence nobody noticed is that S, R and the effect toggle were inside
+	 * that block too, so all three stopped working the moment the panel became ImGui's: the
+	 * report was "S does not save, R does not reset, END does nothing", with the panel drawing
+	 * and its buttons working fine. INS and L already live here for the same reason and kept
+	 * working, which is what makes this the odd one out rather than the pattern.
+	 *
+	 * Home is the effect toggle. It was END, and END is bound by enough games that the key
+	 * never arrived; Home was the comparison, and the comparison is what this replaces - so
+	 * the key is free and already means "change the picture", which is what the toggle does. */
+	int menu_ui_toggle_was_down;
+	int menu_ui_save_was_down;
+	int menu_ui_reset_was_down;
+	/* The pointer the panel uses, in swapchain pixels, read from the system cursor while the
+	 * panel owns it (see `menu_ui_mouse`: the layer confines the cursor to the window and writes
+	 * its position every frame, so this is one source of truth rather than an accumulated guess).
+	 *
+	 * Only meaningful while `menu_ui_have_pointer` is set. */
+	/* Whether the OS pointer is currently hidden for the panel. `ShowCursor` is a counter,
+	 * so it is pushed down once on open and restored once on close rather than every frame. */
+	int menu_ui_cursor_hidden;
+	float menu_ui_pointer_x;
+	float menu_ui_pointer_y;
+	int menu_ui_have_pointer;
+	POINT menu_ui_last_cursor;          /* the OS position the last delta was measured from */
 	/* When this device's panel was last drawn, in seconds from the same clock `nrex_repeat`
 	 * uses, so ImGui's keyboard repeat is timed on the real interval between presents.
 	 *
@@ -2437,6 +2466,12 @@ static void menu_ui_mouse(struct device_data *data, struct swapchain_data *chain
 	 * modifiers and returns before touching any widget.
 	 *
 	 * The window is resolved first so the focus test has something to compare against. */
+	/* The panel's ownership of the system cursor. The RELEASE is not done here: this function
+	 * only runs on the frames the panel is open (`menu_composite` is what calls it), so a release
+	 * here would never run at the one moment it is needed. It lives in `menu_read_keys`, which
+	 * runs every frame whether the panel is open or shut. */
+	int panel_open = data->menu && nr_menu_is_open(data->menu);
+
 	HWND hwnd = window_for_thread_for_ui();
 	if (!hwnd) UI_MOUSE_STOP(2, "no window for this process");
 	if (!window_is_foreground(hwnd)) {
@@ -2446,11 +2481,23 @@ static void menu_ui_mouse(struct device_data *data, struct swapchain_data *chain
 		 * Ctrl+Tab in the other window and released it there. */
 		nrex_mouse(data->menu_ui, -1.0f, -1.0f, 0);
 		nrex_set_software_cursor(data->menu_ui, 0);
+		/* The panel is still open but another window has the focus, so the pointer belongs to that
+		 * window: give it back. The layer re-takes it on the first frame the game is in front
+		 * again, and a cursor confined to a game nobody is looking at is the one thing that would
+		 * be worse than the bug this is fixing. */
+		if (data->menu_ui_cursor_hidden) {
+			ShowCursor(TRUE);
+			data->menu_ui_cursor_hidden = 0;
+			ClipCursor(NULL);
+			data->menu_ui_have_pointer = 0;
+			nr_raw_mouse_stop();
+		}
 		return;
 	}
 
 	POINT screen = {0, 0};
 	if (!GetCursorPos(&screen)) UI_MOUSE_STOP(1, "GetCursorPos failed");
+
 
 	/* Where the game's client area is on screen, and how large. */
 	POINT origin = {0, 0};
@@ -2482,34 +2529,209 @@ static void menu_ui_mouse(struct device_data *data, struct swapchain_data *chain
 	 * the common case, and this is what keeps the pointer aligned when it does. */
 	float sx = (float)chain->extent.width / cw;
 	float sy = (float)chain->extent.height / ch;
-	float x = ((float)screen.x - (float)origin.x) * sx;
-	float y = ((float)screen.y - (float)origin.y) * sy;
+
+	/* The pointer, in the picture's own coordinates.
+	 *
+	 * While the panel is open the layer OWNS the system cursor: it confines it to the game's
+	 * client area and writes its position every frame. That is the alternative to hooking, which
+	 * this project does not do, and it removes the problem instead of competing over it.
+	 *
+	 * Why ownership is needed. A game in a relative-input mode calls `SetCursorPos` back to its
+	 * centre every frame and aims with the movement. Two writers to one cursor is a race, and
+	 * everything that went wrong before came from losing it:
+	 *
+	 *   - the OS pointer was dragged to the centre, so `GetCursorPos` answered "centre" forever
+	 *     and the panel's arrow sat there while the hand moved;
+	 *   - accumulating raw movement to compensate gave the layer a SECOND opinion about where the
+	 *     pointer is - one that drifts from the game's, that keeps moving after the real pointer
+	 *     has been stopped at the window edge, and that cannot be corrected without disagreeing
+	 *     with itself. That is the "pinned but not at the centre" the report described: not the
+	 *     game's centre, but a position the layer had invented and could not resynchronise;
+	 *   - and the game's cursor and the panel's were in different places, so the one being
+	 *     clicked was not the one being seen.
+	 *
+	 * Confining and then WRITING the position settles all three by removing the race rather than
+	 * winning it per frame: `ClipCursor` means the position can never leave the picture, so there
+	 * is no drift to accumulate and no edge to run past, and reading it back gives one source of
+	 * truth - the OS one - instead of two.
+	 *
+	 * The game's own mouse-look is not silenced by this, and cannot be without hooking. What it
+	 * gets is a pointer that only ever moves inside the window, which is the reachable part of
+	 * "the panel has the mouse". */
+	float x, y;
+	if (panel_open) {
+		/* The panel takes the pointer away from the game, and keeps it.
+		 *
+		 * The measured shape of the failure: the layer wrote the position every frame and the
+		 * write took (`read == wrote == after`), yet a second later the position was back at the
+		 * game's centre. The race was not lost per frame - it was lost BETWEEN frames. A game in
+		 * a relative-input mode re-centres the cursor whenever it likes, and the centre is inside
+		 * the client area, so a clip covering the client area permits it. Confirming a write is
+		 * only proof that it landed, not that it survived.
+		 *
+		 * So the cursor is not raced for at all: it is pinned. `ClipCursor` to a ONE PIXEL box at
+		 * the panel's pointer position means the OS clamps every attempted move - the game's to
+		 * the centre, the hardware's from the mouse - straight back onto that pixel. The game
+		 * cannot move it, so it stops trying to interpret it, and the pointer the player sees is
+		 * the only one that moves.
+		 *
+		 * That pixel then has to travel with the pointer, which is what `menu_ui_pointer_x/y`
+		 * does: it is the panel's own position, advanced by how far the MOUSE moved, which is
+		 * independent of where the cursor is being held. Seeded once from the real cursor when
+		 * the panel opens, so the pointer does not jump.
+		 *
+		 * With the panel closed none of this runs - the clip is released and the game gets its
+		 * cursor back (see the release at the top of this function).
+		 */
+		if (!data->menu_ui_have_pointer) {
+			/* Seed from the real pointer, once, so the panel's starts where the hand is, and
+			 * start listening for raw movement before the first delta is asked for. */
+			data->menu_ui_pointer_x = ((float)screen.x - (float)origin.x) * sx;
+			data->menu_ui_pointer_y = ((float)screen.y - (float)origin.y) * sy;
+			data->menu_ui_last_cursor = screen;
+			data->menu_ui_have_pointer = 1;
+			nr_raw_mouse_start();
+		}
+
+		/* Advance by how far the MOUSE moved, read from raw input.
+		 *
+		 * `GetCursorPos` cannot answer this once the cursor is pinned: it returns the pin. Raw
+		 * input still carries the movement, because it describes the device rather than the
+		 * pointer, and it is the same stream the game aims with - so this is the one number that
+		 * is right in both modes and needs no reconciliation with anything.
+		 *
+		 * `raw_gain` converts mouse counts to pixels. A mouse at 800 DPI reports about 800 counts
+		 * per inch; 0.5 makes a full sweep of a 800-pixel-wide picture take about two inches of
+		 * hand travel, which is the range a settings panel wants. */
+		{
+			int rdx = 0, rdy = 0;
+			if (nr_raw_mouse_take(&rdx, &rdy)) {
+				const float raw_gain = 0.5f;
+				data->menu_ui_pointer_x += (float)rdx * raw_gain * sx;
+				data->menu_ui_pointer_y += (float)rdy * raw_gain * sy;
+			}
+		}
+
+		/* Clamp to the picture: outside it there is no panel to point at, and the pin would be
+		 * somewhere the player cannot see. */
+		if (data->menu_ui_pointer_x < 0.0f) data->menu_ui_pointer_x = 0.0f;
+		if (data->menu_ui_pointer_y < 0.0f) data->menu_ui_pointer_y = 0.0f;
+		if (data->menu_ui_pointer_x > (float)chain->extent.width - 1.0f)
+			data->menu_ui_pointer_x = (float)chain->extent.width - 1.0f;
+		if (data->menu_ui_pointer_y > (float)chain->extent.height - 1.0f)
+			data->menu_ui_pointer_y = (float)chain->extent.height - 1.0f;
+
+		/* Pin: hide the OS pointer (the panel draws its own) and hold the real one inside a
+		 * one-pixel box at the panel's position. `ClipCursor` is in SCREEN coordinates. */
+		if (!data->menu_ui_cursor_hidden) {
+			while (ShowCursor(FALSE) >= 0) { /* push until it is off */ }
+			data->menu_ui_cursor_hidden = 1;
+		}
+		{
+			POINT pin;
+			pin.x = origin.x + (sx > 0.0f ? (LONG)(data->menu_ui_pointer_x / sx) : 0);
+			pin.y = origin.y + (sy > 0.0f ? (LONG)(data->menu_ui_pointer_y / sy) : 0);
+			RECT box;
+			box.left = pin.x;
+			box.top = pin.y;
+			box.right = pin.x + 1;
+			box.bottom = pin.y + 1;
+			RECT held;
+			if (!GetClipCursor(&held) ||
+			    held.left != box.left || held.top != box.top ||
+			    held.right != box.right || held.bottom != box.bottom) {
+				ClipCursor(&box);
+			}
+			/* And put it there, so a re-centre that happened before the pin is undone now. */
+			SetCursorPos(pin.x, pin.y);
+		}
+
+		x = data->menu_ui_pointer_x;
+		y = data->menu_ui_pointer_y;
+	} else {
+		x = ((float)screen.x - (float)origin.x) * sx;
+		y = ((float)screen.y - (float)origin.y) * sy;
+	}
+	data->menu_ui_last_cursor = screen;
 
 	int down = (GetAsyncKeyState(0x01) & 0x8000) != 0;
 	nrex_mouse(data->menu_ui, x, y, down);
 
 	/* And whether the menu has to draw the pointer itself.
 	 *
-	 * The game owns the OS cursor: ShowCursor is a per-process counter it can leave off, and a
-	 * fullscreen title usually paints its own or confines the hardware one. Neither is something a
-	 * layer can undo, so when Windows says the cursor is not showing, the panel draws one. Asked
-	 * every frame because the game shows and hides it as it likes.
+	 * `GetCursorInfo`'s CURSOR_SHOWING is NOT the question, and asking it is what left the panel
+	 * with no pointer in the game that reported this.
+	 *
+	 * It was the obvious test: the flag looks like "is the cursor on screen". It answers "is the
+	 * cursor shown for THIS DESKTOP", and under Vulkan exclusive fullscreen it stays set while the
+	 * pointer is nowhere to be seen - the compositor that would draw it has been taken out, and the
+	 * game, which draws its own pointer during play, draws none while a menu takes the mouse. This
+	 * was measured in the game: `flags = 1` from outside the process, at the pointer's real
+	 * position, with no pointer visible in the picture. It is a known Vulkan-wide behaviour, not a
+	 * quirk of this game (Dota 2 and Path of Exile report the same thing).
+	 *
+	 * So the panel draws its own pointer whenever it is the one that has the mouse - which is the
+	 * whole of the time it is open, because the layer reports "no position" to ImGui otherwise.
+	 * The game's cursor is not double-drawn by this: the game hides or draws its own while the
+	 * panel has the pointer, and this is the arrow for the panel's own widgets.
 	 *
 	 * The hint goes with it, and it is not the same thing as the position above: that one is
 	 * "no position" outside the image, so a widget is never hovered from off-panel. ImGui draws its
-	 * cursor only when it HAS a position, so without the hint the fallback arrow appeared only over
-	 * the panel - the one place the user is not looking for it. */
-	CURSORINFO ci;
-	ci.cbSize = sizeof ci;
-	int cursor_visible = GetCursorInfo(&ci) && (ci.flags & CURSOR_SHOWING);
-	nrex_set_software_cursor(data->menu_ui, !cursor_visible);
-	if (!cursor_visible)
+	 * cursor only when it HAS a position, so without the hint the arrow appeared only over the
+	 * panel - the one place the user is not looking for it. */
+	nrex_set_software_cursor(data->menu_ui, panel_open);
+	if (panel_open)
 		nrex_cursor_hint(data->menu_ui, x, y);
+}
+
+/* Turn the effect on or off, by creating or removing the trigger file the present path reads.
+ *
+ * One function because there are now three ways in - the Home key, the panel's checkbox, and
+ * whatever comes next - and they must not each spell the file handling out. A zero-byte file is
+ * "on" and its absence is "off"; nothing else is written, so nothing can go stale. */
+static void set_trigger(const char *path, int on)
+{
+	if (!path || !*path) return;
+	if (on) {
+		FILE *f = fopen(path, "wb");
+		if (f) fclose(f);
+	} else {
+		if (access(path, F_OK) == 0) remove(path);
+	}
+}
+
+/* Hand the system cursor back, if the panel is holding it.
+ *
+ * Called from `menu_read_keys` because that is the one place that runs EVERY frame, open or shut.
+ * It used to live in `menu_ui_mouse`, which only runs while `menu_composite` does - that is,
+ * while the panel is open - so the release never executed at the one moment it was needed. The
+ * cursor stayed pinned in its one-pixel box after the panel closed and the player could not move
+ * the mouse at all; the raw-input queue meanwhile kept accumulating, so reopening the panel
+ * replayed every movement made while it was shut.
+ *
+ * `ClipCursor` and `ShowCursor` are PROCESS state, not per-window: leaking either one leaves a
+ * cursor that cannot leave the game or cannot be seen, and the only way back is to end the
+ * process. So this is driven by "is the panel open" alone, not by whether anything else
+ * succeeded.
+ */
+static void menu_cursor_release(struct device_data *data)
+{
+	if (!data) return;
+	if (data->menu && nr_menu_is_open(data->menu)) return;   /* still the panel's */
+	if (!data->menu_ui_cursor_hidden) return;
+	ShowCursor(TRUE);
+	data->menu_ui_cursor_hidden = 0;
+	ClipCursor(NULL);
+	data->menu_ui_have_pointer = 0;
+	nr_raw_mouse_stop();
 }
 
 static int menu_read_keys(struct device_data *data)
 {
 	if (!data->menu) return 0;
+
+	/* Before anything else: a closed panel must never leave the pointer captured. */
+	menu_cursor_release(data);
 
 	/* The keyboard is system-wide too, so the ImGui feed gets the same gate as the pointer.
 	 *
@@ -2566,6 +2788,51 @@ static int menu_read_keys(struct device_data *data)
 		data->menu_ui_ins_was_down = down;
 	}
 
+	/* Home, S and R, which the ImGui build has to read itself.
+	 *
+	 * All three are inside `nr_menu_update`'s `m->open && m->read_keys` block, and `read_keys`
+	 * is 0 here - so the panel drew, its buttons worked, and none of the three keys did. INS
+	 * and L are already read at this level for exactly that reason, so these join them rather
+	 * than inventing a second mechanism.
+	 *
+	 * They go through the menu's own flags, not straight to the effect: `nr_menu_take_*` is
+	 * what the bridge polls, and routing the keys there keeps the key and the panel's button
+	 * on one path - a button that saves and a key that does something else is the bug this
+	 * project has already paid for twice.
+	 *
+	 * Home is the effect toggle, not END. END never arrived in the games that were tried:
+	 * the key is bound by enough of them that the layer saw nothing. Home was the picture
+	 * comparison, which is what this replaces, so the key is free and already means "change
+	 * what I am looking at" - which is what turning the effect on and off does.
+	 *
+	 * Read only while the panel is open, for S and R, so a game with its own binding keeps
+	 * it: the menu is a settings surface, and stealing a key from the game when the player is
+	 * not looking at settings is the worse trade. INS and L are exempt because the panel
+	 * cannot be opened without INS.
+	 *
+	 * Home is exempt with them: turning the effect off to get the frames back is something a
+	 * player does mid-game, with the panel closed. Putting it behind the panel would mean
+	 * opening settings to stop the thing that is making the game slow - which is the one thing
+	 * an effect-off key must not require. */
+	if (data->menu_ui) {
+		int toggle = (GetAsyncKeyState(0x24) & 0x8000) != 0;
+		if (toggle && !data->menu_ui_toggle_was_down)
+			nr_menu_inject_toggle(data->menu);
+		data->menu_ui_toggle_was_down = toggle;
+	}
+
+	if (data->menu_ui && nr_menu_is_open(data->menu)) {
+		int save = (GetAsyncKeyState('S') & 0x8000) != 0;
+		if (save && !data->menu_ui_save_was_down)
+			nr_menu_inject_save(data->menu);
+		data->menu_ui_save_was_down = save;
+
+		int reset = (GetAsyncKeyState('R') & 0x8000) != 0;
+		if (reset && !data->menu_ui_reset_was_down)
+			nr_menu_inject_reset(data->menu);
+		data->menu_ui_reset_was_down = reset;
+	}
+
 	if (data->menu_bridge) {
 		int state = nr_menu_bridge_update(data->menu_bridge, 1.0f / 60.0f);
 		if (state == 2)
@@ -2578,12 +2845,11 @@ static int menu_read_keys(struct device_data *data)
 	/* The toggle moves the trigger the layer already reads every frame. The menu reports the
 	 * press and this is what acts on it, because the trigger is the layer's. */
 	if (nr_menu_take_toggle_request(data->menu) && trigger_path && *trigger_path) {
-		if (access(trigger_path, F_OK) == 0) {
-			remove(trigger_path);
-		} else {
-			FILE *f = fopen(trigger_path, "wb");
-			if (f) fclose(f);
-		}
+		int on = !(access(trigger_path, F_OK) == 0);
+		set_trigger(trigger_path, on);
+		/* The saved choice follows the key, so a Save after pressing Home writes what the
+		 * player just chose rather than what the panel last happened to show. */
+		nr_menu_bridge_set_nr_saved(data->menu_bridge, on);
 	}
 
 	/* Tell the menu whether NR is on, so its status line is the truth rather than a guess. */
@@ -2819,6 +3085,10 @@ static int menu_composite(struct device_data *data, struct swapchain_data *chain
 		 * `nr_menu_language` is the same accessor the L key reads to step the value, so the two
 		 * cannot disagree about which language is showing. */
 		nrex_begin_panel(data->menu_ui, "DLSS-NR on Intel", nr_menu_language(data->menu));
+		/* The effect, as the layer sees it. -1 when this install has no trigger path, so the
+		 * checkbox can show "unknown" instead of claiming the effect is off. */
+		nrex_set_nr_enabled(data->menu_ui,
+					(trigger_path && *trigger_path) ? (access(trigger_path, F_OK) == 0) : -1);
 		nrex_rows(data->menu_ui, rows, count, nr_menu_selected(data->menu));
 		int acted = nrex_end_panel(data->menu_ui);
 
@@ -2840,6 +3110,18 @@ static int menu_composite(struct device_data *data, struct swapchain_data *chain
 		/* Reset is the menu's own flag: nr_menu_take_reset is what the bridge polls, and setting
 		 * it here puts the button through the same path the R key takes. */
 		if (acted & NREX_ACT_RESET) nr_menu_inject_reset(data->menu);
+		/* Revert: back to the SAVED settings. Through the menu's flag, like Reset, so the
+			 * button and any future key share one path. */
+		if (acted & NREX_ACT_REVERT) nr_menu_inject_revert(data->menu);
+		/* The effect checkbox. It moves the same trigger the Home key and the setup window
+			 * move - one place, so the three cannot disagree - and records the choice for Save. */
+		if (acted & NREX_ACT_NR_TOGGLE) {
+			int want = nrex_nr_toggle_request(data->menu_ui) > 0;
+			nr_menu_bridge_set_nr_saved(data->menu_bridge, want);
+			if (trigger_path && *trigger_path) {
+				set_trigger(trigger_path, want);
+			}
+		}
 		/* Close, through the same path INS uses.
 		 *
 		 * The button reported this action and nothing consumed it, so pressing Close did nothing at

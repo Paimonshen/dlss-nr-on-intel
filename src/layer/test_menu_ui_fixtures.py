@@ -17,6 +17,18 @@ What each fixture answers, and why it is a separate program:
                    panel frame, action bits, bridge update. Links the real nr_menu.c,
                    nr_menu_bridge.c and the generated strings.
 
+  test_menu_language
+                   whether the panel's selector shows the language its ROWS are drawn in. A
+                   settings file saying `menu_language: 1` gave Chinese rows beside an "English"
+                   selector: the bridge held the value and the menu held a second copy that
+                   nothing updated after start-up.
+
+  test_menu_keys   the panel's hotkeys, by structure. S, R and the effect toggle were dead
+                   because their reads sat inside `if (m->open && m->read_keys)` and the ImGui
+                   build turns `read_keys` off; two other shapes of test passed with that bug in
+                   place, so this one asserts where the reads live in the source. It runs from
+                   the repository root because that is where it reads them from.
+
 Both are Windows-only and both need no GPU: they create no Vulkan device, only an ImGui
 context. On another platform, or with no compiler to have built them, this reports a FAILURE
 rather than a skip - a check that cannot run is not a check that passed, and the two fixtures
@@ -33,7 +45,11 @@ ROOT = Path(__file__).resolve().parents[2]
 WORK = ROOT / "work"
 # The panel's frames sleep to make their hold timings real, so the budget is generous; a
 # fixture that hangs is a failure, not a timeout nobody reports.
-FIXTURES = ("test_menu_panel", "test_menu_side")
+FIXTURES = ("test_menu_panel", "test_menu_side", "test_menu_keys", "test_menu_language",
+            "test_menu_actions")
+# The ones that must run from the repository root, because they read the sources there rather
+# than driving a linked copy of them.
+FROM_ROOT = frozenset({"test_menu_keys", "test_menu_language"})
 TIMEOUT = 600
 
 
@@ -53,20 +69,26 @@ def run(fixture: str) -> tuple[bool, str]:
     executable = WORK / f"{fixture}.exe"
     if not executable.is_file():
         return False, f"{executable} is missing - tools\\build_win.bat builds it"
-    room = Path(os.environ.get("TEMP", ".")) / f"nr-menu-fixture-{os.getpid()}"
-    room.mkdir(parents=True, exist_ok=True)
+    if fixture in FROM_ROOT:
+        # Reads src/layer/nr_menu.c and nr_layer.c by a relative path, so it runs where they
+        # are. A scratch folder would make it report "not readable" and look like a red test.
+        room = ROOT
+    else:
+        room = Path(os.environ.get("TEMP", ".")) / f"nr-menu-fixture-{os.getpid()}"
+        room.mkdir(parents=True, exist_ok=True)
     try:
         done = subprocess.run([str(executable)], cwd=room, capture_output=True, text=True,
                               encoding="utf-8", errors="replace", timeout=TIMEOUT)
     except subprocess.TimeoutExpired:
         return False, f"no answer within {TIMEOUT} s"
     finally:
-        try:
-            for leftover in room.iterdir():
-                leftover.unlink()
-            room.rmdir()
-        except OSError:
-            pass
+        if fixture not in FROM_ROOT:
+            try:
+                for leftover in room.iterdir():
+                    leftover.unlink()
+                room.rmdir()
+            except OSError:
+                pass
     output = (done.stdout + done.stderr).strip()
     if done.returncode != 0:
         return False, f"exit {done.returncode}\n{output[-3000:]}"

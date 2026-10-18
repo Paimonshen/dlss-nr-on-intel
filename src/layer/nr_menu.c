@@ -224,6 +224,7 @@ gb10a2, which changes how a colour constant is packed -
     int step;
     int save_pressed;
     int reset_pressed;
+    int revert_pressed;
     int language_changed;
     int toggle_pressed;
     int compare_changed;
@@ -261,8 +262,13 @@ gb10a2, which changes how a colour constant is packed -
 #define NR_KEY_R       0x52
 #define NR_KEY_C       0x43
 #define NR_KEY_ESC     0x1B
-#define NR_KEY_TOGGLE  0x23   /* END  - neural rendering on or off */
-#define NR_KEY_COMPARE 0x24   /* HOME - the picture comparison */
+/* Home - neural rendering on or off.
+ *
+ * It was END, and END is bound by enough games that the key never reached the layer: the report
+ * was "END does nothing" while the panel beside it worked. Home was the picture comparison,
+ * and the comparison is gone - so the key is free, it already means "change what I am looking
+ * at", and turning the effect on and off is that. */
+#define NR_KEY_TOGGLE  0x24
 
 static int key_pressed(nr_menu *m, int vk)
 {
@@ -888,16 +894,33 @@ int nr_menu_update(nr_menu *m, float frame_seconds)
     m->elapsed += frame_seconds;
 
     /* The three that act with the menu closed. A game keeps its own input for everything else,
-     * which is why these are polled first and the rest only inside the `if`. */
+     * which is why these are polled first and the rest only inside the `if`.
+     *
+     * The toggle is one of them and stays here: the bridge polls it with the panel closed, and
+     * the ImGui build reaches it through `nr_menu_inject_toggle` from the layer's own reader -
+     * this line is the hand-drawn path's version of the same request. */
     /* INS opens and closes the panel. In the ImGui build the panel is ImGui's window and this
      * reader must not also act on the same key - two owners of one key is what made Enter open a
      * combo and change the value behind it at the same time. `nr_menu_set_key_reading` is how the
      * layer says which build is running. */
     if (m->read_keys && key_pressed(m, NR_KEY_INS)) m->open = !m->open;
     if (key_pressed(m, NR_KEY_TOGGLE)) m->toggle_pressed = 1;
-    if (key_pressed(m, NR_KEY_COMPARE)) {
-        m->compare_mode = (m->compare_mode + 1) % NR_MENU_COMPARE_COUNT;
-        m->compare_changed = 1;
+
+    /* S and R, outside the `read_keys` block, because they were inside it and that is what
+     * killed them.
+     *
+     * The ImGui build sets `read_keys` to 0, so the whole block below is skipped and these two
+     * keys did nothing at all: the report was "S does not save, R does not reset" with the panel
+     * open and its buttons working. They belong with the always-on keys rather than with the
+     * panel's own navigation - a Save that only works when a particular reader is enabled is
+     * not a Save key, it is a half of one.
+     *
+     * Still gated on the panel being OPEN, so a game that binds S or R keeps its own binding
+     * while the player is playing: the menu is a settings surface and stealing a key from the
+     * game when nobody is looking at settings is the worse trade. */
+    if (m->open) {
+        if (key_pressed(m, NR_KEY_S)) m->save_pressed = 1;
+        if (key_pressed(m, NR_KEY_R)) m->reset_pressed = 1;
     }
 
     int was_open = m->open;
@@ -909,25 +932,11 @@ int nr_menu_update(nr_menu *m, float frame_seconds)
         if (key_pressed(m, NR_KEY_LEFT))  m->step = -1;
         if (key_pressed(m, NR_KEY_RIGHT)) m->step = +1;
         if (key_pressed(m, NR_KEY_ENTER)) m->step = +1;
-        if (key_pressed(m, NR_KEY_S)) m->save_pressed = 1;
-        if (key_pressed(m, NR_KEY_R)) m->reset_pressed = 1;
-        if (key_pressed(m, NR_KEY_C)) {
-            m->compare_mode = (m->compare_mode + 1) % NR_MENU_COMPARE_COUNT;
-            m->compare_changed = 1;
-        }
         if (key_pressed(m, NR_KEY_L)) {
             m->language = (m->language + 1) % NR_MENU_LANG_COUNT;
             m->language_changed = 1;
         }
         if (key_pressed(m, NR_KEY_ESC)) m->open = 0;
-
-        /* Shift and an arrow move the split, and are the one key pair the menu wants held rather
-         * than tapped - a wipe is adjusted by eye, not by counting presses. Shift is what
-         * separates them from the arrow keys that move the cursor. */
-        if (key_down(m, NR_KEY_SHIFT) && m->compare_mode != NR_MENU_COMPARE_OFF) {
-            if (key_down(m, NR_KEY_LEFT))  m->split_step = -1.0f;
-            if (key_down(m, NR_KEY_RIGHT)) m->split_step = +1.0f;
-        }
     }
     if (m->open != was_open) return 2;
     return m->open ? 1 : 0;
@@ -1022,6 +1031,45 @@ void nr_menu_set_key_reading(nr_menu *m, int on)
 void nr_menu_inject_reset(nr_menu *m)
 {
     if (m) m->reset_pressed = 1;
+}
+
+/* Revert: back to what is SAVED.
+ *
+ * Reset answers "give me the standard values" and Revert answers "give me back what I had"; they
+ * are different questions and a single button cannot answer both. */
+void nr_menu_inject_revert(nr_menu *m)
+{
+    if (m) m->revert_pressed = 1;
+}
+
+int nr_menu_take_revert(nr_menu *m)
+{
+    if (!m || !m->revert_pressed) return 0;
+    m->revert_pressed = 0;
+    return 1;
+}
+
+/* Home, as the layer's own reader raises it.
+ *
+ * `toggle_pressed` is the flag `nr_menu_update`'s own key reading sets for the effect toggle,
+ * so this is the same request with a different author: the bridge polls it with
+ * `nr_menu_take_toggle_request` either way and the layer turns it into the trigger file. */
+void nr_menu_inject_toggle(nr_menu *m)
+{
+    if (m) m->toggle_pressed = 1;
+}
+
+/* The bridge telling the menu which language the settings say, without asking for a write.
+ *
+ * `inject_language` below is the user's direction: it raises `language_changed` so the bridge
+ * persists the choice. This is the other one, and it must NOT raise that flag - the bridge is
+ * already the authority on the value, and a refresh that queued a write would rewrite the
+ * settings file on every frame nothing changed. */
+void nr_menu_set_language(nr_menu *m, int language)
+{
+    if (!m) return;
+    if (language < 0 || language >= NR_MENU_LANG_COUNT) return;
+    m->language = language;
 }
 
 void nr_menu_inject_language(nr_menu *m, int language)

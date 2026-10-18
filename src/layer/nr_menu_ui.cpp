@@ -555,6 +555,11 @@ static int g_language = 0;
 
 static nrex_ui *g_ui = nullptr;
 static int g_actions = 0;
+/* The effect's state, as the layer reported it for this frame, and what the user asked for by
+ * clicking the checkbox. -1 in g_nr_enabled means "this install has no trigger path", which is
+ * drawn differently from "off": one is a state, the other is the absence of one. */
+static int g_nr_enabled = 0;
+static int g_nr_request = -1;
 /* The caller's row array for this frame. The widgets write their edits into it directly, which is
  * what lets the caller read them back after `nrex_end_panel` - a local copy would lose them, and
  * that lost copy is why a dragged slider changed nothing. */
@@ -689,6 +694,26 @@ static void nrex_draw_panel(nrex_ui *u, const char *title, int language,
      * `nrex_mouse` reports "no position" outside the UI image. */
     if (!ImGui::Begin(title, nullptr, ImGuiWindowFlags_NoCollapse))
         { ImGui::End(); ImGui::PopStyleVar(); return; }
+
+    /* Home belongs to the effect toggle, not to ImGui's navigation.
+     *
+     * ImGui's keyboard nav treats Home as "jump to the first item", so pressing it with the panel
+     * open moved the selection to the first slider and never reached the layer - the report was
+     * "with the panel open, Home selects the first slider; with it closed, Home does nothing".
+     * Claiming it for the window stops nav acting on it; the layer reads the physical key with
+     * `GetAsyncKeyState` and does not care who ImGui thinks owns it. */
+    ImGui::SetKeyOwner(ImGuiKey_Home, ImGui::GetID(title));
+
+    /* Home belongs to the effect toggle, not to ImGui's navigation.
+     *
+     * ImGui's keyboard nav treats Home as "jump to the first item", so pressing it with the panel
+     * open moved the selection to the first slider and never reached the layer - the report was
+     * "with the panel open, Home selects the first slider; with it closed, Home does nothing".
+     * Claiming it for the window stops nav acting on it; the layer reads the physical key with
+     * `GetAsyncKeyState` and does not care who ImGui thinks owns it.
+     *
+     * `ImGuiKey_Home`, not the End key: the toggle is Home and the comparison it replaced was
+     * Home, so there is no second key to keep clear here. */
 
     /* Three fixed columns, so the controls line up as a table rather than drifting with each
      * label's length.
@@ -884,7 +909,37 @@ static void nrex_draw_panel(nrex_ui *u, const char *title, int language,
     ImGui::SameLine();
     if (ImGui::Button("Reset"))  g_actions |= NREX_ACT_RESET;
     ImGui::SameLine();
+    /* Revert: back to what is SAVED, where Reset goes to the code's defaults. Two different
+     * questions - "I broke something, give me the standard values" and "I was experimenting, give
+     * me back what I had" - and one button cannot answer both. */
+    if (ImGui::Button("Revert")) g_actions |= NREX_ACT_REVERT;
+    ImGui::SameLine();
     if (ImGui::Button("Close"))  g_actions |= NREX_ACT_CLOSE;
+
+    /* The effect, on the footer where the other whole-picture controls are.
+     *
+     * It reads the state the layer passes in rather than keeping one: the Home key and the setup
+     * window's button flip the same trigger file, and a checkbox with its own copy would show the
+     * wrong thing as soon as either was used. A click only REPORTS - the layer decides, so the
+     * three ways in cannot disagree. */
+    {
+        bool on = g_nr_enabled > 0;
+        ImGui::SameLine();
+        ImGui::TextUnformatted("NR");
+        ImGui::SameLine();
+        if (ImGui::Checkbox("##nr", &on)) {
+            g_nr_request = on ? 1 : 0;
+            g_actions |= NREX_ACT_NR_TOGGLE;
+        }
+        /* No state to show - the trigger path did not resolve. The box is drawn unticked and
+         * disabled rather than pretending the effect is off. */
+        if (g_nr_enabled < 0) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("(?)");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("this install has no trigger path; NR cannot be switched here");
+        }
+    }
 
     /* The language, as a control and not only a hotkey. The strings live on the C side, so this
      * only records the choice; the caller reads it back and asks the menu for the change through
@@ -907,8 +962,23 @@ extern "C" NREX_API void nrex_begin_panel(nrex_ui *ui, const char *title, int la
 {
     g_ui = ui;
     g_actions = 0;
+    /* Cleared here, not in `nrex_rows`: the checkbox is drawn in the footer, after the rows, and a
+     * request from the PREVIOUS frame must not be read twice. */
+    g_nr_request = -1;
     (void)title;
     if (language >= 0 && language < 4) g_language = language;
+}
+
+extern "C" NREX_API void nrex_set_nr_enabled(nrex_ui *ui, int on)
+{
+    (void)ui;
+    g_nr_enabled = on < 0 ? -1 : (on ? 1 : 0);
+}
+
+extern "C" NREX_API int nrex_nr_toggle_request(nrex_ui *ui)
+{
+    (void)ui;
+    return g_nr_request;
 }
 
 extern "C" NREX_API int nrex_panel_language(nrex_ui *ui)

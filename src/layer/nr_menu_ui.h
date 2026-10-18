@@ -70,9 +70,11 @@ enum {
     NREX_ACT_NONE = 0,
     NREX_ACT_CHANGED = 1,     /* some row's value moved; the C side reads back with nrex_get_* */
     NREX_ACT_SAVE = 2,        /* the user asked to save */
-    NREX_ACT_RESET = 4,       /* the user asked for defaults */
+    NREX_ACT_RESET = 4,       /* the user asked for the code defaults */
     NREX_ACT_CLOSE = 8,       /* the user asked to close the panel */
     NREX_ACT_LANGUAGE = 16,   /* the panel's language selector moved */
+    NREX_ACT_REVERT = 32,     /* the user asked for the SAVED settings, not the defaults */
+    NREX_ACT_NR_TOGGLE = 64,  /* the user flipped the effect checkbox */
 };
 
 /* Handle. The C side never looks inside. */
@@ -109,6 +111,22 @@ void nrex_begin_panel(nrex_ui *ui, const char *title, int language);
 int nrex_panel_language(nrex_ui *ui);
 /* Fills the panel from the rows. The C side keeps the arrays; the UI only reads. */
 void nrex_rows(nrex_ui *ui, const nrex_row *rows, int count, int selected);
+
+/* Whether the effect is on, for the checkbox in the footer.
+ *
+ * The checkbox is a VIEW of state the layer owns - the trigger file - not a setting of the panel's
+ * own: the setup window's button and the Home key flip the same thing, and a checkbox that kept
+ * its own copy would disagree with both the moment one of them was used. So the caller passes the
+ * current state in every frame, and the panel reports a click back through NREX_ACT_NR_TOGGLE
+ * rather than deciding anything itself.
+ *
+ * `on` is 0 or 1, or -1 for "unknown" - an install whose trigger path could not be resolved has no
+ * state to show, and drawing it as "off" would be a claim. */
+void nrex_set_nr_enabled(nrex_ui *ui, int on);
+
+/* What the user did to the checkbox this frame: 1 = they turned it on, 0 = they turned it off,
+ * -1 = they did not touch it. Valid after nrex_end_panel, like the action bits. */
+int nrex_nr_toggle_request(nrex_ui *ui);
 /* Ends the frame. Returns the OR of nrex_act_* the user performed this frame. */
 int nrex_end_panel(nrex_ui *ui);
 

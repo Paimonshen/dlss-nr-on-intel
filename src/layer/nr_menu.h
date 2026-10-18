@@ -209,6 +209,13 @@ int nr_menu_take_step(nr_menu *menu);
  * file is still written by the same code. */
 void nr_menu_inject_step(nr_menu *menu, int direction);
 void nr_menu_inject_save(nr_menu *menu);
+/* The effect toggle, as the Home key raises it.
+ *
+ * A flag rather than a direct flip of the trigger, because the trigger is the layer's and the
+ * bridge is what turns this request into a file write - the same path the button and the key
+ * already share. The ImGui build reads Home at the layer's level (see `menu_read_keys`), so
+ * this exists to give that read somewhere to land. */
+void nr_menu_inject_toggle(nr_menu *menu);
 /* Whether this file reads the panel's keys itself. Off when ImGui owns the panel: the two
  * readers would otherwise both act on INS, the arrows and Enter, which is one keypress processed
  * twice. The always-on hotkeys (NR on/off, the comparison) are unaffected - they are read by the
@@ -217,10 +224,27 @@ void nr_menu_set_key_reading(nr_menu *menu, int on);
 
 void nr_menu_inject_reset(nr_menu *menu);
 
+/* Revert to the SAVED settings, where Reset goes to the code's defaults. The caller polls it
+ * with `nr_menu_take_revert`, the same way it polls reset. */
+void nr_menu_inject_revert(nr_menu *menu);
+int  nr_menu_take_revert(nr_menu *menu);
+
 /* Ask for a language, the way the L key does. It sets the same flag the key sets, so the bridge
  * picks it up on its next update and every row is re-translated - there is no second path that
  * could translate differently. */
 void nr_menu_inject_language(nr_menu *menu, int language);
+
+/* Set the language WITHOUT raising the change flag.
+ *
+ * The bridge owns the setting - it reads `menu_language` from the file and writes it back - so it
+ * has to be able to tell the menu which language is showing without that coming back as a fresh
+ * request to save it. `nr_menu_inject_language` is the other direction: a user asking for a change,
+ * which the bridge then persists.
+ *
+ * Using the injector for this made every refresh queue a language write, and
+ * `nr_menu_bridge_update` acts on that queue - so a refresh followed by an update rewrote the
+ * settings file's `menu_language` on a frame where nothing had changed. */
+void nr_menu_set_language(nr_menu *menu, int language);
 /* The language the menu is showing, so a caller that cycles with L can take the next one. The
  * injector above takes an absolute index and there is no "advance by one" among the menu's own
  * controls, so the value has to be readable for L to mean anything. */

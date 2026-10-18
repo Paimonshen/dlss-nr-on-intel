@@ -213,6 +213,11 @@ struct nr_menu_bridge {
     int preview_confirmed;
     int dirty;
     long long stamp;
+    /* Whether the settings file says the effect is on. The CHECKBOX is a view of the
+     * layer's trigger - the layer passes the live state in every frame - but Save has to
+     * remember the choice for the next launch, and this is where it goes while the panel is
+     * open. -1 until the file has been read. */
+    int nr_enabled_saved;
 };
 
 /* ------------------------------------------------------------------ label lookup */
@@ -303,6 +308,10 @@ static void format_row(nr_menu_bridge *b, int i)
 
 static void load_defaults(nr_menu_bridge *b)
 {
+    /* Reset's target for the effect is OFF, not "whatever was saved": the checkbox is a knob like
+     * any other as far as Reset is concerned, and the defaults of a neural effect nobody has asked
+     * for is off. */
+    b->nr_enabled_saved = -1;
     for (int i = 0; i < NR_KNOBS_COUNT; ++i) {
         const nr_knob_def *k = &knobs[i];
         b->moved[i] = 0;
@@ -340,6 +349,14 @@ static int load_settings(nr_menu_bridge *b)
             int lang = atoi(settings.value[at]);
             if (lang >= 0 && lang < NR_MENU_LANG_COUNT) b->language = lang;
         }
+
+        /* And whether the effect was on when this was saved. Absent means off: an install that
+         * predates the key, or a file written before the checkbox existed, must not start with
+         * the effect running - that would make NR slow a game for somebody who never asked. */
+        b->nr_enabled_saved = 0;
+        int nr_at = nr_settings_find(&settings, "nr_enabled");
+        if (nr_at >= 0)
+            b->nr_enabled_saved = atoi(settings.value[nr_at]) ? 1 : 0;
 
         for (int i = 0; i < NR_KNOBS_COUNT; ++i) {
             const nr_knob_def *k = &knobs[i];
@@ -562,6 +579,7 @@ static int save_settings(nr_menu_bridge *b)
     int written[NR_KNOBS_COUNT];
     memset(written, 0, sizeof written);
     int wrote_language = 0;
+    int wrote_nr = 0;
 
     /* Whether a field has already been emitted, so the comma goes BEFORE a field rather than after
      * it. Writing `"key": value,\n` for every field and closing with `}` leaves a trailing comma
@@ -598,6 +616,16 @@ static int save_settings(nr_menu_bridge *b)
                 continue;
             }
 
+            /* Same substitution for the effect's saved state, and same reason: the loop copies
+             * existing keys verbatim, so emitting it again at the end would leave two entries. */
+            if (strcmp(name, "nr_enabled") == 0) {
+                snprintf(moved_text, sizeof moved_text, "%d",
+                         b->nr_enabled_saved > 0 ? 1 : 0);
+                NR_EMIT("  \"%s\": %s", name, moved_text);
+                wrote_nr = 1;
+                continue;
+            }
+
             if (index >= 0 && b->moved[index]) {
                 const nr_knob_def *k = &knobs[index];
                 if (k->kind == 1) {
@@ -619,6 +647,10 @@ static int save_settings(nr_menu_bridge *b)
 
     /* The language, appended only if the file did not already carry it. */
     if (!wrote_language) NR_EMIT("  \"menu_language\": %d", b->language);
+
+    /* And the effect's saved state. Appended when the file did not carry it, so the first Save
+     * after this change adds it and every later Save substitutes in place. */
+    if (!wrote_nr) NR_EMIT("  \"nr_enabled\": %d", b->nr_enabled_saved > 0 ? 1 : 0);
 
     /* Append the keys the user moved that were not already there. */
     for (int i = 0; i < NR_KNOBS_COUNT; ++i) {
@@ -807,6 +839,37 @@ void nr_menu_bridge_close(nr_menu_bridge *b)
  * defaults and the settings file is not touched. See `nr_menu_bridge_update`'s reset branch for
  * why that matters - the version of this that called `save_settings` destroyed a user's saved
  * settings on one keypress. */
+/* Record what the checkbox was set to, for Save to write.
+ *
+ * The EFFECT is the layer's - it is a trigger file the layer reads every present - so this does not
+ * switch anything. It is the value Save persists, and Reset clears to -1 so the next Save writes
+ * "off" without the panel having to guess. */
+void nr_menu_bridge_set_nr_saved(nr_menu_bridge *b, int on)
+{
+    if (!b) return;
+    b->nr_enabled_saved = on ? 1 : 0;
+}
+
+int nr_menu_bridge_nr_saved(const nr_menu_bridge *b)
+{
+    return b && b->nr_enabled_saved > 0;
+}
+
+/* Revert to the saved settings, on a bridge with no menu.
+ *
+ * With a menu present this routes through `nr_menu_inject_revert`, so the button and this call
+ * cannot diverge - the same rule `reset` follows. */
+void nr_menu_bridge_revert(nr_menu_bridge *b)
+{
+    if (!b) return;
+    if (b->menu) { nr_menu_inject_revert(b->menu); return; }
+    load_settings(b);
+    nr_menu_bridge_refresh(b);
+    b->preview_confirmed = 1;
+    write_live_settings(b);
+    b->dirty = 1;
+}
+
 void nr_menu_bridge_reset(nr_menu_bridge *b)
 {
     if (!b) return;
@@ -881,6 +944,19 @@ void nr_menu_bridge_refresh(nr_menu_bridge *b)
      * label and value accessors read them - which is what lets a caller with no window show the
      * same text the overlay would. */
     if (!b->menu) return;
+
+    /* The language the menu itself holds, which is NOT the same field as the one the rows were
+     * just built with.
+     *
+     * The panel's selector is drawn from `nr_menu_language` - the menu's own value - while every
+     * row's label comes from `b->language` here. `load_settings` sets only the latter, so a
+     * settings file saying `menu_language: 1` gave a panel whose rows were all Chinese and whose
+     * footer selector still read "English": two owners of one setting, disagreeing. Pushing it
+     * across on every refresh makes the next path that changes the language unable to leave the
+     * selector behind, because they all come through here. */
+
+    nr_menu_set_language(b->menu, b->language);
+
     nr_menu_set_rows(b->menu, b->rows, NR_KNOBS_COUNT);
     nr_menu_set_title(b->menu, nr_menu_text(b->language, NR_STR_TITLE));
     nr_menu_set_hint(b->menu, nr_menu_text(b->language, NR_STR_HINT));
@@ -933,11 +1009,21 @@ int nr_menu_bridge_update(nr_menu_bridge *b, float frame_seconds)
 
     int state = nr_menu_update(b->menu, frame_seconds);
 
-    /* The toggle and the comparison act with the menu closed, so they are handled before the open
-     * test - otherwise a player would have to open the menu to switch the effect off. */
-    if (nr_menu_take_toggle_request(b->menu))
-        b->dirty = 1;
-
+    /* The toggle request is NOT taken here, and taking it was the whole reason END, and then
+     * Home, did nothing.
+     *
+     * `nr_menu_take_toggle_request` clears the flag. This function runs first - the layer's
+     * `menu_read_keys` calls the bridge update and only then asks the menu for the toggle - so
+     * the bridge consumed every request to set a `dirty` bit nobody acted on, and the layer's
+     * own take saw 0. The effect never flipped, on either key, while the panel beside it drew
+     * and every button worked.
+     *
+     * The trigger is the LAYER's: it is a file the layer writes and reads, and the layer is what
+     * turns the flag into that file. The bridge has no business clearing a request it cannot
+     * honour. `dirty` was not needed either - the layer reports the press itself.
+     *
+     * The comparison below is the same shape and had the same bug, which is why it went with the
+     * comparison feature: `nr_menu_take_compare_change` is gone from this file with it. */
     int mode;
     if (nr_menu_take_compare_change(b->menu, &mode))
         b->dirty = 1;
@@ -1019,6 +1105,30 @@ int nr_menu_bridge_update(nr_menu_bridge *b, float frame_seconds)
          * so a preview left behind by a Reset must not be applied on the next start. A Save after
          * the Reset confirms them; nothing else does. */
         b->preview_confirmed = 0;
+        write_live_settings(b);
+        b->dirty = 1;
+    }
+
+    if (nr_menu_take_revert(b->menu)) {
+        /* Revert: the SAVED settings, back on screen and back in the picture.
+         *
+         * Reset answers "give me the code's defaults"; this answers "give me back what I had".
+         * They are the two things a person wants after fiddling, and until now only the first
+         * existed - so wanting the second meant closing the game.
+         *
+         * The file is re-read rather than remembered, because the settings file is the authority:
+         * a tool may have written it while the panel was open, and `nr_menu_bridge_update` already
+         * reloads on a changed stamp - this is the same reload, asked for on purpose.
+         *
+         * The preview is written, so the picture follows: a revert that only moved the panel's
+         * numbers would leave the effect running on the values just reverted away from. The
+         * preview is confirmed, because its values ARE the saved ones - unlike Reset's.
+         *
+         * Not `save_settings`: re-reading the file and writing it back would rewrite it for no
+         * reason, and `load_settings` is what the stamp check compares against. */
+        load_settings(b);
+        nr_menu_bridge_refresh(b);
+        b->preview_confirmed = 1;
         write_live_settings(b);
         b->dirty = 1;
     }

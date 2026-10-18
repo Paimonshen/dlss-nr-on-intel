@@ -85,6 +85,18 @@ void nr_menu_bridge_close(nr_menu_bridge *bridge);
  * this routes through `nr_menu_inject_reset` so the key and this call cannot diverge. */
 void nr_menu_bridge_reset(nr_menu_bridge *bridge);
 
+/* Revert to the SAVED settings, on a bridge with no menu. Through `nr_menu_inject_revert` when
+ * there is one, so a button and this call cannot diverge. */
+void nr_menu_bridge_revert(nr_menu_bridge *bridge);
+
+/* What Save should write for the effect, and what the settings file last said.
+ *
+ * The effect itself is the layer's trigger file, not a setting the bridge owns - the layer passes
+ * its live state to the panel every frame. These two only carry the value across a Save, so the
+ * next launch can restore it. */
+void nr_menu_bridge_set_nr_saved(nr_menu_bridge *bridge, int on);
+int  nr_menu_bridge_nr_saved(const nr_menu_bridge *bridge);
+
 /* Which row the cursor is on, and where it is. */
 int nr_menu_bridge_row_count(const nr_menu_bridge *bridge);
 const char *nr_menu_bridge_row_label(const nr_menu_bridge *bridge, int row, int language);
