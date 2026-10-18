@@ -1573,10 +1573,20 @@ def run_owned(args):
     # Before the model loads: a game that is closed during the load takes the daemon with it.
     end_with_game()
     if args.weights is None:
-        # No model named on the command line: the installer's network choice decides. One
-        # line, because the preset and the knob name the same file two ways - B's weights are
-        # what the panel calls `cc_small_fp8` (nr_frame.PRESET_WEIGHTS is the other spelling).
-        args.weights = "cc_small_fp8" if nr_frame.PRESET == "B" else "ht"
+        # No model named on the command line: the settings file's `weights` knob decides, and
+        # behind it the installer's network choice (`NR_PRESET`). Reading the file here rather
+        # than letting the first refresh swap is what keeps one model load: the daemon comes up
+        # on the network the user last saved instead of loading A and hot-swapping to B.
+        args.weights = None
+        try:
+            if args.settings and pathlib.Path(args.settings).is_file():
+                saved = json.loads(pathlib.Path(args.settings).read_text(encoding="utf-8-sig"))
+                if isinstance(saved, dict) and saved.get("weights") in nr_weight_models.names():
+                    args.weights = saved["weights"]
+        except (OSError, ValueError):
+            pass
+        if args.weights is None:
+            args.weights = "cc_small_fp8" if nr_frame.PRESET == "B" else "ht"
     args.live = Settings(args)
     args.history = History()
     args.letterbox = Letterbox()
