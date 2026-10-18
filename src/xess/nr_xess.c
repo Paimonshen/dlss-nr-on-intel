@@ -153,11 +153,14 @@ static struct {
 	 * now, in nr_xess.hlsl's `likeness`, before its change is refused there: partly from the
 	 * first, wholly from the second. */
 	float match_from, match_to;
+	/* 1 makes the game wait for NR: each frame takes the answer to the frame before it, and
+	 * the game runs at NR's rate. 0 lets the game run on, the change carried along motion. */
+	int sync;
 	/* `record=N` records the next N frames XeSS is handed into `record_dir`, for
 	 * replay_nr_xess; each time the file is saved with a nonzero N. */
 	int record;
 	char record_dir[MAX_PATH];
-} config = { "\\\\.\\pipe\\nr-xess", 1.0f, 1.0f, 1, 0, 1, 1, 0.02f, 0.06f, 0, "" };
+} config = { "\\\\.\\pipe\\nr-xess", 1.0f, 1.0f, 1, 0, 1, 1, 0.02f, 0.06f, 0, 0, "" };
 
 static volatile LONG record_asked;      /* frames to record, set by the settings, taken by the hook */
 
@@ -200,6 +203,8 @@ static void read_settings(int first)
 			config.match_from = (float)atof(value);
 		else if (!strcmp(line, "match_to"))
 			config.match_to = (float)atof(value);
+		else if (!strcmp(line, "sync"))
+			config.sync = atoi(value);
 		else if (!strcmp(line, "record"))
 			config.record = atoi(value);
 		else if (!strcmp(line, "record_dir"))
@@ -212,8 +217,8 @@ static void read_settings(int first)
 	if (!(config.match_from >= 0)) config.match_from = 0;
 	if (!(config.match_to > config.match_from)) config.match_to = config.match_from + 0.01f;
 	say("settings: enabled %d, white %g, strength %g, warp %d, motion history %d, match %g-%g, "
-	    "pipe %s\n", config.enabled, config.white, config.strength, config.warp,
-	    config.motion_history, config.match_from, config.match_to, config.pipe);
+	    "sync %d, pipe %s\n", config.enabled, config.white, config.strength, config.warp,
+	    config.motion_history, config.match_from, config.match_to, config.sync, config.pipe);
 }
 
 /* ---- Pixels on the CPU: the proxy NR is given, and its change ---- */
@@ -399,6 +404,7 @@ _Static_assert(sizeof(struct constants) == 32 * 4, "the root signature takes 32 
 static struct {
 	SRWLOCK lock;
 	HANDLE wake;                 /* set when a capture has been recorded */
+	HANDLE idle;                 /* set when the worker is done with one */
 	HANDLE thread;
 	int broken;                  /* something failed: every call goes straight to XeSS */
 	ID3D12Device *device;
@@ -534,6 +540,26 @@ static void dump_frames(void)
 		fclose(file);
 	}
 	say("wrote nr-xess-in.ppm and nr-xess-out.ppm\n");
+}
+
+/* replay_nr_xess's --answers: each frame NR was given and its answer, by the execute it was
+ * captured on, so NR's own picture can be told from what the proxy made of it. */
+static const char *answers_dir;
+
+static void write_answer(uint32_t sequence)
+{
+	const uint8_t *images[2] = { nr.frame, nr.answer };
+	const char *names[2] = { "given", "answer" };
+	for (int i = 0; i < 2; i++) {
+		char path[MAX_PATH + 32];
+		snprintf(path, sizeof path, "%s\\%s_%04u.ppm", answers_dir, names[i], sequence - 1);
+		FILE *file = fopen(path, "wb");
+		if (!file) continue;
+		fprintf(file, "P6\n%u %u\n255\n", nr.width, nr.height);
+		for (size_t p = 0; p < (size_t)nr.width * nr.height; p++)
+			fwrite(images[i] + p * 4, 1, 3, file);
+		fclose(file);
+	}
 }
 
 /* NR's answer minus what it was given, into a free change buffer, made the newest. A
@@ -673,6 +699,7 @@ static DWORD WINAPI worker(LPVOID unused)
 		}
 		if (ok) {
 			publish(epoch, sequence, jitter);
+			if (answers_dir) write_answer(sequence);
 			if (++nr.answered == 30 && config.dump) dump_frames();
 			QueryPerformanceCounter(&t1);
 			QueryPerformanceFrequency(&f);
@@ -692,6 +719,7 @@ static DWORD WINAPI worker(LPVOID unused)
 		AcquireSRWLockExclusive(&nr.lock);
 		nr.capture = 0;
 		ReleaseSRWLockExclusive(&nr.lock);
+		SetEvent(nr.idle);
 	}
 }
 
@@ -892,8 +920,9 @@ static int rebuild(ID3D12Device *device, UINT width, UINT height, DXGI_FORMAT fo
 	}
 	if (!nr.thread) {
 		nr.wake = CreateEventW(NULL, FALSE, FALSE, NULL);
+		nr.idle = CreateEventW(NULL, FALSE, FALSE, NULL);
 		nr.thread = CreateThread(NULL, 0, worker, NULL, 0, NULL);
-		if (!nr.wake || !nr.thread) return -1;
+		if (!nr.wake || !nr.idle || !nr.thread) return -1;
 	}
 	return 0;
 }
@@ -1213,6 +1242,30 @@ static ID3D12Resource *record(ID3D12GraphicsCommandList *list, const xess_d3d12_
 		if (!recording) {
 			say("the recording's writer fell 2 s behind; stopped at %u frames\n", rec.index);
 			rec.left = 0;
+		}
+	}
+
+	/* `sync`: the worker has the frame before (the game submitted it after its execute
+	 * returned); its answer is published before the worker lets go of it, so once it does,
+	 * this frame takes a change one frame old and is captured itself. A second without an
+	 * answer — a game that submits late, or no daemon — and the frame goes on as it would. */
+	if (config.sync) {
+		ULONGLONG until = GetTickCount64() + 1000;
+		for (;;) {
+			AcquireSRWLockExclusive(&nr.lock);
+			int busy = nr.capture != 0;
+			ReleaseSRWLockExclusive(&nr.lock);
+			ULONGLONG now = GetTickCount64();
+			if (!busy) break;
+			if (now >= until) {
+				static ULONGLONG said;
+				if (!said || now - said >= 5000) {
+					said = now;
+					say("sync: no answer to the frame before after 1 s; this one goes on without\n");
+				}
+				break;
+			}
+			WaitForSingleObject(nr.idle, (DWORD)(until - now));
 		}
 	}
 

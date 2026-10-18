@@ -1355,6 +1355,11 @@ def run_owned(args):
           f" on {xmx.device_name()}", flush=True)
     print(f"network preset {nr_frame.PRESET}, {backend.topology.block_count} blocks,"
           f" history ceiling {backend.blend_scale}", flush=True)
+    if nr_image is None or nr_image.library() is None:
+        # Silent otherwise, and slow: the history a client's motion carries is resampled in
+        # MLX-DLSS's NumPy then, 1.1 s a frame at 835x522 against 51 ms in C (2026-10-18).
+        print("host passes in NumPy: work/libnr_image did not load (a MinGW build needs"
+              " libgomp-1.dll, found through NR_DLL_PATH)", flush=True)
     print(f"buffers in {xmx.memory_note()}", flush=True)
     if xmx.low_latency():
         # without it the GPU's governor clocks down between frames (libxmx, xmx_init)

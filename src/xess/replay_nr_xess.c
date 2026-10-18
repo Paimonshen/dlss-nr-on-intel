@@ -7,6 +7,9 @@
  *     --strength S      NR's strength (default 1; 0 runs the whole path and adds nothing)
  *     --off             XeSS alone: the proxy hands every frame straight on
  *     --warp 0|1, --match FROM TO, --history 0|1   the proxy's own settings
+ *     --sync            each frame waits for the answer to the one before (`sync=1`)
+ *     --answers DIR     each frame NR was given and its answer, DIR\given_%04u.ppm and
+ *                       answer_%04u.ppm by frame: with --sync, NR on every frame as it is
  *     --every N         write every Nth frame (default 1)
  *     --inputs DIR      also the colour XeSS was handed, the proxy's change in it, to
  *                       DIR\%04u.ppm: whether something in the output came in with the
@@ -145,6 +148,11 @@ int main(int argc, char **argv)
 		else if (!strcmp(argv[i], "--strength") && i + 1 < argc) config.strength = (float)atof(argv[++i]);
 		else if (!strcmp(argv[i], "--every") && i + 1 < argc) every = atoi(argv[++i]);
 		else if (!strcmp(argv[i], "--off")) off = 1;
+		else if (!strcmp(argv[i], "--sync")) config.sync = 1;
+		else if (!strcmp(argv[i], "--answers") && i + 1 < argc) {
+			answers_dir = argv[++i];
+			CreateDirectoryA(answers_dir, NULL);
+		}
 		else if (!strcmp(argv[i], "--inputs") && i + 1 < argc) inputs = argv[++i];
 		else if (!strcmp(argv[i], "--warp") && i + 1 < argc) config.warp = atoi(argv[++i]);
 		else if (!strcmp(argv[i], "--history") && i + 1 < argc) config.motion_history = atoi(argv[++i]);

@@ -190,6 +190,40 @@ under that date. When an item is done, strike it through here and name the commi
 
 ---
 
+## `e803624` in Hogwarts, `sync=1`, and the owner's call: NR's answer on its own frame, on the GPU (2026-10-18, branch `newnr`)
+
+**In the game** (A, render scale 0.5, XeSS Performance 835x522). The first run's daemon came from
+the checkout without its C library: a MinGW `libnr_image.dll` needs `libgomp-1.dll`, found through
+`NR_DLL_PATH`, and the test's environment had none. `History.follow` then resampled in MLX-DLSS's
+NumPy, 1.1 s of a 1.2-1.4 s frame, and NR landed 0.8 times a second. The daemon now says so when it
+starts (`host passes in NumPy`). In that run: no trails in motion, patches on the robe standing
+still. With the history standing still (`motion_history=0`, 5.4 a second): trails and patches. With
+no history: worse.
+
+**`sync=1`** (new in `nr-xess.txt`; `--sync` in the replay): the game waits for the answer to the
+frame before. In the game: 12 frames a second with A, 83 ms from capture to change, every frame
+answered, no wait over 1 s. Trails and patches remain.
+
+**Where they come from** (`--answers DIR`, new in the replay). With `--sync` the daemon answers
+every frame, with the motion to the one before, so its answers are NR on each frame as it is. On
+the 10-16 orbit recording and today's idle one the answers are clean. What the proxy hands XeSS
+differs from them over most of the background while the camera moves (frames 80 and 120, with green
+fringes), and by a speckle over textured cloth standing still (a change made at one jitter, laid on
+a frame at another). The trails and patches come from carrying a change onto another frame, not
+from the network or the daemon's history.
+
+**The owner's call:** frames stay on the GPU, and NR's answer goes onto the frame it was made for.
+Nothing inside a game's D3D12 list can wait for Vulkan, so XeSS runs one frame late:
+1. The proxy copies the colour and the vectors in the game's list, and hands NR the frame on the
+   GPU (D3D12 shared resources and a shared fence, imported into libxmx's Vulkan).
+2. Once NR signals, the proxy runs XeSS on the answer from its own list on the game's queue: a
+   hooked `ExecuteCommandLists` waits on the fence.
+3. On the next frame it copies XeSS's result into the game's output.
+
+The cost is that the world shows one frame behind the interface. The starting point is the daemon's
+GPU path (`nr_gpu_bridge.h`, `NR_GPU_ONLY`). It needs D3D12's handle types and the
+motion-following history on the GPU.
+
 ## `newnr` on Windows: green, B measured, the same clock, and B in the setup window (2026-10-18, branch `newnr`)
 
 The owner brought the Linux agent's list of 10-18; here it is in its order. Intel's driver
