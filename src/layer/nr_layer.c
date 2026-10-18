@@ -2326,8 +2326,12 @@ static int menu_ui_rows(struct device_data *data, nrex_row *out, int capacity)
 	 * also what clears the conflict - the bridge applies it - so the row stays clickable when it
 	 * is enabled and explains itself when it is not. */
 	if (nr_menu_bridge_pacing_available(data->menu_bridge)) {
-		static char every_names_store[3][24];
-		static const char *every_names[4];
+		/* FOUR names, not three: `choice_count` is 4 (every frame .. every 4th), so a store of
+		 * three left the fourth entry pointing at whatever the static held - which ImGui showed
+		 * as `*Unknown item*` in the opened combo. This is the same shape as the `*Unknown item*`
+		 * the profiles row had: a NULL written over an entry the count still offered. */
+		static char every_names_store[4][24];
+		static const char *every_names[5];
 		int every = nr_menu_bridge_pacing_every(data->menu_bridge);
 		int pipelined = nr_menu_bridge_pacing_async(data->menu_bridge);
 		int gpu = nr_menu_bridge_pacing_gpu_image(data->menu_bridge);
@@ -2373,7 +2377,7 @@ static int menu_ui_rows(struct device_data *data, nrex_row *out, int capacity)
 				? "其间各帧重复上一次结果：游戏跑得更快，画面只在网络出帧时变化。下次游戏启动生效。"
 				: "The frames between repeat the last result, so the game runs faster and the picture changes only when the network produces one. Takes effect at the next game start.";
 			r->kind = NREX_KIND_CHOICE;
-			for (int c = 0; c < 3; ++c) {
+			for (int c = 0; c < 4; ++c) {
 				if (c == 0) snprintf(every_names_store[c], sizeof every_names_store[c], "%s",
 						     nr_menu_language(data->menu) == NR_LANG_ZH ? "每帧" : "every frame");
 				else snprintf(every_names_store[c], sizeof every_names_store[c], "%s %d %s",
@@ -2382,7 +2386,7 @@ static int menu_ui_rows(struct device_data *data, nrex_row *out, int capacity)
 					      nr_menu_language(data->menu) == NR_LANG_ZH ? "帧" : "frames");
 				every_names[c] = every_names_store[c];
 			}
-			every_names[3] = NULL;
+			every_names[4] = NULL;
 			r->choices = (const char *const *)every_names;
 			r->choice_count = 4;
 			r->choice_index = every >= 1 && every <= 4 ? every - 1 : 0;

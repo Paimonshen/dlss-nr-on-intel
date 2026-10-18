@@ -29,7 +29,14 @@ What each fixture answers, and why it is a separate program:
                    place, so this one asserts where the reads live in the source. It runs from
                    the repository root because that is where it reads them from.
 
-Both are Windows-only and both need no GPU: they create no Vulkan device, only an ImGui
+  test_menu_choices
+                    a choice list is only as long as its count. The cadence row declared four
+                    options with a store of three names and the combo drew `*Unknown item*` as
+                    its fourth entry - the second time that shape cost something, the first being
+                    the profiles combo. It walks the layer's cadence row and every choice knob
+                    the bridge produces.
+
+All are Windows-only and none needs a GPU: they create no Vulkan device, only an ImGui
 context. On another platform, or with no compiler to have built them, this reports a FAILURE
 rather than a skip - a check that cannot run is not a check that passed, and the two fixtures
 are the only thing that watches the panel's reporting at all.
@@ -46,7 +53,7 @@ WORK = ROOT / "work"
 # The panel's frames sleep to make their hold timings real, so the budget is generous; a
 # fixture that hangs is a failure, not a timeout nobody reports.
 FIXTURES = ("test_menu_panel", "test_menu_side", "test_menu_keys", "test_menu_language",
-            "test_menu_actions", "test_menu_pacing")
+            "test_menu_actions", "test_menu_pacing", "test_menu_choices")
 # The ones that must run from the repository root, because they read the sources there rather
 # than driving a linked copy of them.
 FROM_ROOT = frozenset({"test_menu_keys", "test_menu_language"})

@@ -670,8 +670,32 @@ static void nrex_draw_panel(nrex_ui *u, const char *title, int language,
      * mouse test and the picture in agreement.
      *
      * `NoNavInputs` is deliberately NOT set - the whole point is that the keyboard drives it. */
+    /* The panel is sized against the PICTURE, not against a fixed number of pixels.
+     *
+     * It was a fixed 560x380, which was fine for eleven knobs and is not fine for fourteen: the
+     * last three could not be reached, and the only way to see them was to drag the window
+     * bigger. Doing that is what crashed the game - the window could be dragged past the edges of
+     * the swapchain image it has to be drawn into, and ImGui happily drew outside it.
+     *
+     * So the default size is now "as much of the picture as the panel wants", and the size is
+     * CLAMPED to the picture every frame. The clamp is the part that matters: a resize survives
+     * across frames and across game window sizes, so a size that was legal once can be illegal
+     * later - a user who drags the panel wide in a large window and then starts the game smaller
+     * would otherwise be drawing off the image again. */
+    {
+        ImGuiIO &io = ImGui::GetIO();
+        float want_w = io.DisplaySize.x - 48.0f;
+        float want_h = io.DisplaySize.y - 48.0f;
+        /* A ceiling as well as a floor: on a 1920x1080 picture "as tall as the picture" would be
+         * a settings panel covering the game, and the point of an overlay is to leave something
+         * to look at. 640x720 shows all fourteen rows with room to spare. */
+        if (want_w > 640.0f) want_w = 640.0f;
+        if (want_h > 720.0f) want_h = 720.0f;
+        if (want_h < 240.0f) want_h = 240.0f;
+        if (want_w < 200.0f) want_w = 200.0f;
+        ImGui::SetNextWindowSize(ImVec2(want_w, want_h), ImGuiCond_FirstUseEver);
+    }
     ImGui::SetNextWindowPos(ImVec2(24, 24), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(ImVec2(560, 380), ImGuiCond_FirstUseEver);
     if (!ImGui::IsWindowFocused(ImGuiFocusedFlags_AnyWindow))
         ImGui::SetNextWindowFocus();
 
@@ -692,7 +716,18 @@ static void nrex_draw_panel(nrex_ui *u, const char *title, int language,
      * click while it is open, and while it is open a press on its own title bar is a press on the
      * panel. A press anywhere else belongs to the game and never reaches ImGui, because
      * `nrex_mouse` reports "no position" outside the UI image. */
-    if (!ImGui::Begin(title, nullptr, ImGuiWindowFlags_NoCollapse))
+    /* `NoResize`: the panel is sized to the picture, and a user-resized window that outgrows the
+     * swapchain image makes ImGui draw outside the render target - which is an access violation in
+     * the driver, not a warning. Dragging the border to see the last three rows is what crashed
+     * the game.
+     *
+     * In exchange the panel is made tall enough to show everything without resizing (see the
+     * default size above), and it keeps a scrollbar for the case where it is not.
+     *
+     * A per-frame clamp was tried first and is wrong: it has to run BEFORE `Begin` to have any
+     * effect, and reading the window's current size there means `FindWindowByName` on a window
+     * that has not been created yet on the first frame. It crashed the game on every INS press. */
+    if (!ImGui::Begin(title, nullptr, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize))
         { ImGui::End(); ImGui::PopStyleVar(); return; }
 
     /* Home belongs to the effect toggle, not to ImGui's navigation.
