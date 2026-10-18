@@ -61,10 +61,16 @@ MODELS = (
     # (`nr_frame.WEIGHTS`). It keeps that name so an install with one model is unchanged.
     Model("ht", "WEIGHTS_HT", LEGACY_LOGICAL, supported=True, expected_tensors=649,
           packed="dlssnr-packed.safetensors"),
-    # 310.9.16's second model: 77 packed tensors, 30 blocks, FP8. Extractable, not loadable: the
-    # unpacker's block contracts are HT's 71 blocks at 32/64/128/256 wide.
-    Model("cc_small_fp8", "WEIGHTS_CC_SMALL_FP8", "dlssnr-cc-small-fp8-logical.safetensors",
-          supported=False, expected_tensors=77, note="different block table; not loadable yet"),
+    # 310.9.16's second network: 31 blocks at depths {2,2,2,2,2} with A's bottleneck, the
+    # preset B of notes/phase72-preset-b.md. Loadable since the topology is read from the
+    # weights themselves (`nr_topology.from_weights`); unpacked through
+    # `src/tools/unpack_preset.py`, whose role-renaming decoder the plain MLX unpacker does
+    # not have, so it has no packed intermediate. The logical name is the one
+    # `nr_frame.PRESET_WEIGHTS["B"]` and the installer both use, so the two selection paths
+    # - `NR_PRESET` at start-up, the panel's `weights` knob at run time - read one file.
+    Model("cc_small_fp8", "WEIGHTS_CC_SMALL_FP8", "dlssnr-b-logical.safetensors",
+          supported=True, expected_tensors=281,
+          note="preset B; unpacked through unpack_preset.py"),
 )
 BY_NAME = {model.name: model for model in MODELS}
 BY_RESOURCE = {model.resource: model for model in MODELS}

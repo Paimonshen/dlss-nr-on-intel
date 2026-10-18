@@ -245,7 +245,10 @@ def _validated_settings(values, knobs):
         name = knob["name"]
         value = values.get(name, knob["default"])
         if knob["kind"] == "choice":
-            if value not in knob["choices"]:
+            # None is the unset choice, not a wrong one: `weights` defaults to "follow the
+            # installer's network choice" (`NR_PRESET`), which no single name spells. A value
+            # that IS given must still be one of the choices.
+            if value is not None and value not in knob["choices"]:
                 raise ValueError(f"{name} must be one of {', '.join(knob['choices'])}")
         else:
             if isinstance(value, bool):

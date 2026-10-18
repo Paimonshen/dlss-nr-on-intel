@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """The weight table, the manifest, and what a DLL actually carries.
 
 Three things are being kept true at once here:
@@ -115,12 +115,14 @@ class TableTests(unittest.TestCase):
         self.assertEqual(ht.packed, "dlssnr-packed.safetensors")
         self.assertTrue(ht.supported)
 
-    def test_the_second_model_is_known_but_not_offered_as_loadable(self):
+    def test_the_second_model_is_loadable_and_named_as_the_preset_path_names_it(self):
+        # Preset B has been loadable since the topology is read from the weights themselves
+        # (`nr_topology.from_weights`); the logical name is the one `nr_frame.PRESET_WEIGHTS`
+        # and the installer both use, so `NR_PRESET=B` and the panel's knob read one file.
         model = weights.BY_NAME["cc_small_fp8"]
-        self.assertFalse(model.supported)
-        self.assertNotIn(model.name, [entry["name"] for entry in
-                                      [{"name": e.name} for e in weights.MODELS
-                                       if e.supported]])
+        self.assertTrue(model.supported)
+        self.assertEqual(model.logical, "dlssnr-b-logical.safetensors")
+        self.assertEqual(model.expected_tensors, 281)
 
     def test_a_manifest_naming_two_files_switches_between_them(self):
         with tempfile.TemporaryDirectory() as room:

@@ -23,8 +23,10 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import os
 import pathlib
 import struct
+import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -215,7 +217,29 @@ def extract(dll, work_dir, tools=None, *, all_models=True, quiet=False):
             continue
         packed = mlxw / model.packed
         record = model.as_dict() | {"packed": packed.name, "resource_bytes": size}
-        if model.supported:
+        if model.name == "cc_small_fp8":
+            # Preset B goes through `unpack_preset.py`, not the plain unpacker: its records
+            # are named by B's own block indices, and only the role-renaming decoder there
+            # knows which preset A block each one decodes as (notes/phase72-preset-b.md).
+            # The tool does its own extraction from the DLL, so B has no packed intermediate.
+            logical = mlxw / model.logical
+            fresh = logical.with_name(logical.name + ".new")
+            fresh.unlink(missing_ok=True)
+            if not quiet:
+                print(f"  {model.resource}: unpacking via unpack_preset to {logical.name}",
+                      flush=True)
+            result = subprocess.run(
+                [sys.executable, "-I", str(ROOT / "src" / "tools" / "unpack_preset.py"),
+                 str(dll), str(fresh), "--preset", "B",
+                 "--mlx-dlss", str(work / "mlx-dlss")],
+                cwd=str(ROOT))
+            if result.returncode != 0 or not fresh.is_file():
+                fresh.unlink(missing_ok=True)
+                raise SystemExit(f"{model.resource}: unpack_preset failed; "
+                                 "see its output above")
+            os.replace(fresh, logical)
+            record["logical_bytes"] = logical.stat().st_size
+        elif model.supported:
             logical = mlxw / model.logical
             if not quiet:
                 print(f"  {model.resource}: extracting to {packed.name}", flush=True)

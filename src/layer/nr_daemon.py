@@ -1501,7 +1501,13 @@ def main():
     # Which weight model to run, by name. The choices are the table's, not a second list: a model
     # added to `nr_weight_models` is nameable here the same day, and one this build cannot load is
     # still allowed as a value because the settings file may name it and `refresh_model` falls back.
-    parser.add_argument("--weights", default="ht", choices=nr_weight_models.names())
+    #
+    # Default None, not "ht": the installer's network choice (`NR_PRESET`, written beside the
+    # game) names a preset, and this knob names the model file that preset's weights are. The
+    # mapping is one line below the parse - preset B's weights and the panel's `cc_small_fp8` are
+    # the same file - so an install chosen as B starts on B without the two selection paths
+    # disagreeing. An explicit --weights, and a settings file's `weights` knob, still win.
+    parser.add_argument("--weights", default=None, choices=nr_weight_models.names())
     parser.add_argument("--intensity", type=float, default=1.0)
     parser.add_argument("--detail-strength", type=float, default=1.0)
     parser.add_argument("--colour-strength", type=float, default=1.0)
@@ -1566,6 +1572,11 @@ def main():
 def run_owned(args):
     # Before the model loads: a game that is closed during the load takes the daemon with it.
     end_with_game()
+    if args.weights is None:
+        # No model named on the command line: the installer's network choice decides. One
+        # line, because the preset and the knob name the same file two ways - B's weights are
+        # what the panel calls `cc_small_fp8` (nr_frame.PRESET_WEIGHTS is the other spelling).
+        args.weights = "cc_small_fp8" if nr_frame.PRESET == "B" else "ht"
     args.live = Settings(args)
     args.history = History()
     args.letterbox = Letterbox()
