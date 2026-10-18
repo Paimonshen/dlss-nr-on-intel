@@ -524,12 +524,12 @@ $script:Strings=@{
   'Hint.hold'='Keep the previous result where the game pixels did not change, reducing flicker in still areas.'
   'Hint.release'='Pixel change in levels of 255 that releases history. 16–24 is a useful starting range; zero disables this protection.'
   'Hint.cut_limit'='Average frame change that discards history for a scene cut. Lower reacts sooner; 1 never cuts.'
-  'Knob.weights'='Weights model'; 'Hint.weights'='Which weight model the daemon runs. HT is the model this project reproduces; the small FP8 model newer DLLs carry is detected and extracted, and is not loadable yet.'
+  'Knob.weights'='Network'; 'Hint.weights'='Which network the daemon runs. Unset, the installer''s network choice decides: A runs HT, B runs CC small FP8, the faster model a 310.9.16-or-later DLL carries. Naming one here overrides that and reloads the model without restarting the game; a name whose file is missing falls back to the one that is here.'
   Uninstall='Remove NR'; 'Loading.uninstall'='Removing NR from the game…'; 'Done.uninstall'='NR removed. The game folder is as it was before installation.'
   'Done.uninstall-steam'='Steam''s launch options restored and NR removed. The game folder is as it was before installation.'
   UninstallConfirm='Remove NR from this game? Setup deletes the dlss-nr folder and the files it put beside the game, and puts back the game files it set aside. If Steam still starts the game through an earlier setup''s launch options, they go back first, and Steam restarts. Your weights and settings stay in the DLSS-NR folder.'
   'Profile.standard'='Standard'; 'Profile.natural'='Natural'; 'Profile.cinematic'='Cinematic'
-  'Choice.weights.ht'='HT (the model this project reproduces)'; 'Choice.weights.cc_small_fp8'='CC small FP8 (preset B, the faster model of a 310.9.16 DLL)'
+  'Choice.weights.ht'='A: HT, the model this project reproduces'; 'Choice.weights.cc_small_fp8'='B: CC small FP8, the faster model'
  }
  ru=@{
   Title='DLSS-NR — установка и запуск'; LanguageTip='Выберите язык мастера.'
@@ -627,12 +627,12 @@ $script:Strings=@{
   'Hint.hold'='Сохраняет предыдущий результат там, где пиксели игры не менялись, уменьшая мерцание неподвижных участков.'
   'Hint.release'='Изменение пикселя в уровнях из 255, которое освобождает историю. Начните с 16–24; ноль выключает эту защиту.'
   'Hint.cut_limit'='Среднее изменение кадра для сброса истории при смене сцены. Меньше — быстрее реагирует; 1 никогда не сбрасывает.'
-  'Knob.weights'='Модель весов'; 'Hint.weights'='Какую модель весов запускает демон. HT — модель, которую воспроизводит проект; малая FP8-модель из новых DLL определяется и извлекается, но её раскладка блоков пока не загружается.'
+  'Knob.weights'='Сеть'; 'Hint.weights'='Какую сеть запускает демон. Не задано — решает выбор сети в установщике: A запускает HT, B — CC small FP8, быструю модель из DLL 310.9.16 или новее. Заданное здесь имя имеет приоритет, и модель перезагружается без перезапуска игры; имя без файла откатывается к тому, что есть.'
   Uninstall='Удалить NR'; 'Loading.uninstall'='Удаляем NR из игры…'; 'Done.uninstall'='NR удалён. Папка игры такая же, как до установки.'
   'Done.uninstall-steam'='Параметры запуска Steam возвращены, NR удалён. Папка игры такая же, как до установки.'
   UninstallConfirm='Удалить NR из этой игры? Мастер удалит папку dlss-nr и файлы, которые положил рядом с игрой, и вернёт отложенные файлы игры. Если Steam ещё запускает игру с параметрами от прежней версии мастера, сначала вернутся они, и Steam перезапустится. Веса и настройки останутся в папке DLSS-NR.'
   'Profile.standard'='Стандартный'; 'Profile.natural'='Естественный'; 'Profile.cinematic'='Кинематографический'
-  'Choice.weights.ht'='HT (модель, которую воспроизводит проект)'; 'Choice.weights.cc_small_fp8'='CC small FP8 (пресет B, быстрая модель из DLL 310.9.16)'
+  'Choice.weights.ht'='A: HT, модель, которую воспроизводит проект'; 'Choice.weights.cc_small_fp8'='B: CC small FP8, быстрая модель'
  }
  es=@{
   Title='DLSS-NR — instalación e inicio'; LanguageTip='Cambie el idioma del instalador.'
@@ -730,12 +730,12 @@ $script:Strings=@{
   'Hint.hold'='Mantiene el resultado anterior donde los píxeles del juego no cambiaron, lo que reduce el parpadeo en las zonas quietas.'
   'Hint.release'='Cambio de un píxel, en niveles de 255, que libera el historial. 16–24 es un buen punto de partida; cero desactiva esta protección.'
   'Hint.cut_limit'='Cambio medio del fotograma que descarta el historial en un cambio de escena. Menos reacciona antes; 1 nunca corta.'
-  'Knob.weights'='Modelo de pesos'; 'Hint.weights'='Qué modelo de pesos ejecuta el demonio. HT es el modelo que reproduce este proyecto; el modelo FP8 pequeño de los DLL nuevos se detecta y se extrae, y aún no se puede cargar.'
+  'Knob.weights'='Red'; 'Hint.weights'='Qué red ejecuta el demonio. Sin definir, decide la elección de red del instalador: A ejecuta HT, B ejecuta CC small FP8, el modelo rápido de un DLL 310.9.16 o posterior. Nombrar una aquí tiene prioridad y recarga el modelo sin reiniciar el juego; un nombre sin archivo retrocede al que esté.'
   Uninstall='Quitar NR'; 'Loading.uninstall'='Quitando NR del juego…'; 'Done.uninstall'='NR quitado. La carpeta del juego está como antes de la instalación.'
   'Done.uninstall-steam'='Se restauraron las opciones de inicio de Steam y se quitó NR. La carpeta del juego está como antes de la instalación.'
   UninstallConfirm='¿Quitar NR de este juego? El instalador borra la carpeta dlss-nr y los archivos que puso junto al juego, y devuelve los archivos del juego que guardó aparte. Si Steam todavía inicia el juego con las opciones de un instalador anterior, primero se restauran, y Steam se reinicia. Sus pesos y su configuración se quedan en la carpeta de DLSS-NR.'
   'Profile.standard'='Estándar'; 'Profile.natural'='Natural'; 'Profile.cinematic'='Cinematográfico'
-  'Choice.weights.ht'='HT (el modelo que reproduce el proyecto)'; 'Choice.weights.cc_small_fp8'='CC small FP8 (preset B, el modelo rápido de un DLL 310.9.16)'
+  'Choice.weights.ht'='A: HT, el modelo que reproduce el proyecto'; 'Choice.weights.cc_small_fp8'='B: CC small FP8, el modelo rápido'
  }
  zh=@{
    Title='DLSS-NR — 安装与启动'; LanguageTip='更改安装程序语言。'
@@ -833,12 +833,12 @@ $script:Strings=@{
    'Hint.hold'='在游戏像素未变处保留上一次结果，减少静止区域的闪烁。'
    'Hint.release'='以 255 级表示的像素变化量，达到则释放历史。16–24 是有用的起始范围；零则关闭该保护。'
    'Hint.cut_limit'='平均帧变化量，达到则因转场丢弃历史。越低反应越快；1 从不切换。'
-   'Knob.weights'='权重模型'; 'Hint.weights'='守护进程运行哪个权重模型。HT 是本项目复现的模型；新版 DLL 里的小型 FP8 模型会被识别并提取，其分块结构目前还不能加载。'
+   'Knob.weights'='网络'; 'Hint.weights'='守护进程运行哪个网络。未设置时由安装器的网络选择决定：A 运行 HT，B 运行 CC small FP8——310.9.16 或更新 DLL 里的更快模型。在此命名则覆盖安装器的选择，且不重启游戏即可换模型；名字没有对应文件时回退到已有的那个。'
    Uninstall='移除 NR'; 'Loading.uninstall'='正在从游戏移除 NR…'; 'Done.uninstall'='NR 已移除。游戏文件夹恢复如初。'
    'Done.uninstall-steam'='Steam 启动选项已恢复，NR 已移除。游戏文件夹恢复如初。'
    UninstallConfirm='要从本游戏移除 NR 吗？安装程序会删除 dlss-nr 文件夹和它放到游戏旁的文件，并还原它收起来的游戏文件。如果 Steam 仍通过此前安装的启动选项启动游戏，它们会先被恢复，然后 Steam 重启。你的权重和设置保留在 DLSS-NR 文件夹中。'
    'Profile.standard'='标准'; 'Profile.natural'='自然'; 'Profile.cinematic'='电影'
-   'Choice.weights.ht'='HT（本项目复现的模型）'; 'Choice.weights.cc_small_fp8'='CC small FP8（预设 B，310.9.16 DLL 的更快模型）'
+   'Choice.weights.ht'='A：HT（本项目复现的模型）'; 'Choice.weights.cc_small_fp8'='B：CC small FP8（更快的模型）'
   }
 }
 $script:TextBindings=@{
