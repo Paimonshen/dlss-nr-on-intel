@@ -1,4 +1,4 @@
-param([string]$Root = '', [switch]$SelfTest, [string]$ControlSchema = '')
+﻿param([string]$Root = '', [switch]$SelfTest, [string]$ControlSchema = '')
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms
 # Drawn by the CPU: the window is text and buttons, and on an integrated GPU the game and the
@@ -807,6 +807,13 @@ $script:Strings=@{
    GpuImagePath='实验性：帧保留在 GPU 上'
    GpuImagePathTip='帧保留在 GPU 上。如果 GPU 路径不可用或处理失败，则跳过效果，游戏显示原始帧。要求游戏与网络在同一块 Arc 上，异步关闭，且每帧都处理。'
    GpuImageNote='在下次游戏启动时生效。异步模式或非每帧处理会在该模式下跳过效果。'
+   PresetHeading='网络'; PresetA='A：NR 一直运行的模型'; PresetB='B：nvngx_dlssnr.dll 310.9.16 中的更快模型'
+   PresetTip='nvngx_dlssnr.dll 310.9.16 携带两个网络：A，NR 一直运行的模型；B，NVIDIA 后来加入的更小网络，在这块 GPU 上耗时约为 A 的一半。「安装 NR」会把 B 从该 DLL 中提取出来，与 A 并存。'
+   PresetNote='B 需要 310.9.16 或更新版的 nvngx_dlssnr.dll，在「安装」页选择，按「安装 NR」时生效。在游戏下次启动时生效。'
+   'Loading.preset'='正在保存网络…'; 'Done.preset'='网络已保存；在游戏下次启动时生效。'
+   'Done.preset-later'='网络已保存；安装 NR 会把它交给游戏。'
+   SpeedPreset='{0}, 网络 {1}'
+   'Warn.preset_b_extraction'='NR 已按网络 A 安装：无法从 nvngx_dlssnr.dll {0} 提取网络 B。提取器的输出在「检查详情」和「保存报告」里。'
    EveryLabel='网络运行于'; EveryTip='其间各帧重复上一次结果：游戏跑得更快，画面只在网络出帧时变化。'
    Every1='每帧'; Every2='每 2 帧'; Every3='每 3 帧'; Every4='每 4 帧'
    'Loading.pacing'='正在保存帧节奏…'; 'Done.pacing'='帧节奏已保存；在游戏下次启动时生效。'
