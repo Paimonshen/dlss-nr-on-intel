@@ -208,6 +208,9 @@ class Settings:
         self.saved_values = {}
         for knob in self.KNOBS:
             setattr(self, knob, getattr(args, knob, None))
+        # What this daemon came up running: a Reset of `weights` returns to it, not to a
+        # constant - the start-up choice already folded in the installer's network decision.
+        self.weights_at_start = self.weights
         # `weights` came from `--weights` through the loop above, like every other knob. It is a
         # name rather than a number; `_apply` validates it against what this build knows and
         # `serve` swaps the model when it changes.
@@ -227,6 +230,13 @@ class Settings:
                 # A name, not a number. An install that carries only one model still has to accept
                 # the name of the other - the settings file may have been written where both exist -
                 # and `nr_weight_models.resolve` is what falls back to the model that IS here.
+                # None is the reset state: the knob stops overriding and the installer's network
+                # choice (`NR_PRESET`) decides again, which is what a Reset of this knob means.
+                if value is None:
+                    if getattr(self, "weights", None) != self.weights_at_start:
+                        self.weights = self.weights_at_start
+                        changed.append(f"weights={self.weights_at_start} (reset)")
+                    continue
                 if value not in nr_weight_models.names():
                     print(f"settings: no weights model {value!r}", flush=True)
                     continue
