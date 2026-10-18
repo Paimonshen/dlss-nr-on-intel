@@ -213,7 +213,8 @@ a frame at another). The trails and patches come from carrying a change onto ano
 from the network or the daemon's history.
 
 **The owner's call:** frames stay on the GPU, and NR's answer goes onto the frame it was made for.
-Nothing inside a game's D3D12 list can wait for Vulkan, so XeSS runs one frame late:
+The plan, for Wednesday 10-21 (the owner put it off till the weekly limit renews): nothing inside a
+game's D3D12 list can wait for Vulkan, so XeSS runs one frame late:
 1. The proxy copies the colour and the vectors in the game's list, and hands NR the frame on the
    GPU (D3D12 shared resources and a shared fence, imported into libxmx's Vulkan).
 2. Once NR signals, the proxy runs XeSS on the answer from its own list on the game's queue: a
