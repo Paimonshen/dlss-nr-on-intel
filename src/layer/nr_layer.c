@@ -2819,11 +2819,10 @@ static int menu_read_keys(struct device_data *data)
 	 * Without this, typing in any other window while the game sat behind it pressed keys in the
 	 * panel: an `L` in a chat box cycled the language, an arrow in a document moved a slider.
 	 *
-	 * **Only the ImGui feed is gated.** INS, L and the NR toggle are the LAYER's own hotkeys, read
-	 * further down, and they have to keep working - opening the panel is what the user does when the
-	 * game is NOT in front, and the NR toggle is meant to work over the game while another window
-	 * has focus. Returning early here skipped all of them, which made the panel impossible to open;
-	 * feeding "all keys up" instead is what the ImGui path needs, and it leaves the hotkeys alone.
+	 * **Only the ImGui feed is gated.** The hotkeys read further down are gated separately, with
+	 * one exception each - see the note on them below. Returning early here skipped all of them,
+	 * which made the panel impossible to open; feeding "all keys up" instead is what the ImGui
+	 * path needs, and it leaves the hotkeys alone.
 	 *
 	 * The sweep is skipped rather than fed as releases for the same reason: 256 release events are
 	 * not a state change ImGui needs, and `nrex_mouse` already reports the pointer gone. */
@@ -2844,13 +2843,22 @@ static int menu_read_keys(struct device_data *data)
 	 * and rewrites the file. There is no second path that could translate differently.
 	 *
 	 * Edge-triggered here because this is a level poll: without the latch a held L would step the
-	 * language once per presented frame and blur through all four in a fraction of a second. */
-	if (data->menu && data->menu_ui) {
+	 * language once per presented frame and blur through all four in a fraction of a second.
+	 *
+	 * **Gated on the game's window being in front, and on the panel being open** (PR #20 review,
+	 * item 2). An `L` typed in a chat window while the game sat behind it rewrote the settings
+	 * file from another window - and a language write goes around "Save is the only thing that
+	 * writes", which makes an unfocused L worse than an unfocused arrow. A language change is a
+	 * settings action: it belongs behind the same two gates as S and R. The panel's own combo in
+	 * the footer still cycles the language, so nothing is lost by gating the key. */
+	if (data->menu && data->menu_ui && foreground && nr_menu_is_open(data->menu)) {
 		int down = (GetAsyncKeyState('L') & 0x8000) != 0;
 		if (down && !data->menu_ui_l_was_down)
 			nr_menu_inject_language(data->menu,
 						(nr_menu_language(data->menu) + 1) % NR_MENU_LANG_COUNT);
 		data->menu_ui_l_was_down = down;
+	} else if (data->menu) {
+		data->menu_ui_l_was_down = 0;   /* re-armed while gated, so the first press acts */
 	}
 
 	/* INS opens and closes the panel.
@@ -2861,12 +2869,19 @@ static int menu_read_keys(struct device_data *data)
 	 * the ImGui path has to own it here.
 	 *
 	 * Edge-triggered for the same reason as L: this is a level poll, and a held INS would toggle the
-	 * panel once per presented frame. */
-	if (data->menu_ui) {
+	 * panel once per presented frame.
+	 *
+	 * **Gated on the game's window being in front** (PR #20 review, item 2). Opening the panel is
+	 * still what the user does when they return to the game: the first INS lands while the game is
+	 * already in front, so the gate costs nothing - and it stops INS closing the panel, or opening
+	 * and re-closing it, while the user is typing in another window. */
+	if (data->menu_ui && foreground) {
 		int down = (GetAsyncKeyState(0x2D) & 0x8000) != 0;
 		if (down && !data->menu_ui_ins_was_down)
 			nr_menu_inject_open(data->menu, !nr_menu_is_open(data->menu));
 		data->menu_ui_ins_was_down = down;
+	} else if (data->menu) {
+		data->menu_ui_ins_was_down = 0;
 	}
 
 	/* Home, S and R, which the ImGui build has to read itself.
@@ -2888,21 +2903,23 @@ static int menu_read_keys(struct device_data *data)
 	 *
 	 * Read only while the panel is open, for S and R, so a game with its own binding keeps
 	 * it: the menu is a settings surface, and stealing a key from the game when the player is
-	 * not looking at settings is the worse trade. INS and L are exempt because the panel
-	 * cannot be opened without INS.
+	 * not looking at settings is the worse trade.
 	 *
-	 * Home is exempt with them: turning the effect off to get the frames back is something a
-	 * player does mid-game, with the panel closed. Putting it behind the panel would mean
-	 * opening settings to stop the thing that is making the game slow - which is the one thing
-	 * an effect-off key must not require. */
-	if (data->menu_ui) {
+	 * **Gated on the game's window being in front** (PR #20 review, item 2): Home in an editor
+	 * turned NR off in the game behind it. Home keeps its panel-closed exemption, because
+	 * turning the effect off to get the frames back is something a player does mid-game - but
+	 * only when the game is what they are looking at. S and R keep their panel-open rule, now
+	 * with the focus gate on top of it. */
+	if (data->menu_ui && foreground) {
 		int toggle = (GetAsyncKeyState(0x24) & 0x8000) != 0;
 		if (toggle && !data->menu_ui_toggle_was_down)
 			nr_menu_inject_toggle(data->menu);
 		data->menu_ui_toggle_was_down = toggle;
+	} else if (data->menu) {
+		data->menu_ui_toggle_was_down = 0;
 	}
 
-	if (data->menu_ui && nr_menu_is_open(data->menu)) {
+	if (data->menu_ui && foreground && nr_menu_is_open(data->menu)) {
 		int save = (GetAsyncKeyState('S') & 0x8000) != 0;
 		if (save && !data->menu_ui_save_was_down)
 			nr_menu_inject_save(data->menu);
@@ -2912,6 +2929,9 @@ static int menu_read_keys(struct device_data *data)
 		if (reset && !data->menu_ui_reset_was_down)
 			nr_menu_inject_reset(data->menu);
 		data->menu_ui_reset_was_down = reset;
+	} else if (data->menu) {
+		data->menu_ui_save_was_down = 0;
+		data->menu_ui_reset_was_down = 0;
 	}
 
 	if (data->menu_bridge) {

@@ -49,10 +49,41 @@ static int ensure_window(void)
     return g_window != NULL;
 }
 
+/* The game's own registration for the mouse (usage page 1, usage 2), if it has one.
+ *
+ * A process holds ONE registration per usage: registering here REPLACES the game's, and a plain
+ * `RIDEV_REMOVE` on the way out would leave the game with none - a game that reads the mouse
+ * through `WM_INPUT` (most do, UE4 among them) has no mouse after the panel has been opened once.
+ * So the game's registration is read before ours goes in, and put back, target window and flags,
+ * when ours comes out. PR #20 review, item 1. */
+static RAWINPUTDEVICE g_saved_device;
+static int            g_have_saved;
+
+static void save_game_registration(void)
+{
+    g_have_saved = 0;
+    UINT count = 0;
+    if (GetRegisteredRawInputDevices(NULL, &count, sizeof(RAWINPUTHEADER)) || !count) return;
+    RAWINPUTDEVICE *devices = (RAWINPUTDEVICE *)HeapAlloc(GetProcessHeap(), 0,
+                                                          count * sizeof(RAWINPUTDEVICE));
+    if (!devices) return;
+    if (GetRegisteredRawInputDevices(devices, &count, sizeof(RAWINPUTHEADER)) && count) {
+        for (UINT i = 0; i < count; ++i) {
+            if (devices[i].usUsagePage == 0x01 && devices[i].usUsage == 0x02) {
+                g_saved_device = devices[i];
+                g_have_saved = 1;
+                break;
+            }
+        }
+    }
+    HeapFree(GetProcessHeap(), 0, devices);
+}
+
 int nr_raw_mouse_start(void)
 {
     if (g_registered) return 1;
     if (!ensure_window()) return 0;
+    save_game_registration();
 
     RAWINPUTDEVICE device;
     device.usUsagePage = 0x01;
@@ -82,11 +113,20 @@ void nr_raw_mouse_stop(void)
 {
     if (!g_registered) return;
     RAWINPUTDEVICE device;
-    device.usUsagePage = 0x01;
-    device.usUsage = 0x02;
-    device.dwFlags = RIDEV_REMOVE;
-    device.hwndTarget = NULL;
+    if (g_have_saved) {
+        /* The game had its own registration: put it back exactly as it was - same target window,
+         * same flags - rather than removing it. A REMOVE here is what would strip a WM_INPUT game
+         * of its mouse. A restore can fail if the game's target window died while the panel was
+         * open; nothing recoverable is left either way, and the state is cleared regardless. */
+        device = g_saved_device;
+    } else {
+        device.usUsagePage = 0x01;
+        device.usUsage = 0x02;
+        device.dwFlags = RIDEV_REMOVE;
+        device.hwndTarget = NULL;
+    }
     RegisterRawInputDevices(&device, 1, sizeof device);
+    g_have_saved = 0;
     g_registered = 0;
     g_pending_x = 0;
     g_pending_y = 0;
