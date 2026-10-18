@@ -287,7 +287,7 @@ if(NR_BUILD_TESTS)
       nr_test(layer_menu_ui_fixtures "${Python3_EXECUTABLE}"
         "${PROJECT_SOURCE_DIR}/src/layer/test_menu_ui_fixtures.py")
       set_tests_properties(layer_menu_ui_fixtures PROPERTIES
-        REQUIRED_FILES "${NR_WORK_DIR}/test_menu_panel.exe;${NR_WORK_DIR}/test_menu_side.exe;${NR_WORK_DIR}/test_menu_keys.exe;${NR_WORK_DIR}/test_menu_language.exe;${NR_WORK_DIR}/test_menu_actions.exe")
+        REQUIRED_FILES "${NR_WORK_DIR}/test_menu_panel.exe;${NR_WORK_DIR}/test_menu_side.exe;${NR_WORK_DIR}/test_menu_keys.exe;${NR_WORK_DIR}/test_menu_language.exe;${NR_WORK_DIR}/test_menu_actions.exe;${NR_WORK_DIR}/test_menu_pacing.exe")
     endif()
   endif()
   foreach(name publish_check claims_check build_check)

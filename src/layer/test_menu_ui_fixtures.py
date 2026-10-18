@@ -46,7 +46,7 @@ WORK = ROOT / "work"
 # The panel's frames sleep to make their hold timings real, so the budget is generous; a
 # fixture that hangs is a failure, not a timeout nobody reports.
 FIXTURES = ("test_menu_panel", "test_menu_side", "test_menu_keys", "test_menu_language",
-            "test_menu_actions")
+            "test_menu_actions", "test_menu_pacing")
 # The ones that must run from the repository root, because they read the sources there rather
 # than driving a linked copy of them.
 FROM_ROOT = frozenset({"test_menu_keys", "test_menu_language"})

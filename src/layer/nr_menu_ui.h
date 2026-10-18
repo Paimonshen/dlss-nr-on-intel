@@ -50,6 +50,14 @@ typedef struct nrex_row {
      * the Info rows want. */
     const char *hint;
 
+    /* Non-zero draws the row greyed out and refuses interaction.
+     *
+     * For a control that cannot be changed right now because of another one - the GPU image path
+     * is unavailable while the network runs ahead of the game - where hiding it would make the
+     * dependency invisible and leaving it live would let the user set something that is then
+     * silently overruled. `hint` is what explains why, and it is shown on hover. */
+    int         disabled;
+
     /* FILLED BY THE UI when the user moves this row. The C side reads it after `nrex_end_panel`
      * for every row whose `changed` is set, and applies it through the bridge - so the menu owns
      * no setting, it only reports what the user asked for. Without this an edit has nowhere to

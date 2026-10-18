@@ -218,6 +218,15 @@ struct nr_menu_bridge {
      * remember the choice for the next launch, and this is where it goes while the panel is
      * open. -1 until the file has been read. */
     int nr_enabled_saved;
+    /* The layer's own pacing, read from the proxy's `nr-env.txt`. See `read_pacing`: these are
+     * "next launch" settings, so the panel shows and writes them but nothing changes until the
+     * game restarts. `pacing_ok` is 0 when the installation is not shaped the way this expects,
+     * and the panel then offers none of them rather than editing a file it cannot identify. */
+    int pacing_ok;
+    int pacing_async;
+    int pacing_gpu_image;
+    int pacing_every;
+    char env_path[1088];
 };
 
 /* ------------------------------------------------------------------ label lookup */
@@ -304,6 +313,188 @@ static void format_row(nr_menu_bridge *b, int i)
     }
 }
 
+/* ------------------------------------------------------------------ the layer's own pacing */
+
+/* The three lines the setup window calls "frame pacing", which the LAYER reads at start-up rather
+ * than the daemon: whether the network runs ahead of the game, how many presents each result
+ * covers, and whether the frame stays on the GPU.
+ *
+ * They live in the proxy's `nr-env.txt` beside the game, not in the settings file, because the
+ * layer reads its environment when the process starts and never looks again - so these are
+ * "next launch" settings by construction, and the panel has to write the same file the setup
+ * window writes or the two would disagree the moment either was used.
+ *
+ * The file is rewritten line by line with only these keys replaced, which is what
+ * `windows_wizard_core.set_pacing` does: the rest is Install NR's record of the Python, the paths
+ * and the socket, and losing a line of it breaks the installation. */
+static const char *const pacing_keys[] = {
+    "NR_LAYER_ASYNC", "NR_GPU_IMAGE", "NR_GPU_TRANSPORT", "NR_GPU_ONLY", "NR_LAYER_LIVE",
+};
+#define NR_PACING_KEYS (sizeof pacing_keys / sizeof pacing_keys[0])
+
+static int is_pacing_key(const char *line, size_t length)
+{
+    const char *eq = memchr(line, '=', length);
+    size_t name_len = eq ? (size_t)(eq - line) : length;
+    for (size_t i = 0; i < NR_PACING_KEYS; ++i) {
+        size_t key_len = strlen(pacing_keys[i]);
+        if (key_len == name_len && strncmp(line, pacing_keys[i], key_len) == 0) return 1;
+    }
+    return 0;
+}
+
+/* Where the proxy's environment file is.
+ *
+ * **Beside this library**, not derived from the settings path. The two files live in different
+ * trees and there is no arithmetic between them: the installer puts `nr-env.txt` in the game's
+ * `dlss-nr/` folder next to `nr_layer.dll`, while `nr_settings.json` goes in the release's
+ * `work/` folder, which may be an entirely different drive. Deriving one from the other was the
+ * first attempt and it silently found nothing - the panel then offered no pacing rows at all,
+ * which reads as "this build does not have them".
+ *
+ * The proxy is what reads this file, and it reads the copy beside the layer, so asking the loader
+ * for this library's own path answers the question exactly.
+ *
+ * Returns 0 when the path cannot be resolved, in which case the panel must not offer these rows -
+ * a wrong guess would edit somebody else's file. */
+/* An override for the environment file, for a test or a caller that has no library beside it.
+ *
+ * The production path is "beside this DLL", which a headless fixture cannot satisfy: the fixture
+ * is a test executable, not the installed layer. Rather than have the fixture copy itself into a
+ * fake installation, the path can be named directly. Set through `nr_menu_bridge_use_env_file`. */
+static const char *env_override;
+
+void nr_menu_bridge_use_env_file(const char *path)
+{
+    env_override = (path && *path) ? path : NULL;
+}
+
+static int env_file_path(const nr_menu_bridge *b, char *out, size_t size)
+{
+    (void)b;
+    if (env_override) {
+        int written = snprintf(out, size, "%s", env_override);
+        return written > 0 && (size_t)written < size;
+    }
+#ifdef _WIN32
+    HMODULE hmod;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+                            (LPCWSTR)(const void *)&env_file_path, &hmod))
+        return 0;
+    WCHAR wide[1024];
+    if (!GetModuleFileNameW(hmod, wide, 1024)) return 0;
+    char self[1024];
+    char write_out[1024];
+    WideCharToMultiByte(CP_UTF8, 0, wide, -1, self, sizeof self,
+                        write_out, NULL);
+    char *slash = strrchr(self, '\\');
+    char *fslash = strrchr(self, '/');
+    if (fslash && (!slash || fslash > slash)) slash = fslash;
+    if (!slash) return 0;
+    *(slash + 1) = '\0';
+    int written = snprintf(out, size, "%snr-env.txt", self);
+    return written > 0 && (size_t)written < size;
+#else
+    (void)out;
+    (void)size;
+    return 0;   /* the proxy is Windows-only; the pacing rows are a Windows feature */
+#endif
+}
+
+/* The three values the file currently holds. -1 means "absent", which the panel shows as the
+ * defaults the setup window uses. */
+static void read_pacing(nr_menu_bridge *b)
+{
+    b->pacing_ok = 0;
+    b->pacing_async = 0;
+    b->pacing_gpu_image = 0;
+    b->pacing_every = 1;
+    char path[1088];
+    if (!env_file_path(b, path, sizeof path)) return;
+    char *text = NULL;
+    size_t size = 0;
+    if (!nr_read_file(path, &text, &size)) return;
+    b->pacing_ok = 1;
+    snprintf(b->env_path, sizeof b->env_path, "%s", path);
+
+    const char *at = text;
+    while (*at) {
+        const char *end = at;
+        while (*end && *end != '\n' && *end != '\r') ++end;
+        size_t len = (size_t)(end - at);
+        if (len > 0 && *at != '#') {
+            const char *eq = memchr(at, '=', len);
+            if (eq) {
+                size_t name_len = (size_t)(eq - at);
+                const char *value = eq + 1;
+                size_t value_len = len - name_len - 1;
+                int on = (value_len == 1 && value[0] == '1');
+                if (name_len == strlen("NR_LAYER_ASYNC") &&
+                    strncmp(at, "NR_LAYER_ASYNC", name_len) == 0) {
+                    b->pacing_async = on;
+                } else if (name_len == strlen("NR_GPU_IMAGE") &&
+                           strncmp(at, "NR_GPU_IMAGE", name_len) == 0) {
+                    b->pacing_gpu_image = on;
+                } else if (name_len == strlen("NR_LAYER_LIVE") &&
+                           strncmp(at, "NR_LAYER_LIVE", name_len) == 0) {
+                    int every = atoi(value);
+                    b->pacing_every = (every >= 1 && every <= 4) ? every : 1;
+                }
+            }
+        }
+        at = end;
+        while (*at == '\n' || *at == '\r') ++at;
+    }
+    free(text);
+}
+
+/* Rewrite the pacing lines and leave everything else byte for byte.
+ *
+ * The same shape as `set_pacing`: drop every line whose key is one of ours, then append the five.
+ * Rewriting the whole file would mean regenerating the Python path, the socket name and the
+ * layer manifest path correctly in C, and every one of those being slightly wrong is an install
+ * that stops working with no message. */
+static int write_pacing(nr_menu_bridge *b)
+{
+    if (!b->pacing_ok || !b->env_path[0]) return 0;
+    char *text = NULL;
+    size_t size = 0;
+    if (!nr_read_file(b->env_path, &text, &size)) return 0;
+
+    char out[8192];
+    size_t used = 0;
+    const char *at = text;
+    while (*at && used + 2 < sizeof out) {
+        const char *end = at;
+        while (*end && *end != '\n' && *end != '\r') ++end;
+        size_t len = (size_t)(end - at);
+        if (len > 0 && !is_pacing_key(at, len)) {
+            if (used + len + 1 >= sizeof out) { free(text); return 0; }
+            memcpy(out + used, at, len);
+            used += len;
+            out[used++] = '\n';
+        }
+        at = end;
+        while (*at == '\n' || *at == '\r') ++at;
+    }
+    free(text);
+
+    int added = snprintf(out + used, sizeof out - used,
+                         "NR_LAYER_ASYNC=%d\n"
+                         "NR_GPU_IMAGE=%d\n"
+                         "NR_GPU_TRANSPORT=%d\n"
+                         "NR_GPU_ONLY=%d\n"
+                         "NR_LAYER_LIVE=%d\n",
+                         b->pacing_async ? 1 : 0,
+                         b->pacing_gpu_image ? 1 : 0,
+                         b->pacing_gpu_image ? 1 : 0,
+                         b->pacing_gpu_image ? 1 : 0,
+                         b->pacing_every);
+    if (added < 0 || used + (size_t)added >= sizeof out) return 0;
+    used += (size_t)added;
+    return nr_write_file_atomic(b->env_path, out, used);
+}
+
 /* ------------------------------------------------------------------ reading */
 
 static void load_defaults(nr_menu_bridge *b)
@@ -357,6 +548,7 @@ static int load_settings(nr_menu_bridge *b)
         int nr_at = nr_settings_find(&settings, "nr_enabled");
         if (nr_at >= 0)
             b->nr_enabled_saved = atoi(settings.value[nr_at]) ? 1 : 0;
+        read_pacing(b);
 
         for (int i = 0; i < NR_KNOBS_COUNT; ++i) {
             const nr_knob_def *k = &knobs[i];
@@ -1172,6 +1364,57 @@ const char *nr_menu_bridge_selected_key(const nr_menu_bridge *b)
 
 /* The knobs this table owns, so a test can compare the list against `nr_knobs.KNOBS` without
  * parsing the C. */
+/* ------------------------------------------------------------------ the layer's pacing, to the panel */
+
+int nr_menu_bridge_pacing_available(const nr_menu_bridge *b)
+{
+    return b && b->pacing_ok;
+}
+
+int nr_menu_bridge_pacing_async(const nr_menu_bridge *b) { return b ? b->pacing_async : 0; }
+int nr_menu_bridge_pacing_gpu_image(const nr_menu_bridge *b) { return b ? b->pacing_gpu_image : 0; }
+int nr_menu_bridge_pacing_every(const nr_menu_bridge *b) { return b ? b->pacing_every : 1; }
+
+int nr_menu_bridge_set_pacing(nr_menu_bridge *b, int what, int value)
+{
+    if (!b || !b->pacing_ok) return 0;
+    switch (what) {
+    case NR_PACING_ASYNC:
+        b->pacing_async = value ? 1 : 0;
+        /* Asynchronous mode and the GPU image path cannot both run: the path needs the answer
+         * back on the frame it was asked for, and asynchronous mode is defined by not waiting
+         * for it. Turning one on turns the other off, which is what the setup window's own note
+         * says - and doing it here means the two files can never disagree. */
+        if (b->pacing_async) b->pacing_gpu_image = 0;
+        break;
+    case NR_PACING_GPU_IMAGE:
+        b->pacing_gpu_image = value ? 1 : 0;
+        if (b->pacing_gpu_image) {
+            /* The other half of the same constraint: the path requires every frame, so the
+             * cadence goes back to 1 with it. */
+            b->pacing_async = 0;
+            b->pacing_every = 1;
+        }
+        break;
+    case NR_PACING_EVERY: {
+        int every = value;
+        if (every < 1) every = 1;
+        if (every > 4) every = 4;
+        b->pacing_every = every;
+        /* Fewer than every frame also disqualifies the GPU path. */
+        if (every > 1) b->pacing_gpu_image = 0;
+        break;
+    }
+    default:
+        return 0;
+    }
+    /* Written immediately: these are the layer's start-up settings and there is no Save path for
+     * them, so a change that was not written would be lost and the panel would be lying. */
+    if (!write_pacing(b)) return 0;
+    b->dirty = 1;
+    return 1;
+}
+
 int nr_menu_bridge_knob_count(void) { return NR_KNOBS_COUNT; }
 
 const char *nr_menu_bridge_knob_name(int index)

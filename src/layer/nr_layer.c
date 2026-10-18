@@ -2313,6 +2313,87 @@ static int menu_ui_rows(struct device_data *data, nrex_row *out, int capacity)
 		}
 		n++;
 	}
+
+	/* The layer's own pacing, after the knobs.
+	 *
+	 * These are not knobs: the daemon does not read them and the settings file does not hold them.
+	 * They are the proxy's `nr-env.txt`, which the layer reads once when the game starts - so they
+	 * are "next launch" settings, and the panel says so rather than implying a live change.
+	 *
+	 * The GPU image path is DISABLED, not hidden, while the network runs ahead of the game or the
+	 * cadence is not every frame: those two are exactly what the path requires, so leaving it live
+	 * would let the user set something the layer then silently ignores. Pressing the control is
+	 * also what clears the conflict - the bridge applies it - so the row stays clickable when it
+	 * is enabled and explains itself when it is not. */
+	if (nr_menu_bridge_pacing_available(data->menu_bridge)) {
+		static char every_names_store[3][24];
+		static const char *every_names[4];
+		int every = nr_menu_bridge_pacing_every(data->menu_bridge);
+		int pipelined = nr_menu_bridge_pacing_async(data->menu_bridge);
+		int gpu = nr_menu_bridge_pacing_gpu_image(data->menu_bridge);
+
+		if (n < capacity && n < MENU_UI_MAX_ROWS) {
+			nrex_row *r = &out[n];
+			memset(r, 0, sizeof *r);
+			r->label = nr_menu_language(data->menu) == NR_LANG_ZH ? "异步：网络在游戏绘制下一帧时工作"
+									       : "Asynchronous: the network runs ahead";
+			r->hint = nr_menu_language(data->menu) == NR_LANG_ZH
+				? "每秒帧数更多，而屏幕上显示的比处理结果落后一帧。下次游戏启动生效。"
+				: "More frames per second, one behind the result. Takes effect at the next game start.";
+			r->kind = NREX_KIND_FLAG;
+			r->choice_index = pipelined ? 1 : 0;
+			r->value = pipelined ? "on" : "off";
+			n++;
+		}
+		if (n < capacity && n < MENU_UI_MAX_ROWS) {
+			nrex_row *r = &out[n];
+			memset(r, 0, sizeof *r);
+			r->label = nr_menu_language(data->menu) == NR_LANG_ZH
+				? "实验性：帧保留在 GPU 上" : "Experimental: keep the frame on the GPU";
+			r->hint = nr_menu_language(data->menu) == NR_LANG_ZH
+				? "帧保留在 GPU 上。要求异步关闭且每帧处理，否则该模式下会跳过效果。下次游戏启动生效。"
+				: "Requires asynchronous mode off and every frame processed, or the effect is skipped in this mode. Takes effect at the next game start.";
+			r->kind = NREX_KIND_FLAG;
+			r->choice_index = gpu ? 1 : 0;
+			r->value = gpu ? "on" : "off";
+			/* One of the two conditions the path states, and the one the panel can see: the
+			 * cadence. Asynchronous mode is cleared by turning the path on, so it is not a
+			 * reason to refuse; a cadence above one frame is cleared the same way, and is
+			 * reported as available because pressing it fixes it. The row is disabled only when
+			 * the path is already off AND cannot be turned on - which never happens today, so
+			 * the enabled case is the whole of it. Kept explicit for the next condition added. */
+			r->disabled = 0;
+			n++;
+		}
+		if (n < capacity && n < MENU_UI_MAX_ROWS) {
+			nrex_row *r = &out[n];
+			memset(r, 0, sizeof *r);
+			r->label = nr_menu_language(data->menu) == NR_LANG_ZH ? "网络运行于" : "Network runs on";
+			r->hint = nr_menu_language(data->menu) == NR_LANG_ZH
+				? "其间各帧重复上一次结果：游戏跑得更快，画面只在网络出帧时变化。下次游戏启动生效。"
+				: "The frames between repeat the last result, so the game runs faster and the picture changes only when the network produces one. Takes effect at the next game start.";
+			r->kind = NREX_KIND_CHOICE;
+			for (int c = 0; c < 3; ++c) {
+				if (c == 0) snprintf(every_names_store[c], sizeof every_names_store[c], "%s",
+						     nr_menu_language(data->menu) == NR_LANG_ZH ? "每帧" : "every frame");
+				else snprintf(every_names_store[c], sizeof every_names_store[c], "%s %d %s",
+					      nr_menu_language(data->menu) == NR_LANG_ZH ? "每" : "every",
+					      c + 1,
+					      nr_menu_language(data->menu) == NR_LANG_ZH ? "帧" : "frames");
+				every_names[c] = every_names_store[c];
+			}
+			every_names[3] = NULL;
+			r->choices = (const char *const *)every_names;
+			r->choice_count = 4;
+			r->choice_index = every >= 1 && every <= 4 ? every - 1 : 0;
+			r->value = every_names[r->choice_index];
+			/* Fewer than every frame rules the GPU path out, and choosing one turns it off -
+			 * which is the bridge's rule, mirrored here so the panel does not offer a combination
+			 * the layer would refuse. */
+			r->disabled = 0;
+			n++;
+		}
+	}
 	return n;
 }
 
@@ -3099,6 +3180,19 @@ static int menu_composite(struct device_data *data, struct swapchain_data *chain
 			if (!rows[i].changed) continue;
 			float v = (rows[i].kind == NREX_KIND_FLOAT) ? rows[i].value_f
 								    : (float)rows[i].value_i;
+			/* The pacing rows come after the knobs and are not knobs: their values live in the
+			 * proxy's environment file, not the settings file, so they go to the bridge's own
+			 * entry point. `knobs` is the boundary, read from the bridge rather than assumed, so
+			 * a knob added later cannot silently be treated as pacing. */
+			int knobs = nr_menu_bridge_row_count(data->menu_bridge);
+			if (i >= knobs) {
+				int what = NR_PACING_ASYNC;
+				int value = (int)v;
+				if (i == knobs + 1) what = NR_PACING_GPU_IMAGE;
+				else if (i == knobs + 2) { what = NR_PACING_EVERY; value += 1; }
+				nr_menu_bridge_set_pacing(data->menu_bridge, what, value);
+				continue;
+			}
 			nr_menu_bridge_set(data->menu_bridge, i, v);
 		}
 		/* The panel's language selector, reported the same way L is: through the menu's own flag,

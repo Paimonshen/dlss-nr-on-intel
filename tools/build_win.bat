@@ -16,6 +16,7 @@ rem    work\test_menu_side.exe  the menu's C side against the same panel, headle
 rem    work\test_menu_keys.exe  the panel's hotkeys, by structure
 rem    work\test_menu_language.exe  the selector matches the rows
 rem    work\test_menu_actions.exe   Reset, Revert and the effect checkbox
+rem    work\test_menu_pacing.exe    async, the GPU path and the cadence
 rem
 rem  work\mlx-dlss is NOT built here and must NOT be deleted with the artifacts. It is the
 rem  extracted MLX-DLSS runtime - `features.py`, `composition.py`, the weights - and
@@ -146,12 +147,12 @@ rem makes the panel's reporting and the bridge's handoff checkable on any machin
 rem file. `test_exchange.c` is the opposite shape and stays in the /TC block below: it is C, and it
 rem #includes nr_layer.c so its symbols are already inside its own object.
 echo [3/6] building nr_layer.dll ...
-cl /nologo /O2 /TP /utf-8 /EHsc /DNDEBUG /DVK_NO_PROTOTYPES /D_WIN32 /D_IMGUI_DEFINE_MATH_OPERATORS /I"%VULKAN_SDK%\Include" /I"%REPO%\third_party\imgui" /I"%REPO%\src\layer" /Fd"%REPO%\imgui.pdb" /c "%REPO%\third_party\imgui\imgui.cpp" "%REPO%\third_party\imgui\imgui_draw.cpp" "%REPO%\third_party\imgui\imgui_tables.cpp" "%REPO%\third_party\imgui\imgui_widgets.cpp" "%REPO%\third_party\imgui\imgui_impl_vulkan.cpp" "%REPO%\src\layer\nr_menu_ui.cpp" "%REPO%\src\layer\test_menu_panel.cpp" "%REPO%\src\layer\test_menu_side.cpp" "%REPO%\src\layer\test_menu_keys.cpp" "%REPO%\src\layer\test_menu_language.cpp" "%REPO%\src\layer\test_menu_actions.cpp"
+cl /nologo /O2 /TP /utf-8 /EHsc /DNDEBUG /DVK_NO_PROTOTYPES /D_WIN32 /D_IMGUI_DEFINE_MATH_OPERATORS /I"%VULKAN_SDK%\Include" /I"%REPO%\third_party\imgui" /I"%REPO%\src\layer" /Fd"%REPO%\imgui.pdb" /c "%REPO%\third_party\imgui\imgui.cpp" "%REPO%\third_party\imgui\imgui_draw.cpp" "%REPO%\third_party\imgui\imgui_tables.cpp" "%REPO%\third_party\imgui\imgui_widgets.cpp" "%REPO%\third_party\imgui\imgui_impl_vulkan.cpp" "%REPO%\src\layer\nr_menu_ui.cpp" "%REPO%\src\layer\test_menu_panel.cpp" "%REPO%\src\layer\test_menu_side.cpp" "%REPO%\src\layer\test_menu_keys.cpp" "%REPO%\src\layer\test_menu_language.cpp" "%REPO%\src\layer\test_menu_actions.cpp" "%REPO%\src\layer\test_menu_pacing.cpp"
 if errorlevel 1 ( echo ERROR: imgui objects failed & exit /b 1 )
 rem The objects landed in the current directory (cl /c with no /Fo). Move each by name and fail
 rem loudly if any is missing: a stale object from an earlier build, linked in place of a fresh one,
 rem cost this menu a full day of symptoms that matched no source change.
-for %%F in (imgui.obj imgui_draw.obj imgui_tables.obj imgui_widgets.obj imgui_impl_vulkan.obj nr_menu_ui.obj test_menu_panel.obj test_menu_side.obj test_menu_keys.obj test_menu_language.obj test_menu_actions.obj) do (
+for %%F in (imgui.obj imgui_draw.obj imgui_tables.obj imgui_widgets.obj imgui_impl_vulkan.obj nr_menu_ui.obj test_menu_panel.obj test_menu_side.obj test_menu_keys.obj test_menu_language.obj test_menu_actions.obj test_menu_pacing.obj) do (
   if exist "%%F" ( move /Y "%%F" "%REPO%\" >nul ) else if exist "%REPO%\third_party\imgui\%%F" (
     move /Y "%REPO%\third_party\imgui\%%F" "%REPO%\" >nul
   ) else if exist "%REPO%\src\layer\%%F" (
@@ -204,6 +205,13 @@ rem each still answers its own, and that Reset cannot reach the saved file.
 link /nologo /OUT:"%WORK%\test_menu_actions.exe" "%REPO%\test_menu_actions.obj" "%REPO%\nr_menu.obj" "%REPO%\nr_menu_font.obj" "%REPO%\nr_menu_strings.obj" "%REPO%\nr_menu_strings_lookup.obj" "%REPO%\nr_menu_bridge.obj" "%REPO%\nr_file.obj" "%REPO%\nr_focus.obj" "%REPO%\nr_raw_mouse.obj" user32.lib gdi32.lib
 if errorlevel 1 ( echo ERROR: test_menu_actions.exe failed & exit /b 1 )
 echo   test_menu_actions.exe
+rem The layer's own pacing - asynchronous mode, the GPU path and the cadence - and the conflicts
+rem the setup window states: the path requires the other two off, so each of the three clears the
+rem others. Also checks that rewriting the proxy environment file leaves every line it does not
+rem own byte for byte, because those lines are the installation.
+link /nologo /OUT:"%WORK%\test_menu_pacing.exe" "%REPO%\test_menu_pacing.obj" "%REPO%\nr_menu.obj" "%REPO%\nr_menu_font.obj" "%REPO%\nr_menu_strings.obj" "%REPO%\nr_menu_strings_lookup.obj" "%REPO%\nr_menu_bridge.obj" "%REPO%\nr_file.obj" "%REPO%\nr_focus.obj" user32.lib gdi32.lib
+if errorlevel 1 ( echo ERROR: test_menu_pacing.exe failed & exit /b 1 )
+echo   test_menu_pacing.exe
 del /Q "%REPO%\*.obj" >nul 2>&1
 echo   nr_layer.dll
 echo   nr_layer.dll  (with the INS settings menu: user32, gdi32)
@@ -315,7 +323,7 @@ echo   libnr_image.dll the host passes around the network
 echo   libnr_alloc.dll the daemon's NumPy allocator
 echo   *.spv         the compute shaders
 echo   NR-Setup.exe  the Windows setup window
-echo   test_exchange.exe, test_menu_panel.exe, test_menu_side.exe, test_menu_keys.exe, test_menu_language.exe, test_menu_actions.exe  the native fixtures
+echo   test_exchange.exe, test_menu_panel.exe, test_menu_side.exe, test_menu_keys.exe, test_menu_language.exe, test_menu_actions.exe, test_menu_pacing.exe  the native fixtures
 echo.
 echo Next: tools\deploy.bat --game ^<game dir^> installs the layer and points the
 echo daemon at this checkout, so nothing has to be copied into the game folder.

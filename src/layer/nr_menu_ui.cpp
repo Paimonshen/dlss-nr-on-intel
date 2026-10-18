@@ -729,6 +729,10 @@ static void nrex_draw_panel(nrex_ui *u, const char *title, int language,
     for (int i = 0; i < count; ++i) {
         const nrex_row &r = rows[i];
         ImGui::PushID(i);
+        /* A disabled row is drawn greyed and refuses input as a whole: every widget below is
+         * submitted under BeginDisabled, which is what makes "cannot be changed right now" mean
+         * the same thing for a slider, a combo and a checkbox. */
+        if (r.disabled) ImGui::BeginDisabled();
         switch (r.kind) {
         case NREX_KIND_FLOAT: {
             /* While the row is being edited the widget keeps its own number.
@@ -901,6 +905,7 @@ static void nrex_draw_panel(nrex_ui *u, const char *title, int language,
             ImGui::TextDisabled("%s  %s", r.label, r.value ? r.value : "");
         }
         (void)kLabelColumn;
+        if (r.disabled) ImGui::EndDisabled();
         ImGui::PopID();
     }
 

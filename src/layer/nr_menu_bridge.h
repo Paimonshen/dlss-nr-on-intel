@@ -95,6 +95,35 @@ void nr_menu_bridge_revert(nr_menu_bridge *bridge);
  * its live state to the panel every frame. These two only carry the value across a Save, so the
  * next launch can restore it. */
 void nr_menu_bridge_set_nr_saved(nr_menu_bridge *bridge, int on);
+
+/* The layer's own pacing: whether the network runs ahead of the game, whether the frame stays on
+ * the GPU, and how many presents each result covers.
+ *
+ * These are NOT settings the daemon reads - they are the proxy's `nr-env.txt`, which the LAYER
+ * reads once when the game starts. So they are "next launch" settings by construction: the panel
+ * shows and writes them, and nothing changes until the game restarts. The setup window writes the
+ * same file, and both leave every line they are not changing alone.
+ *
+ * `available` is 0 when the installation is not shaped the way the panel expects, in which case it
+ * must offer none of them rather than edit a file it cannot identify. */
+enum { NR_PACING_ASYNC = 0, NR_PACING_GPU_IMAGE = 1, NR_PACING_EVERY = 2 };
+
+/* Name the proxy's environment file instead of taking it from beside this library.
+ *
+ * The production path is "beside this DLL", because that is where the installer puts
+ * `nr-env.txt` and what the proxy reads. A headless fixture is a test executable with no
+ * installation around it, so it names the file directly; NULL restores the default. */
+void nr_menu_bridge_use_env_file(const char *path);
+
+int nr_menu_bridge_pacing_available(const nr_menu_bridge *bridge);
+int nr_menu_bridge_pacing_async(const nr_menu_bridge *bridge);
+int nr_menu_bridge_pacing_gpu_image(const nr_menu_bridge *bridge);
+int nr_menu_bridge_pacing_every(const nr_menu_bridge *bridge);
+
+/* Set one of them and write the file. Applies the conflicts the setup window states: the GPU
+ * image path requires asynchronous mode OFF and every frame, so turning it on turns both of those
+ * off, and turning either of those on turns the GPU path off. Returns 1 when the file was written. */
+int nr_menu_bridge_set_pacing(nr_menu_bridge *bridge, int what, int value);
 int  nr_menu_bridge_nr_saved(const nr_menu_bridge *bridge);
 
 /* Which row the cursor is on, and where it is. */
