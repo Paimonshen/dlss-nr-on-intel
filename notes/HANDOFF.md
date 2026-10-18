@@ -22,12 +22,13 @@ When the dated entries grow long, move the older ones into the archive the same 
   driver. A Vulkan layer hands each presented frame to a daemon that runs NVIDIA's network on the
   GPU and writes the answer back into the swapchain. DirectX 8-11 games go through DXVK. DirectX 12
   runs on Linux through VKD3D-Proton and is not offered on Windows.
-- **The releases are Windows-only so far**: v0.0.1 (`7f9c364`), v0.0.1.1 (`f9ec5f1`) and v0.0.1.2
-  (`2f90064`, 10-15, the latest), a ZIP with the setup window, DXVK 3.1.1, both layers and a
-  `vulkan-1.dll` proxy. **v0.0.1.3 is experimental**, a GitHub pre-release from `newnr` at
-  `d89563f` (10-18): preset B in the setup window. It shipped without Linux's `make test` at
-  its head, on the owner's word, as a Windows-only release. Linux users build from source
-  (README).
+- **The releases are Windows-only so far**: v0.0.1 (`7f9c364`), v0.0.1.1 (`f9ec5f1`), v0.0.1.2
+  (`2f90064`, 10-15) and **v0.0.1.3** (`d89563f` on `newnr`, 10-18, the latest), a ZIP with the
+  setup window, DXVK 3.1.1, both layers and a `vulkan-1.dll` proxy. 0.0.1.3 adds preset B in the
+  setup window. It went out as a pre-release without Linux's `make test` at its head, on the
+  owner's word, as a Windows-only release, and the owner made it the latest release the same
+  day so that the repository's front page shows it. `master` still holds 0.0.1.2. Linux users
+  build from source (README).
 - **Branches.** `master` holds everything released and since (`d29b665`, PR #13). `windows` is the
   Windows line, merged into `master`. `improve-e4m3` is where new work goes, with `master` merged in
   on 10-15 (`7e7dfb5`): Codex's experimental GPU-only frame path on Windows and an E4M3 rounding
