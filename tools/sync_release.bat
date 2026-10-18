@@ -88,6 +88,23 @@ xcopy /E /I /Y /Q "%REPO%\scripts" "%REL%\scripts" >nul
 if errorlevel 1 ( echo ERROR: copying scripts failed & exit /b 1 )
 echo   scripts\ (get_weights.py, nr_weights.py, build_release.py)
 
+rem The setup window's own bridge, which lives in scripts\ in a release even though its source
+rem is src\tools\ (windows-wizard.ps1 runs `scripts\windows_wizard.py`, which imports
+rem scripts\windows_wizard_core.py). Packaged trees get it from build_release.py; this script
+rem copies only the repo's scripts\, which does not hold it - so a synced tree kept whatever the
+rem packer wrote. Every change to the wizard's backend (the weights knob, the None default, the
+rem presets) was verified in src\tools while the window kept running the old copy, which reads
+rem exactly like the feature being broken.
+copy /Y "%REPO%\src\tools\windows_wizard.py" "%REL%\scripts\" >nul
+copy /Y "%REPO%\src\tools\windows_wizard_core.py" "%REL%\scripts\" >nul
+copy /Y "%REPO%\src\tools\windows_launch.py" "%REL%\scripts\" >nul
+for /d /r "%REL%\scripts" %%J in (__pycache__) do @if exist "%%J" rmdir /S /Q "%%J" 2>nul
+if not exist "%REL%\scripts\windows_wizard_core.py" (
+  echo   ERROR: scripts\windows_wizard_core.py missing - the setup window will not run
+  set "MISSING=1"
+)
+echo   scripts\windows_wizard.py, windows_wizard_core.py, windows_launch.py  (the window's bridge)
+
 for /d /r "%REL%\src" %%J in (__pycache__) do @if exist "%%J" rmdir /S /Q "%%J" 2>nul
 
 rem ---- the setup window, and the strings it is translated from ----
