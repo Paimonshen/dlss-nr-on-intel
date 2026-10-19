@@ -260,6 +260,43 @@ into the game folder, or the antivirus, and the assertion failures are unittest 
 error and the abort. A check after a `TearDown` failure is not a check that passed, so this is
 filed here rather than assumed away.
 
+**The GPU row also turned on strict mode, which is the bug issue #17 removed** (2026-10-18, same
+branch). Found by writing a check for the four variables the panel writes rather than assuming
+they were what their names say. `write_pacing` wrote `NR_GPU_ONLY` as a copy of
+`NR_GPU_IMAGE`/`NR_GPU_TRANSPORT`; but `NR_GPU_ONLY` is the **strict** half of the path, not the
+same switch: with it on, `host_pixel_path_allowed` refuses the CPU pixel fallback and the game's
+own image is kept, with the reason going only to stderr — which on Windows is nobody's. That is
+precisely the tester's report that became issue #17 (DOOM at 1080p, "with the GPU option on NR did
+nothing"), and `a31efe6` answered it by making the window never set strict mode: "Never strict:
+where a game cannot keep its frames on the GPU, NR takes its usual path and the layer's line in
+the log says why". The panel had put the strictness back, so **turning that row on could make the
+effect stop working** in exactly the games the fallback exists for — and the row that did it is
+the one promising more speed. `NR_GPU_ONLY` is now written as `0`, always, and deliberately not
+omitted: an install that had it on is cleared by the next pacing write.
+
+**Four behaviours, each pinned by a check that is mutation-tested.** Driving the bridge directly
+(a real `nr_menu_bridge`, real files, no menu) rather than reading it:
+
+| Behaviour | Check | Mutation that must fail it |
+|---|---|---|
+| a row moved writes `nr-env.txt` at once | "a row moved writes the file with no Save pressed" | drop the `write_pacing` call |
+| Save does not touch pacing | "Save leaves the pacing file byte for byte" | add `write_pacing` to `nr_menu_bridge_save` |
+| Reset does not touch pacing | "Reset leaves the pacing file byte for byte" | add it to `nr_menu_bridge_reset` |
+| a restart reads back what was written | "a restart reads back the cadence that was written" | (round trip; guarded by the reader) |
+
+Each mutation was applied, built, and run: all four go red. **One of them first passed for the
+wrong reason** — "Reset leaves the pacing file unchanged" was green because the Reset never ran,
+not because it left the file alone, and the injected mutation made no difference. The check now
+proves Reset ran first, by its preview file (`nr_settings.json.live`), and only then that the
+pacing file is identical. That is the second time in this work a check passed by doing nothing;
+the shape is worth remembering.
+
+The other two mutations on the table are for the two Reset/Save paths that a headless bridge
+cannot reach: the menu's `nr_menu_take_reset` / `nr_menu_take_save_request` branches in
+`nr_menu_bridge_update`. Mutating those does **not** fail the checks, because the fixture has no
+`nr_menu` — so what is covered is the headless functions, which the menu branches call, and the
+shared body they run. Said plainly rather than implied.
+
 ## Frame pacing's three rows: not Save's, and the settings file could hide them (2026-10-18, branch `menu-on-e4m3`)
 
 Three questions asked of the panel's pacing rows — do Save and Reset govern them, does Save leave

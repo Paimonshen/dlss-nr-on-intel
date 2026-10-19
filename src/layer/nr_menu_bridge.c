@@ -479,14 +479,23 @@ static int write_pacing(nr_menu_bridge *b)
     }
     free(text);
 
+    /* `NR_GPU_ONLY` is written as 0, always, and deliberately not as the GPU path's value.
+     *
+     * It is the STRICT half of the path, not the same switch. With it on, the layer refuses the
+     * CPU pixel fallback and keeps the game's own image: a game whose shared path stands aside
+     * then shows the game untouched, and the reason goes to the game's stderr, which is nobody's
+     * on Windows. That is issue #17 exactly - a tester's DOOM at 1080p "did nothing" with the GPU
+     * option on - and the setup window stopped setting it for that reason ("Never strict: where a
+     * game cannot keep its frames on the GPU, NR takes its usual path"). Writing the path's value
+     * here would have quietly put the panel back on the side of the bug the window fixed, and the
+     * row that did it would be the one claiming to make things faster. */
     int added = snprintf(out + used, sizeof out - used,
                          "NR_LAYER_ASYNC=%d\n"
                          "NR_GPU_IMAGE=%d\n"
                          "NR_GPU_TRANSPORT=%d\n"
-                         "NR_GPU_ONLY=%d\n"
+                         "NR_GPU_ONLY=0\n"
                          "NR_LAYER_LIVE=%d\n",
                          b->pacing_async ? 1 : 0,
-                         b->pacing_gpu_image ? 1 : 0,
                          b->pacing_gpu_image ? 1 : 0,
                          b->pacing_gpu_image ? 1 : 0,
                          b->pacing_every);

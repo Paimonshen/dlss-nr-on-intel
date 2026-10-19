@@ -168,6 +168,104 @@ int main(void)
               "choosing fewer than every frame clears the GPU path", detail);
     }
 
+    /* ---- Save and Reset do not govern the pacing rows, and the rows do not wait for Save ---- */
+    {
+        /* The three rows are the LAYER's start-up settings and live in `nr-env.txt`; Save and
+         * Reset are the settings file's, which is the daemon's. These checks pin the separation
+         * down in both directions, because it is the thing a reader is most likely to assume
+         * otherwise: "a panel with a Save button must save everything" is a reasonable guess and
+         * it is wrong here.
+         *
+         * Direction 1: moving a row writes the file on its own. Nothing is saved afterwards.
+         * Direction 2: Save and Reset leave that file byte for byte alone. */
+        nr_menu_bridge_set_pacing(b, NR_PACING_ASYNC, 0);
+        nr_menu_bridge_set_pacing(b, NR_PACING_EVERY, 4);
+
+        char path[1024];
+        snprintf(path, sizeof path, "%s\\dlss-nr\\nr-env.txt", root);
+        char before[8192] = "";
+        FILE *f = fopen(path, "rb");
+        if (!f) { printf("  FAIL  the environment file vanished\n"); return 1; }
+        size_t n = fread(before, 1, sizeof before - 1, f);
+        before[n] = 0;
+        fclose(f);
+
+        snprintf(detail, sizeof detail, "NR_LAYER_ASYNC=%s, NR_LAYER_LIVE=%s",
+                 env_line(root, "NR_LAYER_ASYNC", value, sizeof value) ? value : "?",
+                 env_line(root, "NR_LAYER_LIVE", value, sizeof value) ? value : "?");
+        check(strstr(before, "NR_LAYER_ASYNC=0") && strstr(before, "NR_LAYER_LIVE=4"),
+              "a row moved writes the file with no Save pressed", detail);
+
+        /* Reset has two paths and both must leave the pacing alone. This is the headless one
+         * (`nr_menu_bridge_reset`, taken when there is no menu); the menu's own is the
+         * `nr_menu_take_reset` branch in `nr_menu_bridge_update`, which runs the same body -
+         * `load_defaults`, the moved flags, the preview - and likewise writes no pacing.
+         *
+         * The preview is what proves Reset ran at all. Without that, "the pacing file did not
+         * change" would also pass for a Reset that never happened, which is the shape of check
+         * that passes for the wrong reason - mutation testing the reset branch caught exactly
+         * that, the file check going green because nothing had run. */
+        char preview[1024];
+        snprintf(preview, sizeof preview, "%s.live", settings);
+        remove(preview);
+        nr_menu_bridge_reset(b);
+        f = fopen(preview, "rb");
+        check(f != NULL, "Reset wrote the preview, so it ran", f ? "preview present" : "NO PREVIEW");
+        if (f) fclose(f);
+        char after_reset[8192] = "";
+        f = fopen(path, "rb");
+        n = f ? fread(after_reset, 1, sizeof after_reset - 1, f) : 0;
+        after_reset[n] = 0;
+        if (f) fclose(f);
+        check(strcmp(before, after_reset) == 0, "Reset leaves the pacing file byte for byte",
+              strcmp(before, after_reset) == 0 ? "unchanged" : "REWRITTEN");
+
+        /* Save: it writes the settings file and the preview, nothing of the pacing. */
+        nr_menu_bridge_save(b);
+        char after_save[8192] = "";
+        f = fopen(path, "rb");
+        n = f ? fread(after_save, 1, sizeof after_save - 1, f) : 0;
+        after_save[n] = 0;
+        if (f) fclose(f);
+        check(strcmp(before, after_save) == 0, "Save leaves the pacing file byte for byte",
+              strcmp(before, after_save) == 0 ? "unchanged" : "REWRITTEN");
+
+        char saved[1024];
+        snprintf(saved, sizeof saved, "%s\\work\\nr_settings.json", root);
+        f = fopen(saved, "rb");
+        check(f != NULL, "and Save is what leaves the settings file", f ? "written" : "MISSING");
+        if (f) fclose(f);
+
+        /* Reset must not have reached the pacing values either, on screen or in the bridge. */
+        snprintf(detail, sizeof detail, "async=%d every=%d after Reset",
+                 nr_menu_bridge_pacing_async(b), nr_menu_bridge_pacing_every(b));
+        check(nr_menu_bridge_pacing_async(b) == 0 && nr_menu_bridge_pacing_every(b) == 4,
+              "and Reset does not reset the rows it does not own", detail);
+    }
+
+    /* ---- what the four variables mean, and one of them is NOT the panel's ---- */
+    {
+        /* `NR_GPU_ONLY` is the STRICT half of the GPU path: with it on, the layer refuses the CPU
+         * pixel fallback and keeps the game's own image. The setup window writes it always as
+         * "0" and says why - "Never strict: where a game cannot keep its frames on the GPU, NR
+         * takes its usual path and the layer's line in the log says why, where the strict mode
+         * left the game's frame alone and said nothing a user could see" (issue #17).
+         *
+         * The panel used to write it as a copy of the GPU image path, so turning that row on also
+         * turned strict mode on: in a game whose shared path cannot run, the user got the game's
+         * own frame and no effect at all - the exact failure issue #17 removed. This is the
+         * regression check for that, and it fails if the two are ever tied together again. */
+        nr_menu_bridge_set_pacing(b, NR_PACING_GPU_IMAGE, 1);
+        char strict[32] = "";
+        int have = env_line(root, "NR_GPU_ONLY", strict, sizeof strict);
+        snprintf(detail, sizeof detail, "NR_GPU_ONLY=%s beside NR_GPU_IMAGE=1",
+                 have ? strict : "absent");
+        check(have && strcmp(strict, "0") == 0,
+              "the GPU path does not turn strict mode on with it", detail);
+        /* Still written, not omitted: an install that had strict mode on is cleared by this. */
+        check(have, "and strict mode is written as off rather than left alone", detail);
+    }
+
     /* ---- the file is rewritten, and only those lines ---- */
     {
         nr_menu_bridge_set_pacing(b, NR_PACING_GPU_IMAGE, 1);
@@ -207,6 +305,43 @@ int main(void)
             kept_comment = strstr(text, "# Set by the setup window.") != NULL;
         }
         check(kept_comment, "and the header comment", kept_comment ? "kept" : "LOST");
+    }
+
+    /* ---- round trip: what the panel wrote is what the next start reads ---- */
+    {
+        /* This is the start-up half of the same question, and it is the one that cannot be
+         * answered by looking at the writer: a value written in a shape the reader does not
+         * recognise would be a setting that silently reverts at the next launch. So write the
+         * rows, throw the bridge away, and build a new one over the same files - which is what a
+         * game restart does.
+         *
+         * The cadence is the interesting one (1-4 becomes the text the row shows and back), and
+         * the conflicts are the pair that could be written inconsistently by a half-applied
+         * change. */
+        nr_menu_bridge_set_pacing(b, NR_PACING_ASYNC, 0);
+        nr_menu_bridge_set_pacing(b, NR_PACING_GPU_IMAGE, 0);
+        nr_menu_bridge_set_pacing(b, NR_PACING_EVERY, 3);
+
+        nr_menu_bridge_destroy(b);
+        b = nr_menu_bridge_create_headless(settings, 0);
+        if (!b) { printf("  FAIL  no bridge on the restart\n"); return 1; }
+        snprintf(detail, sizeof detail, "after a restart: async=%d gpu=%d every=%d",
+                 nr_menu_bridge_pacing_async(b), nr_menu_bridge_pacing_gpu_image(b),
+                 nr_menu_bridge_pacing_every(b));
+        check(!nr_menu_bridge_pacing_async(b) && !nr_menu_bridge_pacing_gpu_image(b) &&
+              nr_menu_bridge_pacing_every(b) == 3,
+              "a restart reads back the cadence that was written", detail);
+
+        nr_menu_bridge_set_pacing(b, NR_PACING_GPU_IMAGE, 1);
+        nr_menu_bridge_destroy(b);
+        b = nr_menu_bridge_create_headless(settings, 0);
+        if (!b) { printf("  FAIL  no bridge after the GPU path restart\n"); return 1; }
+        snprintf(detail, sizeof detail, "after a restart: async=%d gpu=%d every=%d",
+                 nr_menu_bridge_pacing_async(b), nr_menu_bridge_pacing_gpu_image(b),
+                 nr_menu_bridge_pacing_every(b));
+        check(nr_menu_bridge_pacing_gpu_image(b) == 1 && !nr_menu_bridge_pacing_async(b) &&
+              nr_menu_bridge_pacing_every(b) == 1,
+              "and a restart reads back the GPU path with the two it cleared", detail);
     }
 
     /* ---- an install that is not shaped as expected offers nothing ---- */
