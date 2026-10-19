@@ -191,6 +191,75 @@ under that date. When an item is done, strike it through here and name the commi
 
 ---
 
+## PR #20: the maintainer's review answered, the menu in a real Windows game (2026-10-18, branch `menu-on-e4m3`)
+
+The maintainer reviewed the in-game menu on 10-18 with four asks before merging #20. All four are
+answered here, in his order.
+
+**1. Raw mouse input.** `nr_raw_mouse_start` registered the mouse over the game's own registration
+and `nr_raw_mouse_stop` removed it, so a WM_INPUT game had no mouse after one panel open. The
+game's registration is read with `GetRegisteredRawInputDevices` before ours goes in and put back,
+target window and flags, when ours comes out; removed only when there was nothing to restore
+(`981a519`).
+
+**2. Hotkeys while another window is in front.** INS, L, Home, S and R were `GetAsyncKeyState`
+polls with no focus gate, so an L in a chat window rewrote the settings file and Home in an editor
+turned NR off in the game behind it. L now also requires the panel open - a language write goes
+around "Save is the only thing that writes", so it is a settings action. Each latch is re-armed
+while gated, so the first press after returning to the game acts (`981a519`).
+
+**3. Rebased onto `newnr`** (his third ask, and the one that carries preset B): 30 commits over
+`newnr`'s tip, one conflict in `build_release.py` where both sides add files to the release list;
+kept both. A full build, 203 Python tests and the C fixtures are green from the rebase (`ef643f5`
+lineage). **4. Authorship:** all 30 commits re-authored to
+`137417967+Paimonshen@users.noreply.github.com`, dates and messages unchanged.
+
+**What the first real launch found**, and what it cost:
+
+- The daemon died at start-up with `xmx_low_latency` not found. `build_win.bat --layer` skips the
+  libxmx step, so the fast path kept the pre-rebase DLL while the daemon came from the rebase and
+  expected the new symbol. A full build regenerates the export list; the function answers false on
+  Windows, where the low-latency hint is Linux Mesa's. (`f785182`)
+- **The setup window's bridge lives in `scripts\`, and only the packer copied it there.** Every
+  change to the wizard's backend was verified against `src\tools` and tested there while the
+  window kept running the packer's old copy - which reads exactly like the feature being broken,
+  and produced `weights must be one of ht, cc_small_fp8` from a Reset with the tree already
+  correct. `sync_release.bat` now copies `windows_wizard.py`, `windows_wizard_core.py` and
+  `windows_launch.py` and clears a stale `__pycache__` beside them. (`d67dbfd`)
+- The cadence combo opened showing `*Unknown item*` as its fourth entry: the row declared four
+  options with a store of three names, so the terminator was written over an entry the count still
+  counted. Second time this shape has cost something, the first being the profiles combo;
+  `test_menu_choices` now asserts the layer's cadence row and every choice knob the bridge
+  produces, mutation-tested with the buggy shape. The panel defaulted to 560x380, which fit eleven
+  knobs and not fourteen rows, and dragging the border past the swapchain image is an access
+  violation: the default is the picture minus a margin clamped to 640x720, and the window is
+  NoResize with a scrollbar for the case where the picture is smaller. (`7eff40a`)
+
+**One network, one chooser.** The setup page had a second network dropdown beside the controls
+page's network knob, and the two disagreed the first time they were used together. The setup card
+is gone; the knob saves into the settings file, which the daemon reads live and at start-up - the
+start-up read is new, so a user who chose B last session comes up on B rather than loading A and
+swapping on the first settings refresh. A Reset of the knob writes null, and null returns to the
+model the daemon came up on. (`1e3ddb3`, `ef643f5`)
+
+**The model table.** Preset B has been loadable since the topology started coming from the weights
+themselves; the manifest's "not loadable yet" was stale. `cc_small_fp8` is supported, its logical
+file is `dlssnr-b-logical.safetensors` - the name `PRESET_WEIGHTS["B"]` and the installer both use,
+so `NR_PRESET=B` at start-up and the panel's knob read one file - and B unpacks through
+`unpack_preset.py`, whose role-renaming decoder is the only one that can read B's records.
+(`f48912d`)
+
+**Still to do, and it is not the menu's logic:** the wizard's own test suites are non-deterministic
+under Windows when several files run in one pytest process. Both files pass alone and pass in a
+trio; in the larger combination the failures wander between runs and every traceback is the same
+thing - `TemporaryDirectory.cleanup` raising `WinError 145`, a directory not empty, over
+`release (candidate)\dxvk\x64` and friends. The failures move, they move with the teardown errors,
+and no product assertion is among them: re-running the same command that failed passed 106. The
+shape says a handle is still open at cleanup time - the fixtures' own `shutil.copy2` of a DXVK file
+into the game folder, or the antivirus, and the assertion failures are unittest reporting both the
+error and the abort. A check after a `TearDown` failure is not a check that passed, so this is
+filed here rather than assumed away.
+
 ## `e803624` in Hogwarts, `sync=1`, and the owner's call: NR's answer on its own frame, on the GPU (2026-10-18, branch `newnr`)
 
 **In the game** (A, render scale 0.5, XeSS Performance 835x522). The first run's daemon came from

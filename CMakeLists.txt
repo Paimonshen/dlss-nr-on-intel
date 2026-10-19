@@ -287,8 +287,14 @@ if(NR_BUILD_TESTS)
       nr_test(layer_menu_ui_fixtures "${Python3_EXECUTABLE}"
         "${PROJECT_SOURCE_DIR}/src/layer/test_menu_ui_fixtures.py")
       set_tests_properties(layer_menu_ui_fixtures PROPERTIES
-        REQUIRED_FILES "${NR_WORK_DIR}/test_menu_panel.exe;${NR_WORK_DIR}/test_menu_side.exe;${NR_WORK_DIR}/test_menu_keys.exe;${NR_WORK_DIR}/test_menu_language.exe;${NR_WORK_DIR}/test_menu_actions.exe;${NR_WORK_DIR}/test_menu_pacing.exe")
+        REQUIRED_FILES "${NR_WORK_DIR}/test_menu_panel.exe;${NR_WORK_DIR}/test_menu_side.exe;${NR_WORK_DIR}/test_menu_keys.exe;${NR_WORK_DIR}/test_menu_language.exe;${NR_WORK_DIR}/test_menu_actions.exe;${NR_WORK_DIR}/test_menu_pacing.exe;${NR_WORK_DIR}/test_menu_choices.exe")
     endif()
+    # The layer's own input path: the game's registration read before ours and put back after
+    # (PR #20 review, item 1). Like the menu fixtures, Windows-only - it imports user32 - and
+    # off Windows the runner says so rather than skipping.
+    nr_test(layer_menu_keys "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/src/layer/test_menu_keys.py")
+    nr_test(layer_settings_live "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/src/layer/test_settings_live.py")
+    nr_test(layer_menu_rows "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/src/layer/test_menu_rows.py")
   endif()
   foreach(name publish_check claims_check build_check)
     nr_test(${name} "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/src/tools/${name}.py")
