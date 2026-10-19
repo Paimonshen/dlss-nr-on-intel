@@ -260,6 +260,48 @@ into the game folder, or the antivirus, and the assertion failures are unittest 
 error and the abort. A check after a `TearDown` failure is not a check that passed, so this is
 filed here rather than assumed away.
 
+## Frame pacing's three rows: not Save's, and the settings file could hide them (2026-10-18, branch `menu-on-e4m3`)
+
+Three questions asked of the panel's pacing rows — do Save and Reset govern them, does Save leave
+a file, does what it left take effect at the next start — answered by driving the bridge directly
+rather than by reading it, because two of the three answers are about files.
+
+**Save and Reset do not govern them, by design.** The three rows (asynchronous, GPU image path,
+every Nth frame) are the *layer's* start-up settings and live in the proxy's `nr-env.txt`; the
+knobs and Save live in `work/nr_settings.json`. `nr_menu_bridge_set_pacing` writes `nr-env.txt`
+**the moment a row moves** and never touches the settings file, with the reason in the code: "there
+is no Save path for them, so a change that was not written would be lost and the panel would be
+lying". Measured:
+
+- **Moving a row writes immediately.** No Save press needed — one `set_pacing` call rewrote
+  `NR_LAYER_ASYNC=1` and `NR_LAYER_LIVE=3` while `nr_settings.json` stayed byte-identical.
+- **Save leaves `work/nr_settings.json`** and writes nothing to `nr-env.txt`: the pacing rows are
+  already in their own file.
+- **Reset leaves both alone.** It returns the knobs to defaults on screen and in the preview and
+  deliberately does not write the saved file; `nr-env.txt` is not its business, so a pacing change
+  stands through a Reset. Coherent — they are next-launch settings, not previews — but it does
+  mean Reset is not an undo for them.
+- **The next start really applies them.** The proxy reads `nr-env.txt` and calls
+  `SetEnvironmentVariableW` for every line; the layer reads `NR_LAYER_ASYNC` / `NR_LAYER_LIVE` /
+  `NR_GPU_IMAGE` once before the first present. Verified on the real installed game: its
+  `nr-env.txt` holds `NR_LAYER_ASYNC=1` and `NR_LAYER_LIVE=4`, which is the panel's "on" and
+  "every 4th frame".
+
+**What was wrong: the three rows could vanish for a reason unconnected to them.** `read_pacing(b)`
+was called from inside `load_settings`'s `if (nr_settings_parse(...))` branch. The pacing values
+are in `nr-env.txt`; the settings file is the daemon's and unrelated. So a settings file that was
+absent, empty, or half-written left `pacing_ok = 0`, `nr_menu_bridge_pacing_available` returned
+false, and the panel drew **no pacing rows at all** while `set_pacing` refused to write — the three
+settings that decide how the network is fed became unreachable because an unrelated JSON file was
+missing. Install always writes that file, so a normal installation never showed it; a release whose
+`work/` had been cleared, or a settings file a tool truncated, did.
+
+`read_pacing` now runs first in `load_settings`, unconditionally, before the settings file is even
+opened, and `pacing_ok` depends only on whether `nr-env.txt` was located and read — the only thing
+it ever meant. `test_menu_pacing` gained three checks (a missing settings file leaves the rows
+readable and writable; an empty one likewise), **mutation-tested** by putting the call back inside
+the parse branch, which reports all three failing with `available=0`.
+
 **The speed test measures the network it is asked for** (2026-10-18, after the review). The test
 only ever ran network A: `windows_wizard_core.speed_test` took no network and `speed_test.py`
 defaulted to A, so a tester with B installed measured A and could not tell. The two networks are

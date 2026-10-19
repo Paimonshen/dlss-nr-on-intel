@@ -230,10 +230,62 @@ int main(void)
         check(wrote == 0, "and refuses to write", detail);
     }
 
+    /* ---- the pacing rows do not depend on the settings file ---- */
+    {
+        /* They live in `nr-env.txt`; the settings file is the daemon's. Reading one inside the
+         * other's parse branch made them die together, and the consequence was visible: a
+         * settings file that was absent or empty left the panel offering no pacing rows at all,
+         * with `set_pacing` refusing to write - so the three settings that decide how the
+         * network is fed became unreachable because an unrelated JSON file was missing. */
+        nr_menu_bridge_destroy(b);
+        const char *bare = "nr-pacing-test-bare";
+        char cmd[1024];
+        snprintf(cmd, sizeof cmd, "mkdir \"%s\\dlss-nr\" 2>nul & mkdir \"%s\\work\" 2>nul", bare, bare);
+        if (system(cmd) != 0) { /* the folders may already exist */ }
+        char path[1024];
+        snprintf(path, sizeof path, "%s\\dlss-nr\\nr-env.txt", bare);
+        FILE *f = fopen(path, "wb");
+        fputs("NR_ROOT=C:\\somewhere\\release\n"
+              "NR_LAYER_ASYNC=1\n"
+              "NR_GPU_IMAGE=0\n"
+              "NR_GPU_TRANSPORT=0\n"
+              "NR_GPU_ONLY=0\n"
+              "NR_LAYER_LIVE=3\n", f);
+        fclose(f);
+
+        nr_menu_bridge_use_env_file(path);
+        char bare_settings[1024];
+        snprintf(bare_settings, sizeof bare_settings, "%s\\work\\nr_settings.json", bare);
+
+        /* No settings file at all. */
+        b = nr_menu_bridge_create_headless(bare_settings, 0);
+        if (!b) { printf("  FAIL  no bridge on the bare shape\n"); return 1; }
+        snprintf(detail, sizeof detail, "available=%d async=%d every=%d",
+                 nr_menu_bridge_pacing_available(b), nr_menu_bridge_pacing_async(b),
+                 nr_menu_bridge_pacing_every(b));
+        check(nr_menu_bridge_pacing_available(b) && nr_menu_bridge_pacing_async(b) &&
+              nr_menu_bridge_pacing_every(b) == 3,
+              "a missing settings file leaves the pacing rows readable", detail);
+        int wrote = nr_menu_bridge_set_pacing(b, NR_PACING_ASYNC, 0);
+        snprintf(detail, sizeof detail, "set_pacing returned %d", wrote);
+        check(wrote == 1, "and writable", detail);
+
+        /* And an empty one: present, no JSON in it, still nothing to do with pacing. */
+        f = fopen(bare_settings, "wb");
+        fclose(f);
+        nr_menu_bridge_destroy(b);
+        b = nr_menu_bridge_create_headless(bare_settings, 0);
+        if (!b) { printf("  FAIL  no bridge on the empty settings shape\n"); return 1; }
+        snprintf(detail, sizeof detail, "available=%d", nr_menu_bridge_pacing_available(b));
+        check(nr_menu_bridge_pacing_available(b),
+              "an empty settings file leaves them readable too", detail);
+    }
+
     nr_menu_bridge_destroy(b);
     nr_menu_bridge_use_env_file(NULL);
     system("rmdir /s /q nr-pacing-test 2>nul");
     system("rmdir /s /q nr-pacing-test-odd 2>nul");
+    system("rmdir /s /q nr-pacing-test-bare 2>nul");
     remove("nr-pacing-test\\work\\nr_settings.json");
     printf("\n%s: %d failure(s)\n", failures ? "FAILED" : "ok", failures);
     return failures ? 1 : 0;

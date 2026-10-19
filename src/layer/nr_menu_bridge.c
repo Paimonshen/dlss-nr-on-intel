@@ -520,6 +520,20 @@ static int load_settings(nr_menu_bridge *b)
 {
     load_defaults(b);
 
+    /* The layer's pacing is read FIRST and unconditionally.
+     *
+     * It lives in the proxy's `nr-env.txt`, which has nothing to do with the settings file: the
+     * three rows come from there and the panel writes there. Reading it inside the parse branch
+     * below tied them to a file they do not use, and the consequence was exact - a settings file
+     * that is absent, empty, or half-written made `pacing_ok` false, the panel offered no pacing
+     * rows at all, and `set_pacing` refused to write, so the user could neither see nor change
+     * the three settings that decide how the network is fed. Those three are what a game needs
+     * most; they must not depend on a broken JSON file.
+     *
+     * `read_pacing` sets `pacing_ok` from whether the environment file was located and read, and
+     * that is the only thing it should depend on. */
+    read_pacing(b);
+
     /* A file that is not there is not an error: the menu then shows the defaults and writes
      * nothing until the user moves something. Creating the file on open would be a menu that
      * changed the daemon's behaviour by being looked at. */
@@ -548,7 +562,6 @@ static int load_settings(nr_menu_bridge *b)
         int nr_at = nr_settings_find(&settings, "nr_enabled");
         if (nr_at >= 0)
             b->nr_enabled_saved = atoi(settings.value[nr_at]) ? 1 : 0;
-        read_pacing(b);
 
         for (int i = 0; i < NR_KNOBS_COUNT; ++i) {
             const nr_knob_def *k = &knobs[i];
