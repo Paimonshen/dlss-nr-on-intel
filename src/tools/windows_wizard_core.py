@@ -275,7 +275,14 @@ def _settings_result(path, values, knobs):
 def get_settings(root):
     """Describe validated saved values; this is not a daemon acknowledgement."""
     path, values = _settings_document(root)
-    return _settings_result(path, values, _runtime_knobs())
+    result = _settings_result(path, values, _runtime_knobs())
+    # The networks this release can measure, by name, so the window's speed-test chooser can
+    # offer what is here and grey what is not. Root-scoped like the rest of the settings, and
+    # read from the same check everything else uses - a second copy of "is this a whole model"
+    # is how the two would start disagreeing about whether B can be run.
+    result["presets"] = {name: _weights_state_file(Path(root) / PRESETS[name][0])["ready"]
+                         for name in PRESETS}
+    return result
 
 
 def save_settings(root, changes):
@@ -704,7 +711,18 @@ def _shader_names(root):
 
 def _weights_state(profile, preset="A"):
     relative, count = PRESETS[preset]
-    path = profile.root / relative
+    return _weights_state_file(profile.root / relative, count)
+
+
+def _weights_state_file(path, count=None):
+    """Whether one logical weights file is a whole model, and how much of one it is.
+
+    `count` is the tensor count the model must have; left out, either preset's count is
+    accepted, which is what a caller who only has the path needs. One function because the
+    release-wide answer (which networks can be measured) and the installed answer (which the
+    game runs) must not disagree - a second copy of this check is how they would."""
+    path = Path(path)
+    wanted = [count] if count is not None else [expected for _, expected in PRESETS.values()]
     try:
         with path.open("rb") as handle:
             size_bytes = handle.read(8)
@@ -716,14 +734,15 @@ def _weights_state(profile, preset="A"):
             header = json.loads(handle.read(length))
         data_size = path.stat().st_size - 8 - length
         tensors = {key: value for key, value in header.items() if key != "__metadata__"}
-        if len(tensors) != count or data_size < 0:
-            raise ValueError(f"expected {count} logical tensors")
+        if len(tensors) not in wanted or data_size < 0:
+            raise ValueError(f"expected {wanted[0] if len(wanted) == 1 else ' or '.join(map(str, wanted))} "
+                             f"logical tensors")
         for value in tensors.values():
             offsets = value.get("data_offsets", [])
             if (len(offsets) != 2 or not all(isinstance(v, int) for v in offsets)
                     or not 0 <= offsets[0] <= offsets[1] <= data_size):
                 raise ValueError("invalid tensor data offsets")
-        return {"ready": True, "path": str(path), "detail": f"{count} local logical tensors"}
+        return {"ready": True, "path": str(path), "detail": f"{len(tensors)} local logical tensors"}
     except (OSError, ValueError, TypeError, AttributeError) as error:
         return {"ready": False, "path": str(path), "detail": str(error)}
 
@@ -1906,12 +1925,27 @@ def _daemon_answering(profile):
         return False
 
 
-def speed_test(profile, emit=None):
+def speed_test(profile, emit=None, preset=None):
     """NR's own speed on this PC, the daemon alone with no game, at the settings a release starts
     at: src/bench/speed_test.py with the release's Python. Kept in SPEED_TEST, with the PC, for
-    Save report, so testers' reports say what each GPU does at its best."""
-    if not _weights_state(profile, profile.preset)["ready"]:
-        return {"ok": False, "error": "Install NR first: the speed test runs the model it extracts"}
+    Save report, so testers' reports say what each GPU does at its best.
+
+    `preset` is the network to measure, A or B; the profile's own when left out. The two are
+    asked for separately because the speed test is the one place a user may want to compare them
+    on this machine - the window offers the choice beside the button, with B greyed unless its
+    weights are here - while the network a GAME runs stays the one the settings chose. A run
+    records which network it measured, so a report cannot be read as the other one."""
+    wanted = preset or profile.preset
+    if not isinstance(wanted, str) or wanted not in PRESETS:
+        return {"ok": False, "error": "Measure which network? " + " or ".join(PRESETS)}
+    if not _weights_state(profile, wanted)["ready"]:
+        if wanted == "A":
+            # The original network is the one Install NR always extracts: without it nothing
+            # here can run, and the sentence says what to do rather than naming a choice.
+            return {"ok": False, "error": "Install NR first: the speed test runs the model it extracts"}
+        return {"ok": False, "error": f"Network {wanted}'s weights are not in this release: "
+                                      "install them first, or measure A",
+                "presets": _presets_ready(profile)}
     script = profile.root / "src/bench/speed_test.py"
     if not script.is_file():
         return {"ok": False, "error": f"This release has no speed test: {script} is missing"}
@@ -1927,9 +1961,9 @@ def speed_test(profile, emit=None):
         emit("Measuring NR on this GPU, without a game\n")
     run = profile.root / "work/windows-wizard/speed-test-run.json"
     run.unlink(missing_ok=True)
-    # The network a game started now would run.
+    # The network the user asked to measure; it may differ from the one a game would run.
     got = _run([profile.python, "-I", script, "--root", profile.root, "--json", run,
-                "--preset", profile.preset], timeout=900, emit=emit, cwd=profile.root)
+                "--preset", wanted], timeout=900, emit=emit, cwd=profile.root)
     try:
         measured = _read_json(run, limit=256 * 1024)
     except (OSError, ValueError):

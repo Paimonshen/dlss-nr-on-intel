@@ -665,6 +665,45 @@ class WizardFixture(unittest.TestCase):
                 patch.object(core, "uninstall", return_value={"ok": True, "removed": True}):
             self.assertNotIn("steam_restored", bridge.remove_nr(self.profile, None))
 
+    def test_the_window_chooses_which_network_the_speed_test_measures(self):
+        # The combo beside the button sends `preset` in the request; the bridge passes it on and
+        # leaves it out when absent, so an older window still measures the profile's network.
+        import windows_wizard as bridge
+        request = self.base / "speed-request.json"
+        output = self.base / "speed-result.json"
+
+        def run(values):
+            request.write_text(json.dumps(values), encoding="utf-8")
+            argv = ["windows_wizard.py", "speedtest", "--root", str(self.root),
+                    "--input", str(request), "--output", str(output)]
+            with patch.object(sys, "argv", argv):
+                bridge.main()
+            return core._read_json(output)
+
+        # The words the window sends: a profile and the network to measure.
+        values = {**self.profile.to_dict(), "root": str(self.root), "preset": "B"}
+        with patch.object(core, "speed_test", return_value={"ok": True}) as speed:
+            self.assertTrue(run(values)["ok"])
+            self.assertEqual(speed.call_args.kwargs["preset"], "B")
+            speed.reset_mock()
+            self.assertTrue(run({**values, "preset": "a"})["ok"])
+            self.assertEqual(speed.call_args.kwargs["preset"], "A")
+            speed.reset_mock()
+            # No preset at all: the profile's own network, as before the chooser existed.
+            without = dict(values)
+            without.pop("preset")
+            self.assertTrue(run(without)["ok"])
+            self.assertIsNone(speed.call_args.kwargs["preset"])
+        # A network that does not exist is the backend's refusal, not the window's, and it
+        # costs nothing to reach: no script, no weights, no GPU.
+        self.assertFalse(run({**values, "preset": "C"})["ok"])
+        self.assertIn("Measure which network?", core._read_json(output)["error"])
+        # A value that is not a network at all is refused before anything is measured.
+        for bad in ("", "   ", 1, ["B"]):
+            refused = run({**values, "preset": bad})
+            self.assertFalse(refused["ok"], bad)
+            self.assertIn("Specify the network", refused["error"], bad)
+
     def test_enabling_warns_when_the_game_runs_without_nr(self):
         self.own()
         # Started before NR was installed: no launch record names it, the game runs.
@@ -1428,6 +1467,59 @@ class WizardFixture(unittest.TestCase):
                                                       "stderr": "", "output": "", "timed_out": True}):
             self.assertIn("no answer in 900 s", core.speed_test(self.profile)["error"])
         self.assertFalse((self.root / core.SPEED_TEST).exists())
+
+    def test_the_speed_test_measures_the_network_it_is_asked_for_or_says_which_is_here(self):
+        # A and B are measurably different networks, so the window lets a tester compare them on
+        # one PC without changing the network a game runs. The choice is the test's own: the
+        # profile may say A while the test measures B, and vice versa.
+        self.speed_script()
+        write_weights(self.weights)
+        measured = {"ok": True, "error": None, "device": "Fixture GPU", "preset": "A", "cases": []}
+        asked = []
+
+        def run(command, timeout=10, env=None, emit=None, cwd=None):
+            command = [str(part) for part in command]
+            asked.append(command[command.index("--preset") + 1])
+            target = Path(command[command.index("--json") + 1])
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(json.dumps(dict(measured, preset=asked[-1])), encoding="utf-8")
+            return {"command": command, "returncode": 0, "stdout": "", "stderr": "", "output": "",
+                    "timed_out": False}
+
+        # A release that carries both measures whichever it is asked for, profile untouched.
+        write_weights(self.preset_b_weights(), count=core.PRESETS["B"][1])
+        self.assertEqual(core.get_settings(self.root)["presets"], {"A": True, "B": True})
+        with patch.object(core, "_run", side_effect=run), \
+                patch.object(core, "_system_metadata", return_value={}):
+            self.assertTrue(core.speed_test(self.profile, preset="B")["ok"], asked)
+            self.assertTrue(core.speed_test(replace(self.profile, preset="B"), preset="A")["ok"], asked)
+        self.assertEqual(asked, ["B", "A"])
+        # The network measured is kept with the result, so a report cannot be read as the other.
+        self.assertEqual(core._read_json(self.root / core.SPEED_TEST)["preset"], "A")
+        # Measuring changes neither the profile nor what a game would run.
+        self.assertFalse(core.profile_path(self.root).exists())
+
+        # A release with A alone still measures A, and refuses B by name rather than running
+        # something else: the window greys B for the same reason.
+        self.preset_b_weights().unlink()
+        self.assertEqual(core.get_settings(self.root)["presets"], {"A": True, "B": False})
+        with patch.object(core, "_run", side_effect=run), \
+                patch.object(core, "_system_metadata", return_value={}):
+            self.assertTrue(core.speed_test(self.profile, preset="A")["ok"])
+        refused = core.speed_test(self.profile, preset="B")
+        self.assertFalse(refused["ok"])
+        self.assertIn("B's weights are not in this release", refused["error"])
+        self.assertIn("measure A", refused["error"])
+        self.assertEqual(refused["presets"], {"A": True, "B": False})
+        self.assertEqual(asked, ["B", "A", "A"])
+        # A network the profile's own type would refuse is refused here too, and the message
+        # names the two there are.
+        for bad in ("C", 1, ["B"]):
+            wrong = core.speed_test(self.profile, preset=bad)
+            self.assertFalse(wrong["ok"], bad)
+            self.assertIn("Measure which network?", wrong["error"])
+            self.assertIn("A", wrong["error"])
+            self.assertIn("B", wrong["error"])
 
     def test_a_python_or_a_library_that_fails_says_why_in_its_check(self):
         self.native.return_value = python_info(probe_ok=False, probe_error="no answer in 30 s")

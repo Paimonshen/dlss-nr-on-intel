@@ -260,6 +260,34 @@ into the game folder, or the antivirus, and the assertion failures are unittest 
 error and the abort. A check after a `TearDown` failure is not a check that passed, so this is
 filed here rather than assumed away.
 
+**The speed test measures the network it is asked for** (2026-10-18, after the review). The test
+only ever ran network A: `windows_wizard_core.speed_test` took no network and `speed_test.py`
+defaulted to A, so a tester with B installed measured A and could not tell. The two networks are
+measurably different here — B is 0.46-0.53 of A's network time — which is exactly what a tester
+would want to compare on their own GPU, so the window now has a chooser beside the Speed test
+button: A always, B only where `get_settings()` reports its weights are present.
+
+The choice is the **test's** own, and deliberately not the `weights` knob's. The knob asks which
+network a game runs; the test asks what to measure. They are separate because comparing the two
+networks would otherwise mean changing what the game runs, and because a run records which
+network it measured (`work/speed-test.json`, `preset`) so a report cannot be read as the other.
+`get_settings` now returns `presets: {A: bool, B: bool}`, read through the same
+`_weights_state_file` check everything else uses — a second copy of "is this a whole model" is how
+the window and the backend would come to disagree about whether B can be measured at all.
+
+On the bridge, `preset` in a speed-test request names the network to measure and is removed
+before the profile is parsed, so one word cannot mean two things in one request; absent, the
+profile's own network is measured, which is what the window did before the chooser existed. A
+value that is not a network is refused before anything runs; a network whose weights are absent is
+the backend's own refusal ("Network B's weights are not in this release: install them first, or
+measure A"). `test_the_speed_test_measures_the_network_it_is_asked_for_or_says_which_is_here` and
+`test_the_window_chooses_which_network_the_speed_test_measures` cover both directions and the
+A-only release; the window's self-test covers the combo's contents, its labels in four languages,
+and that the selection reaches the button's request. B in a release without B is **absent from the
+list**, not greyed: a choice that cannot run is worse than no choice. These two tests also found
+that `speed_test(preset=[...])` raised `TypeError` out of a dict lookup instead of returning a
+refusal; that is fixed.
+
 ## `e803624` in Hogwarts, `sync=1`, and the owner's call: NR's answer on its own frame, on the GPU (2026-10-18, branch `newnr`)
 
 **In the game** (A, render scale 0.5, XeSS Performance 835x522). The first run's daemon came from
