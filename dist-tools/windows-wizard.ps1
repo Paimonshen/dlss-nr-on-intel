@@ -302,7 +302,7 @@ $script:SettingsStateKey = 'SettingsLoading'
       <Border Style="{StaticResource CardBox}">
        <StackPanel>
         <TextBlock x:Name="CompareHeading" Style="{StaticResource Heading}"/>
-        <WrapPanel><Button x:Name="Launch"/><Button x:Name="Toggle"/><Button x:Name="SpeedTest"/><ComboBox x:Name="SpeedNetwork" Margin="8,0,0,0" MinWidth="150" VerticalAlignment="Center" ToolTip=""/></WrapPanel>
+        <WrapPanel><Button x:Name="Launch"/><Button x:Name="Toggle"/><Button x:Name="SpeedTest"/><ComboBox x:Name="SpeedNetwork" Margin="8,0,6,6" MinWidth="150" VerticalAlignment="Top" Height="{Binding ActualHeight, ElementName=SpeedTest}" ToolTip=""/></WrapPanel>
         <TextBlock x:Name="EffectState" Text="" FontWeight="SemiBold" Margin="0,4,0,2"/>
         <TextBlock x:Name="RuntimeState" Text="" Style="{StaticResource Note}" FontSize="13"/>
         <TextBlock x:Name="FpsHint" Style="{StaticResource Note}" Margin="0,6,0,0"/>
@@ -1446,6 +1446,17 @@ if($SelfTest) {
         if([string]$script:Ui.SpeedNetwork.SelectedItem.Tag -ne 'A') { throw 'Filling in B moved the choice away from A' }
         foreach($item in $script:Ui.SpeedNetwork.Items) { if(-not $item.Content -or $item.Content -eq ('SpeedNetwork'+[string]$item.Tag)) { throw "Untranslated network choice $($item.Tag)" } }
         if(-not $script:Ui.SpeedNetwork.ToolTip) { throw 'The network chooser has no tooltip' }
+        # Line up with the buttons it sits beside: same top and same height. The combo's own
+        # style asks for a 28px minimum and its content is centred, which left it 3.7px lower
+        # and 1.3px shorter than the buttons - visible as a list floating out of line.
+        $script:Window.Show(); $script:Window.UpdateLayout()
+        try {
+            $top=$script:Ui.SpeedTest.TranslatePoint([Windows.Point]::new(0,0),$script:Ui.CompareHeading).Y
+            $listTop=$script:Ui.SpeedNetwork.TranslatePoint([Windows.Point]::new(0,0),$script:Ui.CompareHeading).Y
+            if([Math]::Abs($top-$listTop) -gt 0.5) { throw "The network chooser sits $([Math]::Round($listTop-$top,1)) px below the buttons" }
+            $buttonHeight=$script:Ui.SpeedTest.ActualHeight
+            if([Math]::Abs($buttonHeight-$script:Ui.SpeedNetwork.ActualHeight) -gt 0.5) { throw "The network chooser is $([Math]::Round($script:Ui.SpeedNetwork.ActualHeight,1)) px tall beside $([Math]::Round($buttonHeight,1)) px buttons" }
+        } finally { $script:Window.Hide() }
         # What the button asks to measure is read from the combo, so selecting B must reach it.
         $script:Ui.SpeedNetwork.SelectedIndex=1
         if((Get-SpeedNetwork) -ne 'B') { throw 'Choosing B in the combo did not reach the request' }
