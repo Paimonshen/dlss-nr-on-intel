@@ -339,6 +339,70 @@ it ever meant. `test_menu_pacing` gained three checks (a missing settings file l
 readable and writable; an empty one likewise), **mutation-tested** by putting the call back inside
 the parse branch, which reports all three failing with `available=0`.
 
+## Model swap took the GPU transport down with it (2026-10-20, branch `menu-on-e4m3`)
+
+The owner reported NR failing with the GPU image path on. The log named the failure exactly:
+
+```
+frame rejected/failed; game keeps original: GPU frame has no matching imported session
+[nr_layer] GPU transport fallback: frame exchange failed; original frame retained
+[nr_layer] GPU-only: CPU pixel path disabled (shared processing unavailable); original GPU image retained
+```
+
+The image engine wraps a `ResidentBackend`, so a new model means a new engine — and
+`close_gpu_images` closed the **whole transport** with it. But the transport's `contexts` are the
+**game's** imports: buffers, semaphores and an authenticated process lifetime established by a
+HELLO the layer sent. Closing them leaves the layer holding handles to objects the daemon has
+already given back, so its next frame has no matching session, `gpu_blocked` latches for the
+session (it is cleared only when the reply said "unsupported"), and NR never processes again. In a
+release built before the strict-mode fix, the player then sees the game's own frame — which is the
+combination this machine was running. **The panel's network chooser was the trigger**: it is the
+only thing that changes the model mid-game.
+
+Two halves, because either alone is wrong (`1b26be3`):
+
+- `close_gpu_images(keep_sessions=True)` drops the engine, leaves the contexts. Shutdown still
+  takes the transport — nobody sends another frame after it.
+- `rebind_backend` follows the model: the engine is rebuilt lazily from `self.backend`, so
+  leaving it on the replaced model would rebuild the pipeline on the model it just replaced.
+
+**Both are mutation-tested, and the call site needed a test of its own.** The transport's own
+tests cover `rebind_backend`, and they caught nothing when `keep_sessions=True` was removed from
+the daemon — because the daemon was not under test. `test_daemon.model_swap_gpu_tests` drives
+`refresh_model` itself with the real weights on disk, which is what catches it; removing either
+half now goes red. The first version of that test called `close_gpu_images` directly and passed
+with the regression reintroduced, which is the third time in this work a check passed for the
+wrong reason.
+
+**The game folder was stale, and that is its own finding.** `nr_layer.dll` beside the game was
+from 10-18 while `work` held the 10-19 build, so the panel was running code that predated both
+the strict-mode fix and the pacing-rows fix. Updated through the installer (`install` action with
+a request built from `work/windows-profile.json`), not by hand: the installer backs up the game's
+files and owns the copy. `nr_layer32.dll` is still the older build — that is correct, not an
+oversight: `_copy_runtime` installs one layer, chosen by `pe_architecture(game_exe)`, and this
+game is x64.
+
+**A second, separate bug found on the way, still open.** The window's `set_pacing` rewrites the
+PACING lines of `nr-env.txt` from `layer_environment(profile)`, so it overwrites whatever the
+panel wrote for the same keys. The two writers disagree about `nr-env.txt` with no ordering
+between them: a panel change followed by any window pacing save silently reverts it. The profile
+on this machine says `gpu_image_path: false`, `nr_async: true`, `nr_every: 4` — so the panel's
+GPU row and the window's checkbox are currently saying different things. Not fixed here because
+it needs a decision about which of the two owns the file, and that is the owner's call.
+
+**The GPU path does work on this hardware**, and it is worth recording since the owner asked:
+the same log has `[nr_layer] GPU transport ready: 800x600 format 43 family 0 daemon 6252
+sync=semaphore; pixels remain on GPU`, followed by 1110 consecutive frames on
+`transport=gpu-shared` with `image prep` and `compose` populated and `change ~0.021` — the
+picture really was being rewritten, not passed through. The failure above is a mid-session
+model swap, not the path being unavailable.
+
+**Also still open, from the same session:** turning the GPU row on while `detail_strength` /
+`colour_strength` are not 1 makes the daemon decline with `GPU composition requires detail and
+colour strength 1`, and the panel says nothing about why. The owner confirmed those two knobs
+behave normally with the GPU path off, so the constraint is specific to GPU composition — but a
+row that silently does nothing is the same failure shape as issue #17.
+
 **The speed test measures the network it is asked for** (2026-10-18, after the review). The test
 only ever ran network A: `windows_wizard_core.speed_test` took no network and `speed_test.py`
 defaulted to A, so a tester with B installed measured A and could not tell. The two networks are
