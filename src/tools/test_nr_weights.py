@@ -236,7 +236,10 @@ class HotSwitchTests(unittest.TestCase):
                 self.closed = True
 
         nr_daemon.nr_frame.ResidentBackend = Fake
-        nr_daemon.close_gpu_images = lambda args: None
+        # A swap passes `keep_sessions`: the transport's imports are the game's, not the
+        # model's. A stub that only takes `args` is how the first version of this test broke
+        # when the daemon learned to keep them.
+        nr_daemon.close_gpu_images = lambda args, **keep: None
 
     def tearDown(self):
         (self.daemon.ROOT, self.daemon.nr_frame.ResidentBackend, self.daemon.close_gpu_images) = self.saved

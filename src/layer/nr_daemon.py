@@ -874,7 +874,8 @@ def refresh_model(args, backend):
         if want != name:
             print(f"weights: {want} is not loadable here ({name} is); keeping {name}", flush=True)
         return backend
-    close_gpu_images(args)
+    # The engine follows the model; the transport's imports are the game's and stay.
+    close_gpu_images(args, keep_sessions=True)
     args.history = History()
     previous = model.get("backend")
     if previous is not None and previous is not backend:
@@ -885,6 +886,12 @@ def refresh_model(args, backend):
     started = time.perf_counter()
     fresh = nr_frame.ResidentBackend(path)
     model.update(backend=fresh, name=name, path=path)
+    # The transport keeps the game's imports but must follow the model: its engine is rebuilt
+    # from `self.backend` on the next frame, so without this it would rebuild on the model it
+    # just replaced. `rebind_backend` drops only the engine, never the contexts.
+    shared = getattr(args, "gpu_transport", None)
+    if shared is not None:
+        shared.rebind_backend(fresh)
     print(f"weights: {want} -> {name} ({path.name}) in {time.perf_counter() - started:.1f}s",
           flush=True)
     return fresh
@@ -1707,12 +1714,38 @@ def run_owned(args):
             os.unlink(args.socket)
 
 
-def close_gpu_images(args):
+def close_gpu_images(args, *, keep_sessions=False):
+    """Give back the GPU image engine and, when the daemon is going, its transport.
+
+    A model swap used to close both, and that is what made the panel's network chooser able to
+    stop NR dead. The image engine (`gpu_images`) wraps a `ResidentBackend`, so a new model means
+    a new engine. But the transport's `contexts` are the game process's OWN imports - buffers,
+    semaphores and an authenticated process lifetime, all established by a HELLO the layer sent
+    and all of which the layer is still using. Closing them silently leaves the layer holding
+    handles to objects this daemon has already given back, and its next frame is answered
+    `GPU frame has no matching imported session`. That failure is unrecoverable by design
+    (`gpu_blocked` is set and, unless the reply said "unsupported", never cleared), so NR stops
+    processing for the rest of the session - and the panel's row is the one thing that looks
+    like it changed something.
+
+    `keep_sessions=True` is a model swap: the engine is rebuilt lazily on the next frame
+    (`handle` does `if self.images is None`), so dropping only `gpu_images` costs nothing and
+    leaves the session standing. Without it the transport goes too, which is right at shutdown -
+    nobody is going to send another frame - and wrong anywhere the daemon keeps serving. """
     for name in ("gpu_images", "gpu_transport"):
         resource = getattr(args, name, None)
-        if resource is not None:
-            resource.close()
-            setattr(args, name, None)
+        if resource is None:
+            continue
+        if keep_sessions and name == "gpu_transport":
+            # The imports belong to the game, not to the model: drop only the engine they feed.
+            engine = getattr(resource, "images", None)
+            if engine is not None:
+                engine.close()
+                resource.images = None
+            resource.active = None
+            continue
+        resource.close()
+        setattr(args, name, None)
 
 
 if __name__ == "__main__":

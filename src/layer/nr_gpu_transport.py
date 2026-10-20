@@ -156,6 +156,23 @@ class GPUSharedTransport:
         self.last = {}
         self.fallback_reason = None
 
+    def rebind_backend(self, backend):
+        """Follow a model swap, keeping the imports the game established.
+
+        The backend this transport was built with belongs to the model it was built with, and the
+        engine is rebuilt lazily from `self.backend` on the next frame - so a swap that leaves
+        this object alone would rebuild the pipeline on the model it just replaced. The imports
+        in `self.contexts` are the game's and are untouched by this: only the engine they feed
+        goes, which is the same thing `close_gpu_images(keep_sessions=True)` does on the daemon
+        side. Called with the new backend after every swap."""
+        if backend is self.backend:
+            return
+        self.backend, self.lib = backend, backend.runtime.lib
+        engine, self.images = self.images, None
+        if engine is not None:
+            engine.close()
+        self.active = None
+
     def _reply(self, connection, p, status, detail=0):
         connection.sendall(REPLY.pack(status, detail, p["session"] & 0xffffffff, p["session"] >> 32))
 

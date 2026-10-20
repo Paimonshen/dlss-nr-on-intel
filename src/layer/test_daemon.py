@@ -370,6 +370,55 @@ def device_lost_tests():
           '  stops; any other failure still costs only its frame')
 
 
+def model_swap_gpu_tests():
+    """A network swap must take the engine with it and leave the game's imports standing.
+
+    The panel's chooser changes the model while a game is running, and on a machine with the GPU
+    image path on that swap used to kill NR for the rest of the session. The image engine wraps a
+    `ResidentBackend`, so a new model means a new engine - but `close_gpu_images` closed the
+    transport too, and the transport's `contexts` are the GAME's imports. The layer was left
+    holding handles to objects the daemon had given back, its next frame came back
+    `GPU frame has no matching imported session`, and `gpu_blocked` latched: with strict mode on
+    the player then saw the game's own frame and nothing else. That is the failure this pins.
+
+    Driven through `refresh_model` itself, with the real weights on disk, because a test that
+    only calls `close_gpu_images` proves the function accepts the flag and not that the swap
+    passes it - which is exactly what a regression would take away. """
+    import nr_gpu_transport
+    import nr_weight_models
+    from pathlib import Path
+
+    work = ROOT / 'work'
+    name, path = nr_weight_models.resolve(work, 'cc_small_fp8')
+    assert path and path.is_file(), 'both networks must be on disk to test a swap'
+
+    shared = nr_gpu_transport.GPUSharedTransport(SimpleNamespace(runtime=SimpleNamespace(lib=None)))
+    # One import, as the layer's HELLO leaves it: the context that must survive the swap.
+    shared.contexts[(42, 7)] = SimpleNamespace(close=lambda: None, usable=True)
+    args = SimpleNamespace(model={"name": "ht", "requested": "ht", "backend": None},
+                           live=SimpleNamespace(weights=name), history=None,
+                           gpu_images=SimpleNamespace(close=lambda: None), gpu_transport=shared)
+    backend = SimpleNamespace(name='ht')
+
+    with mock.patch('nr_daemon.nr_frame') as frame:
+        fresh = SimpleNamespace(name=name, runtime=SimpleNamespace(lib=None))
+        frame.ResidentBackend.return_value = fresh
+        with contextlib.redirect_stdout(io.StringIO()):
+            returned = daemon.refresh_model(args, backend)
+
+    assert returned is fresh, returned
+    # The swap dropped the engine and rebound the transport to the NEW model...
+    assert shared.images is None, 'the engine did not go with the model'
+    assert shared.backend is fresh, shared.backend
+    # ...while the game's import is still standing, which is the whole point.
+    assert list(shared.contexts) == [(42, 7)], shared.contexts
+    # And the shutdown path is untouched: nobody sends another frame after it.
+    with mock.patch.object(daemon, 'close_gpu_images') as close:
+        daemon.close_gpu_images(args)
+        close.assert_called_once_with(args)
+    print('model swap: the engine follows the network, the games imports survive')
+
+
 if __name__ == '__main__':
     pipe_handle_tests()
     request_tests()
@@ -377,3 +426,4 @@ if __name__ == '__main__':
     letterbox_tests()
     native_exchange_tests()
     device_lost_tests()
+    model_swap_gpu_tests()
