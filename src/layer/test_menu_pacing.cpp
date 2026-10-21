@@ -288,6 +288,51 @@ int main(void)
               "and Reset does not reset the rows it does not own", detail);
     }
 
+    /* ---- Reset returns the picture to its defaults but keeps the NETWORK ---- */
+    {
+        /* Reset used to put the network back to the first name in the table, `ht` (A, 71 blocks).
+         * A user who had chosen `cc_small_fp8` (B, 31 blocks, about half the time) was moved back
+         * onto the slower model by pressing Reset, with no message: the row simply showed the
+         * other name. Seen on this machine - a Reset took `weights` from cc_small_fp8 to ht along
+         * with detail 1.75 -> 0.75 and intensity 2.0 -> 1.0, and the daemon's next start logged
+         * `network preset A, 71 blocks`.
+         *
+         * The network is a choice about what runs, not how much of it is applied, so Reset leaves
+         * it; everything that shapes the picture still goes back. */
+        int network = -1, detail_row = -1;
+        for (int i = 0; i < nr_menu_bridge_knob_count(); ++i) {
+            const char *name = nr_menu_bridge_knob_name(i);
+            if (strcmp(name, "weights") == 0) network = i;
+            if (strcmp(name, "detail_strength") == 0) detail_row = i;
+        }
+        snprintf(detail, sizeof detail, "weights=%d detail=%d", network, detail_row);
+        check(network >= 0 && detail_row >= 0, "the two knobs this is about are in the table", detail);
+
+        /* Choose the second network, as a user would from the combo. */
+        int options = nr_menu_bridge_knob_choice_count(network);
+        snprintf(detail, sizeof detail, "%d options", options);
+        check(options >= 2, "the network knob offers more than one", detail);
+        nr_menu_bridge_set(b, network, 1.0f);
+        char chosen[32] = "";
+        nr_menu_bridge_knob_choice_name(network, 1, chosen, sizeof chosen);
+        snprintf(detail, sizeof detail, "chose %s, row shows %s",
+                 chosen, nr_menu_bridge_row_value(b, network));
+        check(nr_menu_bridge_knob_choice_index(b, network) == 1, "the second network is chosen", detail);
+
+        /* And a picture parameter off its default, so the Reset has something to put back. */
+        nr_menu_bridge_set(b, detail_row, 1.75f);
+
+        nr_menu_bridge_reset(b);
+        int after = nr_menu_bridge_knob_choice_index(b, network);
+        snprintf(detail, sizeof detail, "network after Reset = index %d (%s)", after,
+                 nr_menu_bridge_row_value(b, network));
+        check(after == 1, "Reset keeps the network the user chose", detail);
+        snprintf(detail, sizeof detail, "detail after Reset = %s",
+                 nr_menu_bridge_row_value(b, detail_row));
+        check(strcmp(nr_menu_bridge_row_value(b, detail_row), "1") == 0,
+              "and still returns a picture parameter to its default", detail);
+    }
+
     /* ---- what the four variables mean, and one of them is NOT the panel's ---- */
     {
         /* `NR_GPU_ONLY` is the STRICT half of the GPU path: with it on, the layer refuses the CPU
@@ -474,12 +519,38 @@ int main(void)
               strcmp(every_env, "1") == 0,
               "and the file and the profile say the same thing", detail);
 
+        /* The file must still be JSON. Replacing a value used to eat the comma after it, so the
+         * profile came out as
+         *     "nr_async": false
+         *     "nr_every": 1
+         * which the setup window could not read at all - `nr_every must be a whole number` from a
+         * file the panel had just written. Every member but the last has to end in a comma. */
+        char path[1024];
+        snprintf(path, sizeof path, "%s\\work\\windows-profile.json", root);
+        FILE *f = fopen(path, "rb");
+        char whole[2048] = "";
+        size_t got = f ? fread(whole, 1, sizeof whole - 1, f) : 0;
+        whole[got] = 0;
+        if (f) fclose(f);
+        int members = 0, commas = 0;
+        for (size_t i = 0; i + 4 < got; ++i) {
+            if (whole[i] == ':' && whole[i + 1] == ' ') {
+                ++members;
+                const char *p = whole + i;
+                while (*p && *p != '\n' && *p != '}') ++p;
+                const char *last = p;
+                while (last > whole && (last[-1] == ' ' || last[-1] == '\r')) --last;
+                if (last > whole && last[-1] == ',') ++commas;
+            }
+        }
+        snprintf(detail, sizeof detail, "%d members, %d with a comma", members, commas);
+        check(members >= 4 && commas >= members - 1,
+              "and every member but the last still ends in a comma", detail);
+
         /* A profile from before these keys existed: `nr_async`, `nr_every` and `gpu_image_path`
          * are absent, so they have to be added inside the object rather than appended after the
          * closing brace - which would be a file the window cannot read at all. */
-        char path[1024];
-        snprintf(path, sizeof path, "%s\\work\\windows-profile.json", root);
-        FILE *f = fopen(path, "wb");
+        f = fopen(path, "wb");
         if (f) {
             fputs("{\n  \"root\": \"old\",\n  \"preset\": \"A\"\n}\n", f);
             fclose(f);
@@ -494,14 +565,31 @@ int main(void)
         check(have && strcmp(raw, "\"A\"") == 0, "and keeps what it had", detail);
         /* Still valid JSON: the brace has to come last, not before what was added. */
         f = fopen(path, "rb");
-        char whole[512] = "";
-        size_t got = f ? fread(whole, 1, sizeof whole - 1, f) : 0;
+        whole[0] = 0;
+        got = f ? fread(whole, 1, sizeof whole - 1, f) : 0;
         whole[got] = 0;
         if (f) fclose(f);
         char *brace = strrchr(whole, '}');
         int trailing_ok = brace && strspn(brace + 1, " \t\r\n") == strlen(brace + 1);
         snprintf(detail, sizeof detail, "ends: %s", brace ? brace : "NO BRACE");
         check(trailing_ok, "and the object still closes after what was added", detail);
+
+        /* And that case's commas too: only some members were replaced, so the untouched ones
+         * keep theirs while the added ones have to bring one. */
+        members = commas = 0;
+        for (size_t i = 0; i + 4 < got; ++i) {
+            if (whole[i] == ':' && whole[i + 1] == ' ') {
+                ++members;
+                const char *p = whole + i;
+                while (*p && *p != '\n' && *p != '}') ++p;
+                const char *last = p;
+                while (last > whole && (last[-1] == ' ' || last[-1] == '\r')) --last;
+                if (last > whole && last[-1] == ',') ++commas;
+            }
+        }
+        snprintf(detail, sizeof detail, "%d members, %d with a comma", members, commas);
+        check(members >= 4 && commas >= members - 1,
+              "and it is still comma-separated after a partial rewrite", detail);
     }
 
     /* ---- the GPU row explains itself when the path cannot run ---- */

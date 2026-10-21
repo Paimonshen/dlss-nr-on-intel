@@ -573,9 +573,22 @@ static int write_profile_pacing(const nr_menu_bridge *b)
             const char *found = n > 0 ? strstr(at, quoted) : NULL;
             if (found && found < end) {
                 size_t head = (size_t)(found - at) + (size_t)n;
-                int tail = snprintf(out + used, sizeof out - used, "%.*s: %s",
-                                    (int)head, at, values[i]);
-                /* The trailing comma of the original line belongs to the entry, not the key. */
+                /* The original line's own tail after the value carries the comma that separates
+                 * this member from the next. Dropping it produced
+                 *   "nr_async": false
+                 *   "nr_every": 1
+                 * which is not JSON at all, and the setup window then could not read its own
+                 * profile - `ValueError: nr_every must be a whole number` from a file the panel
+                 * had just written. Keep whatever followed the value, minus the value itself. */
+                const char *value_at = found + n;
+                while (value_at < end && (*value_at == ':' || *value_at == ' ' || *value_at == '\t'))
+                    ++value_at;
+                while (value_at < end && *value_at != ',' && *value_at != '}' && *value_at != ' ' &&
+                       *value_at != '\t')
+                    ++value_at;
+                while (value_at < end && (*value_at == ' ' || *value_at == '\t')) ++value_at;
+                int tail = snprintf(out + used, sizeof out - used, "%.*s: %s%.*s",
+                                    (int)head, at, values[i], (int)(end - value_at), value_at);
                 if (tail < 0 || used + (size_t)tail >= sizeof out) { free(text); return 0; }
                 used += (size_t)tail;
                 seen |= 1 << i;
@@ -596,7 +609,11 @@ static int write_profile_pacing(const nr_menu_bridge *b)
 
     /* Absent keys go in before the closing brace, with the comma the last entry lacks. The brace
      * stays last: appending after it would leave a file the setup window cannot parse, and a
-     * profile it cannot parse is a window that cannot open. */
+     * profile it cannot parse is a window that cannot open.
+     *
+     * The comma TRAILS the line before it rather than leading the new one. Both are valid JSON,
+     * but every other line in this file ends in its comma and a file written half one way and
+     * half the other is hard to read - and reading it by eye is how the last bug here was found. */
     if (seen != 7) {
         size_t close = used;
         while (close > 0 && out[close - 1] != '}') --close;
@@ -607,18 +624,24 @@ static int write_profile_pacing(const nr_menu_bridge *b)
         int comma = body > 0 && out[body - 1] != '{';
         char added[512];
         size_t n = 0;
+        int first = 1;
         for (int i = 0; i < 3; ++i) {
             if (seen & (1 << i)) continue;
-            int step = snprintf(added + n, sizeof added - n, "%s  \"%s\": %s\n",
-                                (comma || n) ? ",\n" : "", keys[i], values[i]);
+            int step = snprintf(added + n, sizeof added - n, "%s  \"%s\": %s",
+                                first ? "" : ",\n", keys[i], values[i]);
             if (step < 0 || n + (size_t)step >= sizeof added) return 0;
             n += (size_t)step;
+            first = 0;
         }
         if (!n) return 0;
-        /* Move the tail (the brace) right, then write the new members over the gap. */
-        memmove(out + body + n, out + body, used - body + 1);
-        memcpy(out + body, added, n);
-        used += n;
+        n += (size_t)snprintf(added + n, sizeof added - n, "\n");
+        /* The member before ours gets its comma and a line break, so ours start on their own
+         * line like every other member in the file. */
+        size_t insert_at = body;
+        memmove(out + insert_at + (comma ? 2u : 0u) + n, out + body, used - body + 1);
+        if (comma) { out[insert_at] = ','; out[insert_at + 1] = '\n'; }
+        memcpy(out + insert_at + (comma ? 2u : 0u), added, n);
+        used += n + (comma ? 2u : 0u);
     }
     return nr_write_file_atomic(path, out, used);
 }
@@ -641,6 +664,39 @@ static void load_defaults(nr_menu_bridge *b)
             b->values[i] = k->default_value;
         }
         format_row(b, i);
+    }
+}
+
+/* Reset's defaults, which are not quite `load_defaults`: the NETWORK survives.
+ *
+ * Reset means "give me the defaults back" for the things that shape the picture - intensity, the
+ * two strengths, the temporal knobs. The network is not one of those. `weights` chooses between
+ * two SETS OF WEIGHTS, `ht` (A, 71 blocks) and `cc_small_fp8` (B, 31 blocks, about half the time),
+ * and the first of those is the default only because the table lists it first. Resetting therefore
+ * moved a user who had chosen B back onto A - a slower model they had not asked to go back to -
+ * with no message and no way to tell, because the row simply showed the other name.
+ *
+ * The owner's call, and the right one: Reset leaves it alone. Anything that is genuinely a
+ * picture parameter still goes back to its default; a model is a choice about what runs, not how
+ * much of it is applied, and the panel has no business undoing it as a side effect.
+ *
+ * A Reset on an install with only one network behaves exactly as before, since the only name it
+ * could show is the one already there. */
+static void load_reset_defaults(nr_menu_bridge *b)
+{
+    int network = -1;
+    char keep[32] = "";
+    for (int i = 0; i < NR_KNOBS_COUNT; ++i)
+        if (strcmp(knobs[i].key, "weights") == 0) {
+            network = i;
+            snprintf(keep, sizeof keep, "%s", b->choice[i]);
+        }
+    load_defaults(b);
+    if (network >= 0 && keep[0]) {
+        snprintf(b->choice[network], sizeof b->choice[network], "%s", keep);
+        int here = choice_index(&knobs[network], keep);
+        b->values[network] = (float)(here < 0 ? 0 : here);
+        format_row(b, network);
     }
 }
 
@@ -1211,7 +1267,7 @@ void nr_menu_bridge_reset(nr_menu_bridge *b)
         nr_menu_inject_reset(b->menu);
         return;
     }
-    load_defaults(b);
+    load_reset_defaults(b);
     for (int i = 0; i < NR_KNOBS_COUNT; ++i) b->moved[i] = 1;
     for (int i = 0; i < NR_KNOBS_COUNT; ++i) format_row(b, i);
     write_live_settings(b);
@@ -1430,7 +1486,7 @@ int nr_menu_bridge_update(nr_menu_bridge *b, float frame_seconds)
          * the user's own saved settings are exactly what a Reset must not be able to reach. After
          * this the panel shows the defaults and the file still holds what was saved, so closing the
          * panel without saving discards the reset - which is what makes it safe to press. */
-        load_defaults(b);
+        load_reset_defaults(b);
         for (int i = 0; i < NR_KNOBS_COUNT; ++i) b->moved[i] = 1;
         nr_menu_bridge_refresh(b);
         /* Unconfirmed, and this is the case that caused the report. The defaults go to the preview

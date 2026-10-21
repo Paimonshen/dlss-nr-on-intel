@@ -343,6 +343,47 @@ the profile write, by forcing the blocker to never fire, and by dropping the bra
 path; each turns the suite red. The three wizard tests that asserted the old "`set_pacing` writes
 the file" behaviour now assert the new contract instead.
 
+## Two bugs the first run in a game found (2026-10-21, branch `menu-on-e4m3`)
+
+Both were in the work above, and neither was caught by the checks that shipped with it.
+
+**Writing the profile ate the commas.** `write_profile_pacing` replaced a member by copying the
+line up to the key and then `": %s"`, dropping whatever followed the value — including the comma
+that separates it from the next member. The result was
+
+```
+  "nr_async": false
+  "nr_every": 1
+```
+
+which is not JSON. The setup window then could not read its own profile and refused to launch the
+game with `nr_every must be a whole number from 1 to 4` — a message that names neither the file nor
+the panel that wrote it. Found when the owner asked for a relaunch at 800x600 and the launcher
+failed. Restored from the backup taken before the session, and fixed by keeping the tail of the
+original line past the value.
+
+The check that should have caught it only compared key VALUES, which were all correct; nothing
+asserted the file was still JSON. It now counts members and commas in both the replace path and
+the append path, and the written file is confirmed against the real Python parser. Mutation-tested
+by restoring the comma-eating `snprintf`, which turns it red.
+
+**Reset put the network back to A.** `load_defaults` gives a choice knob index 0, and
+`CHOICES["weights"]` is `("ht", "cc_small_fp8")` — so Reset moved a user who had chosen B onto A,
+the slower model, with the row simply showing the other name. Seen here as a Reset taking `weights`
+from `cc_small_fp8` to `ht` alongside detail 1.75 -> 0.75 and intensity 2.0 -> 1.0, with the
+daemon's next start logging `network preset A, 71 blocks`.
+
+The network is a choice about *what runs*, not how much of it is applied, so Reset leaves it
+(`load_reset_defaults`); every picture parameter still returns to its default. The owner's call,
+and the right one. An install carrying one network behaves exactly as before.
+
+**What this says about the earlier checks.** The profile bug shipped because the tests compared
+values and never the file's shape; the Reset bug shipped because no test ever pressed Reset and
+then looked at the network. Both are the same mistake in different clothes — a check that
+exercises the thing you changed rather than the thing that broke.
+
+
+
 ## Frame pacing's three rows: not Save's, and the settings file could hide them (2026-10-18, branch `menu-on-e4m3`)
 
 Three questions asked of the panel's pacing rows — do Save and Reset govern them, does Save leave
