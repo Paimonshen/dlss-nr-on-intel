@@ -2354,9 +2354,18 @@ static int menu_ui_rows(struct device_data *data, nrex_row *out, int capacity)
 			memset(r, 0, sizeof *r);
 			r->label = nr_menu_language(data->menu) == NR_LANG_ZH
 				? "实验性：帧保留在 GPU 上" : "Experimental: keep the frame on the GPU";
-			r->hint = nr_menu_language(data->menu) == NR_LANG_ZH
-				? "帧保留在 GPU 上。要求异步关闭且每帧处理，否则该模式下会跳过效果。下次游戏启动生效。"
-				: "Requires asynchronous mode off and every frame processed, or the effect is skipped in this mode. Takes effect at the next game start.";
+			/* The hint says why the path cannot run when the panel can see a reason. The daemon
+			 * declines a frame whose detail or colour strength is not 1, and that refusal used to
+			 * appear only in the daemon's log: the row read "on" while every frame was composed
+			 * on the CPU. Same shape as issue #17, so the row says it. */
+			const char *blocker = nr_menu_bridge_pacing_gpu_blocker(
+				data->menu_bridge, nr_menu_language(data->menu));
+			if (blocker)
+				r->hint = blocker;
+			else
+				r->hint = nr_menu_language(data->menu) == NR_LANG_ZH
+					? "帧保留在 GPU 上。要求异步关闭且每帧处理，否则该模式下会跳过效果。下次游戏启动生效。"
+					: "Requires asynchronous mode off and every frame processed, or the effect is skipped in this mode. Takes effect at the next game start.";
 			r->kind = NREX_KIND_FLAG;
 			r->choice_index = gpu ? 1 : 0;
 			r->value = gpu ? "on" : "off";

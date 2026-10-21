@@ -297,6 +297,52 @@ cannot reach: the menu's `nr_menu_take_reset` / `nr_menu_take_save_request` bran
 `nr_menu` — so what is covered is the headless functions, which the menu branches call, and the
 shared body they run. Said plainly rather than implied.
 
+## `nr-env.txt` is the panel's, and the profile follows it (2026-10-20, branch `menu-on-e4m3`)
+
+**Two writers, one file, no ordering.** `windows_wizard_core.set_pacing` rewrote the pacing lines
+of the game's `nr-env.txt` from the profile, and `nr_menu_bridge_set_pacing` (the in-game panel)
+wrote the same lines from what the user changed. Neither knew about the other, so a change made in
+the panel and then any pacing save in the setup window silently reverted it. Measured on this
+machine before the fix: the file said `NR_GPU_IMAGE=1 NR_LAYER_ASYNC=0 NR_LAYER_LIVE=1` while the
+profile still said `gpu_image_path=false nr_async=true nr_every=4` — the window's checkbox and the
+panel's row describing different settings with equal confidence.
+
+**One owner, and it is the panel** (the owner's rule). It is the only writer that can see what the
+layer is actually running; the profile is a record of what the user asked for, not of what is
+happening. So:
+
+- The panel writes the file **and** the same three values into `work/windows-profile.json`, editing
+  that file in place so the game, the Python, the DLL and the launch options survive
+  (`write_profile_pacing`). Keys a profile from before lacks are added inside the object, not after
+  its closing brace — a profile the window cannot parse is a window that cannot open.
+- `set_pacing` writes **only the profile**. It no longer touches the file, so the revert is gone
+  rather than merely reordered.
+- `NR_ROOT` in `nr-env.txt` is how the panel finds the profile; a release without one keeps working
+  and simply has no profile to keep in step.
+
+**The GPU row now says why it is not running.** `gpu_image_compose.fallback_reason` declines a
+frame whose `detail_strength` or `colour_strength` is not 1, and that sentence went only to the
+daemon's log — the row read "on" while every frame was composed on the CPU, which cost 0.05-0.07 s
+a frame against 0.014-0.016 s on the shared path (measured here, same scene). Same shape as issue
+#17: a reason nobody can see. `nr_menu_bridge_pacing_gpu_blocker` returns that sentence in the
+panel's language while the path is on and one of the two strengths is not 1, and the row's hint
+becomes it; off, there is nothing to explain.
+
+**Not fixed, and it is a feature rather than a bug:** the two strengths themselves are still
+CPU-path-only. `compose_detail` is `source + colour*lowpass(change) + detail*highpass(change)` with
+a radius-4 Gaussian separable blur, and the GPU composer has no blur pass, so porting it means a
+25-tap two-axis convolution, an intermediate buffer and a bit-exact rounding story. Until then the
+honest thing is the sentence above, and it is what the panel now says.
+
+Checks: `test_menu_pacing` grew the profile-projection block (the profile carries the three values,
+the file and the profile agree, keys the panel does not own survive, a profile without them gains
+them and still closes), the blocker block, and "the real installation is reachable again" after the
+odd-shape override — that last one exists because the override is process-wide and leaving it set
+made two later blocks fail for a reason unrelated to what they tested. Mutation-tested by removing
+the profile write, by forcing the blocker to never fire, and by dropping the brace in the append
+path; each turns the suite red. The three wizard tests that asserted the old "`set_pacing` writes
+the file" behaviour now assert the new contract instead.
+
 ## Frame pacing's three rows: not Save's, and the settings file could hide them (2026-10-18, branch `menu-on-e4m3`)
 
 Three questions asked of the panel's pacing rows — do Save and Reset govern them, does Save leave

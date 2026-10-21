@@ -41,11 +41,53 @@ static int make_installation(const char *root, const char *env_body)
     fputs("{\n  \"render_scale\": 0.8\n}\n", f);
     fclose(f);
 
+    /* The setup window's profile, beside it. `NR_ROOT` in the environment file names this
+     * directory, which is how the panel finds the profile to keep in step. */
+    snprintf(path, sizeof path, "%s\\work\\windows-profile.json", root);
+    f = fopen(path, "wb");
+    if (!f) return 0;
+    fputs("{\n"
+          "  \"root\": \"" , f);
+    fputs(root, f);
+    fputs("\",\n"
+          "  \"game_exe\": \"C:\\\\game\\\\game.exe\",\n"
+          "  \"nr_async\": true,\n"
+          "  \"nr_every\": 4,\n"
+          "  \"gpu_image_path\": false,\n"
+          "  \"preset\": \"A\",\n"
+          "  \"keep_me\": \"the panel must not drop what it does not know\"\n"
+          "}\n", f);
+    fclose(f);
+
     snprintf(path, sizeof path, "%s\\dlss-nr\\nr-env.txt", root);
     f = fopen(path, "wb");
     if (!f) return 0;
     fputs(env_body, f);
     fclose(f);
+    return 1;
+}
+
+/* One key of a JSON file, as its literal text, into `out`. Enough for the three booleans and the
+ * one integer the panel writes back, and it does not need a parser to say what is in the file. */
+static int profile_raw(const char *root, const char *key, char *out, size_t size)
+{
+    char path[1024];
+    snprintf(path, sizeof path, "%s\\work\\windows-profile.json", root);
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    static char text[8192];
+    size_t n = fread(text, 1, sizeof text - 1, f);
+    text[n] = '\0';
+    fclose(f);
+    char needle[96];
+    snprintf(needle, sizeof needle, "\"%s\": ", key);
+    const char *at = strstr(text, needle);
+    if (!at) return 0;
+    const char *p = at + strlen(needle);
+    size_t i = 0;
+    while (*p && *p != ',' && *p != '\n' && *p != '}' && i + 1 < size) out[i++] = *p++;
+    while (i > 0 && (out[i - 1] == ' ' || out[i - 1] == '\r')) --i;
+    out[i] = '\0';
     return 1;
 }
 
@@ -94,16 +136,19 @@ int main(void)
     printf("the layer's pacing, and the conflicts between the three\n");
 
     const char *root = "nr-pacing-test";
-    /* An untouched install: the setup window's defaults, plus a line the panel must not lose. */
-    const char *body =
+    /* An untouched install: the setup window's defaults, plus a line the panel must not lose.
+     * `NR_ROOT` is where the release lives - the panel finds `work/windows-profile.json` under it
+     * - so it names this fixture's own directory, which is the release as far as the panel knows. */
+    char body[1024];
+    snprintf(body, sizeof body,
         "# Set by the setup window.\n"
-        "NR_ROOT=C:\\somewhere\\release\n"
+        "NR_ROOT=%s\n"
         "NR_LAYER_ASYNC=0\n"
         "NR_GPU_IMAGE=0\n"
         "NR_GPU_TRANSPORT=0\n"
         "NR_GPU_ONLY=0\n"
         "NR_LAYER_LIVE=1\n"
-        "NR_PYTHON=C:\\python.exe\n";
+        "NR_PYTHON=C:\\python.exe\n", root);
     if (!make_installation(root, body)) { printf("  FAIL  could not build the fixture\n"); return 1; }
 
     /* The production path is the `nr-env.txt` beside the layer DLL. A fixture has no installation
@@ -292,7 +337,7 @@ int main(void)
               strcmp(value, "C:\\python.exe") == 0,
               "the lines the panel does not own survive", value);
         check(env_line(root, "NR_ROOT", value, sizeof value) &&
-              strcmp(value, "C:\\somewhere\\release") == 0,
+              strcmp(value, root) == 0,
               "including the release root", value);
 
         FILE *f = fopen("nr-pacing-test\\dlss-nr\\nr-env.txt", "rb");
@@ -363,6 +408,143 @@ int main(void)
         int wrote = nr_menu_bridge_set_pacing(b, NR_PACING_ASYNC, 1);
         snprintf(detail, sizeof detail, "set_pacing returned %d", wrote);
         check(wrote == 0, "and refuses to write", detail);
+
+        /* Back to the real installation: the override is process-wide, so leaving it here would
+         * make every later block run against a path that cannot be written - which is how the
+         * profile and blocker checks first failed, for a reason that had nothing to do with what
+         * they were testing. */
+        nr_menu_bridge_destroy(b);
+        nr_menu_bridge_use_env_file(env_path);
+        b = nr_menu_bridge_create_headless(settings, 0);
+        if (!b) { printf("  FAIL  no bridge after the odd shape\n"); return 1; }
+        snprintf(detail, sizeof detail, "available=%d", nr_menu_bridge_pacing_available(b));
+        check(nr_menu_bridge_pacing_available(b),
+              "and the real installation is reachable again", detail);
+    }
+
+    /* ---- the profile follows the file the panel owns ---- */
+    {
+        /* Two writers used to share the five pacing lines of `nr-env.txt` with nothing ordering
+         * them: this panel, and the setup window's `set_pacing`, which wrote them from the
+         * profile. A panel change followed by any window pacing save silently reverted it -
+         * measured on the owner's machine as `NR_GPU_IMAGE=1 NR_LAYER_ASYNC=0 NR_LAYER_LIVE=1` in
+         * the file against `gpu_image_path=false nr_async=true nr_every=4` in the profile.
+         *
+         * The rule now: the file is the panel's, and the profile is its projection. So a change
+         * writes both, and the window reads the truth whichever way it reaches the profile. */
+        nr_menu_bridge_set_pacing(b, NR_PACING_ASYNC, 0);
+        nr_menu_bridge_set_pacing(b, NR_PACING_GPU_IMAGE, 1);
+
+        char raw[64] = "";
+        int have = profile_raw(root, "nr_async", raw, sizeof raw);
+        snprintf(detail, sizeof detail, "profile nr_async=%s", have ? raw : "ABSENT");
+        check(have && strcmp(raw, "false") == 0, "the profile follows asynchronous mode off", detail);
+
+        have = profile_raw(root, "gpu_image_path", raw, sizeof raw);
+        snprintf(detail, sizeof detail, "profile gpu_image_path=%s", have ? raw : "ABSENT");
+        check(have && strcmp(raw, "true") == 0, "and the GPU path on", detail);
+
+        /* The GPU path forces every frame, so the cadence the profile sees is 1. */
+        have = profile_raw(root, "nr_every", raw, sizeof raw);
+        snprintf(detail, sizeof detail, "profile nr_every=%s", have ? raw : "ABSENT");
+        check(have && strcmp(raw, "1") == 0, "and the cadence the path requires", detail);
+
+        /* Whatever this code does not know about is still there: the panel edits the file, it
+         * does not regenerate it, and a profile it rebuilt would quietly drop the game. */
+        have = profile_raw(root, "keep_me", raw, sizeof raw);
+        snprintf(detail, sizeof detail, "keep_me=%s", have ? raw : "LOST");
+        check(have && strstr(raw, "must not drop") != NULL,
+              "and a key the panel does not know survives", detail);
+        have = profile_raw(root, "game_exe", raw, sizeof raw);
+        snprintf(detail, sizeof detail, "game_exe=%s", have ? raw : "LOST");
+        check(have && strstr(raw, "game.exe") != NULL, "including the game it is for", detail);
+
+        /* The file the layer reads and the profile agree on all three, which is the whole point. */
+        char async_env[32] = "", gpu_env[32] = "", every_env[32] = "";
+        env_line(root, "NR_LAYER_ASYNC", async_env, sizeof async_env);
+        env_line(root, "NR_GPU_IMAGE", gpu_env, sizeof gpu_env);
+        env_line(root, "NR_LAYER_LIVE", every_env, sizeof every_env);
+        char async_prof[32] = "", gpu_prof[32] = "";
+        profile_raw(root, "nr_async", async_prof, sizeof async_prof);
+        profile_raw(root, "gpu_image_path", gpu_prof, sizeof gpu_prof);
+        snprintf(detail, sizeof detail, "env async=%s gpu=%s every=%s / profile async=%s gpu=%s",
+                 async_env, gpu_env, every_env, async_prof, gpu_prof);
+        check(strcmp(async_env, "0") == 0 && strcmp(async_prof, "false") == 0 &&
+              strcmp(gpu_env, "1") == 0 && strcmp(gpu_prof, "true") == 0 &&
+              strcmp(every_env, "1") == 0,
+              "and the file and the profile say the same thing", detail);
+
+        /* A profile from before these keys existed: `nr_async`, `nr_every` and `gpu_image_path`
+         * are absent, so they have to be added inside the object rather than appended after the
+         * closing brace - which would be a file the window cannot read at all. */
+        char path[1024];
+        snprintf(path, sizeof path, "%s\\work\\windows-profile.json", root);
+        FILE *f = fopen(path, "wb");
+        if (f) {
+            fputs("{\n  \"root\": \"old\",\n  \"preset\": \"A\"\n}\n", f);
+            fclose(f);
+        }
+        nr_menu_bridge_set_pacing(b, NR_PACING_ASYNC, 1);
+        int have_async = profile_raw(root, "nr_async", raw, sizeof raw);
+        snprintf(detail, sizeof detail, "nr_async=%s", have_async ? raw : "ABSENT");
+        check(have_async && strcmp(raw, "true") == 0,
+              "a profile without the keys gains them", detail);
+        have = profile_raw(root, "preset", raw, sizeof raw);
+        snprintf(detail, sizeof detail, "preset=%s", have ? raw : "LOST");
+        check(have && strcmp(raw, "\"A\"") == 0, "and keeps what it had", detail);
+        /* Still valid JSON: the brace has to come last, not before what was added. */
+        f = fopen(path, "rb");
+        char whole[512] = "";
+        size_t got = f ? fread(whole, 1, sizeof whole - 1, f) : 0;
+        whole[got] = 0;
+        if (f) fclose(f);
+        char *brace = strrchr(whole, '}');
+        int trailing_ok = brace && strspn(brace + 1, " \t\r\n") == strlen(brace + 1);
+        snprintf(detail, sizeof detail, "ends: %s", brace ? brace : "NO BRACE");
+        check(trailing_ok, "and the object still closes after what was added", detail);
+    }
+
+    /* ---- the GPU row explains itself when the path cannot run ---- */
+    {
+        /* The daemon declines a frame whose detail or colour strength is not 1, with a sentence
+         * that used to go only to its log. The row read "on" while every frame was composed on
+         * the CPU - the same shape as issue #17, where the reason was in a place nobody reads. */
+        nr_menu_bridge_set_pacing(b, NR_PACING_GPU_IMAGE, 1);
+        snprintf(detail, sizeof detail, "blocker with both at 1: %s",
+                 nr_menu_bridge_pacing_gpu_blocker(b, 0) ? "SOMETHING" : "none");
+        check(nr_menu_bridge_pacing_gpu_blocker(b, 0) == NULL,
+              "the GPU path has nothing to explain while both strengths are 1", detail);
+
+        int row = -1;
+        for (int i = 0; i < nr_menu_bridge_knob_count(); ++i)
+            if (strcmp(nr_menu_bridge_knob_name(i), "detail_strength") == 0) row = i;
+        snprintf(detail, sizeof detail, "detail_strength is knob %d", row);
+        check(row >= 0, "the detail knob is in the table", detail);
+
+        /* Default 1.0, and 1.05 is "not 1" - the value the daemon refuses. Set rather than moved:
+         * `nr_menu_bridge_move` writes the daemon's live preview as well, which this fixture has
+         * no installation for, so it reports failure for a reason that has nothing to do with the
+         * row's value. The path must be ON for the row to have anything to explain, and the block
+         * above left it off. */
+        int turned_on = nr_menu_bridge_set_pacing(b, NR_PACING_GPU_IMAGE, 1);
+        nr_menu_bridge_set(b, row, 1.05f);
+        const char *why = nr_menu_bridge_pacing_gpu_blocker(b, 0);
+        snprintf(detail, sizeof detail, "on=%d detail=%s gpu=%d blocker=%s", turned_on,
+                 nr_menu_bridge_row_value(b, row), nr_menu_bridge_pacing_gpu_image(b),
+                 why ? "reported" : "NONE");
+        check(why && strstr(why, "Detail strength") != NULL,
+              "and says so when detail strength is not 1", detail);
+        const char *why_zh = nr_menu_bridge_pacing_gpu_blocker(b, 1);
+        check(why_zh && why_zh != why, "in the panel's own language",
+              why_zh ? "translated" : "ENGLISH ONLY");
+
+        /* Off, there is nothing to explain: the row already says "off". */
+        nr_menu_bridge_set_pacing(b, NR_PACING_GPU_IMAGE, 0);
+        snprintf(detail, sizeof detail, "blocker while off: %s",
+                 nr_menu_bridge_pacing_gpu_blocker(b, 0) ? "SOMETHING" : "none");
+        check(nr_menu_bridge_pacing_gpu_blocker(b, 0) == NULL,
+              "and says nothing while the path is off", detail);
+        nr_menu_bridge_set(b, row, 1.0f);
     }
 
     /* ---- the pacing rows do not depend on the settings file ---- */

@@ -373,21 +373,22 @@ class WizardFixture(unittest.TestCase):
         env_file = core.installed_path(self.profile) / core.ENV_FILE
         before, values = written()
         self.assertEqual((values["NR_LAYER_LIVE"], values["NR_LAYER_ASYNC"]), ("1", "0"))
-        # Installed: the two lines change, the rest stays as Install NR wrote it, even with
-        # another Python in the window that Install NR has not checked.
+        # Installed: the PROFILE changes and the proxy's file does not. The file belongs to the
+        # in-game panel - it is the only writer that can see what the layer is running - and the
+        # window writing it too is what let a panel change be silently reverted by any pacing
+        # save here. The panel keeps the profile in step instead (`write_profile_pacing`), so
+        # this function's job is the profile alone.
         result = core.set_pacing(replace(paced, python=self.base / "unchecked" / "python.exe"))
         self.assertEqual((result["ok"], result["applied"]), (True, True))
         after, values = written()
-        self.assertEqual((values["NR_LAYER_LIVE"], values["NR_LAYER_ASYNC"]), ("2", "1"))
-        self.assertEqual(values["NR_PYTHON"], str(self.python))
-        others = [line for line in before if line.split("=", 1)[0] not in core.PACING]
-        self.assertEqual([line for line in after if line.split("=", 1)[0] not in core.PACING], others)
-        self.assertEqual(len(after), len(before))
-        core.set_pacing(self.profile)
-        after, values = written()
+        self.assertEqual(after, before, "the panel's file is not the window's to rewrite")
         self.assertEqual((values["NR_LAYER_LIVE"], values["NR_LAYER_ASYNC"]), ("1", "0"))
+        self.assertEqual(values["NR_PYTHON"], str(self.python))
+        # The profile it did write is the one a later reader sees.
+        self.assertEqual(core.load_profile(self.root).nr_every, core.Profile.from_dict(
+            {**paced.to_dict(), "python": str(self.base / "unchecked" / "python.exe")}).nr_every)
         self.assertFalse(env_file.with_name(core.ENV_FILE + ".new").exists())
-        # Another release's installation is left alone.
+        # Another release's installation: the profile is kept, and nothing is written anywhere.
         other = replace(self.profile, root=self.base / "another release", nr_every=3)
         (self.base / "another release" / "work").mkdir(parents=True)
         result = core.set_pacing(other)
@@ -412,34 +413,26 @@ class WizardFixture(unittest.TestCase):
         self.assertTrue(core.install(self.profile)["ok"])
         path = core.installed_path(self.profile) / core.ENV_FILE
         before = path.read_text(encoding="utf-8").splitlines()
-        # An installation from before strict mode gains its explicit flag when
-        # the requested profile is applied; all non-pacing paths stay intact.
-        path.write_text("\n".join(line for line in before if not line.startswith("NR_GPU_ONLY=")) + "\n",
-                        encoding="utf-8")
+        # The profile carries the choice; the proxy's file is the in-game panel's and this
+        # function does not write it, so what the LAYER would be given comes from runtime_env.
         result = core.set_pacing(enabled)
         self.assertTrue(result["applied"])
         self.assertEqual(core.load_profile(self.root), enabled)
-        values = dict(line.split("=", 1) for line in path.read_text(encoding="utf-8").splitlines()
-                      if "=" in line and not line.startswith("#"))
+        environment = core.layer_environment(enabled)
         # Never strict: where the GPU path stands aside, NR takes its usual path (issue #17).
-        self.assertEqual((values["NR_GPU_IMAGE"], values["NR_GPU_TRANSPORT"], values["NR_GPU_ONLY"]), ("1", "1", "0"))
-        self.assertEqual(sum(line.startswith("NR_GPU_ONLY=")
-                             for line in path.read_text(encoding="utf-8").splitlines()), 1)
+        self.assertEqual((environment["NR_GPU_IMAGE"], environment["NR_GPU_TRANSPORT"],
+                          environment["NR_GPU_ONLY"]), ("1", "1", "0"))
         # The GPU path takes every frame in step or stands aside: the asynchronous mode and
         # every Nth frame asked for wait in the profile until it is off.
-        self.assertEqual((values["NR_LAYER_ASYNC"], values["NR_LAYER_LIVE"]), ("0", "1"))
+        self.assertEqual((environment["NR_LAYER_ASYNC"], environment["NR_LAYER_LIVE"]), ("0", "1"))
+        # And the installed file is exactly as Install NR left it.
+        self.assertEqual(path.read_text(encoding="utf-8").splitlines(), before)
+        # With the path off the profile keeps what was asked for.
         core.set_pacing(replace(enabled, gpu_image_path=False))
-        values = dict(line.split("=", 1) for line in path.read_text(encoding="utf-8").splitlines()
-                      if "=" in line and not line.startswith("#"))
-        self.assertEqual((values["NR_LAYER_ASYNC"], values["NR_LAYER_LIVE"], values["NR_GPU_IMAGE"]),
+        off = core.layer_environment(core.load_profile(self.root))
+        self.assertEqual((off["NR_LAYER_ASYNC"], off["NR_LAYER_LIVE"], off["NR_GPU_IMAGE"]),
                          ("1", "3", "0"))
-        unchanged = [line for line in before if line.split("=", 1)[0] not in core.PACING]
-        self.assertEqual([line for line in path.read_text(encoding="utf-8").splitlines()
-                          if line.split("=", 1)[0] not in core.PACING], unchanged)
-        core.set_pacing(self.profile)
-        values = dict(line.split("=", 1) for line in path.read_text(encoding="utf-8").splitlines()
-                      if "=" in line and not line.startswith("#"))
-        self.assertEqual((values["NR_GPU_IMAGE"], values["NR_GPU_TRANSPORT"], values["NR_GPU_ONLY"]), ("0", "0", "0"))
+        self.assertEqual(path.read_text(encoding="utf-8").splitlines(), before)
         self.assertNotIn("NR_LAYER_TIMING", core.runtime_env(enabled))
         self.assertNotIn("NR_LAYER_TIMING_LOG", core.runtime_env(enabled))
 
@@ -483,10 +476,12 @@ class WizardFixture(unittest.TestCase):
         result = core.set_pacing(chosen)
         self.assertEqual((result["ok"], result["applied"]), (True, True))
         self.assertEqual(core.load_profile(self.root).preset, "B")
-        self.assertEqual(values()["NR_PRESET"], "B")
-        self.assertEqual(sum(line.startswith("NR_PRESET=") for line in path.read_text(encoding="utf-8").splitlines()), 1)
+        # The profile carries the network; the proxy's file is the panel's. What a game started
+        # from this profile is given is `layer_environment`'s, which is what the layer reads.
+        self.assertEqual(core.layer_environment(core.load_profile(self.root))["NR_PRESET"], "B")
+        self.assertEqual(values()["NR_PRESET"], "A", "the panel's file is left alone")
         core.set_pacing(self.profile)
-        self.assertEqual(values()["NR_PRESET"], "A")
+        self.assertEqual(core.layer_environment(core.load_profile(self.root))["NR_PRESET"], "A")
         self.assertTrue(core.uninstall(self.profile)["ok"])
 
     def test_preset_b_is_checked_for_its_weights_or_a_dll_that_carries_them(self):

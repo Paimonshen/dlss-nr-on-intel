@@ -227,6 +227,9 @@ struct nr_menu_bridge {
     int pacing_gpu_image;
     int pacing_every;
     char env_path[1088];
+    /* `NR_ROOT` from the same file: where the release lives, and so where the setup window's
+     * profile is. Empty when the line is absent, and then nothing is written back. */
+    char release_root[1024];
 };
 
 /* ------------------------------------------------------------------ label lookup */
@@ -409,6 +412,7 @@ static void read_pacing(nr_menu_bridge *b)
     b->pacing_async = 0;
     b->pacing_gpu_image = 0;
     b->pacing_every = 1;
+    b->release_root[0] = 0;
     char path[1088];
     if (!env_file_path(b, path, sizeof path)) return;
     char *text = NULL;
@@ -439,6 +443,15 @@ static void read_pacing(nr_menu_bridge *b)
                            strncmp(at, "NR_LAYER_LIVE", name_len) == 0) {
                     int every = atoi(value);
                     b->pacing_every = (every >= 1 && every <= 4) ? every : 1;
+                } else if (name_len == strlen("NR_ROOT") &&
+                           strncmp(at, "NR_ROOT", name_len) == 0) {
+                    /* Where the release lives: the setup window's profile is under it. This is
+                     * how the panel keeps the profile a projection of what it wrote - see
+                     * write_profile_pacing. */
+                    if (value_len < sizeof b->release_root) {
+                        memcpy(b->release_root, value, value_len);
+                        b->release_root[value_len] = 0;
+                    }
                 }
             }
         }
@@ -502,6 +515,112 @@ static int write_pacing(nr_menu_bridge *b)
     if (added < 0 || used + (size_t)added >= sizeof out) return 0;
     used += (size_t)added;
     return nr_write_file_atomic(b->env_path, out, used);
+}
+
+/* Keep the setup window's profile the projection of what the panel just wrote.
+ *
+ * Two things used to write the same five lines of `nr-env.txt`: this panel, and
+ * `windows_wizard_core.set_pacing` on behalf of the window's own frame-pacing controls. Nothing
+ * ordered them, so a panel change followed by any window pacing save silently reverted it - the
+ * window's values came from a profile the panel had never touched, so the two said different
+ * things and the last writer won. Measured here before the fix: the file had
+ * `NR_GPU_IMAGE=1 NR_LAYER_ASYNC=0 NR_LAYER_LIVE=1` while the profile still said
+ * `gpu_image_path=false nr_async=true nr_every=4`.
+ *
+ * The owner's rule, and it is the right one: **the file belongs to the panel** - it is the only
+ * writer that can see what the layer is actually running - and the profile follows it as a
+ * projection. So a pacing change writes both, and `set_pacing` no longer needs to write the file
+ * at all: whichever way the window reaches the profile, the file the panel wrote is the truth.
+ *
+ * The profile is edited in place rather than regenerated: it carries the game, the Python, the
+ * DLL and the launch options, and rebuilding it in C would silently drop whatever this code does
+ * not know about. Same rule as `write_pacing`, for the same reason.
+ *
+ * Returns 0 when there is no profile to update, which is not an error: a release with no
+ * `windows-profile.json` has no window to keep in step, and the panel's own file is still written.
+ */
+static int write_profile_pacing(const nr_menu_bridge *b)
+{
+    if (!b->release_root[0]) return 0;
+    char path[2048];
+    int written = snprintf(path, sizeof path, "%s\\work\\windows-profile.json", b->release_root);
+    if (written <= 0 || (size_t)written >= sizeof path) return 0;
+    char *text = NULL;
+    size_t size = 0;
+    if (!nr_read_file(path, &text, &size)) return 0;
+
+    /* One key per line in the file, so each is replaced where it stands and everything else is
+     * copied through untouched. A key that is absent is appended before the closing brace. */
+    static const char *const keys[3] = {"nr_async", "nr_every", "gpu_image_path"};
+    char values[3][16];
+    snprintf(values[0], sizeof values[0], "%s", b->pacing_async ? "true" : "false");
+    snprintf(values[1], sizeof values[1], "%d", b->pacing_every);
+    snprintf(values[2], sizeof values[2], "%s", b->pacing_gpu_image ? "true" : "false");
+
+    char out[16384];
+    size_t used = 0;
+    int seen = 0;
+    const char *at = text;
+    while (*at) {
+        const char *end = at;
+        while (*end && *end != '\n' && *end != '\r') ++end;
+        size_t len = (size_t)(end - at);
+        int replaced = 0;
+        for (int i = 0; i < 3; ++i) {
+            /* `  "nr_every": 4,` - the quote is what distinguishes the key from a value. */
+            char quoted[32];
+            int n = snprintf(quoted, sizeof quoted, "\"%s\"", keys[i]);
+            const char *found = n > 0 ? strstr(at, quoted) : NULL;
+            if (found && found < end) {
+                size_t head = (size_t)(found - at) + (size_t)n;
+                int tail = snprintf(out + used, sizeof out - used, "%.*s: %s",
+                                    (int)head, at, values[i]);
+                /* The trailing comma of the original line belongs to the entry, not the key. */
+                if (tail < 0 || used + (size_t)tail >= sizeof out) { free(text); return 0; }
+                used += (size_t)tail;
+                seen |= 1 << i;
+                replaced = 1;
+                break;
+            }
+        }
+        if (!replaced) {
+            if (used + len + 1 >= sizeof out) { free(text); return 0; }
+            memcpy(out + used, at, len);
+            used += len;
+        }
+        out[used++] = '\n';
+        at = end;
+        while (*at == '\n' || *at == '\r') ++at;
+    }
+    free(text);
+
+    /* Absent keys go in before the closing brace, with the comma the last entry lacks. The brace
+     * stays last: appending after it would leave a file the setup window cannot parse, and a
+     * profile it cannot parse is a window that cannot open. */
+    if (seen != 7) {
+        size_t close = used;
+        while (close > 0 && out[close - 1] != '}') --close;
+        if (close == 0) return 0;               /* no object to add to */
+        size_t body = close - 1;                /* where the brace is */
+        while (body > 0 && (out[body - 1] == '\n' || out[body - 1] == ' ' ||
+                            out[body - 1] == '\r')) --body;
+        int comma = body > 0 && out[body - 1] != '{';
+        char added[512];
+        size_t n = 0;
+        for (int i = 0; i < 3; ++i) {
+            if (seen & (1 << i)) continue;
+            int step = snprintf(added + n, sizeof added - n, "%s  \"%s\": %s\n",
+                                (comma || n) ? ",\n" : "", keys[i], values[i]);
+            if (step < 0 || n + (size_t)step >= sizeof added) return 0;
+            n += (size_t)step;
+        }
+        if (!n) return 0;
+        /* Move the tail (the brace) right, then write the new members over the gap. */
+        memmove(out + body + n, out + body, used - body + 1);
+        memcpy(out + body, added, n);
+        used += n;
+    }
+    return nr_write_file_atomic(path, out, used);
 }
 
 /* ------------------------------------------------------------------ reading */
@@ -1433,6 +1552,10 @@ int nr_menu_bridge_set_pacing(nr_menu_bridge *b, int what, int value)
     /* Written immediately: these are the layer's start-up settings and there is no Save path for
      * them, so a change that was not written would be lost and the panel would be lying. */
     if (!write_pacing(b)) return 0;
+    /* And the setup window's profile follows the file, so the two cannot disagree. A failure here
+     * is not the user's problem yet - the file the layer reads at the next start is correct - so
+     * the change still reports success. See write_profile_pacing. */
+    write_profile_pacing(b);
     b->dirty = 1;
     return 1;
 }
@@ -1481,6 +1604,50 @@ int nr_menu_bridge_knob_choice_index(const nr_menu_bridge *bridge, int index)
     if (k->kind != 1) return 0;
     int here = choice_index(k, bridge->choice[index]);
     return here < 0 ? 0 : here;
+}
+
+/* The live value of one knob, by name. 0 when the bridge or the knob is not there, which a caller
+ * reads as "nothing to say" rather than as zero - the two knobs this is used for default to 1. */
+static int knob_value_by_name(const nr_menu_bridge *b, const char *name, float *out)
+{
+    if (!b || !name) return 0;
+    for (int i = 0; i < NR_KNOBS_COUNT; ++i) {
+        if (strcmp(knobs[i].key, name) != 0) continue;
+        if (knobs[i].kind != 0) return 0;
+        if (out) *out = b->values[i];
+        return 1;
+    }
+    return 0;
+}
+
+const char *nr_menu_bridge_pacing_gpu_blocker(const nr_menu_bridge *b, int language)
+{
+    if (!b || !b->pacing_ok) return NULL;
+    /* Only when the path is ON: off, the row is already saying "off" and a reason would be noise. */
+    if (!b->pacing_gpu_image) return NULL;
+    const int zh = language == 1;
+    float detail = 1.0f, colour = 1.0f;
+    int have_detail = knob_value_by_name(b, "detail_strength", &detail);
+    int have_colour = knob_value_by_name(b, "colour_strength", &colour);
+    int detail_off = have_detail && detail != 1.0f;
+    int colour_off = have_colour && colour != 1.0f;
+    if (detail_off && colour_off)
+        return zh ? "细节强度和色彩强度都不为 1，GPU 合成不接受这对取值：画面仍在处理，"
+                    "但走的是 CPU 路径。把两项都调回 1 再用 GPU 路径。"
+                  : "Detail and colour strength are both not 1, which GPU composition does not "
+                    "accept: the picture is still processed, on the CPU path. Set both to 1 to "
+                    "use the GPU path.";
+    if (detail_off)
+        return zh ? "细节强度不为 1，GPU 合成不接受：画面仍在处理，但走的是 CPU 路径。"
+                    "把细节强度调回 1 再用 GPU 路径。"
+                  : "Detail strength is not 1, which GPU composition does not accept: the "
+                    "picture is still processed, on the CPU path. Set it to 1 to use the GPU path.";
+    if (colour_off)
+        return zh ? "色彩强度不为 1，GPU 合成不接受：画面仍在处理，但走的是 CPU 路径。"
+                    "把色彩强度调回 1 再用 GPU 路径。"
+                  : "Colour strength is not 1, which GPU composition does not accept: the "
+                    "picture is still processed, on the CPU path. Set it to 1 to use the GPU path.";
+    return NULL;
 }
 
 int nr_menu_bridge_knob_range(int index, float *low, float *high, float *step, float *default_value)

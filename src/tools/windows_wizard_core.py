@@ -1614,11 +1614,24 @@ def install(profile, emit=None):
 
 
 def set_pacing(profile):
-    """Keep frame pacing and the experimental GPU path in the profile, and
-    where NR is installed in this game from this release, in the proxy's ENV_FILE as well. The
-    layer reads them when the game starts, so a running game keeps the pacing it started with.
-    Only the PACING lines change: the rest of the file stays as Install NR wrote it, with the
-    Python and paths it checked."""
+    """Keep frame pacing and the experimental GPU path in the profile, and only there.
+
+    **The proxy's ENV_FILE belongs to the in-game panel.** Both used to write its five pacing
+    lines and nothing ordered them, so a change made in the panel and then any pacing save in this
+    window reverted it silently: the window wrote from a profile the panel had never touched.
+    Measured on this machine before the fix - the file said `NR_GPU_IMAGE=1 NR_LAYER_ASYNC=0
+    NR_LAYER_LIVE=1` while the profile still said `gpu_image_path=false nr_async=true
+    nr_every=4`, so the window's own checkbox and the panel's row were describing different
+    settings with equal confidence.
+
+    The panel is the only writer that can see what the layer is actually running, so the file is
+    its own; this function writes the profile, and the panel keeps the profile in step as the
+    projection (`nr_menu_bridge.c`, `write_profile_pacing`). Whichever one the user reaches, both
+    agree afterwards, and there is one writer per file instead of two writers for one.
+
+    `applied` stays in the answer because the window's frame pacing is still "next launch": the
+    layer reads its environment when the game starts and never looks again.
+    """
     if profile.preset != "A" and not _weights_state(profile, profile.preset)["ready"]:
         # A daemon started for it would find no weights and end, and the game run without NR.
         return {"ok": False, "error": f"Preset {profile.preset}'s weights are not in this release: "
@@ -1627,16 +1640,7 @@ def set_pacing(profile):
     save_profile(profile)
     folder = installed_path(profile)
     owns, _ = _owned_installation(profile)
-    env_file = folder / ENV_FILE
-    applied = owns and (folder / OWNER_NAME).is_file() and env_file.is_file()
-    if applied:
-        lines = [line for line in env_file.read_text(encoding="utf-8").splitlines()
-                 if line.split("=", 1)[0] not in PACING]
-        lines += [f"{name}={value}" for name, value in layer_environment(profile).items()
-                  if name in PACING]
-        temporary = env_file.with_name(ENV_FILE + ".new")
-        temporary.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
-        os.replace(temporary, env_file)
+    applied = owns and (folder / OWNER_NAME).is_file() and (folder / ENV_FILE).is_file()
     return {"ok": True, "error": None, "applied": bool(applied), "profile": profile.to_dict(),
             "presets": _presets_ready(profile)}
 
