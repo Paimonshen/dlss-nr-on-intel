@@ -343,6 +343,41 @@ the profile write, by forcing the blocker to never fire, and by dropping the bra
 path; each turns the suite red. The three wizard tests that asserted the old "`set_pacing` writes
 the file" behaviour now assert the new contract instead.
 
+## The panel spoke two languages over a four-language enum (2026-10-21, branch `menu-on-e4m3`)
+
+Reported from a game with the panel set to Español: the three frame-pacing rows, the GPU row's
+refusal message and their tooltips were all in English, beside eleven knobs that were translated.
+
+`nr_layer.c` selected them with `nr_menu_language(...) == NR_LANG_ZH ? "chinese" : "english"` —
+eleven sites, including the four cadence option names. The language enum has four values
+(EN/ZH/RU/ES), so Russian and Spanish fell through to the English arm. They are table keys now
+(`async`, `async_hint`, `gpu_image`, `gpu_image_hint`, `every`, `every_hint`, `every_frame`,
+`every_nth`, and the three `gpu_blocked_*` reasons), generated for all four languages from `OWN` in
+`tools/gen_menu_strings.py` and read through `nr_menu_text` like the knobs. The cadence options are
+formatted from `every_nth`'s `{}`, so a language with a different word order needs no C.
+
+**The generated header gained `extern "C"`.** The tables live in a `.c` file and the menu's UI is
+C++, so a C++ caller looked for `?nr_menu_text@@YAPEBDHH@Z`, which nothing defines. It linked only
+because every caller had been C; the first C++ fixture to touch the table failed to link, which is
+how it was found.
+
+The fixture now walks those eleven keys through all four languages: each non-empty, none still
+equal to the English row, and every_nth keeps its `{}`. Mutation-tested by copying the English row
+into Spanish (`1 of 11 still English in es`) and by blanking a Russian row.
+
+**A translation that was behind its English, which no check can see.** The setup window's
+`GpuImagePathTip` said, in English, Russian and Spanish, that where the shared path cannot be used
+NR "takes its usual path, and Save report says why". The Chinese still described the behaviour
+issue #17 removed — "the effect is skipped and the game's original frame is shown" — because it was
+written before `a31efe6` and never revisited. A Chinese reader was told the option disables NR when
+it in fact falls back, which is the opposite of what happens. Aligned to the other three.
+
+The lesson is not the string: it is that **a check for "is every key translated" cannot see a
+translation that is merely out of date.** Comparing values catches a copy of the English row;
+nothing mechanical catches a Chinese sentence about behaviour that changed underneath it. English
+and the other languages carry the same risk, and this one was found by reading all four side by
+side, which is what the pacing rows made worth doing.
+
 ## Two bugs the first run in a game found (2026-10-21, branch `menu-on-e4m3`)
 
 Both were in the work above, and neither was caught by the checks that shipped with it.

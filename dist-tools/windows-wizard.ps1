@@ -812,7 +812,7 @@ $script:Strings=@{
    AsyncMode='异步：网络在游戏绘制下一帧时工作'
    AsyncModeTip='每秒帧数更多，而屏幕上显示的比处理结果落后一帧。'
    GpuImagePath='实验性：帧保留在 GPU 上'
-   GpuImagePathTip='帧保留在 GPU 上。如果 GPU 路径不可用或处理失败，则跳过效果，游戏显示原始帧。要求游戏与网络在同一块 Arc 上，异步关闭，且每帧都处理。'
+   GpuImagePathTip='帧保留在 GPU 上，从捕获到屏幕都不经过 CPU 拷贝。需要游戏与网络在同一块 Arc 上，且游戏使用 Vulkan 1.1 或更高版本（DirectX 游戏经 DXVK 即属于此）。如果不能如此，NR 会走常规路径，保存报告会说明原因。'
    GpuImageNote='在下次游戏启动时生效。异步模式或非每帧处理会在该模式下跳过效果。'
    PresetHeading='网络'; PresetA='A：NR 一直运行的模型'; PresetB='B：nvngx_dlssnr.dll 310.9.16 中的更快模型'
    PresetTip='nvngx_dlssnr.dll 310.9.16 携带两个网络：A，NR 一直运行的模型；B，NVIDIA 后来加入的更小网络，在这块 GPU 上耗时约为 A 的一半。「安装 NR」会把 B 从该 DLL 中提取出来，与 A 并存。'
