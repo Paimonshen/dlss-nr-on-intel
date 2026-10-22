@@ -13,6 +13,7 @@
  */
 #include "nr_menu.h"
 #include "nr_menu_bridge.h"
+#include "nr_menu_strings.h"   /* nr_menu_text: the table the pacing rows are read from */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -590,6 +591,55 @@ int main(void)
         snprintf(detail, sizeof detail, "%d members, %d with a comma", members, commas);
         check(members >= 4 && commas >= members - 1,
               "and it is still comma-separated after a partial rewrite", detail);
+    }
+
+    /* ---- the three pacing rows are translated in all four languages ---- */
+    {
+        /* They were `zh ? ... : ...` in `nr_layer.c`: a two-language choice over a four-language
+         * enum, so Russian and Spanish players read English for these three rows while the eleven
+         * knobs beside them were translated. Reported from a real game with the panel set to
+         * Español and every one of these rows in English. */
+        static const int keys[] = {
+            NR_STR_ASYNC, NR_STR_ASYNC_HINT, NR_STR_GPU_IMAGE, NR_STR_GPU_IMAGE_HINT,
+            NR_STR_EVERY, NR_STR_EVERY_HINT, NR_STR_EVERY_FRAME, NR_STR_EVERY_NTH,
+            NR_STR_GPU_BLOCKED_BOTH, NR_STR_GPU_BLOCKED_DETAIL, NR_STR_GPU_BLOCKED_COLOUR,
+        };
+        static const char *const key_names[] = {
+            "async", "async_hint", "gpu_image", "gpu_image_hint", "every", "every_hint",
+            "every_frame", "every_nth", "gpu_blocked_both", "gpu_blocked_detail",
+            "gpu_blocked_colour",
+        };
+        int count = (int)(sizeof keys / sizeof keys[0]);
+        for (int i = 0; i < count; ++i) {
+            char shown[256] = "";
+            size_t used = 0;
+            int ok = 1;
+            for (int lang = 0; lang < NR_MENU_LANG_COUNT; ++lang) {
+                const char *text = nr_menu_text(lang, keys[i]);
+                if (!text || !*text) ok = 0;
+                used += (size_t)snprintf(shown + used, sizeof shown - used, "%s%s",
+                                         lang ? " / " : "", (text && *text) ? "ok" : "EMPTY");
+            }
+            snprintf(detail, sizeof detail, "%s: %s", key_names[i], shown);
+            check(ok, "the pacing row text is present in all four languages", detail);
+        }
+        /* And they differ: a copy of the English row in the Spanish column is what a missing
+         * translation looks like, and it would pass the emptiness check above. */
+        for (int lang = 1; lang < NR_MENU_LANG_COUNT; ++lang) {
+            int same = 0;
+            for (int i = 0; i < count; ++i)
+                if (strcmp(nr_menu_text(lang, keys[i]), nr_menu_text(0, keys[i])) == 0) ++same;
+            snprintf(detail, sizeof detail, "%d of %d still English in %s", same, count,
+                     lang == 1 ? "zh" : lang == 2 ? "ru" : "es");
+            check(same == 0, "and no language is left saying the English row", detail);
+        }
+        /* The cadence options are built from `every_nth` by replacing the braces, so a translation
+         * that dropped them would render "every frames" with the number missing. */
+        int braces = 1;
+        for (int lang = 0; lang < NR_MENU_LANG_COUNT; ++lang)
+            if (strstr(nr_menu_text(lang, NR_STR_EVERY_NTH), "{}") == NULL) braces = 0;
+        check(braces, "every_nth keeps a {} for the number in all four languages",
+              braces ? "four of four" : "ONE OR MORE MISSING");
     }
 
     /* ---- the GPU row explains itself when the path cannot run ---- */

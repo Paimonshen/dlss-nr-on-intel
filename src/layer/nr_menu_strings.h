@@ -16,7 +16,7 @@
 #define NR_MENU_STRINGS_H
 
 #define NR_MENU_LANG_COUNT 4
-#define NR_MENU_KEY_COUNT 23
+#define NR_MENU_KEY_COUNT 34
 #define NR_MENU_COMPARE_COUNT 3
 /* The hints are one per KNOB, which is fewer than the keys: a key like `title` or `on` is
  * a string the menu shows, not a knob it explains. Declaring them with the key count left
@@ -24,6 +24,16 @@
  * which cost the menu its Chinese and Russian glyphs and faulted on the first real game. */
 #define NR_MENU_KNOB_COUNT 11
 enum { NR_LANG_EN = 0, NR_LANG_ZH, NR_LANG_RU, NR_LANG_ES };
+
+/* C linkage, like nr_menu.h and nr_menu_bridge.h.
+ *
+ * The tables are defined in a .c file and the menu's own UI is C++. Without this guard a
+ * C++ caller looks for a mangled name (`?nr_menu_text@@YAPEBDHH@Z`) that nothing defines, so
+ * the link fails only once something in C++ calls into this table - which is what happened
+ * to the first fixture that did, after these strings had been used from C alone. */
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 enum {
     NR_STR_RENDER_SCALE = 0,
@@ -49,6 +59,17 @@ enum {
     NR_STR_SHORTCUT = 20,
     NR_STR_ON = 21,
     NR_STR_OFF = 22,
+    NR_STR_ASYNC = 23,
+    NR_STR_ASYNC_HINT = 24,
+    NR_STR_GPU_IMAGE = 25,
+    NR_STR_GPU_IMAGE_HINT = 26,
+    NR_STR_EVERY = 27,
+    NR_STR_EVERY_HINT = 28,
+    NR_STR_EVERY_FRAME = 29,
+    NR_STR_EVERY_NTH = 30,
+    NR_STR_GPU_BLOCKED_BOTH = 31,
+    NR_STR_GPU_BLOCKED_DETAIL = 32,
+    NR_STR_GPU_BLOCKED_COLOUR = 33,
 };
 
 /* [language][key] */
@@ -70,5 +91,9 @@ const char *nr_menu_text(int language, int key);
 /* Which key index a knob name maps to, or -1. The names are nr_knobs.py's, so the knob
  * list joins to this table without a mapping that could itself drift. */
 int nr_menu_key_for(const char *knob_name);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* NR_MENU_STRINGS_H */

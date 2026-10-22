@@ -56,6 +56,35 @@ EXTRA = {
     "shortcut":       (None,           "menu key"),
     "on":             (None,           "on"),
     "off":            (None,           "off"),
+    # The layer's own pacing, which the wizard words on its own controls page. These three are
+    # the MENU's rows for the same settings, and the menu has no wizard key to join to, so they
+    # are OWN. They were hand-written in `nr_layer.c` as `zh ? ... : ...`, which left Russian
+    # and Spanish showing English - the language enum has four values and the ternary had two.
+    "async":          (None,           "Asynchronous: the network runs ahead"),
+    "async_hint":     (None,           "More frames per second, one behind the result. "
+                                       "Takes effect at the next game start."),
+    "gpu_image":      (None,           "Experimental: keep the frame on the GPU"),
+    "gpu_image_hint": (None,           "Requires asynchronous mode off and every frame processed, "
+                                       "or the effect is skipped in this mode. "
+                                       "Takes effect at the next game start."),
+    "every":          (None,           "Network runs on"),
+    "every_hint":     (None,           "The frames between repeat the last result, so the game "
+                                       "runs faster and the picture changes only when the network "
+                                       "produces one. Takes effect at the next game start."),
+    "every_frame":    (None,           "every frame"),
+    "every_nth":      (None,           "every {} frames"),
+    # Why the GPU image path is not running while its row says it is on: the daemon's own
+    # `fallback_reason` for this case, said in the panel's language. One key per case.
+    "gpu_blocked_both": (None,         "Detail and colour strength are both not 1, which GPU "
+                                       "composition does not accept: the picture is still "
+                                       "processed, on the CPU path. Set both to 1 to use the GPU "
+                                       "path."),
+    "gpu_blocked_detail": (None,       "Detail strength is not 1, which GPU composition does not "
+                                       "accept: the picture is still processed, on the CPU path. "
+                                       "Set it to 1 to use the GPU path."),
+    "gpu_blocked_colour": (None,       "Colour strength is not 1, which GPU composition does not "
+                                       "accept: the picture is still processed, on the CPU path. "
+                                       "Set it to 1 to use the GPU path."),
 }
 
 # Compare modes, in the order the key cycles them. OptiScaler's own names are Off / Side by side /
@@ -78,6 +107,28 @@ OWN = {
         "shortcut":      "menu key",
         "on":            "on",
         "off":           "off",
+        "async":         "Asynchronous: the network runs ahead",
+        "async_hint":    "More frames per second, one behind the result. "
+                         "Takes effect at the next game start.",
+        "gpu_image":     "Experimental: keep the frame on the GPU",
+        "gpu_image_hint": "Requires asynchronous mode off and every frame processed, "
+                          "or the effect is skipped in this mode. "
+                          "Takes effect at the next game start.",
+        "every":         "Network runs on",
+        "every_hint":    "The frames between repeat the last result, so the game runs faster "
+                         "and the picture changes only when the network produces one. "
+                         "Takes effect at the next game start.",
+        "every_frame":   "every frame",
+        "every_nth":     "every {} frames",
+        "gpu_blocked_both": "Detail and colour strength are both not 1, which GPU composition does "
+                            "not accept: the picture is still processed, on the CPU path. Set both "
+                            "to 1 to use the GPU path.",
+        "gpu_blocked_detail": "Detail strength is not 1, which GPU composition does not accept: the "
+                              "picture is still processed, on the CPU path. Set it to 1 to use the "
+                              "GPU path.",
+        "gpu_blocked_colour": "Colour strength is not 1, which GPU composition does not accept: the "
+                              "picture is still processed, on the CPU path. Set it to 1 to use the "
+                              "GPU path.",
     },
     "zh": {
         "hint":          "\u4e0a/\u4e0b \u9009\u62e9  \u5de6/\u53f3 \u8c03\u6574  L \u8bed\u8a00  "
@@ -90,6 +141,26 @@ OWN = {
         "shortcut":      "\u83dc\u5355\u952e",
         "on":            "\u5f00",
         "off":           "\u5173",
+        "async":         "\u5f02\u6b65\uff1a\u7f51\u7edc\u5728\u6e38\u620f\u7ed8\u5236\u4e0b\u4e00\u5e27\u65f6\u5de5\u4f5c",
+        "async_hint":    "\u6bcf\u79d2\u5e27\u6570\u66f4\u591a\uff0c\u800c\u5c4f\u5e55\u4e0a\u663e\u793a\u7684\u6bd4\u5904\u7406\u7ed3\u679c\u843d\u540e\u4e00\u5e27\u3002"
+                         "\u4e0b\u6b21\u6e38\u620f\u542f\u52a8\u751f\u6548\u3002",
+        "gpu_image":     "\u5b9e\u9a8c\u6027\uff1a\u5e27\u4fdd\u7559\u5728 GPU \u4e0a",
+        "gpu_image_hint": "\u5e27\u4fdd\u7559\u5728 GPU \u4e0a\u3002\u8981\u6c42\u5f02\u6b65\u5173\u95ed\u4e14\u6bcf\u5e27\u5904\u7406\uff0c"
+                          "\u5426\u5219\u8be5\u6a21\u5f0f\u4e0b\u4f1a\u8df3\u8fc7\u6548\u679c\u3002\u4e0b\u6b21\u6e38\u620f\u542f\u52a8\u751f\u6548\u3002",
+        "every":         "\u7f51\u7edc\u8fd0\u884c\u4e8e",
+        "every_hint":    "\u5176\u95f4\u5404\u5e27\u91cd\u590d\u4e0a\u4e00\u6b21\u7ed3\u679c\uff1a\u6e38\u620f\u8dd1\u5f97\u66f4\u5feb\uff0c"
+                         "\u753b\u9762\u53ea\u5728\u7f51\u7edc\u51fa\u5e27\u65f6\u53d8\u5316\u3002\u4e0b\u6b21\u6e38\u620f\u542f\u52a8\u751f\u6548\u3002",
+        "every_frame":   "\u6bcf\u5e27",
+        "every_nth":     "\u6bcf {} \u5e27",
+        "gpu_blocked_both": "\u7ec6\u8282\u5f3a\u5ea6\u548c\u8272\u5f69\u5f3a\u5ea6\u90fd\u4e0d\u4e3a 1\uff0cGPU \u5408\u6210\u4e0d\u63a5\u53d7\u8fd9\u5bf9\u53d6\u503c\uff1a"
+                            "\u753b\u9762\u4ecd\u5728\u5904\u7406\uff0c\u4f46\u8d70\u7684\u662f CPU \u8def\u5f84\u3002"
+                            "\u628a\u4e24\u9879\u90fd\u8c03\u56de 1 \u518d\u7528 GPU \u8def\u5f84\u3002",
+        "gpu_blocked_detail": "\u7ec6\u8282\u5f3a\u5ea6\u4e0d\u4e3a 1\uff0cGPU \u5408\u6210\u4e0d\u63a5\u53d7\uff1a"
+                              "\u753b\u9762\u4ecd\u5728\u5904\u7406\uff0c\u4f46\u8d70\u7684\u662f CPU \u8def\u5f84\u3002"
+                              "\u628a\u7ec6\u8282\u5f3a\u5ea6\u8c03\u56de 1 \u518d\u7528 GPU \u8def\u5f84\u3002",
+        "gpu_blocked_colour": "\u8272\u5f69\u5f3a\u5ea6\u4e0d\u4e3a 1\uff0cGPU \u5408\u6210\u4e0d\u63a5\u53d7\uff1a"
+                              "\u753b\u9762\u4ecd\u5728\u5904\u7406\uff0c\u4f46\u8d70\u7684\u662f CPU \u8def\u5f84\u3002"
+                              "\u628a\u8272\u5f69\u5f3a\u5ea6\u8c03\u56de 1 \u518d\u7528 GPU \u8def\u5f84\u3002",
     },
     "ru": {
         "hint":          "\u0412\u0432\u0435\u0440\u0445/\u0412\u043d\u0438\u0437 \u0432\u044b\u0431\u043e\u0440  "
@@ -104,6 +175,46 @@ OWN = {
         "shortcut":      "\u043a\u043b\u0430\u0432\u0438\u0448\u0430 \u043c\u0435\u043d\u044e",
         "on":            "\u0432\u043a\u043b",
         "off":           "\u0432\u044b\u043a\u043b",
+        "async":         "\u0410\u0441\u0438\u043d\u0445\u0440\u043e\u043d\u043d\u043e: \u0441\u0435\u0442\u044c \u0440\u0430\u0431\u043e\u0442\u0430\u0435\u0442 "
+                         "\u043f\u043e\u043a\u0430 \u0438\u0433\u0440\u0430 \u0440\u0438\u0441\u0443\u0435\u0442 \u0441\u043b\u0435\u0434\u0443\u044e\u0449\u0438\u0439 \u043a\u0430\u0434\u0440",
+        "async_hint":    "\u0411\u043e\u043b\u044c\u0448\u0435 \u043a\u0430\u0434\u0440\u043e\u0432 \u0432 \u0441\u0435\u043a\u0443\u043d\u0434\u0443, "
+                         "\u043d\u043e \u043d\u0430 \u044d\u043a\u0440\u0430\u043d\u0435 \u0440\u0435\u0437\u0443\u043b\u044c\u0442\u0430\u0442 "
+                         "\u043d\u0430 \u043e\u0434\u0438\u043d \u043a\u0430\u0434\u0440 \u043f\u043e\u0437\u0436\u0435. "
+                         "\u041f\u0440\u0438\u043c\u0435\u043d\u0438\u0442\u0441\u044f \u043f\u0440\u0438 \u0441\u043b\u0435\u0434\u0443\u044e\u0449\u0435\u043c \u0437\u0430\u043f\u0443\u0441\u043a\u0435 \u0438\u0433\u0440\u044b.",
+        "gpu_image":     "\u042d\u043a\u0441\u043f\u0435\u0440\u0438\u043c\u0435\u043d\u0442: \u043e\u0441\u0442\u0430\u0432\u043b\u044f\u0442\u044c \u043a\u0430\u0434\u0440 \u043d\u0430 GPU",
+        "gpu_image_hint": "\u041a\u0430\u0434\u0440 \u043e\u0441\u0442\u0430\u0451\u0442\u0441\u044f \u043d\u0430 GPU. "
+                          "\u0422\u0440\u0435\u0431\u0443\u0435\u0442 \u0432\u044b\u043a\u043b\u044e\u0447\u0435\u043d\u043d\u043e\u0433\u043e "
+                          "\u0430\u0441\u0438\u043d\u0445\u0440\u043e\u043d\u043d\u043e\u0433\u043e \u0440\u0435\u0436\u0438\u043c\u0430 "
+                          "\u0438 \u043e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0438 \u043a\u0430\u0436\u0434\u043e\u0433\u043e \u043a\u0430\u0434\u0440\u0430, "
+                          "\u0438\u043d\u0430\u0447\u0435 \u0432 \u044d\u0442\u043e\u043c \u0440\u0435\u0436\u0438\u043c\u0435 "
+                          "\u044d\u0444\u0444\u0435\u043a\u0442 \u043f\u0440\u043e\u043f\u0443\u0441\u043a\u0430\u0435\u0442\u0441\u044f. "
+                          "\u041f\u0440\u0438\u043c\u0435\u043d\u0438\u0442\u0441\u044f \u043f\u0440\u0438 \u0441\u043b\u0435\u0434\u0443\u044e\u0449\u0435\u043c \u0437\u0430\u043f\u0443\u0441\u043a\u0435 \u0438\u0433\u0440\u044b.",
+        "every":         "\u0421\u0435\u0442\u044c \u0440\u0430\u0431\u043e\u0442\u0430\u0435\u0442 \u043d\u0430",
+        "every_hint":    "\u041a\u0430\u0434\u0440\u044b \u043c\u0435\u0436\u0434\u0443 \u043d\u0438\u043c\u0438 "
+                         "\u043f\u043e\u0432\u0442\u043e\u0440\u044f\u044e\u0442 \u043f\u0440\u0435\u0434\u044b\u0434\u0443\u0449\u0438\u0439 "
+                         "\u0440\u0435\u0437\u0443\u043b\u044c\u0442\u0430\u0442: \u0438\u0433\u0440\u0430 \u0438\u0434\u0451\u0442 "
+                         "\u0431\u044b\u0441\u0442\u0440\u0435\u0435, \u0430 \u043a\u0430\u0440\u0442\u0438\u043d\u043a\u0430 "
+                         "\u043c\u0435\u043d\u044f\u0435\u0442\u0441\u044f \u0442\u043e\u043b\u044c\u043a\u043e \u043a\u043e\u0433\u0434\u0430 "
+                         "\u0441\u0435\u0442\u044c \u0432\u044b\u0434\u0430\u0451\u0442 \u043a\u0430\u0434\u0440. "
+                          "\u041f\u0440\u0438\u043c\u0435\u043d\u0438\u0442\u0441\u044f \u043f\u0440\u0438 \u0441\u043b\u0435\u0434\u0443\u044e\u0449\u0435\u043c \u0437\u0430\u043f\u0443\u0441\u043a\u0435 \u0438\u0433\u0440\u044b.",
+        "every_frame":   "\u043a\u0430\u0436\u0434\u044b\u0439 \u043a\u0430\u0434\u0440",
+        "every_nth":     "\u043a\u0430\u0436\u0434\u044b\u0435 {} \u043a\u0430\u0434\u0440\u043e\u0432",
+        "gpu_blocked_both": "\u0421\u0438\u043b\u0430 \u0434\u0435\u0442\u0430\u043b\u0435\u0439 \u0438 \u0441\u0438\u043b\u0430 \u0446\u0432\u0435\u0442\u0430 "
+                            "\u043e\u0431\u0435 \u043d\u0435 \u0440\u0430\u0432\u043d\u044b 1, \u0430 GPU-\u043a\u043e\u043c\u043f\u043e\u0437\u0438\u0446\u0438\u044f "
+                            "\u0442\u0430\u043a\u0438\u0435 \u0437\u043d\u0430\u0447\u0435\u043d\u0438\u044f \u043d\u0435 \u043f\u0440\u0438\u043d\u0438\u043c\u0430\u0435\u0442: "
+                            "\u043a\u0430\u0434\u0440\u044b \u0432\u0441\u0451 \u0440\u0430\u0432\u043d\u043e \u043e\u0431\u0440\u0430\u0431\u0430\u0442\u044b\u0432\u0430\u044e\u0442\u0441\u044f, "
+                            "\u043d\u043e \u043d\u0430 CPU. \u041f\u043e\u0441\u0442\u0430\u0432\u044c\u0442\u0435 \u043e\u0431\u0430 \u0432 1, \u0447\u0442\u043e\u0431\u044b "
+                            "\u0438\u0441\u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u044c GPU.",
+        "gpu_blocked_detail": "\u0421\u0438\u043b\u0430 \u0434\u0435\u0442\u0430\u043b\u0435\u0439 \u043d\u0435 \u0440\u0430\u0432\u043d\u0430 1, \u0430 "
+                              "GPU-\u043a\u043e\u043c\u043f\u043e\u0437\u0438\u0446\u0438\u044f \u0442\u0430\u043a\u043e\u0435 \u0437\u043d\u0430\u0447\u0435\u043d\u0438\u0435 "
+                              "\u043d\u0435 \u043f\u0440\u0438\u043d\u0438\u043c\u0430\u0435\u0442: \u043a\u0430\u0434\u0440\u044b \u0432\u0441\u0451 \u0440\u0430\u0432\u043d\u043e "
+                              "\u043e\u0431\u0440\u0430\u0431\u0430\u0442\u044b\u0432\u0430\u044e\u0442\u0441\u044f, \u043d\u043e \u043d\u0430 CPU. "
+                              "\u041f\u043e\u0441\u0442\u0430\u0432\u044c\u0442\u0435 1, \u0447\u0442\u043e\u0431\u044b \u0438\u0441\u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u044c GPU.",
+        "gpu_blocked_colour": "\u0421\u0438\u043b\u0430 \u0446\u0432\u0435\u0442\u0430 \u043d\u0435 \u0440\u0430\u0432\u043d\u0430 1, \u0430 "
+                              "GPU-\u043a\u043e\u043c\u043f\u043e\u0437\u0438\u0446\u0438\u044f \u0442\u0430\u043a\u043e\u0435 \u0437\u043d\u0430\u0447\u0435\u043d\u0438\u0435 "
+                              "\u043d\u0435 \u043f\u0440\u0438\u043d\u0438\u043c\u0430\u0435\u0442: \u043a\u0430\u0434\u0440\u044b \u0432\u0441\u0451 \u0440\u0430\u0432\u043d\u043e "
+                              "\u043e\u0431\u0440\u0430\u0431\u0430\u0442\u044b\u0432\u0430\u044e\u0442\u0441\u044f, \u043d\u043e \u043d\u0430 CPU. "
+                              "\u041f\u043e\u0441\u0442\u0430\u0432\u044c\u0442\u0435 1, \u0447\u0442\u043e\u0431\u044b \u0438\u0441\u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u044c GPU.",
     },
     "es": {
         "hint":          "Arriba/Abajo elegir  Izq/Der cambiar  L idioma  Home activar  "
@@ -116,6 +227,28 @@ OWN = {
         "shortcut":      "tecla del men\u00fa",
         "on":            "activado",
         "off":           "desactivado",
+        "async":         "As\u00edncrono: la red trabaja mientras el juego dibuja el siguiente fotograma",
+        "async_hint":    "M\u00e1s fotogramas por segundo, pero lo que se ve va un fotograma "
+                         "procesado por detr\u00e1s. Se aplica en el pr\u00f3ximo inicio del juego.",
+        "gpu_image":     "Experimental: mantener el fotograma en la GPU",
+        "gpu_image_hint": "El fotograma se queda en la GPU. Requiere el modo as\u00edncrono "
+                          "desactivado y el procesamiento de cada fotograma, o el efecto se "
+                          "omite en este modo. Se aplica en el pr\u00f3ximo inicio del juego.",
+        "every":         "La red se ejecuta en",
+        "every_hint":    "Los fotogramas intermedios repiten el resultado anterior: el juego va "
+                         "m\u00e1s r\u00e1pido y la imagen solo cambia cuando la red produce uno. "
+                         "Se aplica en el pr\u00f3ximo inicio del juego.",
+        "every_frame":   "cada fotograma",
+        "every_nth":     "cada {} fotogramas",
+        "gpu_blocked_both": "Ni la fuerza del detalle ni la del color son 1, y la composici\u00f3n por "
+                            "GPU no acepta esa pareja: la imagen se sigue procesando, en la ruta "
+                            "de CPU. Pon las dos en 1 para usar la ruta de GPU.",
+        "gpu_blocked_detail": "La fuerza del detalle no es 1, y la composici\u00f3n por GPU no acepta "
+                              "ese valor: la imagen se sigue procesando, en la ruta de CPU. Ponla "
+                              "en 1 para usar la ruta de GPU.",
+        "gpu_blocked_colour": "La fuerza del color no es 1, y la composici\u00f3n por GPU no acepta "
+                              "ese valor: la imagen se sigue procesando, en la ruta de CPU. Ponla "
+                              "en 1 para usar la ruta de GPU.",
     },
 }
 
@@ -267,6 +400,16 @@ def write_header(labels, hints, compare):
         "#define NR_MENU_KNOB_COUNT " + str(len(KNOBS)),
         "enum { NR_LANG_EN = 0, NR_LANG_ZH, NR_LANG_RU, NR_LANG_ES };",
         "",
+        "/* C linkage, like nr_menu.h and nr_menu_bridge.h.",
+        " *",
+        " * The tables are defined in a .c file and the menu's own UI is C++. Without this guard a",
+        " * C++ caller looks for a mangled name (`?nr_menu_text@@YAPEBDHH@Z`) that nothing defines, so",
+        " * the link fails only once something in C++ calls into this table - which is what happened",
+        " * to the first fixture that did, after these strings had been used from C alone. */",
+        "#ifdef __cplusplus",
+        "extern \"C\" {",
+        "#endif",
+        "",
         "enum {",
     ]
     for i, k in enumerate(keys):
@@ -293,6 +436,10 @@ def write_header(labels, hints, compare):
         "/* Which key index a knob name maps to, or -1. The names are nr_knobs.py's, so the knob",
         " * list joins to this table without a mapping that could itself drift. */",
         "int nr_menu_key_for(const char *knob_name);",
+        "",
+        "#ifdef __cplusplus",
+        "}",
+        "#endif",
         "",
         "#endif /* NR_MENU_STRINGS_H */",
         "",

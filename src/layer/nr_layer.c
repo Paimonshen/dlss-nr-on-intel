@@ -2336,14 +2336,18 @@ static int menu_ui_rows(struct device_data *data, nrex_row *out, int capacity)
 		int pipelined = nr_menu_bridge_pacing_async(data->menu_bridge);
 		int gpu = nr_menu_bridge_pacing_gpu_image(data->menu_bridge);
 
+		/* The pacing rows read the four-language table, like the knobs do. They used to be
+		 * `zh ? ... : ...` written here, which is a two-language choice over a four-language enum:
+		 * a Russian or Spanish player got English for these three rows and a translation for the
+		 * eleven knobs beside them. `nr_menu_text` is the same lookup the knobs use, so a language
+		 * added later reaches all of them at once. */
+		int language = nr_menu_language(data->menu);
+
 		if (n < capacity && n < MENU_UI_MAX_ROWS) {
 			nrex_row *r = &out[n];
 			memset(r, 0, sizeof *r);
-			r->label = nr_menu_language(data->menu) == NR_LANG_ZH ? "异步：网络在游戏绘制下一帧时工作"
-									       : "Asynchronous: the network runs ahead";
-			r->hint = nr_menu_language(data->menu) == NR_LANG_ZH
-				? "每秒帧数更多，而屏幕上显示的比处理结果落后一帧。下次游戏启动生效。"
-				: "More frames per second, one behind the result. Takes effect at the next game start.";
+			r->label = nr_menu_text(language, NR_STR_ASYNC);
+			r->hint = nr_menu_text(language, NR_STR_ASYNC_HINT);
 			r->kind = NREX_KIND_FLAG;
 			r->choice_index = pipelined ? 1 : 0;
 			r->value = pipelined ? "on" : "off";
@@ -2352,20 +2356,14 @@ static int menu_ui_rows(struct device_data *data, nrex_row *out, int capacity)
 		if (n < capacity && n < MENU_UI_MAX_ROWS) {
 			nrex_row *r = &out[n];
 			memset(r, 0, sizeof *r);
-			r->label = nr_menu_language(data->menu) == NR_LANG_ZH
-				? "实验性：帧保留在 GPU 上" : "Experimental: keep the frame on the GPU";
+			r->label = nr_menu_text(language, NR_STR_GPU_IMAGE);
 			/* The hint says why the path cannot run when the panel can see a reason. The daemon
 			 * declines a frame whose detail or colour strength is not 1, and that refusal used to
 			 * appear only in the daemon's log: the row read "on" while every frame was composed
 			 * on the CPU. Same shape as issue #17, so the row says it. */
 			const char *blocker = nr_menu_bridge_pacing_gpu_blocker(
-				data->menu_bridge, nr_menu_language(data->menu));
-			if (blocker)
-				r->hint = blocker;
-			else
-				r->hint = nr_menu_language(data->menu) == NR_LANG_ZH
-					? "帧保留在 GPU 上。要求异步关闭且每帧处理，否则该模式下会跳过效果。下次游戏启动生效。"
-					: "Requires asynchronous mode off and every frame processed, or the effect is skipped in this mode. Takes effect at the next game start.";
+				data->menu_bridge, language);
+			r->hint = blocker ? blocker : nr_menu_text(language, NR_STR_GPU_IMAGE_HINT);
 			r->kind = NREX_KIND_FLAG;
 			r->choice_index = gpu ? 1 : 0;
 			r->value = gpu ? "on" : "off";
@@ -2381,18 +2379,28 @@ static int menu_ui_rows(struct device_data *data, nrex_row *out, int capacity)
 		if (n < capacity && n < MENU_UI_MAX_ROWS) {
 			nrex_row *r = &out[n];
 			memset(r, 0, sizeof *r);
-			r->label = nr_menu_language(data->menu) == NR_LANG_ZH ? "网络运行于" : "Network runs on";
-			r->hint = nr_menu_language(data->menu) == NR_LANG_ZH
-				? "其间各帧重复上一次结果：游戏跑得更快，画面只在网络出帧时变化。下次游戏启动生效。"
-				: "The frames between repeat the last result, so the game runs faster and the picture changes only when the network produces one. Takes effect at the next game start.";
+			r->label = nr_menu_text(language, NR_STR_EVERY);
+			r->hint = nr_menu_text(language, NR_STR_EVERY_HINT);
 			r->kind = NREX_KIND_CHOICE;
 			for (int c = 0; c < 4; ++c) {
-				if (c == 0) snprintf(every_names_store[c], sizeof every_names_store[c], "%s",
-						     nr_menu_language(data->menu) == NR_LANG_ZH ? "每帧" : "every frame");
-				else snprintf(every_names_store[c], sizeof every_names_store[c], "%s %d %s",
-					      nr_menu_language(data->menu) == NR_LANG_ZH ? "每" : "every",
-					      c + 1,
-					      nr_menu_language(data->menu) == NR_LANG_ZH ? "帧" : "frames");
+				/* One string per option, from the table: "every frame" is its own key and the
+				 * others are "every N frames", so a language with a different word order needs
+				 * no formatting in this file. `every_names_store` holds what was built, and the
+				 * terminator at 4 is what keeps the combo from offering a fifth, empty entry. */
+				if (c == 0)
+					snprintf(every_names_store[c], sizeof every_names_store[c], "%s",
+					         nr_menu_text(language, NR_STR_EVERY_FRAME));
+				else {
+					const char *shape = nr_menu_text(language, NR_STR_EVERY_NTH);
+					const char *brace = strstr(shape, "{}");
+					if (brace) {
+						int head = (int)(brace - shape);
+						snprintf(every_names_store[c], sizeof every_names_store[c],
+						         "%.*s%d%s", head, shape, c + 1, brace + 2);
+					} else
+						snprintf(every_names_store[c], sizeof every_names_store[c],
+						         "%s %d", shape, c + 1);
+				}
 				every_names[c] = every_names_store[c];
 			}
 			every_names[4] = NULL;

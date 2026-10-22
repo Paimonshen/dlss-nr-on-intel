@@ -1681,28 +1681,17 @@ const char *nr_menu_bridge_pacing_gpu_blocker(const nr_menu_bridge *b, int langu
     if (!b || !b->pacing_ok) return NULL;
     /* Only when the path is ON: off, the row is already saying "off" and a reason would be noise. */
     if (!b->pacing_gpu_image) return NULL;
-    const int zh = language == 1;
     float detail = 1.0f, colour = 1.0f;
     int have_detail = knob_value_by_name(b, "detail_strength", &detail);
     int have_colour = knob_value_by_name(b, "colour_strength", &colour);
     int detail_off = have_detail && detail != 1.0f;
     int colour_off = have_colour && colour != 1.0f;
-    if (detail_off && colour_off)
-        return zh ? "细节强度和色彩强度都不为 1，GPU 合成不接受这对取值：画面仍在处理，"
-                    "但走的是 CPU 路径。把两项都调回 1 再用 GPU 路径。"
-                  : "Detail and colour strength are both not 1, which GPU composition does not "
-                    "accept: the picture is still processed, on the CPU path. Set both to 1 to "
-                    "use the GPU path.";
-    if (detail_off)
-        return zh ? "细节强度不为 1，GPU 合成不接受：画面仍在处理，但走的是 CPU 路径。"
-                    "把细节强度调回 1 再用 GPU 路径。"
-                  : "Detail strength is not 1, which GPU composition does not accept: the "
-                    "picture is still processed, on the CPU path. Set it to 1 to use the GPU path.";
-    if (colour_off)
-        return zh ? "色彩强度不为 1，GPU 合成不接受：画面仍在处理，但走的是 CPU 路径。"
-                    "把色彩强度调回 1 再用 GPU 路径。"
-                  : "Colour strength is not 1, which GPU composition does not accept: the "
-                    "picture is still processed, on the CPU path. Set it to 1 to use the GPU path.";
+    /* From the table, like every other string the panel shows. These were `zh ? ... : ...`, which
+     * is a two-language choice over a four-language enum: Russian and Spanish players read the
+     * reason in English, next to knobs that were translated. */
+    if (detail_off && colour_off) return nr_menu_text(language, NR_STR_GPU_BLOCKED_BOTH);
+    if (detail_off) return nr_menu_text(language, NR_STR_GPU_BLOCKED_DETAIL);
+    if (colour_off) return nr_menu_text(language, NR_STR_GPU_BLOCKED_COLOUR);
     return NULL;
 }
 
