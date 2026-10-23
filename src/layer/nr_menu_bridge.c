@@ -27,6 +27,10 @@
 #include "nr_menu_bridge.h"
 #include "nr_menu.h"
 #include "nr_menu_strings.h"
+/* `nr_menu_extra_key_for`, which maps `choice_weights_ht` and friends to their key. It is in its
+ * own header because `nr_menu_strings.h` is generated and would lose the prototype on the next
+ * run - which is what happened, leaving an implicit declaration here. */
+#include "nr_menu_strings_extra.h"
 #include "nr_file.h"
 
 #include <stdlib.h>

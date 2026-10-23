@@ -219,8 +219,19 @@ const char *nr_menu_bridge_knob_name(int index);
  *
  * `_choice_name` writes into the caller's buffer - `size` must be at least
  * NR_KNOB_CHOICE_NAME_SIZE - so a caller collecting several names gets several distinct strings.
- * `_choice_index` is the option currently set, or 0 for a numeric knob. */
-#define NR_KNOB_CHOICE_NAME_SIZE 32
+ * `_choice_index` is the option currently set, or 0 for a numeric knob.
+ *
+ * **96, not 32.** The raw names fit in 12 (`cc_small_fp8`), which is why 32 looked generous, but
+ * the buffer now holds a LABEL: "A: HT, the model this project reproduces" is 40 bytes, the
+ * Russian is 75, and the Chinese one is 36 - and Chinese is 3 bytes a character, so a 31-byte cut
+ * can land inside one and produce invalid UTF-8 that ImGui renders as replacement glyphs. Measured
+ * across all four languages: every one of the eight labels exceeds 31 bytes, so the panel was
+ * showing "A: HT, the model this project r". Nothing crashed and nothing was written wrong, which
+ * is exactly why it needed measuring rather than looking at.
+ *
+ * The count of characters is what misleads here, in the same way it did for the cadence row: the
+ * English label is 41 characters and 40 bytes, the Russian is 43 and 75. Size in bytes. */
+#define NR_KNOB_CHOICE_NAME_SIZE 96
 int nr_menu_bridge_knob_choice_count(int index);
 /* The option's LABEL for the panel's list, in `language` - not the raw name. The raw name is what
  * the daemon resolves and what the settings file stores, and the write paths keep using it; this

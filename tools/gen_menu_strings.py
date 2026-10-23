@@ -270,7 +270,7 @@ OWN = {
         "every_frame":   "cada fotograma",
         "every_nth_few":  "cada {} fotogramas",
         "every_nth_many": "cada {} fotogramas",
-        "choice_weights_ht": "A: HT, el modelo que reproduce este proyecto",
+        "choice_weights_ht": "A: HT, el modelo que reproduce el proyecto",
         "choice_weights_cc_small_fp8": "B: CC small FP8, el modelo r\u00e1pido",
         "gpu_blocked_both": "Ni la fuerza del detalle ni la del color son 1, y la composici\u00f3n por "
                             "GPU no acepta esa pareja: la imagen se sigue procesando, en la ruta "

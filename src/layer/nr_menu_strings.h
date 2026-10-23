@@ -95,10 +95,6 @@ const char *nr_menu_text(int language, int key);
  * list joins to this table without a mapping that could itself drift. */
 int nr_menu_key_for(const char *knob_name);
 
-/* The keys that are not knobs - a title, a pacing row, a choice value's label. They sit after the
- * knob rows in the generated table, so their index is `NR_MENU_KNOB_COUNT + position`. */
-int nr_menu_extra_key_for(const char *name);
-
 #ifdef __cplusplus
 }
 #endif

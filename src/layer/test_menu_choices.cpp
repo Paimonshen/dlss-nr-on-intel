@@ -174,6 +174,33 @@ int main(void)
                 }
                 check(blank == 0, "and both are labelled in all four languages",
                       blank ? "one or more blank" : "four of four");
+
+                /* ---- and the store the layer copies them into is wide enough ----
+                 *
+                 * `nr_layer.c` fills `name_storage[..][NR_KNOB_CHOICE_NAME_SIZE]` and hands those
+                 * to ImGui. That was 32 bytes, sized for the raw names (`cc_small_fp8` is 12), and
+                 * the labels are 33 to 75 bytes - so every one of the eight was cut, and the
+                 * Chinese one was cut inside a 3-byte character and rendered as a replacement
+                 * glyph. Nothing failed: a truncated label is still a label.
+                 *
+                 * Measured in bytes, because the character count is what hides it: the English
+                 * label is 41 characters and 40 bytes, the Russian 43 and 75. */
+                int worst = 0;
+                const char *worst_text = "";
+                for (int lang = 0; lang < NR_MENU_LANG_COUNT; ++lang) {
+                    for (int which = 0; which < 2; ++which) {
+                        char a[256] = "";
+                        nr_menu_bridge_knob_choice_name(weights, which, lang, a, sizeof a);
+                        int n = (int)strlen(a);
+                        if (n > worst) { worst = n; worst_text = lang == 0 ? "en" :
+                                                       lang == 1 ? "zh" :
+                                                       lang == 2 ? "ru" : "es"; }
+                    }
+                }
+                snprintf(detail, sizeof detail, "longest label %d bytes (%s), store holds %d",
+                         worst, worst_text, NR_KNOB_CHOICE_NAME_SIZE - 1);
+                check(worst < NR_KNOB_CHOICE_NAME_SIZE,
+                      "the choice-name store fits the longest label", detail);
             }
         }
 

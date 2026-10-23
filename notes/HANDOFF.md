@@ -386,29 +386,29 @@ problem.
 done; the architecture document still describes the tree, defects included, because the parts of
 it that were wrong are worth keeping as the record of what was wrong.
 
-- `a824f02` stage 0 — the build links again. Five fixtures `#include "nr_layer.c"` and were given
+- `3f5e7b6` stage 0 — the build links again. Five fixtures `#include "nr_layer.c"` and were given
   no menu sources; CMake and the Makefile now link what `build_win.bat` always did. Also
   `nr_menu_ui.cpp` compiles off Windows (its `menu_ui_keys` had no platform gate at all),
   `test_focus_gate` runs in the Windows build for the first time, and the CTest entry pointing at
   a `test_menu_keys.py` that does not exist is withdrawn.
-- `68c4c71` stage 1 — the 32-bit crash. Three defects, not the one reported: no `VKAPI_PTR` on the
+- `d953809` stage 1 — the 32-bit crash. Three defects, not the one reported: no `VKAPI_PTR` on the
   GPA typedef, `nrex_image`/`nrex_image_view` returning `void *` where a Vulkan non-dispatchable
   handle is `uint64_t` on x86, and a loader context of `void *` slots holding `VkDevice` and
   `VkInstance`. Fixed and pinned by negative assertions in `test_menu_keys.cpp`.
-- `4b06df7` stage 2 — the input path. The raw-mouse `cbSize` (24 against 16 on x64, so the game's
+- `7e5b187` stage 2 — the input path. The raw-mouse `cbSize` (24 against 16 on x64, so the game's
   registration was never saved and the stop path stripped its mouse every time), plus the
   `(UINT)-1` truthiness and the missing `ERROR_INSUFFICIENT_BUFFER` retry. The focus gate on
   `nr_menu.c`'s own reader, which had none at all, and `nr_menu_release_keys` so the gate does not
   cost the first press after alt-tab. Item 7 is documented as impossible rather than fixed.
-- `c8cbac9` stage 3 — the window writes `nr-env.txt` again, so its frame pacing reaches an
+- `ba8571a` stage 3 — the window writes `nr-env.txt` again, so its frame pacing reaches an
   installed game. Safe now because `write_profile_pacing` keeps the profile current; four test
   assertions flipped.
-- `043e797` stage 4 — the Russian cadence (27 bytes against a 24-byte store, and three plural
+- `99cae31` stage 4 — the Russian cadence (27 bytes against a 24-byte store, and three plural
   forms where one `{}` cannot choose), the lost newline at `nr_layer.c:88`, the proxy's
   non-appending and unconditional launch trace, and the hardcoded `F:\Downloads` path.
-- `866447d` stage 4b — the panel's Network row shows `A: HT …` / `B: CC small FP8 …` instead of
+- `984754d` stage 4b — the panel's Network row shows `A: HT …` / `B: CC small FP8 …` instead of
   `ht` / `cc_small_fp8`, with the raw name still what gets written.
-- `984754d` stage 5 — the PR's base moved from `master` to `newnr`, and all 57 commits re-authored
+- `5b46fd2` stage 5 — the PR's base moved from `master` to `newnr`, and all 57 commits re-authored
   to `Paimonshen`; the tree is byte-identical to before the rewrite.
 
 **One trap worth carrying forward.** `nr_menu_extra_key_for` returns `NR_MENU_KNOB_COUNT +
@@ -417,6 +417,24 @@ were first put at the END of that list while the generator emits them in the mid
 panel showed the GPU-blocker sentence as its two Network options - every entry a valid string, so
 nothing was blank and no existing check could see it. `test_menu_choices.cpp` now asks for that
 key by name; verified by putting the wrong order back.
+
+**Two more the verification pass found, both fixed here.** They are worth recording because neither
+failed anything, and both are the same shape as the bug above - a value that is wrong but valid.
+
+- **The choice-name store was 32 bytes and every label is 33 to 75.** `NR_KNOB_CHOICE_NAME_SIZE`
+  was sized for the raw names (`cc_small_fp8` is 12) and then started holding a label. The panel
+  showed "A: HT, the model this project r", and the Chinese one was cut inside a 3-byte character
+  and rendered as a replacement glyph. Nothing crashed, nothing was written wrong. It is 96 now,
+  and the check measures bytes rather than characters - the English label is 41 characters and 40
+  bytes, the Russian 43 and 75, which is the same trap the cadence row had.
+- **`nr_menu_extra_key_for`'s prototype was in the GENERATED header.** Running
+  `tools/gen_menu_strings.py` deleted it, leaving an implicit declaration in `nr_menu_bridge.c` that
+  MSVC warns about (C4013) and links anyway. It is in `nr_menu_strings_extra.h` now, which the
+  generator does not write, and the sequence that matters - regenerate, then build - is what was
+  checked.
+
+Both were found by a teammate reading the code rather than by a test, which is the point of doing
+that pass at all.
 
 
 ## The panel spoke two languages over a four-language enum (2026-10-21, branch `menu-on-e4m3`)
