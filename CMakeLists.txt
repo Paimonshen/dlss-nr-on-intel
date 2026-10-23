@@ -5,7 +5,12 @@
 # not ported there yet (docs/WINDOWS.md). The fork's portable GEMM and C frame library have
 # not been imported.
 cmake_minimum_required(VERSION 3.21)
-project(dlss_nr_on_intel LANGUAGES C)
+# **CXX is required, not optional.** The in-game menu's backend is `nr_menu_ui.cpp` and the
+# vendored ImGui is C++ throughout, both of which the layer links. With `LANGUAGES C` alone, CMake
+# does not merely complain about a `.cpp` in a target's source list - it **silently never compiles
+# it**, configures cleanly, and leaves the link to fail with LNK2019 or an undefined reference.
+# That is the very failure this target set exists to fix, moved from configure time to link time.
+project(dlss_nr_on_intel LANGUAGES C CXX)
 
 if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT WIN32)
   message(FATAL_ERROR "This source tree supports Linux, and Windows on the windows branch.")
@@ -196,9 +201,14 @@ if(NR_BUILD_LAYER)
     option(NR_BUILD_LAYER32 "Build the 32-bit layer too, for 32-bit games under Proton"
            ${NR_HAVE_VULKAN32})
     if(NR_BUILD_LAYER32)
-      add_library(nr_layer32 SHARED src/layer/nr_layer.c)
-      target_include_directories(nr_layer32 PRIVATE "${NR_VULKAN_INCLUDE}")
-      target_compile_options(nr_layer32 PRIVATE -O2 -m32)
+      # The same menu sources the 64-bit layer takes, and for the same reason: `nr_layer.c` calls
+      # into them unconditionally, so a target that compiles it and nothing else does not link.
+      # This list was left out when the 64-bit target got its sources, so the 32-bit layer - the
+      # one a 32-bit game actually loads - was the only target still broken. The Makefile's
+      # `libnr_layer32.so` rule had it right, which is how the omission survived review.
+      add_library(nr_layer32 SHARED src/layer/nr_layer.c ${NR_MENU_SOURCES} ${NR_IMGUI_SOURCES})
+      target_include_directories(nr_layer32 PRIVATE "${NR_VULKAN_INCLUDE}" third_party/imgui)
+      target_compile_options(nr_layer32 PRIVATE -O2 -m32 -DIMGUI_DEFINE_MATH_OPERATORS)
       target_link_options(nr_layer32 PRIVATE -m32)
       target_link_libraries(nr_layer32 PRIVATE vulkan)
       nr_output(nr_layer32)
@@ -300,10 +310,20 @@ if(NR_BUILD_TESTS)
       set_property(TEST ${name} APPEND PROPERTY ENVIRONMENT "PYTHONUTF8=1")
     endif()
   endfunction()
-  foreach(name surface_policy transfer_resources)
+  # `test_transfer_resources` `#include "nr_layer.c"`, so it needs the menu sources and is built
+  # with the layer fixtures - which live inside `if(NR_BUILD_LAYER)`. Registering it here
+  # unconditionally meant `$<TARGET_FILE:test_transfer_resources>` named a target that does not
+  # exist when the layer is off (the default on Windows), and a missing target is a GENERATE error,
+  # not a test that skips: `Error evaluating generator expression: No target
+  # "test_transfer_resources"`. So both the target and its registration are behind the same switch.
+  foreach(name surface_policy)
     nr_test(layer_${name} "$<TARGET_FILE:test_${name}>")
     set_tests_properties(layer_${name} PROPERTIES LABELS "host")
   endforeach()
+  if(NR_BUILD_LAYER)
+    nr_test(layer_transfer_resources "$<TARGET_FILE:test_transfer_resources>")
+    set_tests_properties(layer_transfer_resources PROPERTIES LABELS "host")
+  endif()
   nr_test(layer_daemon_owner "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/src/layer/test_daemon_owner.py")
   nr_test(layer_gpu_transport "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/src/layer/test_gpu_transport.py")
   nr_test(layer_gpu_only_daemon "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/src/layer/test_gpu_only.py")

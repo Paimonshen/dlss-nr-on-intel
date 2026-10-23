@@ -2051,7 +2051,7 @@ static void menu_settings_path(char *out, size_t size)
  * This wrapper ignores whatever handle the menu passes and uses the layer's own instance, which is
  * the one `next_instance_proc` was resolved against in the first place. The menu's contract stays
  * "call the resolver with the handle you were given" and the layer decides what that means. */
-static void *menu_instance_resolver(void *handle, const char *name)
+static void *NR_MENU_CALL menu_instance_resolver(void *handle, const char *name)
 {
 	(void)handle;
 	if (!next_instance_proc) return NULL;

@@ -222,6 +222,45 @@ int main(void)
           find(usource, "uint64_t *ctx = (uint64_t *)user")
               ? "uint64_t slots" : "MISSING");
 
+    /* ---- and the same boundary further in ----
+     *
+     * Two more of the same two shapes, found by reading rather than by the crash:
+     *
+     *   - `nr_menu_resolve_fn` (nr_menu.h) wraps `vkGetDeviceProcAddr`/`vkGetInstanceProcAddr` and
+     *     had no calling convention, so on x86 it declared them `__cdecl` and every call unbalanced
+     *     the stack - the defect `nrex_gpa_fn` had, one header over.
+     *   - `nr_menu.c` cast two NON-dispatchable handles (`VkImageView`, `VkBuffer`) through
+     *     `uintptr_t`, which is 32 bits on x86, undoing the `uint64_t` the caller had just used.
+     *     The `VkCommandBuffer` casts beside them are correct: that handle is a real pointer.
+     *
+     * The checks read the sources as text, the way the rest of this file does. */
+    FILE *menu_h = fopen("src/layer/nr_menu.h", "rb");
+    FILE *menu_c = fopen("src/layer/nr_menu.c", "rb");
+    if (menu_h && menu_c) {
+        static char hsrc[400000];
+        static char csrc[400000];
+        size_t hn = fread(hsrc, 1, sizeof hsrc - 1, menu_h);
+        hsrc[hn] = '\0';
+        size_t cn = fread(csrc, 1, sizeof csrc - 1, menu_c);
+        csrc[cn] = '\0';
+        int resolver_stdcall = find(hsrc, "NR_MENU_CALL *nr_menu_resolve_fn") && find(hsrc, "__stdcall");
+        check(resolver_stdcall, "nr_menu.h's resolve pointer declares its calling convention",
+              resolver_stdcall ? "NR_MENU_CALL is __stdcall on Windows"
+                               : "MISSING - __cdecl, and x86 unbalances the stack on every call");
+        int image_view_ok = !find(csrc, "(VkImageView)(uintptr_t)");
+        check(image_view_ok, "VkImageView is not narrowed through uintptr_t",
+              image_view_ok ? "cast straight from the 64-bit parameter"
+                            : "STILL NARROWED - a 64-bit handle cut to 32 on x86");
+        int buffer_ok = !find(csrc, "(VkBuffer)(uintptr_t)");
+        check(buffer_ok, "VkBuffer is not narrowed through uintptr_t",
+              buffer_ok ? "cast straight from the 64-bit parameter"
+                        : "STILL NARROWED - a 64-bit handle cut to 32 on x86");
+    } else {
+        check(0, "nr_menu.h and nr_menu.c were readable", "MISSING");
+    }
+    if (menu_h) fclose(menu_h);
+    if (menu_c) fclose(menu_c);
+
     /* ---- the focus gate on nr_menu.c's own reader ----
      *
      * `nr_menu.c` reads Home with no gate at all and S/R with only `m->open`, neither of which

@@ -1572,7 +1572,15 @@ void nr_menu_draw_overlay(nr_menu *m, uint64_t cmd_handle, uint64_t target_handl
 
     VkCommandBuffer cmd = (VkCommandBuffer)(uintptr_t)cmd_handle;
     VkImage target = (VkImage)target_handle;
-    VkImageView ui_view = (VkImageView)(uintptr_t)ui_view_handle;
+    /* **`uintptr_t` is the wrong width for this one, and only for this one.**
+     *
+     * `VkCommandBuffer` is a dispatchable handle - a real pointer - so `uintptr_t` is right for it
+     * on both architectures. `VkImageView` and `VkBuffer` are NON-dispatchable: 64 bits on x86,
+     * where `uintptr_t` is 32. Casting through it there would take the value the C side had just
+     * been careful to pass as `uint64_t` and cut its top half off again - the same defect as the
+     * `nrex_image` return, one layer further in. The neighbouring line for `VkImage` shows the
+     * form that is correct on both: direct from the 64-bit parameter. */
+    VkImageView ui_view = (VkImageView)ui_view_handle;
     if (ui_view == VK_NULL_HANDLE) return;
 
     VkImageView target_view = image_view_for(m, target);
@@ -1669,7 +1677,9 @@ void nr_menu_draw_compare(nr_menu *m, uint64_t cmd_handle, uint64_t image_handle
     VkBufferImageCopy region = {0};
     region.imageSubresource = (VkImageSubresourceLayers){ VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
     region.imageExtent = (VkExtent3D){ width, height, 1 };
-    m->cmd_copy_buffer_to_image(cmd, (VkBuffer)(uintptr_t)reference_handle, m->reference,
+    /* `VkBuffer` is non-dispatchable too: direct from the 64-bit parameter, not through
+     * `uintptr_t`. See the note on `ui_view` above. */
+    m->cmd_copy_buffer_to_image(cmd, (VkBuffer)reference_handle, m->reference,
                                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
     VkImageMemoryBarrier to_general = into;

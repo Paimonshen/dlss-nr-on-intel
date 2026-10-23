@@ -94,8 +94,20 @@ enum {
  *
  * Either returning NULL means the driver has no such function, which the menu treats as "cannot
  * draw" rather than crashing.
- */
-typedef void *(*nr_menu_resolve_fn)(void *handle, const char *name);
+ *
+ * **`NR_MENU_CALL` is `VKAPI_PTR`, spelled locally because this header does not include Vulkan.**
+ * The functions being wrapped are `vkGetDeviceProcAddr` and `vkGetInstanceProcAddr`, which are
+ * `__stdcall` on x86; a plain function-pointer type makes them `__cdecl`, and every call through
+ * it leaves the two arguments on the stack - the same unbalanced-stack defect that crashed a
+ * 32-bit game through `nrex_gpa_fn`. The signature is `void *` for the handle because these are
+ * DISPATCHABLE handles (`VkDevice`, `VkInstance`), which are pointer-width on every architecture,
+ * so nothing is truncated here. */
+#if defined(_WIN32)
+#  define NR_MENU_CALL __stdcall
+#else
+#  define NR_MENU_CALL
+#endif
+typedef void *(NR_MENU_CALL *nr_menu_resolve_fn)(void *handle, const char *name);
 
 /* Build the menu for a device, if this swapchain's format can be a storage image.
  *
