@@ -1613,24 +1613,59 @@ def install(profile, emit=None):
             "speed_test_due": not (profile.root / SPEED_TEST).is_file()}
 
 
+def _rewrite_pacing_lines(path, wanted):
+    """ENV_FILE with `wanted`'s pacing lines replaced in place, every other line byte-identical.
+
+    Why not regenerate the file: it carries `NR_GAME_EXE`, `NR_LAUNCH_STATE` and, when the game's
+    own loader was set aside, `NR_REAL_VULKAN` - the installation, in other words, which a
+    regenerated file would have to reconstruct and would get wrong the moment any of them moved.
+    `nr_menu_bridge.c:write_pacing` makes the same trade for the same reason and its comment says
+    so. So the six pacing lines are dropped and re-appended from `wanted`, and nothing else is
+    touched - not the comment, not the blank lines, not the order of what is left.
+
+    Written through a temporary beside it and `os.replace`d, so a crash mid-write leaves the
+    original intact rather than half a file. The worst case is "the last writer won", never a torn
+    environment.
+    """
+    text = path.read_text(encoding="utf-8")
+    kept = [line for line in text.splitlines()
+            if line.split("=", 1)[0].strip() not in PACING]
+    kept += [f"{name}={wanted[name]}" for name in PACING if name in wanted]
+    temporary = path.with_name(path.name + ".new")
+    temporary.write_text("\n".join(kept) + "\n", encoding="utf-8", newline="\n")
+    os.replace(temporary, path)
+
+
 def set_pacing(profile):
-    """Keep frame pacing and the experimental GPU path in the profile, and only there.
+    """Keep frame pacing and the experimental GPU path in the profile AND in the game's env file.
 
-    **The proxy's ENV_FILE belongs to the in-game panel.** Both used to write its five pacing
-    lines and nothing ordered them, so a change made in the panel and then any pacing save in this
-    window reverted it silently: the window wrote from a profile the panel had never touched.
-    Measured on this machine before the fix - the file said `NR_GPU_IMAGE=1 NR_LAYER_ASYNC=0
-    NR_LAYER_LIVE=1` while the profile still said `gpu_image_path=false nr_async=true
-    nr_every=4`, so the window's own checkbox and the panel's row were describing different
-    settings with equal confidence.
+    **Both, and this is a reversal of an earlier decision.** The file used to be the in-game
+    panel's alone, on the reasoning that two writers for one file need ordering and none existed:
+    a change made in the panel and then any pacing save here reverted it silently, because this
+    window wrote from a profile the panel had never touched. That was measured here - the file said
+    `NR_GPU_IMAGE=1 NR_LAYER_ASYNC=0 NR_LAYER_LIVE=1` while the profile still said
+    `gpu_image_path=false nr_async=true nr_every=4`, so the window's checkbox and the panel's row
+    were describing different settings with equal confidence.
 
-    The panel is the only writer that can see what the layer is actually running, so the file is
-    its own; this function writes the profile, and the panel keeps the profile in step as the
-    projection (`nr_menu_bridge.c`, `write_profile_pacing`). Whichever one the user reaches, both
-    agree afterwards, and there is one writer per file instead of two writers for one.
+    What that decision cost, which the maintainer found: this function returned `applied: true` and
+    the window said the change takes effect at the next start, while the file it was describing was
+    never written - so the layer kept reading the OLD values until Install NR ran again. `applied`
+    was a fact about the installation existing, dressed up as a fact about the write.
 
-    `applied` stays in the answer because the window's frame pacing is still "next launch": the
-    layer reads its environment when the game starts and never looks again.
+    Writing both is now safe, because the panel keeps the profile in step: it writes the file and
+    then `write_profile_pacing` (`nr_menu_bridge.c`) folds the same three values into
+    `windows-profile.json`, which is where this window reads from. So the window writes the file
+    from a profile the panel has already brought up to date, and neither can silently revert the
+    other. The lost-update that motivated the earlier decision needed the window's profile to be
+    OLDER than the panel's last write, and it no longer can be.
+
+    The residual case, recorded rather than ignored: both sides read-modify-write with no lock, so
+    a panel write landing in the same instant as this one loses. The panel re-reads the file on
+    every open and refresh, so what it then shows is what the window wrote - consistent, not
+    silently wrong - and the atomic replace means the file is never half-written.
+
+    `applied` keeps its meaning and now earns it: the installation exists, the file is ours to
+    write, and the change reaches the game at its next start.
     """
     if profile.preset != "A" and not _weights_state(profile, profile.preset)["ready"]:
         # A daemon started for it would find no weights and end, and the game run without NR.
@@ -1640,7 +1675,17 @@ def set_pacing(profile):
     save_profile(profile)
     folder = installed_path(profile)
     owns, _ = _owned_installation(profile)
-    applied = owns and (folder / OWNER_NAME).is_file() and (folder / ENV_FILE).is_file()
+    env_file = folder / ENV_FILE
+    applied = owns and (folder / OWNER_NAME).is_file() and env_file.is_file()
+    if applied:
+        try:
+            _rewrite_pacing_lines(env_file, layer_environment(profile))
+        except OSError as exc:
+            # The profile is already saved, so the window is not lying about what it holds; what
+            # failed is telling the game. Say so rather than reporting a success that will not
+            # arrive - which is the exact shape of the bug being fixed here.
+            return {"ok": True, "error": None, "applied": False, "profile": profile.to_dict(),
+                    "presets": _presets_ready(profile), "write_error": str(exc)}
     return {"ok": True, "error": None, "applied": bool(applied), "profile": profile.to_dict(),
             "presets": _presets_ready(profile)}
 

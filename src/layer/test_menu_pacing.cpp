@@ -569,11 +569,13 @@ int main(void)
         /* Two writers used to share the five pacing lines of `nr-env.txt` with nothing ordering
          * them: this panel, and the setup window's `set_pacing`, which wrote them from the
          * profile. A panel change followed by any window pacing save silently reverted it -
-         * measured on the owner's machine as `NR_GPU_IMAGE=1 NR_LAYER_ASYNC=0 NR_LAYER_LIVE=1` in
-         * the file against `gpu_image_path=false nr_async=true nr_every=4` in the profile.
+         * measured here as `NR_GPU_IMAGE=1 NR_LAYER_ASYNC=0 NR_LAYER_LIVE=1` in the file against
+         * `gpu_image_path=false nr_async=true nr_every=4` in the profile.
          *
-         * The rule now: the file is the panel's, and the profile is its projection. So a change
-         * writes both, and the window reads the truth whichever way it reaches the profile. */
+         * The rule now: this panel writes both, and the profile is the projection the window
+         * reads. The window writes the file too, which is what lets its own frame-pacing controls
+         * reach an installed game - it used to write the profile alone and then claim the change
+         * took effect at the next start, which it did not. */
         nr_menu_bridge_set_pacing(b, NR_PACING_ASYNC, 0);
         nr_menu_bridge_set_pacing(b, NR_PACING_GPU_IMAGE, 1);
 

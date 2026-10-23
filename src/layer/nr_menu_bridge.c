@@ -527,10 +527,17 @@ static int write_pacing(nr_menu_bridge *b)
  * `NR_GPU_IMAGE=1 NR_LAYER_ASYNC=0 NR_LAYER_LIVE=1` while the profile still said
  * `gpu_image_path=false nr_async=true nr_every=4`.
  *
- * The owner's rule, and it is the right one: **the file belongs to the panel** - it is the only
- * writer that can see what the layer is actually running - and the profile follows it as a
- * projection. So a pacing change writes both, and `set_pacing` no longer needs to write the file
- * at all: whichever way the window reaches the profile, the file the panel wrote is the truth.
+ * **The file belongs to the panel** - it is the only writer that can see what the layer is
+ * actually running - and the profile follows it as a projection. So a pacing change writes both,
+ * and this is what keeps the two of them agreeing whichever one the user reached.
+ *
+ * The setup window writes the file too, which reverses an earlier decision to leave it to the
+ * panel alone. That decision was right about the failure it was answering - two writers with no
+ * ordering silently reverted each other - and wrong about what it cost: the window then said a
+ * pacing change "takes effect at the next start" while never writing the file the layer reads, so
+ * the game kept the old values until Install NR ran again. Writing both is safe precisely because
+ * of the projection this function maintains: the window writes the file from a profile this code
+ * has already brought up to date, so neither side can be quietly older than the other.
  *
  * The profile is edited in place rather than regenerated: it carries the game, the Python, the
  * DLL and the launch options, and rebuilding it in C would silently drop whatever this code does
@@ -676,9 +683,9 @@ static void load_defaults(nr_menu_bridge *b)
  * moved a user who had chosen B back onto A - a slower model they had not asked to go back to -
  * with no message and no way to tell, because the row simply showed the other name.
  *
- * The owner's call, and the right one: Reset leaves it alone. Anything that is genuinely a
- * picture parameter still goes back to its default; a model is a choice about what runs, not how
- * much of it is applied, and the panel has no business undoing it as a side effect.
+ * Reset leaves it alone. Anything that is genuinely a picture parameter still goes back to its
+ * default; a model is a choice about what runs, not how much of it is applied, and the panel has
+ * no business undoing it as a side effect.
  *
  * A Reset on an install with only one network behaves exactly as before, since the only name it
  * could show is the one already there. */
