@@ -365,6 +365,14 @@ if(NR_BUILD_TESTS)
       set_tests_properties(layer_focus_gate PROPERTIES
         REQUIRED_FILES "${NR_WORK_DIR}/test_focus_gate.exe")
     endif()
+    # Whether the game's own raw-input registration survives ours going in and coming out. Windows
+    # only - it links user32 and drives real registrations - and worth its own entry rather than
+    # hiding inside the menu fixtures, because it covers the input path rather than the panel.
+    if(WIN32 AND EXISTS "${PROJECT_SOURCE_DIR}/src/layer/test_raw_mouse.c")
+      nr_test(layer_raw_mouse "${NR_WORK_DIR}/test_raw_mouse.exe")
+      set_tests_properties(layer_raw_mouse PROPERTIES
+        REQUIRED_FILES "${NR_WORK_DIR}/test_raw_mouse.exe")
+    endif()
     # The hotkey structure is `test_menu_keys.exe`, already run by `layer_menu_ui_fixtures` above.
     # A separate registration here pointed at a `src/layer/test_menu_keys.py` that is not in the
     # branch, so every CTest run failed with "can't open file" on an entry nothing needed: the

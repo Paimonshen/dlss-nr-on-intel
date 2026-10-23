@@ -904,7 +904,12 @@ int nr_menu_update(nr_menu *m, float frame_seconds)
      * combo and change the value behind it at the same time. `nr_menu_set_key_reading` is how the
      * layer says which build is running. */
     if (m->read_keys && key_pressed(m, NR_KEY_INS)) m->open = !m->open;
-    if (key_pressed(m, NR_KEY_TOGGLE)) m->toggle_pressed = 1;
+    /* Home, gated on `read_keys` like INS. This read had NO gate at all, which made it a second
+     * owner of the effect toggle in the ImGui build - the layer reads Home too, gated on the game
+     * being in front, and this one acted anyway. `read_keys` is held off while the game is not in
+     * front (see `nr_layer.c`'s `menu_read_keys`), so Home keeps working with the panel open AND
+     * closed and simply stops answering when the user is elsewhere. */
+    if (m->read_keys && key_pressed(m, NR_KEY_TOGGLE)) m->toggle_pressed = 1;
 
     /* S and R, outside the `read_keys` block, because they were inside it and that is what
      * killed them.
@@ -917,8 +922,13 @@ int nr_menu_update(nr_menu *m, float frame_seconds)
      *
      * Still gated on the panel being OPEN, so a game that binds S or R keeps its own binding
      * while the player is playing: the menu is a settings surface and stealing a key from the
-     * game when nobody is looking at settings is the worse trade. */
-    if (m->open) {
+     * game when nobody is looking at settings is the worse trade.
+     *
+     * **And now also on `read_keys`** (PR #20 review, item 2), which the layer holds off while
+     * the game is not in front. Being outside the block is what made them live in the ImGui
+     * build; being outside it is also what left them with no focus check at all, so an S typed in
+     * a chat window wrote the settings file. `read_keys` is the one switch that answers both. */
+    if (m->open && m->read_keys) {
         if (key_pressed(m, NR_KEY_S)) m->save_pressed = 1;
         if (key_pressed(m, NR_KEY_R)) m->reset_pressed = 1;
     }
@@ -1026,6 +1036,18 @@ void nr_menu_inject_save(nr_menu *m)
 void nr_menu_set_key_reading(nr_menu *m, int on)
 {
     if (m) m->read_keys = on ? 1 : 0;
+}
+
+/* See the header. `key_pressed` latches whether a key was down even when the answer is thrown
+ * away, so a gate that simply stops asking leaves the latch holding "down" - and the first press
+ * after the gate lifts is then not an edge and does nothing. Clearing it here is what makes the
+ * gate invisible to the user rather than costing them a keypress.
+ *
+ * The latch is only 256 bytes and this is one memset, called when the layer stops reading rather
+ * than every frame it is gated. */
+void nr_menu_release_keys(nr_menu *m)
+{
+    if (m) memset(m->key_down, 0, sizeof m->key_down);
 }
 
 void nr_menu_inject_reset(nr_menu *m)

@@ -232,6 +232,16 @@ if errorlevel 1 ( echo ERROR: nr_focus compilation failed & exit /b 1 )
 link /nologo /OUT:"%WORK%\test_focus_gate.exe" "%WORK%\test_focus_gate.obj" "%WORK%\nr_focus_for_gate.obj" user32.lib
 if errorlevel 1 ( echo ERROR: test_focus_gate.exe failed & exit /b 1 )
 echo   test_focus_gate.exe
+rem Whether the game's own raw-input registration survives ours going in and coming out. The
+rem `cbSize` bug this covers passed on 32-bit and failed on every 64-bit process, so the platform
+rem that was working was the platform that was broken.
+cl /nologo /O2 /TC /D_WIN32 /I"%VULKAN_SDK%\Include" /I"%REPO%\src\layer" /Fo:"%WORK%\test_raw_mouse.obj" /c "%REPO%\src\layer\test_raw_mouse.c"
+if errorlevel 1 ( echo ERROR: test_raw_mouse compilation failed & exit /b 1 )
+cl /nologo /O2 /TC /D_WIN32 /I"%VULKAN_SDK%\Include" /I"%REPO%\src\layer" /Fo:"%WORK%\nr_raw_mouse_for_probe.obj" /c "%REPO%\src\layer\nr_raw_mouse.c"
+if errorlevel 1 ( echo ERROR: nr_raw_mouse compilation failed & exit /b 1 )
+link /nologo /OUT:"%WORK%\test_raw_mouse.exe" "%WORK%\test_raw_mouse.obj" "%WORK%\nr_raw_mouse_for_probe.obj" user32.lib
+if errorlevel 1 ( echo ERROR: test_raw_mouse.exe failed & exit /b 1 )
+echo   test_raw_mouse.exe
 del /Q "%REPO%\*.obj" >nul 2>&1
 echo   nr_layer.dll
 echo   nr_layer.dll  (with the INS settings menu: user32, gdi32)

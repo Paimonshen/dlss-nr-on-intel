@@ -47,7 +47,8 @@ EXTRA = {
     "saved":          ("Done.save",    "saved"),
     "reset":          ("ResetSettings", "reset to defaults"),
     "hint":           (None,           "Up/Down choose  Left/Right change  L language  "
-                                       "Home NR on/off  S save  R reset  INS close"),
+                                       "Home NR on/off  S save  R reset  INS close  "
+                                       "the game also sees these keys"),
     "toggle_nr":      (None,           "neural rendering"),
     "compare":        (None,           "compare"),
     "compare_split":  (None,           "split"),
@@ -98,7 +99,8 @@ COMPARE_MODES = ("off", "wipe", "side by side")
 OWN = {
     "en": {
         "hint":          "Up/Down choose  Left/Right change  L language  "
-                         "Home NR on/off  S save  R reset  INS close",
+                         "Home NR on/off  S save  R reset  INS close  "
+                         "the game also sees these keys",
         "toggle_nr":     "neural rendering",
         "compare":       "compare",
         "compare_split": "split",
@@ -132,7 +134,8 @@ OWN = {
     },
     "zh": {
         "hint":          "\u4e0a/\u4e0b \u9009\u62e9  \u5de6/\u53f3 \u8c03\u6574  L \u8bed\u8a00  "
-                         "Home \u5f00\u5173  S \u4fdd\u5b58  R \u91cd\u7f6e  INS \u5173\u95ed",
+                         "Home \u5f00\u5173  S \u4fdd\u5b58  R \u91cd\u7f6e  INS \u5173\u95ed  "
+                         "\u6e38\u620f\u4e5f\u4f1a\u6536\u5230\u8fd9\u4e9b\u6309\u952e",
         "toggle_nr":     "\u795e\u7ecf\u6e32\u67d3",
         "compare":       "\u753b\u9762\u5bf9\u6bd4",
         "compare_split": "\u5206\u5272\u4f4d\u7f6e",
@@ -166,7 +169,8 @@ OWN = {
         "hint":          "\u0412\u0432\u0435\u0440\u0445/\u0412\u043d\u0438\u0437 \u0432\u044b\u0431\u043e\u0440  "
                          "\u0412\u043b\u0435\u0432\u043e/\u0412\u043f\u0440\u0430\u0432\u043e \u0438\u0437\u043c\u0435\u043d\u0438\u0442\u044c  "
                          "L \u044f\u0437\u044b\u043a  Home \u0432\u043a\u043b/\u0432\u044b\u043a\u043b  "
-                         "S \u0441\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c  R \u0441\u0431\u0440\u043e\u0441  INS \u0437\u0430\u043a\u0440\u044b\u0442\u044c",
+                         "S \u0441\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c  R \u0441\u0431\u0440\u043e\u0441  INS \u0437\u0430\u043a\u0440\u044b\u0442\u044c  "
+                         "\u0438\u0433\u0440\u0430 \u0442\u043e\u0436\u0435 \u0432\u0438\u0434\u0438\u0442 \u044d\u0442\u0438 \u043a\u043b\u0430\u0432\u0438\u0448\u0438",
         "toggle_nr":     "\u043d\u0435\u0439\u0440\u043e\u043d\u043d\u044b\u0439 \u0440\u0435\u043d\u0434\u0435\u0440\u0438\u043d\u0433",
         "compare":       "\u0441\u0440\u0430\u0432\u043d\u0435\u043d\u0438\u0435",
         "compare_split": "\u0433\u0440\u0430\u043d\u0438\u0446\u0430",
@@ -218,7 +222,8 @@ OWN = {
     },
     "es": {
         "hint":          "Arriba/Abajo elegir  Izq/Der cambiar  L idioma  Home activar  "
-                         "S guardar  R restablecer  INS cerrar",
+                         "S guardar  R restablecer  INS cerrar  "
+                         "el juego tambi\u00e9n recibe estas teclas",
         "toggle_nr":     "renderizado neuronal",
         "compare":       "comparaci\u00f3n",
         "compare_split": "divisi\u00f3n",

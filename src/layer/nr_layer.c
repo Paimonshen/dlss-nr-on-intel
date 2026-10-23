@@ -2907,15 +2907,19 @@ static int menu_read_keys(struct device_data *data)
 
 	/* Home, S and R, which the ImGui build has to read itself.
 	 *
-	 * All three are inside `nr_menu_update`'s `m->open && m->read_keys` block, and `read_keys`
-	 * is 0 here - so the panel drew, its buttons worked, and none of the three keys did. INS
-	 * and L are already read at this level for exactly that reason, so these join them rather
-	 * than inventing a second mechanism.
+	 * INS and L are read at this level, so these join them rather than inventing a second
+	 * mechanism - and they go through the menu's own flags, not straight to the effect:
+	 * `nr_menu_take_*` is what the bridge polls, and routing the keys there keeps the key and the
+	 * panel's button on one path. A button that saves and a key that does something else is the
+	 * bug this project has already paid for twice.
 	 *
-	 * They go through the menu's own flags, not straight to the effect: `nr_menu_take_*` is
-	 * what the bridge polls, and routing the keys there keeps the key and the panel's button
-	 * on one path - a button that saves and a key that does something else is the bug this
-	 * project has already paid for twice.
+	 * **What this comment used to claim, and why it was wrong:** it said all three lived inside
+	 * `nr_menu_update`'s `m->open && m->read_keys` block. S and R had been moved OUT of that block
+	 * on purpose (they were dead in the ImGui build while inside it), and Home was never in it. So
+	 * in the ImGui build `nr_menu.c` was a SECOND reader of Home with no gate at all - which is why
+	 * an unfocused Home toggled the effect even though the read right here was gated. The gate on
+	 * `nr_menu.c`'s side is now `read_keys` itself, held off while the game is not in front; see
+	 * the block above `nr_menu_bridge_update`.
 	 *
 	 * Home is the effect toggle, not END. END never arrived in the games that were tried:
 	 * the key is bound by enough of them that the layer saw nothing. Home was the picture
@@ -2953,6 +2957,35 @@ static int menu_read_keys(struct device_data *data)
 	} else if (data->menu) {
 		data->menu_ui_save_was_down = 0;
 		data->menu_ui_reset_was_down = 0;
+	}
+
+	/* `nr_menu.c`'s OWN key reading, which the ImGui build does not replace.
+	 *
+	 * `nr_menu_update` reads Home unconditionally (`nr_menu.c:907` has no gate at all) and S and R
+	 * whenever the panel is open - neither checks focus, and neither is inside the `read_keys`
+	 * block the ImGui build turns off. So the layer's own gated Home at the top of this function
+	 * did NOT protect it: in the ImGui build an unfocused Home was consumed here and still acted.
+	 * That is the "Home turned NR off while I was in another window" report.
+	 *
+	 * The fix is not a focus check inside `nr_menu.c` - that file has no window and no way to know
+	 * which window is the game's, which is the whole reason `nr_focus.c` exists. It is the same
+	 * switch the ImGui build already uses, held in the right position:
+	 *
+	 *   - the game is NOT in front  -> read_keys off, so `nr_menu.c` reads nothing at all
+	 *   - the game IS in front, no ImGui UI -> read_keys on, which is the quad build's normal state
+	 *
+	 * Home therefore keeps working with the panel open AND closed in both builds - it only stops
+	 * working when the user is not looking at the game, which is the defect. */
+	if (data->menu) {
+		if (!foreground) {
+			nr_menu_set_key_reading(data->menu, 0);
+			/* And the latch, or the first press after coming back is swallowed: `key_pressed`
+			 * records "was down" even when the answer is discarded, so a Home held in another
+			 * window would leave the menu believing it is still held. */
+			nr_menu_release_keys(data->menu);
+		} else if (!data->menu_ui) {
+			nr_menu_set_key_reading(data->menu, 1);
+		}
 	}
 
 	if (data->menu_bridge) {

@@ -59,24 +59,50 @@ static int ensure_window(void)
 static RAWINPUTDEVICE g_saved_device;
 static int            g_have_saved;
 
+/* The game's own mouse registration, read before ours goes in so it can be put back.
+ *
+ * **`cbSize` is `sizeof(RAWINPUTDEVICE)`, not `sizeof(RAWINPUTHEADER)`.** The parameter is
+ * documented as "the size, in bytes, of a RAWINPUTDEVICE structure", and the two structs are
+ * different sizes on x64 - 16 against 24. Passing the header's size made the call fail with
+ * `ERROR_INVALID_PARAMETER` on every 64-bit process, so nothing was ever saved and
+ * `nr_raw_mouse_stop` took the `RIDEV_REMOVE` branch every time, stripping the game's mouse.
+ * The 32-bit build restored it by luck: WOW64 accepted the smaller size.
+ *
+ * **The return value is compared against `(UINT)-1`, not tested for truth.** The API returns
+ * `(UINT)-1` on failure, which is truthy, so `if (GetRegisteredRawInputDevices(...))` read a
+ * failure as a success - and then walked a buffer it had never filled. `nr_raw_mouse_take`
+ * further down already does this correctly.
+ *
+ * **`ERROR_INSUFFICIENT_BUFFER` is retried.** The count the first call reports is a snapshot; a
+ * game that registers a device between the two calls would have its entry dropped. The retry
+ * costs one allocation and makes the read honest. */
 static void save_game_registration(void)
 {
     g_have_saved = 0;
     UINT count = 0;
-    if (GetRegisteredRawInputDevices(NULL, &count, sizeof(RAWINPUTHEADER)) || !count) return;
-    RAWINPUTDEVICE *devices = (RAWINPUTDEVICE *)HeapAlloc(GetProcessHeap(), 0,
-                                                          count * sizeof(RAWINPUTDEVICE));
-    if (!devices) return;
-    if (GetRegisteredRawInputDevices(devices, &count, sizeof(RAWINPUTHEADER)) && count) {
-        for (UINT i = 0; i < count; ++i) {
-            if (devices[i].usUsagePage == 0x01 && devices[i].usUsage == 0x02) {
-                g_saved_device = devices[i];
-                g_have_saved = 1;
-                break;
+    if (GetRegisteredRawInputDevices(NULL, &count, sizeof(RAWINPUTDEVICE)) == (UINT)-1 || !count)
+        return;
+
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        RAWINPUTDEVICE *devices = (RAWINPUTDEVICE *)HeapAlloc(GetProcessHeap(), 0,
+                                                             count * sizeof(RAWINPUTDEVICE));
+        if (!devices) return;
+        UINT got = count;
+        if (GetRegisteredRawInputDevices(devices, &got, sizeof(RAWINPUTDEVICE)) != (UINT)-1) {
+            for (UINT i = 0; i < got && i < count; ++i) {
+                if (devices[i].usUsagePage == 0x01 && devices[i].usUsage == 0x02) {
+                    g_saved_device = devices[i];
+                    g_have_saved = 1;
+                    break;
+                }
             }
+            HeapFree(GetProcessHeap(), 0, devices);
+            return;
         }
+        HeapFree(GetProcessHeap(), 0, devices);
+        if (GetLastError() != ERROR_INSUFFICIENT_BUFFER) return;   /* a real failure: give up */
+        count *= 2;                                               /* more devices: ask for more room */
     }
-    HeapFree(GetProcessHeap(), 0, devices);
 }
 
 int nr_raw_mouse_start(void)
@@ -125,7 +151,14 @@ void nr_raw_mouse_stop(void)
         device.dwFlags = RIDEV_REMOVE;
         device.hwndTarget = NULL;
     }
-    RegisterRawInputDevices(&device, 1, sizeof device);
+    /* The restore is the whole point of this file, so a failure to restore is worth a line. It
+     * used to be silent: the comment already conceded a restore can fail when the game's target
+     * window died, and nobody would have known. A line on stderr costs nothing and this runs
+     * once per panel open. */
+    if (!RegisterRawInputDevices(&device, 1, sizeof device))
+        fprintf(stderr, "[dlss-nr] raw mouse: could not put the game's registration back "
+                        "(err %lu); a WM_INPUT game may have no mouse until restarted\n",
+                GetLastError());
     g_have_saved = 0;
     g_registered = 0;
     g_pending_x = 0;

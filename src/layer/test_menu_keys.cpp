@@ -58,19 +58,32 @@ int main(void)
         return 1;
     }
 
-    /* The S and R reads, which the fix moved above the guard. */
+    /* The S and R reads, which an earlier fix moved ABOVE the guard so the ImGui build could see
+     * them at all - it sets `read_keys` to 0, and inside the guard they were dead.
+     *
+     * That fix was right about the symptom and wrong about the boundary, and this assertion held
+     * the wrong boundary in place: being outside the guard is also what left S and R with NO focus
+     * check, so an S typed in a chat window wrote the settings file. They are back inside a guard
+     * now - `m->open && m->read_keys` - and the ImGui build reads them at the layer's level
+     * instead (`nr_layer.c`, gated on the game being in front), which is where they belonged.
+     *
+     * What must stay true either way: S and R are READ somewhere, and the guard they sit behind
+     * asks about focus, not about ImGui. */
     const char *save = strstr(source, "if (key_pressed(m, NR_KEY_S)) m->save_pressed = 1;");
     const char *reset = strstr(source, "if (key_pressed(m, NR_KEY_R)) m->reset_pressed = 1;");
 
     check(save != NULL, "S is still read somewhere", save ? "found" : "NOT FOUND");
-    check(save != NULL && save < guard,
-          "S is read OUTSIDE the read_keys block",
-          save && save < guard ? "above the guard" : "inside the guard - S is dead in ImGui builds");
-
+    check(save != NULL && save > guard,
+          "and it sits behind the read_keys guard",
+          save && save > guard
+              ? "inside the guard - and the ImGui build reads it at the layer's level instead"
+              : "outside the guard again - no focus check, an unfocused S saves");
     check(reset != NULL, "R is still read somewhere", reset ? "found" : "NOT FOUND");
-    check(reset != NULL && reset < guard,
-          "R is read OUTSIDE the read_keys block",
-          reset && reset < guard ? "above the guard" : "inside the guard - R is dead in ImGui builds");
+    check(reset != NULL && reset > guard,
+          "and so does R",
+          reset && reset > guard
+              ? "inside the guard"
+              : "outside the guard again - no focus check, an unfocused R resets");
 
     /* The effect toggle is Home, 0x24, and no longer END, 0x23. END is bound by enough games
      * that the key never arrived; the report was "END does nothing". */
@@ -200,6 +213,51 @@ int main(void)
           "the loader context uses 64-bit slots",
           find(usource, "uint64_t *ctx = (uint64_t *)user")
               ? "uint64_t slots" : "MISSING");
+
+    /* ---- the focus gate on nr_menu.c's own reader ----
+     *
+     * `nr_menu.c` reads Home with no gate at all and S/R with only `m->open`, neither of which
+     * checks focus - and the ImGui build leaves both live because they are outside the
+     * `read_keys` block. So the layer's own gated Home did not protect it: an unfocused Home
+     * toggled the effect. The fix gates both on `read_keys`, which the layer holds off while the
+     * game is not in front.
+     *
+     * The owner's constraint, which this must not break: **Home works whether the panel is open
+     * or closed.** `read_keys` is 1 in the quad build always and 0 in the ImGui build always, so
+     * the gate is about focus, never about the panel. An assertion that Home is gated on
+     * `m->open` would be the wrong fix passing. */
+    FILE *menu_src = fopen("src/layer/nr_menu.c", "rb");
+    if (!menu_src) {
+        printf("  FAIL  nr_menu.c was not readable\n");
+        return 1;
+    }
+    static char msource[400000];
+    size_t mn = fread(msource, 1, sizeof msource - 1, menu_src);
+    msource[mn] = '\0';
+    fclose(menu_src);
+
+    check(find(msource, "m->read_keys && key_pressed(m, NR_KEY_TOGGLE)"),
+          "nr_menu.c's Home read is gated on read_keys",
+          find(msource, "m->read_keys && key_pressed(m, NR_KEY_TOGGLE)")
+              ? "gated" : "UNGATED - a second owner of the toggle, acting while the game is behind");
+    check(find(msource, "if (m->open && m->read_keys) {"),
+          "and S and R are gated on read_keys too",
+          find(msource, "if (m->open && m->read_keys) {")
+              ? "open + read_keys" : "open only - an unfocused S writes the settings file");
+    check(!find(msource, "if (key_pressed(m, NR_KEY_TOGGLE))"),
+          "no ungated Home read remains",
+          find(msource, "if (key_pressed(m, NR_KEY_TOGGLE))")
+              ? "still there" : "none");
+
+    /* The latch, which is the half that turns a gate into a dead key. */
+    check(find(msource, "void nr_menu_release_keys(nr_menu *m)"),
+          "the menu can forget which keys are held",
+          find(msource, "void nr_menu_release_keys(nr_menu *m)")
+              ? "present" : "MISSING - the first press after returning to the game is swallowed");
+    check(find(lsource, "nr_menu_release_keys(data->menu)"),
+          "the layer clears the latch while gated",
+          find(lsource, "nr_menu_release_keys(data->menu)")
+              ? "cleared" : "NOT CALLED - Home is dead for one press after alt-tab");
 
     printf("\n%s: %d failure(s)\n", failures ? "FAILED" : "ok", failures);
     return failures ? 1 : 0;

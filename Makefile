@@ -138,6 +138,11 @@ work/test_menu_hints: src/layer/test_menu_hints.c $(MENU_SOURCES)
 work/test_focus_gate: src/layer/test_focus_gate.c src/layer/nr_focus.c
 	$(CC) $(CFLAGS) -o $@ src/layer/test_focus_gate.c src/layer/nr_focus.c $(MENU_LIBS)
 
+# Whether the game's own raw-input registration survives ours going in and coming out. The
+# `cbSize` bug it covers passed on 32-bit and failed on every 64-bit process.
+work/test_raw_mouse: src/layer/test_raw_mouse.c src/layer/nr_raw_mouse.c
+	$(CC) $(CFLAGS) -o $@ src/layer/test_raw_mouse.c src/layer/nr_raw_mouse.c $(MENU_LIBS)
+
 work/test_soft_cursor: src/layer/test_soft_cursor.cpp $(IMGUI_SOURCES)
 	$(CXX) $(CXXFLAGS) -Ithird_party/imgui -Isrc/layer -o $@ src/layer/test_soft_cursor.cpp \
 	       $(IMGUI_SOURCES) $(MENU_LIBS)

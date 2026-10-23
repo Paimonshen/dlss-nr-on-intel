@@ -222,6 +222,18 @@ void nr_menu_inject_toggle(nr_menu *menu);
  * bridge and act with the panel closed. */
 void nr_menu_set_key_reading(nr_menu *menu, int on);
 
+/* Forget which keys are held, so the next press is an edge again.
+ *
+ * `key_pressed` latches the level in `m->key_down[]` on every call, INCLUDING when the caller
+ * throws the result away - which is what a focus gate does. So a Home held while the game is in
+ * the background is recorded as "was down", and the first press after returning to the game is
+ * not an edge and does nothing. The gate would trade "the key acts when it should not" for "the
+ * key is dead for one press", which is the worse bug.
+ *
+ * The layer calls this whenever it stops reading, which is the same place it already re-arms its
+ * own latches (`nr_layer.c`'s `menu_ui_*_was_down`) for exactly this reason. */
+void nr_menu_release_keys(nr_menu *menu);
+
 void nr_menu_inject_reset(nr_menu *menu);
 
 /* Revert to the SAVED settings, where Reset goes to the code's defaults. The caller polls it
