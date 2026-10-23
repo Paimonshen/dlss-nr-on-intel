@@ -234,13 +234,23 @@ struct device_data {
 	int menu_ui_ins_was_down;       /* the same, for INS: the panel's only way in */
 	/* The same, for the three keys the ImGui build has to own itself.
 	 *
-	 * `nr_menu_update` reads them inside `if (m->open && m->read_keys)`, and the ImGui build sets
-	 * `read_keys` to 0 so that the panel's own reader and this one do not both act on one
-	 * keypress. The consequence nobody noticed is that S, R and the effect toggle were inside
-	 * that block too, so all three stopped working the moment the panel became ImGui's: the
-	 * report was "S does not save, R does not reset, END does nothing", with the panel drawing
-	 * and its buttons working fine. INS and L already live here for the same reason and kept
-	 * working, which is what makes this the odd one out rather than the pattern.
+	 * **This comment used to say all three live inside `nr_menu_update`'s
+	 * `if (m->open && m->read_keys)` block, and that was never true of all three.** S and R were
+	 * moved OUT of that block on purpose, because the ImGui build sets `read_keys` to 0 and they
+	 * were dead inside it; Home was never in it at all. What was true is that the ImGui build gets
+	 * none of the three from `nr_menu.c`, so this file reads them - which is the only part that
+	 * matters here.
+	 *
+	 * The consequence nobody noticed at the time: being outside the block also left S, R and Home
+	 * with NO focus check, so an unfocused Home toggled the effect and an S typed in a chat window
+	 * wrote the settings file. `nr_menu.c` now gates all three on `read_keys`, and the layer holds
+	 * that off while the game is not in front (see `menu_read_keys`), so the two readers agree
+	 * about when the keyboard is the game's.
+	 *
+	 * The report that produced the move, for the record: "S does not save, R does not reset, END
+	 * does nothing", with the panel drawing and its buttons working fine. INS and L already lived
+	 * here for the same reason and kept working, which is what made the three the odd ones out
+	 * rather than the pattern.
 	 *
 	 * Home is the effect toggle. It was END, and END is bound by enough games that the key
 	 * never arrived; Home was the comparison, and the comparison is what this replaces - so
@@ -2405,16 +2415,28 @@ static int menu_ui_rows(struct device_data *data, nrex_row *out, int capacity)
 				         : (c + 1 < 5) ? NR_STR_EVERY_NTH_FEW
 				         : NR_STR_EVERY_NTH_MANY;
 				const char *shape = nr_menu_text(language, key);
-				const char *brace = strstr(shape, "{}");
-				/* 48, not 24. The longest option any language builds is 27 bytes - Russian
-				 * "kazhdye 2 kadrov" - and 24 held 23 plus the terminator, so every Russian option
-				 * was cut mid-word: that is what "kazhdye 2 kadr" in the panel was. Cyrillic is 2
+				/* 48, not 24. The longest option the CURRENT tables build is 25 bytes - Russian
+				 * "каждые 2 кадра" - and the old store held 23 plus the terminator, so every
+				 * Russian option was cut mid-word: that is what "каждые 2 кадр" in the panel was.
+				 * (27 was the figure before the plural split; `every_nth_many` builds it, and it
+				 * is unreachable while the cadence stops at four. 48 covers both.) Cyrillic is 2
 				 * bytes a character and Chinese 3, so this has to be counted in bytes and never in
 				 * characters. `snprintf` truncates in silence, so its return is checked and an
 				 * over-long one falls back to the untranslated shape rather than half a word. It
 				 * cannot happen with today's tables; this is the guard for the next language. */
+				/* `every_frame` is a whole phrase with no number in it - "every frame",
+				 * "каждый кадр" - so it is copied, not formatted. It used to be a separate
+				 * `if (c == 0)` branch doing exactly that; when the plural keys arrived it was
+				 * folded into the shared path below, and the shared path appends the count when
+				 * there is no `{}` - so the first option read "every frame 1". Both forms are
+				 * handled here now, and which one applies is decided by the STRING, not by the
+				 * index: a translation is free to write the number into its own phrase. */
 				int n;
-				if (brace) {
+				if (c == 0 && !strstr(nr_menu_text(language, NR_STR_EVERY_FRAME), "{}")) {
+					n = snprintf(every_names_store[c], sizeof every_names_store[c], "%s",
+					             nr_menu_text(language, NR_STR_EVERY_FRAME));
+				} else if (strstr(shape, "{}")) {
+					const char *brace = strstr(shape, "{}");
 					int head = (int)(brace - shape);
 					n = snprintf(every_names_store[c], sizeof every_names_store[c],
 					             "%.*s%d%s", head, shape, c + 1, brace + 2);
@@ -2984,15 +3006,18 @@ static int menu_read_keys(struct device_data *data)
 
 	/* `nr_menu.c`'s OWN key reading, which the ImGui build does not replace.
 	 *
-	 * `nr_menu_update` reads Home unconditionally (`nr_menu.c:907` has no gate at all) and S and R
-	 * whenever the panel is open - neither checks focus, and neither is inside the `read_keys`
-	 * block the ImGui build turns off. So the layer's own gated Home at the top of this function
-	 * did NOT protect it: in the ImGui build an unfocused Home was consumed here and still acted.
-	 * That is the "Home turned NR off while I was in another window" report.
+	 * **What it read before this change**: `nr_menu_update` read Home with no gate at all and S and
+	 * R whenever the panel was open - neither checked focus, and neither was inside the
+	 * `read_keys` block the ImGui build turns off. So the layer's own gated Home at the top of
+	 * this function did NOT protect it: in the ImGui build an unfocused Home was consumed by
+	 * `nr_menu.c` and still acted. That is the "Home turned NR off while I was in another window"
+	 * report. (The line used to be cited as `nr_menu.c:907`; it has moved, so it is no longer
+	 * cited - a line number that points at the wrong code is worse than none.)
 	 *
-	 * The fix is not a focus check inside `nr_menu.c` - that file has no window and no way to know
-	 * which window is the game's, which is the whole reason `nr_focus.c` exists. It is the same
-	 * switch the ImGui build already uses, held in the right position:
+	 * **What it reads now**: all three are gated on `read_keys` in `nr_menu.c`, and this is what
+	 * holds that switch. The fix is not a focus check inside `nr_menu.c` - that file has no window
+	 * and no way to know which window is the game's, which is the whole reason `nr_focus.c`
+	 * exists. It is the same switch the ImGui build already uses, held in the right position:
 	 *
 	 *   - the game is NOT in front  -> read_keys off, so `nr_menu.c` reads nothing at all
 	 *   - the game IS in front, no ImGui UI -> read_keys on, which is the quad build's normal state

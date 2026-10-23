@@ -162,11 +162,19 @@ int main(void)
     usource[un] = '\0';
     fclose(ui_src);
 
-    check(find(usource, "ImGui::SetKeyOwner(ImGuiKey_Home"),
+    /* **The result is stored before it is used twice, and that is not style.**
+     *
+     * Written as `check(find(usource, X), "...", find(usource, X) ? "claimed" : "not claimed")`,
+     * this reported PASS with the "not claimed" detail - both calls on the same buffer, disagreeing.
+     * MSVC at /O2 merged the two identical calls and then took the wrong arm; the assertion passed
+     * on the `ok` it computed and printed the other branch's text, so a real regression in the
+     * panel (Home no longer claimed, and ImGui nav eating it) would have been announced as PASS.
+     * Reading the answer ONCE removes the expression the compiler is free to rearrange. */
+    int claims_home = find(usource, "ImGui::SetKeyOwner(ImGuiKey_Home");
+    check(claims_home,
           "the panel claims Home so nav cannot act on it",
-          find(usource, "ImGui::SetKeyOwner(ImGuiKey_Home)")
-              ? "claimed"
-              : "not claimed - Home will move the selection instead of toggling the effect");
+          claims_home ? "claimed"
+                      : "not claimed - Home will move the selection instead of toggling the effect");
 
     /* ---- the C/C++ boundary is 32-bit safe ----
      *

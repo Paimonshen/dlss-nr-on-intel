@@ -1143,6 +1143,53 @@ function Update-PacingState([bool]$Busy=[bool]$script:Busy) {
 # Asynchronous mode and every Nth frame are read by the layer when the game starts: a change
 # is saved at once, into the installed game's nr-env.txt too, and waits for a running action.
 # The network is saved the same way, as 'preset', which words its own progress.
+# ---- a pacing field the user did NOT touch takes the file's value ----
+#
+# `Profile-FromWindow` reads this window's controls, and those hold the values the profile had
+# when the window started: `Apply-Profile` runs after discover/dependencies/install and never on
+# the `status` poll. The in-game panel writes both `nr-env.txt` and `windows-profile.json` while
+# the window sits open. So sending every control's current value would write a stale pacing over
+# the panel's - the exact regression that made this file stop writing `nr-env.txt` in the first
+# place.
+#
+# The distinction that matters is "did the user move this control", and `$script:LastProfile`
+# answers it: it is the profile the controls were last filled from, so a control still showing
+# that value was not touched. Only those fields take the file's value. A field the user DID change
+# keeps the user's choice, which is what the controls are for.
+#
+# Its own function so the self-test can call it: this decision is the thing that has to be right,
+# and a check that reproduces the logic instead of calling it would pass with the logic deleted.
+#
+# **`$RequestValues` is the ordered dictionary `Profile-FromWindow` builds**, and the assignment
+# below relies on that - `[ordered]@{}` takes `$dict[$key]=`, a `[pscustomobject]` does not and
+# throws "Unable to index into an object of type PSObject". The first version of the self-test
+# passed a PSObject and the function silently threw, which is why the check proved nothing: it
+# caught the exception only when the test itself was hardened.
+function Merge-PacingFromProfile($RequestValues, $LastProfile, $Fresh) {
+    if(-not $Fresh) { return $RequestValues }
+    foreach($key in @('nr_async','nr_every','gpu_image_path','preset')) {
+        if(-not ($Fresh.PSObject.Properties.Name -contains $key)) { continue }
+        $was=$null
+        if($LastProfile -and ($LastProfile.PSObject.Properties.Name -contains $key)) {
+            $was=$LastProfile.$key
+        }
+        $now=$RequestValues[$key]
+        # A field the window does not carry at all (the network, which is the panel's) is taken
+        # from the file unconditionally: there is no control here that could have been moved.
+        # `Contains` belongs to the OrderedDictionary; a PSObject has properties instead. Both are
+        # handled because the first version of this reached for `Contains` on everything and threw
+        # on a PSObject - and a throw inside the `if` condition is a silently skipped check.
+        $carried = $true
+        if($RequestValues -is [System.Collections.IDictionary]) {
+            $carried = $RequestValues.Contains($key)
+        } elseif($RequestValues.PSObject.Properties.Name -notcontains $key) {
+            $carried = $false
+        }
+        if(-not $carried -or "$was" -eq "$now") { $RequestValues[$key]=$Fresh.$key }
+    }
+    return $RequestValues
+}
+
 function Request-Pacing([string]$Action='pacing') {
     if($script:ApplyingProfile) { return }
     if($script:Busy) { $script:PacingDue=$Action } else { $script:PacingDue=$null; Start-Bridge $Action }
@@ -1173,6 +1220,11 @@ function Start-Bridge([string]$Action,[string]$Destination='', [bool]$Quiet=$fal
         if($Action -ne 'discover') {
             $requestValues=Profile-FromWindow
             if($Extra) { foreach($key in $Extra.Keys) { $requestValues[$key]=$Extra[$key] } }
+            if($Action -in @('pacing','preset')) {
+                $fresh=$null
+                try { $fresh=Read-Json (Join-Path $script:Work 'windows-profile.json') } catch { $fresh=$null }
+                $requestValues=Merge-PacingFromProfile $requestValues $script:LastProfile $fresh
+            }
             Write-Json $request $requestValues; $args+=@('--input',$request)
         }
         if($Destination) { $args+=@('--destination',$Destination) }
@@ -1480,6 +1532,41 @@ if($SelfTest) {
         Set-RuntimeText 'StatusUnavailable'
         Set-Language $language
         if($script:Ui.Progress.Text -ne (T 'Loading.install') -or $script:Ui.RuntimeState.Text -ne (T 'StatusUnavailable')) { throw 'Dynamic messages did not switch languages' }
+    }
+    # ---- a pacing field the user did not touch defers to the profile on disk ----
+    #
+    # The panel writes both files while this window is open and nothing refreshes these controls,
+    # so a request built from the controls alone would put a stale pacing back over the panel's.
+    # `Merge-PacingFromProfile` is the decision, CALLED here rather than described here - an
+    # earlier version of this check rebuilt the logic inline and passed with the function's guard
+    # deleted.
+    #
+    # The request values have to be an ordered dictionary, because that is what
+    # `Profile-FromWindow` returns and what the function's `[$key]=` assignment needs. A PSObject
+    # throws there, and the first version of this block used one, so it proved nothing.
+    {
+        # The window opened on async off / every 1; the panel moved it to async on / every 3.
+        $last=[pscustomobject]@{nr_async=$false; nr_every=1; gpu_image_path=$false; preset='A'}
+        $fresh=[pscustomobject]@{nr_async=$true; nr_every=3; gpu_image_path=$true; preset='B'}
+        $shown=[ordered]@{nr_async=$false; nr_every=1; gpu_image_path=$false; preset='A'}
+        $merged=Merge-PacingFromProfile $shown $last $fresh
+        if(-not $merged.nr_async -or $merged.nr_every -ne 3 -or -not $merged.gpu_image_path -or $merged.preset -ne 'B') {
+            throw 'An untouched pacing control did not take the profile on disk'
+        }
+        # And a control the user DID move keeps the user's choice: it differs from what the
+        # controls were filled from, so it is the user's.
+        $moved=[ordered]@{nr_async=$false; nr_every=2; gpu_image_path=$false; preset='A'}
+        $merged=Merge-PacingFromProfile $moved $last $fresh
+        if($merged.nr_every -ne 2) { throw 'A pacing control the user moved was overwritten' }
+        # With no profile to read, the controls' own values stand - that is the old behaviour, and
+        # it is better than discarding a request because a file could not be read.
+        $merged=Merge-PacingFromProfile ([ordered]@{nr_async=$false; nr_every=2; gpu_image_path=$false; preset='A'}) $last $null
+        if($merged.nr_every -ne 2) { throw 'A missing profile discarded the request' }
+        # A key the window does not carry - the network - is taken from the file, because no
+        # control here could have been moved.
+        $noPreset=[ordered]@{nr_async=$false; nr_every=1; gpu_image_path=$false}
+        $merged=Merge-PacingFromProfile $noPreset $last $fresh
+        if($merged.preset -ne 'B') { throw 'A key the window does not carry was not taken from the file' }
     }
     Write-Output ('WPF layout loaded; '+$script:Ui.Count+' named controls; '+$script:KnobUi.Count+' live NR controls. '+($languages -join '/').ToUpper()+' coverage: '+$script:Strings.en.Count+' keys; automatic language: '+$autoLanguage+'.')
     exit 0

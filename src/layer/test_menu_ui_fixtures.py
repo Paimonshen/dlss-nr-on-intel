@@ -59,8 +59,10 @@ FIXTURES = ("test_menu_panel", "test_menu_side", "test_menu_keys", "test_menu_la
 # nothing else watches what they cover.
 INPUT_FIXTURES = ("test_focus_gate", "test_raw_mouse")
 # The ones that must run from the repository root, because they read the sources there rather
-# than driving a linked copy of them.
-FROM_ROOT = frozenset({"test_menu_keys", "test_menu_language"})
+# than driving a linked copy of them. `test_menu_choices` joined them when it gained a check that
+# `nr_layer.c` still copies the first cadence option instead of numbering it - a source assertion,
+# because the builder is a static function in that file with no seam to call from a fixture.
+FROM_ROOT = frozenset({"test_menu_keys", "test_menu_language", "test_menu_choices"})
 TIMEOUT = 600
 
 

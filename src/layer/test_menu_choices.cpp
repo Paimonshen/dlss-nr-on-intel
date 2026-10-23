@@ -79,6 +79,42 @@ int main(void)
         check(distinct, "and they are distinct", "shared storage");
     }
 
+    /* ---- 1b. the first cadence option is a phrase, not a numbered one ----
+     *
+     * `every_frame` is "every frame" / "каждый кадр" - a whole phrase with no number in it - and
+     * the other three are built from a `{}` template. When the plural keys were added, the
+     * `if (c == 0)` branch that copied it verbatim was folded into the shared path, and the shared
+     * path appends the count when the string has no `{}` - so the first option read
+     * "every frame 1" in all four languages. Nothing failed: a numbered phrase is still a phrase.
+     *
+     * **This is a source assertion, not a behavioural one, and that is deliberate.** The first
+     * version of this check rebuilt the string from the table the same way `nr_layer.c` does -
+     * which meant it tested the COPY, so deleting the real `c == 0` branch still passed. The
+     * builder lives in a static function in a 3700-line file with no seam to call it from here, so
+     * the honest check is that the branch exists and still guards on the string rather than the
+     * index. `nr_layer.c` is read as text, the way `test_menu_keys.cpp` already checks call sites. */
+    {
+        FILE *layer = fopen("src/layer/nr_layer.c", "rb");
+        if (!layer) {
+            printf("  FAIL  nr_layer.c was not readable (run from the repository root)\n");
+            return 1;
+        }
+        static char lsrc[600000];
+        size_t ln = fread(lsrc, 1, sizeof lsrc - 1, layer);
+        lsrc[ln] = '\0';
+        fclose(layer);
+
+        int has_first = strstr(lsrc, "c == 0 && !strstr(nr_menu_text(language, NR_STR_EVERY_FRAME)") != NULL;
+        check(has_first, "the first cadence option is copied, not numbered",
+              has_first ? "the c == 0 branch guards on the string having no {}"
+                        : "MISSING - the first option will read \"every frame 1\"");
+        /* And the numbered path is still there for the other three, so the fix cannot have been
+         * "delete the formatting". */
+        int has_numbered = strstr(lsrc, "\"%.*s%d%s\", head, shape, c + 1, brace + 2") != NULL;
+        check(has_numbered, "and the numbered options are still formatted",
+              has_numbered ? "present" : "MISSING - the cadence would lose its counts");
+    }
+
     /* ---- 2. the bridge's own choice knobs are consistent with their counts ---- */
     /* The bridge produces the eleven knobs, two of them choices (`profile`, `weights`). A count
      * larger than the names available is the same bug in the other half of the list. */

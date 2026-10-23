@@ -503,6 +503,82 @@ class WizardFixture(unittest.TestCase):
         self.assertEqual(values()["NR_PRESET"], "A")
         self.assertTrue(core.uninstall(self.profile)["ok"])
 
+    def test_the_window_does_not_write_a_stale_pacing_over_the_panel(self):
+        """The ordering that made this window stop writing nr-env.txt in the first place.
+
+        The window's pacing controls hold the values the profile had when it opened:
+        `Apply-Profile` runs after discover/dependencies/install and never on the `status` poll, so
+        nothing refreshes them while the window sits there. The in-game panel writes both
+        `nr-env.txt` and `windows-profile.json` while that window is open. So the sequence
+
+            window opens (async off, every 1)
+            panel changes it (async on, every 3) - both files move
+            user touches anything pacing-related in the window
+
+        would, without care, put the window's stale values back over the panel's. That is the
+        regression stage 3 reintroduced by making this function write the file again.
+
+        The window resolves it in `windows-wizard.ps1` by comparing each control against
+        `$script:LastProfile` - the profile the controls were last filled from - and taking the
+        file's value for the fields the user did NOT move. The comparison is reproduced here
+        because the decision is what has to be right; the PowerShell around it is one property
+        read.
+        """
+        self.assertTrue(core.install(self.profile)["ok"])
+        path = core.installed_path(self.profile) / core.ENV_FILE
+
+        def values():
+            return dict(line.split("=", 1) for line in path.read_text(encoding="utf-8").splitlines()
+                        if "=" in line and not line.startswith("#"))
+
+        # The window opened and filled its controls from this profile: async off, every 1.
+        window_opened_from = core.load_profile(self.root)
+        self.assertEqual((window_opened_from.nr_async, window_opened_from.nr_every), (False, 1))
+
+        # The panel moves it, and keeps the profile in step - which is what makes this safe.
+        moved = replace(window_opened_from, nr_async=True, nr_every=3)
+        self.assertTrue(core.set_pacing(moved)["applied"])
+        self.assertEqual((values()["NR_LAYER_ASYNC"], values()["NR_LAYER_LIVE"]), ("1", "3"))
+
+        # Now the user touches something in the window that sends a pacing request. The controls
+        # still show the values the window opened with; LastProfile is the same profile, so every
+        # pacing field compares equal and each takes the FILE's value.
+        on_disk = core.load_profile(self.root)
+        stale = window_opened_from
+        resolved = {}
+        for key in ("nr_async", "nr_every", "gpu_image_path", "preset"):
+            shown = getattr(stale, key)          # what the control shows
+            was = getattr(window_opened_from, key)   # what it was filled from
+            resolved[key] = getattr(on_disk, key) if shown == was else shown
+        self.assertEqual(resolved["nr_async"], True, "the panel's async was overwritten by the window")
+        self.assertEqual(resolved["nr_every"], 3, "the panel's cadence was overwritten by the window")
+
+        # And a field the user DID move keeps the user's choice: that is what the control is for.
+        shown = 2                                     # the user dragged the cadence to 2
+        resolved_every = getattr(on_disk, "nr_every") if shown == getattr(stale, "nr_every") else shown
+        self.assertEqual(resolved_every, 2, "the user's own change was discarded")
+
+        # The file the layer reads, after the window writes the resolved values, still says what
+        # the panel said - because the window resolved to the file's values.
+        self.assertTrue(core.set_pacing(replace(on_disk, **resolved))["applied"])
+        self.assertEqual((values()["NR_LAYER_ASYNC"], values()["NR_LAYER_LIVE"]), ("1", "3"))
+        self.assertTrue(core.uninstall(self.profile)["ok"])
+
+        # ---- and the window actually implements that decision ----
+        #
+        # The block above reproduces the DECISION, so on its own it would still pass if the
+        # PowerShell stopped making it. The behavioural proof lives in the window's own self-test
+        # (`Merge-PacingFromProfile` is called there with an untouched control, a moved one, and
+        # no profile at all), because a PowerShell function cannot be driven from here. What is
+        # checked here is only that the window still routes pacing through that function - the
+        # text of the function itself is the self-test's to verify, not this one's.
+        window = Path(core.__file__).parent.parent.parent / "dist-tools" / "windows-wizard.ps1"
+        source = window.read_text(encoding="utf-8")
+        self.assertIn("function Merge-PacingFromProfile", source,
+                      "the window no longer has the pacing merge it needs")
+        self.assertIn("Merge-PacingFromProfile $requestValues $script:LastProfile $fresh", source,
+                      "pacing requests no longer go through the merge")
+
     def test_preset_b_is_checked_for_its_weights_or_a_dll_that_carries_them(self):
         chosen = replace(self.profile, preset="B")
         check = self.checks(chosen)["preset"]
