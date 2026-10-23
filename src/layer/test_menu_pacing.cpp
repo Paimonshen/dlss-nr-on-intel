@@ -19,6 +19,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef _WIN32
+#include <windows.h>   /* CreateDirectoryA, FindFirstFileA, DeleteFileA - no subshell needed */
+#else
+#include <sys/stat.h>
+#include <ftw.h>       /* nftw, for wipe_tree */
+#include <unistd.h>
+#endif
+
 static int failures = 0;
 
 static void check(int ok, const char *what, const char *detail)
@@ -27,13 +35,101 @@ static void check(int ok, const char *what, const char *detail)
     if (!ok) ++failures;
 }
 
+#ifdef _WIN32
+/* A directory and everything under it, gone. `RemoveDirectoryA` refuses a non-empty one, so this
+ * walks it depth-first. Failures are ignored: a scratch folder that will not delete is untidy, not
+ * wrong, and the assertions above do not depend on it being gone. */
+static void wipe_tree(const char *root)
+{
+    char pattern[1024];
+    snprintf(pattern, sizeof pattern, "%s\\*", root);
+    WIN32_FIND_DATAA found;
+    HANDLE scan = FindFirstFileA(pattern, &found);
+    if (scan == INVALID_HANDLE_VALUE) { RemoveDirectoryA(root); return; }
+    do {
+        if (found.cFileName[0] == '.' &&
+            (found.cFileName[1] == '\0' ||
+             (found.cFileName[1] == '.' && found.cFileName[2] == '\0')))
+            continue;
+        char child[1024];
+        snprintf(child, sizeof child, "%s\\%s", root, found.cFileName);
+        if (found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+            wipe_tree(child);
+        else
+            DeleteFileA(child);
+    } while (FindNextFileA(scan, &found));
+    FindClose(scan);
+    RemoveDirectoryA(root);
+}
+
+/* A whole path's directories, one level at a time. See `make_installation` for why this exists
+ * rather than `system("mkdir")`. */
+static int make_dir_chain(const char *path)
+{
+    char partial[1024];
+    for (const char *p = path; *p; ++p) {
+        if (*p == '\\' || *p == '/') {
+            size_t len = (size_t)(p - path);
+            if (len == 0 || (len == 2 && path[1] == ':')) continue;   /* the drive, or a leading \ */
+            if (len + 1 > sizeof partial) return 0;
+            memcpy(partial, path, len);
+            partial[len] = '\0';
+            if (!CreateDirectoryA(partial, NULL) && GetLastError() != ERROR_ALREADY_EXISTS)
+                return 0;
+        }
+    }
+    if (!CreateDirectoryA(path, NULL) && GetLastError() != ERROR_ALREADY_EXISTS) return 0;
+    return 1;
+}
+#else
+/* POSIX: `nftw` does the same walk, and `mkdir -p` does the same chain. This fixture is
+ * Windows-only in practice - the pacing rows live in the layer, which is Windows-only - but the
+ * source is compiled everywhere, so the non-Windows arms have to exist. */
+static int wipe_cb(const char *path, const struct stat *st, int flag, struct FTW *ftw)
+{
+    (void)st; (void)flag; (void)ftw;
+    return flag == FTW_D ? rmdir(path) : unlink(path);
+}
+static void wipe_tree(const char *root)
+{
+    nftw(root, wipe_cb, 8, FTW_DEPTH | FTW_PHYS);
+}
+static int make_dir_chain(const char *path)
+{
+    char cmd[1100];
+    snprintf(cmd, sizeof cmd, "mkdir -p '%s'", path);
+    return system(cmd) == 0;
+}
+#endif
+
 /* A whole installation, as far as this is concerned: `work/nr_settings.json` beside
- * `dlss-nr/nr-env.txt`, which is the layout `env_file_path` derives. */
+ * `dlss-nr/nr-env.txt`, which is the layout `env_file_path` derives.
+ *
+ * The directories are made one level at a time with `CreateDirectoryA`, not `system("mkdir ...")`.
+ * Two reasons:
+ *
+ *   - `system` starts a subshell, and a subshell is one more thing a non-interactive session can
+ *     refuse us.
+ *   - **`CreateDirectoryA` creates ONE level and fails with ERROR_PATH_NOT_FOUND when the parent is
+ *     missing.** `mkdir a\b` builds both. So the chain has to be walked, or the fixture dies on its
+ *     first `fopen` with the path looking perfectly writable.
+ *
+ * A direct syscall is also the same call `nr_file.c` uses, so the fixture exercises the real thing.
+ *
+ * **What this does NOT fix, and is not this file's to fix:** running the fixture from a working
+ * directory under %TEMP% while the executable itself lives on another drive can fail with
+ * ERROR_ACCESS_DENIED on the very first write - Windows refusing a process started from `F:\` the
+ * right to create files in the user's temporary folder. `test_menu_ui_fixtures.py` runs the
+ * fixtures from `%TEMP%\nr-menu-fixture-<pid>` for exactly that reason on some machines and works on
+ * others; copying the executable into the scratch directory first makes it work everywhere. That is
+ * a property of the harness, not of the assertions below, and the assertions are unchanged by it. */
 static int make_installation(const char *root, const char *env_body)
 {
-    char cmd[1024];
-    snprintf(cmd, sizeof cmd, "mkdir \"%s\\work\" 2>nul & mkdir \"%s\\dlss-nr\" 2>nul", root, root);
-    if (system(cmd) != 0) { /* the folders may already exist; the files below decide */ }
+    char dir[1024];
+    snprintf(dir, sizeof dir, "%s\\work", root);
+    if (!make_dir_chain(dir)) return 0;
+    snprintf(dir, sizeof dir, "%s\\dlss-nr", root);
+    if (!make_dir_chain(dir)) return 0;
 
     char path[1024];
     snprintf(path, sizeof path, "%s\\work\\nr_settings.json", root);
@@ -694,9 +790,11 @@ int main(void)
          * network is fed became unreachable because an unrelated JSON file was missing. */
         nr_menu_bridge_destroy(b);
         const char *bare = "nr-pacing-test-bare";
-        char cmd[1024];
-        snprintf(cmd, sizeof cmd, "mkdir \"%s\\dlss-nr\" 2>nul & mkdir \"%s\\work\" 2>nul", bare, bare);
-        if (system(cmd) != 0) { /* the folders may already exist */ }
+        char dir[1024];
+        snprintf(dir, sizeof dir, "%s\\dlss-nr", bare);
+        if (!make_dir_chain(dir)) { printf("  FAIL  no scratch dir\n"); return 1; }
+        snprintf(dir, sizeof dir, "%s\\work", bare);
+        make_dir_chain(dir);
         char path[1024];
         snprintf(path, sizeof path, "%s\\dlss-nr\\nr-env.txt", bare);
         FILE *f = fopen(path, "wb");
@@ -738,10 +836,12 @@ int main(void)
 
     nr_menu_bridge_destroy(b);
     nr_menu_bridge_use_env_file(NULL);
-    system("rmdir /s /q nr-pacing-test 2>nul");
-    system("rmdir /s /q nr-pacing-test-odd 2>nul");
-    system("rmdir /s /q nr-pacing-test-bare 2>nul");
-    remove("nr-pacing-test\\work\\nr_settings.json");
+    /* The scratch installations, removed without a subshell for the same reason they were made
+     * without one. `rmdir /s /q` said nothing either way, which is how a stale directory could
+     * survive into the next run and have THAT run test the leftovers instead of its own. */
+    wipe_tree("nr-pacing-test");
+    wipe_tree("nr-pacing-test-odd");
+    wipe_tree("nr-pacing-test-bare");
     printf("\n%s: %d failure(s)\n", failures ? "FAILED" : "ok", failures);
     return failures ? 1 : 0;
 }

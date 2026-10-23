@@ -343,6 +343,48 @@ the profile write, by forcing the blocker to never fire, and by dropping the bra
 path; each turns the suite red. The three wizard tests that asserted the old "`set_pacing` writes
 the file" behaviour now assert the new contract instead.
 
+## PR #20 round three: the plan, and the architecture it is aimed at (2026-10-23, branch `menu-on-e4m3`)
+
+The maintainer's second review listed 13 items. Two documents now exist for it, and neither is a
+promise that the work is done:
+
+- **`notes/ROADMAP-PR20-ROUND3.md`** — the order, the dependencies and the verification gate for
+  each stage. Five stages, key path 0→1→2→3→5, stage 4 free to interleave.
+- **`docs/MENU-ARCHITECTURE.md`** — the first description of this subsystem *as* a subsystem:
+  two UIs over one data authority, the C/C++ ABI boundary, the three input paths, the two files
+  and their two readers, and the localisation generator. `docs/ARCHITECTURE.md` covers the network
+  itself and never covered this layer.
+
+**Three things the investigation settled that the review did not state:**
+
+1. **The build failures have one cause, and it is not a missing stub.** Five tests
+   (`test_device_teardown.c:25`, `test_exchange.c:8`, `test_gpu_only.c:22`, `test_settled.c:6`,
+   `test_transfer_resources.c:3`) `#include "nr_layer.c"` rather than linking the library, so they
+   inherit every menu symbol the layer calls. `test_gpu_present` already links `nr_layer` via
+   `add_dependencies` — the pattern exists, those five did not follow it. So the fix is to link the
+   menu sources, not to write no-op arms.
+
+2. **But the no-op arms for `nr_menu_ui.cpp` do not exist, so linking is not enough on Linux.**
+   That file's `menu_ui_keys` (L1316-1339) uses `GetAsyncKeyState`, `ToUnicode`, `BYTE`/`SHORT`/
+   `WCHAR` and its timer uses `LARGE_INTEGER`/`QueryPerformanceCounter` (L647-651), all without a
+   platform gate. The claim in `nr_layer.c` that the menu headers "bring their own no-op arm" is
+   true of `nr_focus.h`, `nr_raw_mouse.c`, `nr_menu_font.c` and `nr_menu.c`'s key functions, and
+   false of `nr_menu_ui.cpp`. Gate first, link second.
+
+3. **A dispatch layer to decouple the menu is not worth it.** `nr_layer.c` calls into it at 89
+   lines from L2125 to L3310, and several of those pass C structures rather than scalars
+   (`nrex_row rows[]`, the `nr_menu_strings[lang][key]` tables). Rejected in the roadmap with the
+   count, so the next person does not re-propose it.
+
+Also recorded there: the pacing conflict (item 6) is the consequence of last round's
+"one owner" decision and is resolved by the window writing both files again, which works because
+`write_profile_pacing` keeps the profile current; and the base-branch item (13) is not a rebase —
+the local branch is already identical to `upstream/newnr`, so it is a pushed-state and PR-setting
+problem.
+
+**Nothing in either document has been implemented yet.** The roadmap is what to do, not what was
+done, and the architecture document describes the tree at `da53550` including its defects.
+
 ## The panel spoke two languages over a four-language enum (2026-10-21, branch `menu-on-e4m3`)
 
 Reported from a game with the panel set to Español: the three frame-pacing rows, the GPU row's

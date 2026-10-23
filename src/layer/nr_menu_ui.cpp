@@ -35,6 +35,9 @@
 #include <stdio.h>
 #include <string.h>
 #include <cstring>
+#ifndef _WIN32
+#include <time.h>    /* CLOCK_MONOTONIC, for nrex_now_seconds */
+#endif
 
 /* ------------------------------------------------------------------ diagnostics
  *
@@ -642,14 +645,28 @@ struct nrex_repeat {
 
 static nrex_repeat s_repeat[NREX_MAX_ROWS];
 
+/* When the panel thinks "now" is. Windows: the performance counter, which is what the value-repeat
+ * arithmetic wants (a monotonic clock with sub-microsecond resolution, and one the OS keeps across
+ * suspend). Off Windows: `CLOCK_MONOTONIC`, which is the same promise on POSIX.
+ *
+ * **Why this is here and not in the C side.** The repeat logic owns its own clock so that a frame
+ * that takes 100 ms and one that takes 10 ms both repeat at the right rate - the caller's frame
+ * time is an input to the panel, not a clock. One function, one place, no second definition of
+ * "now" to drift. */
 static double nrex_now_seconds(void)
 {
+#ifdef _WIN32
     static LARGE_INTEGER frequency;
     static int have_frequency;
     if (!have_frequency) { QueryPerformanceFrequency(&frequency); have_frequency = 1; }
     LARGE_INTEGER counter;
     QueryPerformanceCounter(&counter);
     return (double)counter.QuadPart / (double)frequency.QuadPart;
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+#endif
 }
 
 /* The panel: one window, a scrolled body of rows, a footer. OptiScaler's arrangement. */
@@ -1309,21 +1326,24 @@ extern "C" NREX_API void nrex_key(nrex_ui *ui, int vk, int down)
     if (key != ImGuiKey_None)
         io.AddKeyEvent(key, now);
 
-    /* The character, on the press only. `ToUnicode` translates through the active keyboard layout,
-     * so a layout that puts a digit behind Shift still types that digit - which guessing from the
-     * virtual key would not. A key with no character (an arrow, a function key) returns 0 and is
-     * skipped, and Control is excluded so Ctrl+S is a shortcut rather than a typed 's'. */
+    /* The character, on the press only, so a key with no character (an arrow, a function key)
+     * types nothing and Control is excluded so Ctrl+S is a shortcut rather than a typed 's'.
+     *
+     * **Windows** translates through the active keyboard layout with `ToUnicode`, so a layout that
+     * puts a digit behind Shift still types that digit - which guessing from the virtual key would
+     * not. The key state is BUILT rather than asked for: `GetKeyboardState` reports the calling
+     * thread's message queue, and it is only accurate for a thread that pumps messages - which a
+     * Vulkan layer does not, it runs inside the game's render thread. The first attempt used it and
+     * the typed characters never arrived. `GetAsyncKeyState` is system-wide and needs no pump, so
+     * the state is assembled from it, and it also makes a layout's own modifiers come through.
+     *
+     * **Off Windows** there is no equivalent to ask, so the character is inferred from the virtual
+     * key alone - correct for a US layout, wrong for one that needs a modifier. That is the honest
+     * limit of a panel that has no window to own an input method; the alternative (no typing at all
+     * where a text field exists) is worse. The row that needs text is a number, and digits are
+     * digits on every layout. */
+#ifdef _WIN32
     if (now && !(GetAsyncKeyState(0x11) & 0x8000)) {
-        /* The key state is built rather than asked for.
-         *
-         * `GetKeyboardState` reports the state of the CALLING THREAD'S message queue, and it is only
-         * accurate for a thread that pumps messages - which a Vulkan layer does not, it runs inside
-         * the game's render thread. The first attempt used it and the typed characters never
-         * arrived: `ToUnicode` was being handed a state where no key was down, so it returned 0 for
-         * every press. `GetAsyncKeyState` is system-wide and needs no pump, so the state is
-         * assembled from it - the pressed key down, and the real modifiers where they actually are.
-         * That is also what makes a layout that puts a digit behind Shift work: the state reflects
-         * the layout's own modifiers rather than an assumption. */
         BYTE state[256];
         memset(state, 0, sizeof state);
         for (int k = 0; k < 256; ++k) {
@@ -1341,6 +1361,11 @@ extern "C" NREX_API void nrex_key(nrex_ui *ui, int vk, int down)
             if (buf[i] >= 0x20)
                 io.AddInputCharacter((unsigned int)buf[i]);
     }
+#else
+    (void)vk;
+    if (now && vk >= 0x20 && vk < 0x7F)
+        io.AddInputCharacter((unsigned int)vk);
+#endif
 }
 
 /* ImGui's own pointer, drawn into the frame.

@@ -84,12 +84,22 @@ ifeq ($(OS),Windows_NT)
 MENU_LIBS := -luser32 -lgdi32
 endif
 
-work/libnr_layer.so: src/layer/nr_layer.c $(LAYER_HEADERS)
-	$(CC) $(CFLAGS) -shared -o $@ $< -lvulkan
-
-# The in-game menu, as sources the layer links.
+# The in-game menu, as sources the layer links. `nr_layer.c` calls into it unconditionally, so a
+# target that compiles `nr_layer.c` needs these or it does not link - which is the whole of the
+# undefined-reference failure on Linux and MinGW, where five fixtures `#include "nr_layer.c"`
+# and inherited the layer's menu calls with no menu sources to answer them.
 MENU_SOURCES := src/layer/nr_menu.c src/layer/nr_menu_font.c src/layer/nr_menu_strings.c \
-                src/layer/nr_menu_strings_lookup.c src/layer/nr_menu_bridge.c src/layer/nr_file.c
+                src/layer/nr_menu_strings_lookup.c src/layer/nr_menu_bridge.c src/layer/nr_file.c \
+                src/layer/nr_raw_mouse.c src/layer/nr_focus.c
+# The ImGui panel behind it, including the C++ translation unit behind a plain-C interface. The
+# vendored sources want IMGUI_DEFINE_MATH_OPERATORS and nothing else defines it.
+IMGUI_SOURCES := third_party/imgui/imgui.cpp third_party/imgui/imgui_draw.cpp \
+                 third_party/imgui/imgui_tables.cpp third_party/imgui/imgui_widgets.cpp \
+                 third_party/imgui/imgui_impl_vulkan.cpp src/layer/nr_menu_ui.cpp
+
+work/libnr_layer.so: src/layer/nr_layer.c $(MENU_SOURCES) $(IMGUI_SOURCES) $(LAYER_HEADERS)
+	$(CXX) $(CXXFLAGS) -Ithird_party/imgui -Isrc/layer -shared -o $@ src/layer/nr_layer.c \
+	       $(MENU_SOURCES) $(IMGUI_SOURCES) -lvulkan
 
 # The knob table against `nr_knobs.py`, which is the definition. The author asked for this after
 # `render_scale`'s default drifted between three copies of the same fact.
@@ -108,8 +118,6 @@ work/test_menu_persist: src/layer/test_menu_persist.c $(MENU_SOURCES)
 # without a position, and the layer reports "no position" whenever the pointer is off the panel - so
 # the arrow appeared only over the panel, the one place nobody needs it. Counts the vertices in a
 # rendered frame, which is a fact about the draw data rather than about this file's intent.
-IMGUI_SOURCES := third_party/imgui/imgui.cpp third_party/imgui/imgui_draw.cpp \
-                 third_party/imgui/imgui_tables.cpp third_party/imgui/imgui_widgets.cpp
 # Which window in front means "the user is here". The panel reads the system-wide cursor and
 # key state, so without this it is driven by whatever the user is doing in ANY window - the
 # reported bug, where a drag in another application moved a slider.
@@ -134,8 +142,9 @@ work/test_soft_cursor: src/layer/test_soft_cursor.cpp $(IMGUI_SOURCES)
 	$(CXX) $(CXXFLAGS) -Ithird_party/imgui -Isrc/layer -o $@ src/layer/test_soft_cursor.cpp \
 	       $(IMGUI_SOURCES) $(MENU_LIBS)
 
-work/libnr_layer32.so: src/layer/nr_layer.c $(LAYER_HEADERS)
-	$(CC) $(CFLAGS) -m32 -shared -o $@ $< -lvulkan
+work/libnr_layer32.so: src/layer/nr_layer.c $(MENU_SOURCES) $(IMGUI_SOURCES) $(LAYER_HEADERS)
+	$(CXX) $(CXXFLAGS) -m32 -Ithird_party/imgui -Isrc/layer -shared -o $@ src/layer/nr_layer.c \
+	       $(MENU_SOURCES) $(IMGUI_SOURCES) -lvulkan
 
 work/test_layer_loader: src/layer/test_layer_loader.c
 	$(CC) $(CFLAGS) -o $@ $< -lvulkan
@@ -146,17 +155,19 @@ work/test_present: src/layer/test_present.c
 work/test_layer_loader32: src/layer/test_layer_loader.c
 	$(CC) $(CFLAGS) -m32 -o $@ $< -lvulkan
 
-work/test_settled: src/layer/test_settled.c src/layer/nr_layer.c $(LAYER_HEADERS)
-	$(CC) $(CFLAGS) -Isrc/layer -o $@ $< -lvulkan
+# The three that `#include "nr_layer.c"` rather than link the library, so they compile the menu
+# sources themselves - exactly as the CMake build now does, and as `tools/build_win.bat` always did.
+work/test_settled: src/layer/test_settled.c src/layer/nr_layer.c $(MENU_SOURCES) $(IMGUI_SOURCES) $(LAYER_HEADERS)
+	$(CXX) $(CXXFLAGS) -Ithird_party/imgui -Isrc/layer -o $@ $< $(MENU_SOURCES) $(IMGUI_SOURCES) -lvulkan
 
-work/test_exchange: src/layer/test_exchange.c src/layer/nr_layer.c $(LAYER_HEADERS)
-	$(CC) $(CFLAGS) -o $@ $< -lvulkan -lpthread
+work/test_exchange: src/layer/test_exchange.c src/layer/nr_layer.c $(MENU_SOURCES) $(IMGUI_SOURCES) $(LAYER_HEADERS)
+	$(CXX) $(CXXFLAGS) -Ithird_party/imgui -Isrc/layer -o $@ $< $(MENU_SOURCES) $(IMGUI_SOURCES) -lvulkan -lpthread
 
 work/test_surface_policy: src/layer/test_surface_policy.c src/layer/nr_surface_policy.h
 	$(CC) $(CFLAGS) -UNDEBUG -o $@ $<
 
-work/test_transfer_resources: src/layer/test_transfer_resources.c src/layer/nr_layer.c $(LAYER_HEADERS)
-	$(CC) $(CFLAGS) -UNDEBUG -o $@ $< -lvulkan -lpthread
+work/test_transfer_resources: src/layer/test_transfer_resources.c src/layer/nr_layer.c $(MENU_SOURCES) $(IMGUI_SOURCES) $(LAYER_HEADERS)
+	$(CXX) $(CXXFLAGS) -Ithird_party/imgui -Isrc/layer -o $@ $< $(MENU_SOURCES) $(IMGUI_SOURCES) -lvulkan -lpthread
 
 GEMM_GLSL := src/gpu/publish.glsl src/gpu/specialize.glsl src/gpu/residual_epilogue.glsl \
              src/gpu/cosine_tree.glsl src/gpu/qkv_epilogue.glsl

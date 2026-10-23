@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 
@@ -72,6 +73,14 @@ def run(fixture: str) -> tuple[bool, str]:
     settings file by a relative name, and the panel's ImGui context is happy anywhere. Running
     it from the repository root would leave a stray `nr-menu-side-test-settings.json` behind
     on a crash, which is the kind of file that turns up in a later `git status`.
+
+    The executable is COPIED into that folder rather than run from `work/`, and that is not
+    tidiness. A process started from one drive can be refused the right to create files in the
+    user's temporary folder - ERROR_ACCESS_DENIED on the fixture's very first write, with the
+    path looking perfectly writable and every other program able to write there. Copying the
+    executable in first makes it a child of that folder, and the failure goes away on the
+    machines that had it. Two fixtures failed here for exactly that reason and neither
+    assertion was wrong.
     """
     executable = WORK / f"{fixture}.exe"
     if not executable.is_file():
@@ -80,11 +89,17 @@ def run(fixture: str) -> tuple[bool, str]:
         # Reads src/layer/nr_menu.c and nr_layer.c by a relative path, so it runs where they
         # are. A scratch folder would make it report "not readable" and look like a red test.
         room = ROOT
+        target = executable
     else:
         room = Path(os.environ.get("TEMP", ".")) / f"nr-menu-fixture-{os.getpid()}"
         room.mkdir(parents=True, exist_ok=True)
+        target = room / executable.name
+        try:
+            shutil.copy2(executable, target)
+        except OSError as exc:
+            return False, f"could not stage {executable.name} into {room}: {exc}"
     try:
-        done = subprocess.run([str(executable)], cwd=room, capture_output=True, text=True,
+        done = subprocess.run([str(target)], cwd=room, capture_output=True, text=True,
                               encoding="utf-8", errors="replace", timeout=TIMEOUT)
     except subprocess.TimeoutExpired:
         return False, f"no answer within {TIMEOUT} s"

@@ -148,11 +148,39 @@ if(WIN32)
   nr_output(nr_alloc)
 endif()
 
+# The in-game menu, as sources the layer links. `nr_layer.c` calls into it unconditionally, so a
+# target that compiles `nr_layer.c` needs these or it does not link: five of the fixtures below
+# `#include "nr_layer.c"` and so inherit every one of those symbols, which is how three of them came
+# to fail with undefined references. `tools/build_win.bat` has linked this exact set from the start;
+# these targets now do the same. Off Windows the menu sources compile to no-ops - `nr_focus.h` and
+# the others carry their own `#else` arms - so a Linux build links them and gets a layer with no
+# panel, which is what it should have.
+set(NR_MENU_SOURCES
+    src/layer/nr_menu.c
+    src/layer/nr_menu_font.c
+    src/layer/nr_menu_strings.c
+    src/layer/nr_menu_strings_lookup.c
+    src/layer/nr_menu_bridge.c
+    src/layer/nr_file.c
+    src/layer/nr_raw_mouse.c
+    src/layer/nr_focus.c)
+set(NR_IMGUI_SOURCES
+    third_party/imgui/imgui.cpp
+    third_party/imgui/imgui_draw.cpp
+    third_party/imgui/imgui_tables.cpp
+    third_party/imgui/imgui_widgets.cpp
+    third_party/imgui/imgui_impl_vulkan.cpp
+    src/layer/nr_menu_ui.cpp)
+
 if(NR_BUILD_LAYER)
   find_package(Threads REQUIRED)
-  add_library(nr_layer SHARED src/layer/nr_layer.c)
+  add_library(nr_layer SHARED src/layer/nr_layer.c ${NR_MENU_SOURCES} ${NR_IMGUI_SOURCES})
+  target_include_directories(nr_layer PRIVATE third_party/imgui)
+  target_compile_options(nr_layer PRIVATE -O2 -DIMGUI_DEFINE_MATH_OPERATORS)
   target_link_libraries(nr_layer PRIVATE nr_vulkan Threads::Threads)
-  target_compile_options(nr_layer PRIVATE -O2)
+  if(WIN32)
+    target_link_libraries(nr_layer PRIVATE user32 gdi32)
+  endif()
   nr_output(nr_layer)
   # The 32-bit layer, for 32-bit games under Proton, wherever a 32-bit compiler and a 32-bit
   # Vulkan loader are installed: the Makefile's LAYER32, with NR_BUILD_LAYER32 to override.
@@ -177,10 +205,47 @@ if(NR_BUILD_LAYER)
     endif()
   endif()
   if(NR_BUILD_TESTS)
-    foreach(test test_layer_loader test_present test_settled test_exchange)
+    foreach(test test_layer_loader test_present)
       add_executable(${test} src/layer/${test}.c)
       target_link_libraries(${test} PRIVATE nr_vulkan Threads::Threads)
       target_compile_options(${test} PRIVATE -O2 -UNDEBUG)
+      nr_output(${test})
+    endforeach()
+    # `test_settled` and `test_exchange` `#include "nr_layer.c"` rather than link the library, so
+    # they carry the layer's every symbol - including the menu's - and must compile the menu
+    # sources themselves. This is the whole of the undefined-reference failure on Linux and MinGW.
+    foreach(test test_settled test_exchange)
+      add_executable(${test} src/layer/${test}.c ${NR_MENU_SOURCES} ${NR_IMGUI_SOURCES})
+      target_include_directories(${test} PRIVATE third_party/imgui)
+      target_compile_options(${test} PRIVATE -O2 -UNDEBUG -DIMGUI_DEFINE_MATH_OPERATORS)
+      target_link_libraries(${test} PRIVATE nr_vulkan Threads::Threads)
+      if(WIN32)
+        target_link_libraries(${test} PRIVATE user32 gdi32)
+      endif()
+      nr_output(${test})
+    endforeach()
+    # The five that `#include "nr_layer.c"` instead of linking the library, so they carry the
+    # layer's every symbol - including the menu's - and must compile the menu sources themselves.
+    # This is the whole of the MinGW/Linux undefined-reference failure: the fixtures inherited
+    # `nr_layer.c`'s menu calls and were given no menu sources to satisfy them.
+    # `test_settled` and `test_exchange` are built above, with the layer's own flags; only these
+    # three are new here. All five `#include "nr_layer.c"` and so all five need the menu sources,
+    # but the two above do not get them - which is the other half of the same bug, fixed by adding
+    # the menu sources to them too (see the `NR_LAYER_FIXTURES` list below).
+    #   test_transfer_resources                    (portable, built above)
+    #   test_device_teardown, test_gpu_only        (Windows, built above)
+    set(NR_LAYER_FIXTURES test_transfer_resources)
+    if(WIN32)
+      list(APPEND NR_LAYER_FIXTURES test_device_teardown test_gpu_only)
+    endif()
+    foreach(test ${NR_LAYER_FIXTURES})
+      add_executable(${test} src/layer/${test}.c ${NR_MENU_SOURCES} ${NR_IMGUI_SOURCES})
+      target_include_directories(${test} PRIVATE third_party/imgui)
+      target_compile_options(${test} PRIVATE -O2 -UNDEBUG -DIMGUI_DEFINE_MATH_OPERATORS)
+      target_link_libraries(${test} PRIVATE nr_vulkan)
+      if(WIN32)
+        target_link_libraries(${test} PRIVATE user32 gdi32)
+      endif()
       nr_output(${test})
     endforeach()
   endif()
@@ -191,15 +256,17 @@ if(NR_BUILD_TESTS)
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
   # Policy/transfer lifetime checks use mocked dispatch, so they are useful even
   # when the game layer itself is not built (the Windows compute configuration).
+  # `test_transfer_resources` is NOT here: it `#include "nr_layer.c"` and needs the menu sources,
+  # so it is built with the layer fixtures below.
   find_package(Threads REQUIRED)
-  foreach(test test_surface_policy test_transfer_resources)
+  foreach(test test_surface_policy)
     add_executable(${test} src/layer/${test}.c)
     target_link_libraries(${test} PRIVATE nr_vulkan Threads::Threads)
     target_compile_options(${test} PRIVATE -O2 -UNDEBUG)
     nr_output(${test})
   endforeach()
   if(WIN32)
-    foreach(test test_gpu_bridge test_gpu_rpc test_gpu_rpc_native test_device_teardown test_gpu_only)
+    foreach(test test_gpu_bridge test_gpu_rpc test_gpu_rpc_native)
       add_executable(${test} src/layer/${test}.c)
       target_link_libraries(${test} PRIVATE nr_vulkan)
       target_compile_options(${test} PRIVATE -O2 -UNDEBUG)
@@ -289,10 +356,20 @@ if(NR_BUILD_TESTS)
       set_tests_properties(layer_menu_ui_fixtures PROPERTIES
         REQUIRED_FILES "${NR_WORK_DIR}/test_menu_panel.exe;${NR_WORK_DIR}/test_menu_side.exe;${NR_WORK_DIR}/test_menu_keys.exe;${NR_WORK_DIR}/test_menu_language.exe;${NR_WORK_DIR}/test_menu_actions.exe;${NR_WORK_DIR}/test_menu_pacing.exe;${NR_WORK_DIR}/test_menu_choices.exe")
     endif()
-    # The layer's own input path: the game's registration read before ours and put back after
-    # (PR #20 review, item 1). Like the menu fixtures, Windows-only - it imports user32 - and
-    # off Windows the runner says so rather than skipping.
-    nr_test(layer_menu_keys "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/src/layer/test_menu_keys.py")
+    # Which window in front means "the user is here" - the rule the panel's input gating depends
+    # on. It needs a real window and a focus change, so it self-skips the cases the OS refuses to
+    # set up. The Makefile has always run it; `tools/build_win.bat` builds it as of this change, so
+    # the Windows build finally covers the rule its own input gating rests on.
+    if(WIN32 AND EXISTS "${PROJECT_SOURCE_DIR}/src/layer/test_focus_gate.c")
+      nr_test(layer_focus_gate "${NR_WORK_DIR}/test_focus_gate.exe")
+      set_tests_properties(layer_focus_gate PROPERTIES
+        REQUIRED_FILES "${NR_WORK_DIR}/test_focus_gate.exe")
+    endif()
+    # The hotkey structure is `test_menu_keys.exe`, already run by `layer_menu_ui_fixtures` above.
+    # A separate registration here pointed at a `src/layer/test_menu_keys.py` that is not in the
+    # branch, so every CTest run failed with "can't open file" on an entry nothing needed: the
+    # `.py` would have been a second copy of what the `.cpp` asserts. The registration is gone
+    # rather than satisfied with a file that repeats an existing check.
     nr_test(layer_settings_live "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/src/layer/test_settings_live.py")
     nr_test(layer_menu_rows "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/src/layer/test_menu_rows.py")
   endif()

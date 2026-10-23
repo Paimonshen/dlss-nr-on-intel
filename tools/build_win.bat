@@ -219,6 +219,19 @@ rem the layer's cadence row and every choice knob the bridge produces.
 link /nologo /OUT:"%WORK%\test_menu_choices.exe" "%REPO%\test_menu_choices.obj" "%REPO%\nr_menu.obj" "%REPO%\nr_menu_font.obj" "%REPO%\nr_menu_strings.obj" "%REPO%\nr_menu_strings_lookup.obj" "%REPO%\nr_menu_bridge.obj" "%REPO%\nr_file.obj" "%REPO%\nr_focus.obj" user32.lib gdi32.lib
 if errorlevel 1 ( echo ERROR: test_menu_choices.exe failed & exit /b 1 )
 echo   test_menu_choices.exe
+rem Which window in front means "the user is here". The panel reads the system-wide cursor and key
+rem state, so without this it is driven by whatever the user is doing in ANY window - the reported
+rem bug, where a drag in another application moved a slider. The Makefile has built this for years;
+rem the Windows build did not, which is the one fixture covering the focus rule the panel's input
+rem gating depends on. It needs a real window and a focus change, so it self-skips those cases when
+rem the OS refuses to move focus.
+cl /nologo /O2 /TC /D_WIN32 /I"%VULKAN_SDK%\Include" /I"%REPO%\src\layer" /Fo:"%WORK%\test_focus_gate.obj" /c "%REPO%\src\layer\test_focus_gate.c"
+if errorlevel 1 ( echo ERROR: test_focus_gate compilation failed & exit /b 1 )
+cl /nologo /O2 /TC /D_WIN32 /I"%VULKAN_SDK%\Include" /I"%REPO%\src\layer" /Fo:"%WORK%\nr_focus_for_gate.obj" /c "%REPO%\src\layer\nr_focus.c"
+if errorlevel 1 ( echo ERROR: nr_focus compilation failed & exit /b 1 )
+link /nologo /OUT:"%WORK%\test_focus_gate.exe" "%WORK%\test_focus_gate.obj" "%WORK%\nr_focus_for_gate.obj" user32.lib
+if errorlevel 1 ( echo ERROR: test_focus_gate.exe failed & exit /b 1 )
+echo   test_focus_gate.exe
 del /Q "%REPO%\*.obj" >nul 2>&1
 echo   nr_layer.dll
 echo   nr_layer.dll  (with the INS settings menu: user32, gdi32)
