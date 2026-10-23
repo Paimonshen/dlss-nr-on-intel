@@ -122,7 +122,23 @@ struct nrex_vk {
     VkQueue                    queue;
 };
 
-typedef PFN_vkVoidFunction (*nrex_gpa_fn)(void *device, const char *name);
+/* `vkGetDeviceProcAddr` and `vkGetInstanceProcAddr`, resolved through the C side and called here.
+ *
+ * **`VKAPI_PTR` is load-bearing, and only on x86.** Vulkan's entry points are `__stdcall` there,
+ * which is what `VKAPI_PTR` expands to; declaring the pointer without it makes it `__cdecl`, and
+ * every call unbalances the stack by the size of the two arguments it never cleaned up. On x64 every
+ * convention is the same, so the code was correct for two years on every 64-bit game and crashed a
+ * 32-bit one - Dead or Alive 5, through DXVK, about four seconds in and right after DXVK creates the
+ * swapchain, at an address in no module. That is what a corrupted return address looks like once the
+ * corruption reaches a `ret`.
+ *
+ * **Two typedefs, not one.** They take different first arguments - `VkDevice` for the device
+ * resolver, `VkInstance` for the instance one - and on x86 both of those are `uint64_t` too, so a
+ * single `void *` signature that happened to compile was silently truncating them as well. The C
+ * side passes both through `void *`, which is why nothing complained until the calling convention
+ * was fixed and the compiler could see the mismatch. */
+typedef PFN_vkVoidFunction (VKAPI_PTR *nrex_gpa_device_fn)(VkDevice device, const char *name);
+typedef PFN_vkVoidFunction (VKAPI_PTR *nrex_gpa_instance_fn)(VkInstance instance, const char *name);
 
 struct nrex_ui {
     VkDevice              device;
@@ -273,11 +289,13 @@ static void nrex_drop_target(nrex_ui *u)
     if (u->image_mem)   { u->vk.free_mem(u->device, u->image_mem, nullptr); u->image_mem = VK_NULL_HANDLE; }
 }
 
-/* The load function, kept so the header's contract has a home; everything resolves at create. */
-static nrex_gpa_fn g_saved_gpa = nullptr;
-static nrex_gpa_fn g_saved_gpa_i = nullptr;
-static void *g_saved_instance = nullptr;
-extern "C" nrex_gpa_fn nrex_saved_gpa(void) { return g_saved_gpa; }
+/* The load functions, kept so the header's contract has a home; everything resolves at create.
+ * The instance is kept as `VkInstance` rather than `void *` for the same reason the loader context
+ * is: it is 64 bits on x86 and a pointer is 32. */
+static nrex_gpa_device_fn g_saved_gpa = nullptr;
+static nrex_gpa_instance_fn g_saved_gpa_i = nullptr;
+static VkInstance g_saved_instance = VK_NULL_HANDLE;
+extern "C" void *nrex_saved_gpa(void) { return (void *)(uintptr_t)g_saved_gpa; }
 
 /* A stub for the window-system commands the backend's table names but this menu never calls. */
 static void VKAPI_PTR nrex_noop(void) {}
@@ -304,11 +322,17 @@ extern "C" NREX_API nrex_ui *nrex_create(void *device_v, void *physical_v, void 
     u->queue_family = queue_family;
     u->format = format;
 
-    nrex_gpa_fn gpa = (nrex_gpa_fn)load_fn;
+    /* The two resolvers arrive as `void *` because that is what the plain-C interface can name.
+     * They are cast to their real types here, once, and every later call goes through the typed
+     * pointer - which is what makes the calling convention and the handle width visible to the
+     * compiler instead of silently wrong. */
+    nrex_gpa_device_fn gpa = (nrex_gpa_device_fn)(uintptr_t)load_fn;
     if (!gpa) { *why = "no vkGetDeviceProcAddr for the menu UI"; delete u; return nullptr; }
     g_saved_gpa = gpa;
-    g_saved_gpa_i = (nrex_gpa_fn)load_instance_fn;
-    g_saved_instance = instance_v;   /* a real instance: instance-level commands refuse a NULL one */
+    nrex_gpa_instance_fn gpa_i = (nrex_gpa_instance_fn)(uintptr_t)load_instance_fn;
+    if (!gpa_i) { *why = "no vkGetInstanceProcAddr for the menu UI"; delete u; return nullptr; }
+    g_saved_gpa_i = gpa_i;
+    g_saved_instance = (VkInstance)(uintptr_t)instance_v;   /* a real instance: instance-level commands refuse a NULL one */
 #define NREX_RESOLVE(field, name) \
     u->vk.field = reinterpret_cast<decltype(u->vk.field)>(gpa(u->device, name)); \
     if (!u->vk.field) { *why = "the device has no " name; delete u; return nullptr; }
@@ -320,11 +344,10 @@ extern "C" NREX_API nrex_ui *nrex_create(void *device_v, void *physical_v, void 
     NREX_RESOLVE(img_reqs, "vkGetImageMemoryRequirements")
     /* The physical-device entry points are instance-level; the device proc addr returns them too
      * on every loader this layer supports. */
-    /* Instance-level: the device resolver returns NULL for it by the loader's contract. */
-    nrex_gpa_fn gpa_i = (nrex_gpa_fn)load_instance_fn;
-    if (!gpa_i) { *why = "no vkGetInstanceProcAddr for the menu UI"; delete u; return nullptr; }
+    /* Instance-level: the device resolver returns NULL for it by the loader's contract, so this
+     * one goes to the instance resolver with the instance it was given. */
     u->vk.mem_props = reinterpret_cast<PFN_vkGetPhysicalDeviceMemoryProperties>(
-        gpa_i(instance_v, "vkGetPhysicalDeviceMemoryProperties"));
+        gpa_i(g_saved_instance, "vkGetPhysicalDeviceMemoryProperties"));
     if (!u->vk.mem_props) {
         NREX_ERROR("[menu ui] instance-resolver gave NULL for vkGetPhysicalDeviceMemoryProperties\n");
         *why = "no vkGetPhysicalDeviceMemoryProperties"; delete u; return nullptr;
@@ -479,14 +502,19 @@ extern "C" NREX_API nrex_ui *nrex_create(void *device_v, void *physical_v, void 
     NREX_TRACE("[ui] loading backend functions through the layer's resolvers\n");
     /* Device commands first - nearly all of them - and instance commands from the instance
      * resolver when the device one declines, which is the case for the handful of physical-device
-     * queries: a resolver handed no instance refuses them, so it is the second resolver's job. */
+     * queries: a resolver handed no instance refuses them, so it is the second resolver's job.
+     *
+     * The context is `uint64_t` slots rather than `void *`, because two of the four things in it
+     * are handles that are 64 bits on x86 and 32 bits as a pointer: `VkDevice` and `VkInstance` are
+     * non-dispatchable, so `void *ctx[]` truncated them and the resolver was called with half a
+     * device. Function pointers are the other two, and they fit either way. */
     struct NrexLoader {
         static PFN_vkVoidFunction load(const char *name, void *user) {
-            void **ctx = (void **)user;
-            nrex_gpa_fn gpa_dev = (nrex_gpa_fn)ctx[0];
-            nrex_gpa_fn gpa_ins = (nrex_gpa_fn)ctx[1];
-            PFN_vkVoidFunction f = gpa_dev(ctx[2], name);
-            if (!f) f = gpa_ins(ctx[3], name);
+            uint64_t *ctx = (uint64_t *)user;
+            nrex_gpa_device_fn gpa_dev = (nrex_gpa_device_fn)(uintptr_t)ctx[0];
+            nrex_gpa_instance_fn gpa_ins = (nrex_gpa_instance_fn)(uintptr_t)ctx[1];
+            PFN_vkVoidFunction f = gpa_dev((VkDevice)ctx[2], name);
+            if (!f) f = gpa_ins((VkInstance)ctx[3], name);
             if (!f) {
                 /* Window-system functions (vkDestroySurfaceKHR and friends) come from the
                  * loader's global entry point, which the instance resolver has already covered;
@@ -499,7 +527,9 @@ extern "C" NREX_API nrex_ui *nrex_create(void *device_v, void *physical_v, void 
             return f;
         }
     };
-    void *loaders[4] = { (void *)g_saved_gpa, (void *)g_saved_gpa_i, u->device, g_saved_instance };
+    /* `uint64_t` slots, not `void *`: two of the four are 64-bit handles on x86. */
+    uint64_t loaders[4] = { (uint64_t)(uintptr_t)g_saved_gpa, (uint64_t)(uintptr_t)g_saved_gpa_i,
+                            (uint64_t)u->device, (uint64_t)g_saved_instance };
     if (!ImGui_ImplVulkan_LoadFunctions(init.ApiVersion, &NrexLoader::load, loaders)) {
         *why = "the ImGui Vulkan backend could not load its commands";
         ImGui::DestroyContext();
@@ -1457,10 +1487,12 @@ extern "C" NREX_API void nrex_mouse(nrex_ui *ui, float x, float y, int down)
     io.AddMousePosEvent(x, y);
     io.AddMouseButtonEvent(0, down != 0);
 }
-extern "C" NREX_API void *nrex_image(nrex_ui *ui) { return ui ? (void *)ui->image : nullptr; }
+/* `uint64_t`, not `void *`: on x86 a Vulkan non-dispatchable handle is 64 bits and a pointer is 32,
+ * so a `void *` return dropped the top half of `VkImage`/`VkImageView`. See the header. */
+extern "C" NREX_API uint64_t nrex_image(nrex_ui *ui) { return ui ? (uint64_t)ui->image : 0; }
 /* The view, for the blend pass: the shader samples the UI through an image view, and the caller
  * has no other way to reach one it did not create. */
-extern "C" NREX_API void *nrex_image_view(nrex_ui *ui) { return ui ? (void *)ui->image_view : nullptr; }
+extern "C" NREX_API uint64_t nrex_image_view(nrex_ui *ui) { return ui ? (uint64_t)ui->image_view : 0; }
 extern "C" NREX_API void *nrex_image_layout_transition(nrex_ui *ui) { (void)ui; return nullptr; }
 extern "C" NREX_API uint32_t nrex_image_width(nrex_ui *ui) { return ui ? ui->width : 0; }
 extern "C" NREX_API uint32_t nrex_image_height(nrex_ui *ui) { return ui ? ui->height : 0; }

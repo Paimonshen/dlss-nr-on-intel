@@ -170,10 +170,20 @@ void nrex_set_software_cursor(nrex_ui *ui, int on);
 void nrex_cursor_hint(nrex_ui *ui, float x, float y);
 
 /* The intermediate image the UI rendered into this frame, for the caller's blend-copy. Valid until
- * the next nrex_new_frame. The C side has the storage-image copy it needs. */
-void *nrex_image(nrex_ui *ui);
+ * the next nrex_new_frame. The C side has the storage-image copy it needs.
+ *
+ * **These return `uint64_t`, not `void *`, and that is the x86 half of the 32-bit crash.** Vulkan's
+ * non-dispatchable handles (`VkImage`, `VkImageView`) are `uint64_t` whenever
+ * `VK_USE_64_BIT_PTR_DEFINES` is 0 - which is every 32-bit build, because the macro keys on
+ * `_WIN64`/`__LP64__` and neither is set there. A `void *` return is 32 bits on that platform, so
+ * the top half of the handle was dropped and the blend pass was handed a truncated value: the image
+ * view created from it failed, or bound to something that was not the panel's image. On x64 the
+ * handle IS a pointer, so the same signature was correct for two years on every 64-bit game.
+ *
+ * The C side casts through `uintptr_t` at every use site, which is wide enough on both. */
+uint64_t nrex_image(nrex_ui *ui);
 /* The image VIEW: the blend pass samples the UI through it. */
-void *nrex_image_view(nrex_ui *ui);
+uint64_t nrex_image_view(nrex_ui *ui);
 uint32_t nrex_image_width(nrex_ui *ui);
 uint32_t nrex_image_height(nrex_ui *ui);
 

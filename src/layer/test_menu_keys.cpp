@@ -155,6 +155,52 @@ int main(void)
               ? "claimed"
               : "not claimed - Home will move the selection instead of toggling the effect");
 
+    /* ---- the C/C++ boundary is 32-bit safe ----
+     *
+     * Dead or Alive 5 is a 32-bit DirectX 9 game, and it crashed with the panel open about four
+     * seconds in, right after DXVK creates the swapchain, at an address in no module. Two defects,
+     * both invisible on x64 where every calling convention is the same and every handle is a
+     * pointer:
+     *
+     *   1. The GPA typedef had no `VKAPI_PTR`. On x86 Vulkan's entry points are `__stdcall`, so
+     *      every resolve unbalanced the stack by the two arguments it never cleaned up - a
+     *      corrupted return address, which is what a wild `ret` address looks like.
+     *   2. `nrex_image` / `nrex_image_view` returned `void *`. Vulkan's non-dispatchable handles are
+     *      `uint64_t` on 32-bit builds (the macro keys on `_WIN64`/`__LP64__`), so a pointer return
+     *      dropped the top half and the blend pass was handed a truncated handle.
+     *
+     * A third one the second exposed: the loader context was `void *ctx[]`, and two of its four
+     * slots are `VkDevice`/`VkInstance`, which are 64 bits there too.
+     *
+     * These are read from the source because the defect is a TYPE, and a type is not something a
+     * running test can observe on the platform where it is harmless. The assertions are negative
+     * on purpose: they fail if someone reintroduces the shape. */
+    check(find(usource, "VKAPI_PTR *nrex_gpa_device_fn"),
+          "the device resolver carries VKAPI_PTR",
+          find(usource, "VKAPI_PTR *nrex_gpa_device_fn")
+              ? "__stdcall on x86" : "MISSING - the stack unbalances by 8 bytes per call on 32-bit");
+    check(find(usource, "VKAPI_PTR *nrex_gpa_instance_fn"),
+          "the instance resolver carries VKAPI_PTR",
+          find(usource, "VKAPI_PTR *nrex_gpa_instance_fn")
+              ? "__stdcall on x86" : "MISSING");
+    check(find(usource, "uint64_t nrex_image(nrex_ui *ui)"),
+          "nrex_image returns a 64-bit handle",
+          find(usource, "uint64_t nrex_image(nrex_ui *ui)")
+              ? "uint64_t" : "MISSING - a void* return truncates VkImage on x86");
+    check(find(usource, "uint64_t nrex_image_view(nrex_ui *ui)"),
+          "nrex_image_view returns a 64-bit handle",
+          find(usource, "uint64_t nrex_image_view(nrex_ui *ui)")
+              ? "uint64_t" : "MISSING - a void* return truncates VkImageView on x86");
+    check(!find(usource, "void **ctx = (void **)user"),
+          "the loader context is not void* slots",
+          find(usource, "void **ctx = (void **)user")
+              ? "back to void* - VkDevice and VkInstance are truncated on x86"
+              : "uint64_t slots");
+    check(find(usource, "uint64_t *ctx = (uint64_t *)user"),
+          "the loader context uses 64-bit slots",
+          find(usource, "uint64_t *ctx = (uint64_t *)user")
+              ? "uint64_t slots" : "MISSING");
+
     printf("\n%s: %d failure(s)\n", failures ? "FAILED" : "ok", failures);
     return failures ? 1 : 0;
 }
