@@ -23,6 +23,10 @@
  * The folder the game was started in goes into dlss-nr\start-folders.txt, for Remove NR: DXVK
  * opens its first log there before it loads this DLL, so before DXVK_LOG_PATH is set.
  *
+ * NR_PROXY_TRACE=1 turns on the launch trace: one line per launch into dlss-nr\proxy-log.txt and
+ * the same line on stderr. Off by default, because it runs from DllMain in every process that
+ * loads the proxy, not only the game's.
+ *
  * The launch record carries the process's integrity level. Windows' Vulkan loader ignores
  * VK_LAYER_PATH in a process at High integrity or above, as administrator or with UAC off
  * (Vulkan-Loader's is_high_integrity): such a game gets these variables and never NR's layer,
@@ -224,12 +228,37 @@ static void record_start_folder(const wchar_t *folder)
  * invisible: if the game is started in a way that never loads this DLL, or loads it into a process
  * that is not the game, nothing anywhere says so - the game simply runs without NR. A launch from
  * Steam and a launch from a script are different enough that guessing which branch was taken is
- * not a method; this records the branch. Appended, so a run of launches can be compared. */
+ * not a method; this records the branch. Appended, so a run of launches can be compared.
+ *
+ * **Opt-in, `NR_PROXY_TRACE=1`.** This runs from `DllMain` in every process that loads the proxy
+ * from the game folder - the game, and any launcher or crash reporter that loads the loader - and
+ * it wrote a file and a line on stderr on every one of those launches whether anybody had asked
+ * for it. The shape follows `NR_MENU_DUMP` rather than `NR_MENU`: the panel's switch is opt-out
+ * because its cost is per frame, and this one's is per launch, so the default is off. */
+static int proxy_trace_on(void)
+{
+	static int cached = -1;
+	if (cached < 0) {
+		wchar_t value[8];
+		DWORD got = GetEnvironmentVariableW(L"NR_PROXY_TRACE", value, 8);
+		cached = (got && got < 8 && value[0] == L'1') ? 1 : 0;
+	}
+	return cached;
+}
+
 static void trace_launch(const wchar_t *folder, const wchar_t *what)
 {
+	if (!proxy_trace_on()) return;
 	wchar_t path[MAX_PATH * 2 + 40];
 	swprintf(path, MAX_PATH * 2 + 40, L"%ls\\dlss-nr\\proxy-log.txt", folder);
-	HANDLE file = CreateFileW(path, GENERIC_WRITE | FILE_APPEND_DATA, FILE_SHARE_READ, NULL,
+	/* `GENERIC_READ | FILE_APPEND_DATA`, not `GENERIC_WRITE | FILE_APPEND_DATA`.
+	 *
+	 * `GENERIC_WRITE` expands to include `FILE_WRITE_DATA`, and with that present the write is
+	 * NOT forced to the end of the file: the handle's pointer starts at 0, so every line landed at
+	 * offset 0 and the file held only the last one. The comment above used to claim "Appended, so
+	 * a run of launches can be compared" while the file could not have held two lines if it tried.
+	 * `record_start_folder` in this same file gets it right, and says why. */
+	HANDLE file = CreateFileW(path, GENERIC_READ | FILE_APPEND_DATA, FILE_SHARE_READ, NULL,
 				  OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
 	if (file == INVALID_HANDLE_VALUE) return;
 	char line[16384];
@@ -256,7 +285,9 @@ static void trace_launch(const wchar_t *folder, const wchar_t *what)
 
 	/* The same line on stderr, which the caller can redirect and read without racing the file.
 	 * A game launched by Steam has no visible stderr, but a game launched by a script does - and
-	 * the comparison between the two launches is the whole point of this trace. */
+	 * the comparison between the two launches is the whole point of this trace. Gated with the
+	 * rest: an unconditional `fwrite` per launch in every process that loads the proxy is the
+	 * thing the switch exists to stop. */
 	{
 		static char narrow[16384];
 		int m = WideCharToMultiByte(CP_UTF8, 0, wide, -1, narrow, (int)sizeof narrow, NULL, NULL);

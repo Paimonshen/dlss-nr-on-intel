@@ -52,6 +52,7 @@
  * text, so this file needs to reach them. */
 #include "nr_menu_strings.h"
 #include "nr_menu_font.h"
+#include "nr_layer_cadence.h"   /* CADENCE_NAME_STORE: the one size the store and its test share */
 
 /* ------------------------------------------------------------------ diagnostics
  *
@@ -85,7 +86,8 @@
 #  ifndef F_OK
 #    define F_OK 0
 #  endif
-#  ifndef access#    define access(p, m) _access(p, m)
+#  ifndef access
+#    define access(p, m) _access(p, m)
 #  endif
 #else
 #  include <pthread.h>
@@ -2330,7 +2332,12 @@ static int menu_ui_rows(struct device_data *data, nrex_row *out, int capacity)
 		 * three left the fourth entry pointing at whatever the static held - which ImGui showed
 		 * as `*Unknown item*` in the opened combo. This is the same shape as the `*Unknown item*`
 		 * the profiles row had: a NULL written over an entry the count still offered. */
-		static char every_names_store[4][24];
+		/* 48, not 24: the longest option any language builds is 27 bytes - Russian
+		 * "каждые 2 кадров" - and 24 held 23 plus the terminator, so every Russian option was
+		 * cut mid-word. Cyrillic is 2 bytes a character and Chinese 3, so this has to be
+		 * counted in bytes and never in characters. The number lives in nr_layer_cadence.h so
+		 * the test that catches this uses the same one. */
+		static char every_names_store[4][CADENCE_NAME_STORE];
 		static const char *every_names[5];
 		int every = nr_menu_bridge_pacing_every(data->menu_bridge);
 		int pipelined = nr_menu_bridge_pacing_async(data->menu_bridge);
@@ -2383,24 +2390,40 @@ static int menu_ui_rows(struct device_data *data, nrex_row *out, int capacity)
 			r->hint = nr_menu_text(language, NR_STR_EVERY_HINT);
 			r->kind = NREX_KIND_CHOICE;
 			for (int c = 0; c < 4; ++c) {
-				/* One string per option, from the table: "every frame" is its own key and the
-				 * others are "every N frames", so a language with a different word order needs
-				 * no formatting in this file. `every_names_store` holds what was built, and the
-				 * terminator at 4 is what keeps the combo from offering a fifth, empty entry. */
-				if (c == 0)
-					snprintf(every_names_store[c], sizeof every_names_store[c], "%s",
-					         nr_menu_text(language, NR_STR_EVERY_FRAME));
-				else {
-					const char *shape = nr_menu_text(language, NR_STR_EVERY_NTH);
-					const char *brace = strstr(shape, "{}");
-					if (brace) {
-						int head = (int)(brace - shape);
-						snprintf(every_names_store[c], sizeof every_names_store[c],
-						         "%.*s%d%s", head, shape, c + 1, brace + 2);
-					} else
-						snprintf(every_names_store[c], sizeof every_names_store[c],
-						         "%s %d", shape, c + 1);
+				/* One string per option, from the table, so a language with a different word order
+				 * needs no formatting in this file.
+				 *
+				 * Three keys, not one, because Russian has three plural forms and a single `{}`
+				 * cannot choose between them: 1 kadr, 2-4 kadra, 5+ kadrov. English, Spanish and
+				 * Chinese do not inflect, so their `few` and `many` are the same string and only
+				 * Russian is visibly different. The count picks the key; the `{}` inside takes the
+				 * number.
+				 *
+				 * `every_names_store` holds what was built, and the terminator at 4 is what keeps
+				 * the combo from offering a fifth, empty entry. */
+				int key = (c == 0) ? NR_STR_EVERY_FRAME
+				         : (c + 1 < 5) ? NR_STR_EVERY_NTH_FEW
+				         : NR_STR_EVERY_NTH_MANY;
+				const char *shape = nr_menu_text(language, key);
+				const char *brace = strstr(shape, "{}");
+				/* 48, not 24. The longest option any language builds is 27 bytes - Russian
+				 * "kazhdye 2 kadrov" - and 24 held 23 plus the terminator, so every Russian option
+				 * was cut mid-word: that is what "kazhdye 2 kadr" in the panel was. Cyrillic is 2
+				 * bytes a character and Chinese 3, so this has to be counted in bytes and never in
+				 * characters. `snprintf` truncates in silence, so its return is checked and an
+				 * over-long one falls back to the untranslated shape rather than half a word. It
+				 * cannot happen with today's tables; this is the guard for the next language. */
+				int n;
+				if (brace) {
+					int head = (int)(brace - shape);
+					n = snprintf(every_names_store[c], sizeof every_names_store[c],
+					             "%.*s%d%s", head, shape, c + 1, brace + 2);
+				} else {
+					n = snprintf(every_names_store[c], sizeof every_names_store[c],
+					             "%s %d", shape, c + 1);
 				}
+				if (n < 0 || n >= (int)sizeof every_names_store[c])
+					snprintf(every_names_store[c], sizeof every_names_store[c], "%s", shape);
 				every_names[c] = every_names_store[c];
 			}
 			every_names[4] = NULL;

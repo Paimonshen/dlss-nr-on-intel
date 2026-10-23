@@ -14,6 +14,7 @@
 #include "nr_menu.h"
 #include "nr_menu_bridge.h"
 #include "nr_menu_strings.h"   /* nr_menu_text: the table the pacing rows are read from */
+#include "nr_layer_cadence.h"  /* CADENCE_NAME_STORE: the same number nr_layer.c sizes its store with */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -699,13 +700,14 @@ int main(void)
          * Español and every one of these rows in English. */
         static const int keys[] = {
             NR_STR_ASYNC, NR_STR_ASYNC_HINT, NR_STR_GPU_IMAGE, NR_STR_GPU_IMAGE_HINT,
-            NR_STR_EVERY, NR_STR_EVERY_HINT, NR_STR_EVERY_FRAME, NR_STR_EVERY_NTH,
+            NR_STR_EVERY, NR_STR_EVERY_HINT, NR_STR_EVERY_FRAME,
+            NR_STR_EVERY_NTH_FEW, NR_STR_EVERY_NTH_MANY,
             NR_STR_GPU_BLOCKED_BOTH, NR_STR_GPU_BLOCKED_DETAIL, NR_STR_GPU_BLOCKED_COLOUR,
         };
         static const char *const key_names[] = {
             "async", "async_hint", "gpu_image", "gpu_image_hint", "every", "every_hint",
-            "every_frame", "every_nth", "gpu_blocked_both", "gpu_blocked_detail",
-            "gpu_blocked_colour",
+            "every_frame", "every_nth_few", "every_nth_many", "gpu_blocked_both",
+            "gpu_blocked_detail", "gpu_blocked_colour",
         };
         int count = (int)(sizeof keys / sizeof keys[0]);
         for (int i = 0; i < count; ++i) {
@@ -731,13 +733,71 @@ int main(void)
                      lang == 1 ? "zh" : lang == 2 ? "ru" : "es");
             check(same == 0, "and no language is left saying the English row", detail);
         }
-        /* The cadence options are built from `every_nth` by replacing the braces, so a translation
-         * that dropped them would render "every frames" with the number missing. */
+        /* The cadence options are built by replacing the braces in the plural forms, so a
+         * translation that dropped them would render "every frames" with the number missing.
+         * Both forms carry one, and the English/Spanish/Chinese `many` being the same string as
+         * their `few` is fine - only Russian inflects, and this checks the mechanism, not the
+         * grammar. The grammar is checked below, where the built options are read back. */
         int braces = 1;
-        for (int lang = 0; lang < NR_MENU_LANG_COUNT; ++lang)
-            if (strstr(nr_menu_text(lang, NR_STR_EVERY_NTH), "{}") == NULL) braces = 0;
-        check(braces, "every_nth keeps a {} for the number in all four languages",
+        for (int lang = 0; lang < NR_MENU_LANG_COUNT; ++lang) {
+            if (strstr(nr_menu_text(lang, NR_STR_EVERY_NTH_FEW), "{}") == NULL) braces = 0;
+            if (strstr(nr_menu_text(lang, NR_STR_EVERY_NTH_MANY), "{}") == NULL) braces = 0;
+        }
+        check(braces, "both cadence plural forms keep a {} in all four languages",
               braces ? "four of four" : "ONE OR MORE MISSING");
+
+        /* ---- the store is wide enough, and Russian inflects ----
+         *
+         * Two separate bugs lived here, and both have to be checked because fixing either one
+         * alone leaves the other:
+         *
+         *   1. `every_names_store[4][24]` held 23 bytes plus the terminator, and the longest
+         *      option any language builds is 27 - Russian "каждые 2 кадров". Every Russian option
+         *      was cut mid-word: the panel read "каждые 2 кадр". Cyrillic is 2 bytes a character,
+         *      which is why counting characters instead of bytes gets the wrong answer.
+         *   2. One `{}` in one string cannot choose between Russian's three plural forms. 2, 3
+         *      and 4 all want кадра, and 5 and up want кадров.
+         *
+         * The first is checked by measuring what the loop builds against the store the loop
+         * actually uses; the second by reading back what the two forms actually say. Neither is
+         * something a running test on a 64-bit machine can observe, which is why both are stated
+         * as facts about the table.
+         *
+         * `CADENCE_NAME_STORE` is the same constant `nr_layer.c` sizes its store with, declared
+         * in `nr_layer_cadence.h` so there is one number. An earlier version of this check wrote
+         * `<= 48` literally, which meant shrinking the store to 24 did not fail it - the check
+         * was measuring the strings and comparing them to a number nobody else used. */
+        for (int lang = 0; lang < NR_MENU_LANG_COUNT; ++lang) {
+            const char *forms[2] = { nr_menu_text(lang, NR_STR_EVERY_NTH_FEW),
+                                     nr_menu_text(lang, NR_STR_EVERY_NTH_MANY) };
+            int worst = 0;
+            for (int f = 0; f < 2; ++f) {
+                const char *brace = strstr(forms[f], "{}");
+                int head = brace ? (int)(brace - forms[f]) : (int)strlen(forms[f]);
+                char built[CADENCE_NAME_STORE];
+                int n = snprintf(built, sizeof built, "%.*s%d%s", head, forms[f], 2,
+                                 brace ? brace + 2 : "");
+                if (n > worst) worst = n;
+            }
+            const char *frame = nr_menu_text(lang, NR_STR_EVERY_FRAME);
+            if ((int)strlen(frame) > worst) worst = (int)strlen(frame);
+            snprintf(detail, sizeof detail, "longest option %d bytes, store holds %d",
+                     worst, CADENCE_NAME_STORE - 1);
+            check(worst < CADENCE_NAME_STORE,
+                  "the cadence store is wide enough in every language", detail);
+        }
+        /* Russian is the only language that inflects, so it is the only one whose two forms can
+         * differ. English, Spanish and Chinese saying the same thing is correct, not a missing
+         * translation - which is why this asserts the Russian forms are the ones that differ. */
+        const char *ru_few = nr_menu_text(NR_LANG_RU, NR_STR_EVERY_NTH_FEW);
+        const char *ru_many = nr_menu_text(NR_LANG_RU, NR_STR_EVERY_NTH_MANY);
+        check(strcmp(ru_few, ru_many) != 0,
+              "Russian's two cadence forms differ",
+              strcmp(ru_few, ru_many) != 0 ? "кадра for 2-4, кадров for 5+"
+                                           : "SAME STRING - one of the counts is wrong");
+        check(strstr(ru_few, "\u043a\u0430\u0434\u0440\u0430") != NULL,
+              "and the 2-4 form says кадра",
+              strstr(ru_few, "\u043a\u0430\u0434\u0440\u0430") ? "кадра" : "NOT кадра");
     }
 
     /* ---- the GPU row explains itself when the path cannot run ---- */

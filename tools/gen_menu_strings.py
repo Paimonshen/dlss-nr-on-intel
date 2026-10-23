@@ -73,7 +73,13 @@ EXTRA = {
                                        "runs faster and the picture changes only when the network "
                                        "produces one. Takes effect at the next game start."),
     "every_frame":    (None,           "every frame"),
-    "every_nth":      (None,           "every {} frames"),
+    # The cadence's other options, in two plural forms because Russian needs them: 2-4 takes
+    # `every_nth_few` (каждые 2 кадра) and 5 and up takes `every_nth_many` (каждые 5 кадров).
+    # English, Spanish and Chinese do not inflect, so their two forms are the same string and
+    # only Russian is visibly different. The count picks the key in nr_layer.c; the `{}` inside
+    # it takes the number, so a language with a different word order needs no C.
+    "every_nth_few":  (None,           "every {} frames"),
+    "every_nth_many": (None,           "every {} frames"),
     # Why the GPU image path is not running while its row says it is on: the daemon's own
     # `fallback_reason` for this case, said in the panel's language. One key per case.
     "gpu_blocked_both": (None,         "Detail and colour strength are both not 1, which GPU "
@@ -121,7 +127,8 @@ OWN = {
                          "and the picture changes only when the network produces one. "
                          "Takes effect at the next game start.",
         "every_frame":   "every frame",
-        "every_nth":     "every {} frames",
+        "every_nth_few":  "every {} frames",
+        "every_nth_many": "every {} frames",
         "gpu_blocked_both": "Detail and colour strength are both not 1, which GPU composition does "
                             "not accept: the picture is still processed, on the CPU path. Set both "
                             "to 1 to use the GPU path.",
@@ -154,7 +161,8 @@ OWN = {
         "every_hint":    "\u5176\u95f4\u5404\u5e27\u91cd\u590d\u4e0a\u4e00\u6b21\u7ed3\u679c\uff1a\u6e38\u620f\u8dd1\u5f97\u66f4\u5feb\uff0c"
                          "\u753b\u9762\u53ea\u5728\u7f51\u7edc\u51fa\u5e27\u65f6\u53d8\u5316\u3002\u4e0b\u6b21\u6e38\u620f\u542f\u52a8\u751f\u6548\u3002",
         "every_frame":   "\u6bcf\u5e27",
-        "every_nth":     "\u6bcf {} \u5e27",
+        "every_nth_few":  "\u6bcf {} \u5e27",
+        "every_nth_many": "\u6bcf {} \u5e27",
         "gpu_blocked_both": "\u7ec6\u8282\u5f3a\u5ea6\u548c\u8272\u5f69\u5f3a\u5ea6\u90fd\u4e0d\u4e3a 1\uff0cGPU \u5408\u6210\u4e0d\u63a5\u53d7\u8fd9\u5bf9\u53d6\u503c\uff1a"
                             "\u753b\u9762\u4ecd\u5728\u5904\u7406\uff0c\u4f46\u8d70\u7684\u662f CPU \u8def\u5f84\u3002"
                             "\u628a\u4e24\u9879\u90fd\u8c03\u56de 1 \u518d\u7528 GPU \u8def\u5f84\u3002",
@@ -202,7 +210,9 @@ OWN = {
                          "\u0441\u0435\u0442\u044c \u0432\u044b\u0434\u0430\u0451\u0442 \u043a\u0430\u0434\u0440. "
                           "\u041f\u0440\u0438\u043c\u0435\u043d\u0438\u0442\u0441\u044f \u043f\u0440\u0438 \u0441\u043b\u0435\u0434\u0443\u044e\u0449\u0435\u043c \u0437\u0430\u043f\u0443\u0441\u043a\u0435 \u0438\u0433\u0440\u044b.",
         "every_frame":   "\u043a\u0430\u0436\u0434\u044b\u0439 \u043a\u0430\u0434\u0440",
-        "every_nth":     "\u043a\u0430\u0436\u0434\u044b\u0435 {} \u043a\u0430\u0434\u0440\u043e\u0432",
+        # 2-4 takes кадра and 5 and up takes кадров: Russian inflects, and one `{}` cannot choose.
+        "every_nth_few":  "\u043a\u0430\u0436\u0434\u044b\u0435 {} \u043a\u0430\u0434\u0440\u0430",
+        "every_nth_many": "\u043a\u0430\u0436\u0434\u044b\u0435 {} \u043a\u0430\u0434\u0440\u043e\u0432",
         "gpu_blocked_both": "\u0421\u0438\u043b\u0430 \u0434\u0435\u0442\u0430\u043b\u0435\u0439 \u0438 \u0441\u0438\u043b\u0430 \u0446\u0432\u0435\u0442\u0430 "
                             "\u043e\u0431\u0435 \u043d\u0435 \u0440\u0430\u0432\u043d\u044b 1, \u0430 GPU-\u043a\u043e\u043c\u043f\u043e\u0437\u0438\u0446\u0438\u044f "
                             "\u0442\u0430\u043a\u0438\u0435 \u0437\u043d\u0430\u0447\u0435\u043d\u0438\u044f \u043d\u0435 \u043f\u0440\u0438\u043d\u0438\u043c\u0430\u0435\u0442: "
@@ -244,7 +254,8 @@ OWN = {
                          "m\u00e1s r\u00e1pido y la imagen solo cambia cuando la red produce uno. "
                          "Se aplica en el pr\u00f3ximo inicio del juego.",
         "every_frame":   "cada fotograma",
-        "every_nth":     "cada {} fotogramas",
+        "every_nth_few":  "cada {} fotogramas",
+        "every_nth_many": "cada {} fotogramas",
         "gpu_blocked_both": "Ni la fuerza del detalle ni la del color son 1, y la composici\u00f3n por "
                             "GPU no acepta esa pareja: la imagen se sigue procesando, en la ruta "
                             "de CPU. Pon las dos en 1 para usar la ruta de GPU.",

@@ -23,7 +23,14 @@ import zipfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 VENDORED = ROOT / "third_party" / "imgui"
-DEFAULT_ARCHIVE = pathlib.Path(r"F:\Downloads\imgui-1.93.0.zip")
+# Where to look when no path is given, in order, and the first one that exists wins. A single
+# hardcoded absolute path was here before - `F:\Downloads\imgui-1.93.0.zip`, one machine's
+# download folder - so the tool could only ever run there and said nothing useful anywhere else.
+CANDIDATES = (
+    pathlib.Path(r"F:\Downloads\imgui-1.93.0.zip"),
+    pathlib.Path.home() / "Downloads" / "imgui-1.93.0.zip",
+)
+DEFAULT_ARCHIVE = next((p for p in CANDIDATES if p.is_file()), CANDIDATES[0])
 
 
 def compare(archive: pathlib.Path) -> int:
