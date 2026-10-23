@@ -20,6 +20,7 @@
  */
 #include "nr_menu.h"
 #include "nr_menu_bridge.h"
+#include "nr_menu_strings.h"   /* NR_LANG_EN, and the labels the choice list is filled with */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -100,7 +101,7 @@ int main(void)
             int empties = 0;
             for (int c = 0; c < count; ++c) {
                 name[0] = '\0';
-                nr_menu_bridge_knob_choice_name(i, c, name, sizeof name);
+                nr_menu_bridge_knob_choice_name(i, c, NR_LANG_EN, name, sizeof name);
                 if (!name[0]) ++empties;
             }
             if (empties) {
@@ -125,10 +126,55 @@ int main(void)
                 /* One past the end: `_choice_name` bounds-checks, so an out-of-range index
                  * leaves the buffer untouched - which here means the sentinel stands. */
                 name[0] = '\0';
-                nr_menu_bridge_knob_choice_name(i, count, name, sizeof name);
+                nr_menu_bridge_knob_choice_name(i, count, NR_LANG_EN, name, sizeof name);
                 if (name[0]) ++refused;
             }
             check(refused == 0, "an index past the end names nothing", refused ? "wrote one" : "");
+        }
+
+        /* ---- a choice value's label is the label, not whichever string sits nearby ----
+         *
+         * The Network row's options used to be the raw names `ht` / `cc_small_fp8`, and the fix
+         * maps them to a translated label through `nr_menu_extra_key_for`. That lookup returns
+         * `NR_MENU_KNOB_COUNT + position`, so the position has to be the TABLE's position - and
+         * the choice labels were first written at the end of that list while the generator emits
+         * them in the middle. Nothing failed: every entry is a valid string, so the row showed the
+         * GPU-blocker sentence as its two options and the emptiness checks above all passed.
+         *
+         * This asks for the label by row and checks it is ABOUT the network, which is the only
+         * kind of assertion that catches an off-by-N into a neighbouring key. The row is found by
+         * name through the public accessors rather than by index, so a knob added later does not
+         * silently move what this checks. */
+        {
+            int weights = -1;
+            for (int i = 0; i < nr_menu_bridge_row_count(b); ++i) {
+                const char *key = nr_menu_bridge_knob_name(i);
+                if (key && strcmp(key, "weights") == 0) { weights = i; break; }
+            }
+            check(weights >= 0, "the weights knob is in the table",
+                  weights >= 0 ? "found" : "MISSING");
+            if (weights >= 0 && nr_menu_bridge_knob_choice_count(weights) == 2) {
+                char first[160] = "", second[160] = "";
+                nr_menu_bridge_knob_choice_name(weights, 0, NR_LANG_EN, first, sizeof first);
+                nr_menu_bridge_knob_choice_name(weights, 1, NR_LANG_EN, second, sizeof second);
+                int about_a = strstr(first, "HT") != NULL;
+                int about_b = strstr(second, "FP8") != NULL || strstr(second, "small") != NULL;
+                char detail[320];
+                snprintf(detail, sizeof detail, "A reads '%.70s' and B reads '%.70s'",
+                         first, second);
+                check(about_a && about_b, "the network row's options are about the network", detail);
+                /* And in every language, because a label present in English and absent elsewhere
+                 * is the shape of the four-language bugs this project has already had. */
+                int blank = 0;
+                for (int lang = 0; lang < NR_MENU_LANG_COUNT; ++lang) {
+                    char a[160] = "", c[160] = "";
+                    nr_menu_bridge_knob_choice_name(weights, 0, lang, a, sizeof a);
+                    nr_menu_bridge_knob_choice_name(weights, 1, lang, c, sizeof c);
+                    if (!a[0] || !c[0]) ++blank;
+                }
+                check(blank == 0, "and both are labelled in all four languages",
+                      blank ? "one or more blank" : "four of four");
+            }
         }
 
         nr_menu_bridge_destroy(b);

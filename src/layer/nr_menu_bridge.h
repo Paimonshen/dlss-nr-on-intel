@@ -222,7 +222,10 @@ const char *nr_menu_bridge_knob_name(int index);
  * `_choice_index` is the option currently set, or 0 for a numeric knob. */
 #define NR_KNOB_CHOICE_NAME_SIZE 32
 int nr_menu_bridge_knob_choice_count(int index);
-void nr_menu_bridge_knob_choice_name(int index, int which, char *out, size_t size);
+/* The option's LABEL for the panel's list, in `language` - not the raw name. The raw name is what
+ * the daemon resolves and what the settings file stores, and the write paths keep using it; this
+ * is display only. A value with no translated label falls back to the raw name. */
+void nr_menu_bridge_knob_choice_name(int index, int which, int language, char *out, size_t size);
 int nr_menu_bridge_knob_choice_index(const nr_menu_bridge *bridge, int index);
 
 int nr_menu_bridge_knob_range(int index, float *low, float *high, float *step,

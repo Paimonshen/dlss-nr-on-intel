@@ -412,7 +412,7 @@ int main(void)
         check(options >= 2, "the network knob offers more than one", detail);
         nr_menu_bridge_set(b, network, 1.0f);
         char chosen[32] = "";
-        nr_menu_bridge_knob_choice_name(network, 1, chosen, sizeof chosen);
+        nr_menu_bridge_knob_choice_name(network, 1, NR_LANG_EN, chosen, sizeof chosen);
         snprintf(detail, sizeof detail, "chose %s, row shows %s",
                  chosen, nr_menu_bridge_row_value(b, network));
         check(nr_menu_bridge_knob_choice_index(b, network) == 1, "the second network is chosen", detail);

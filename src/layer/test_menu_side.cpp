@@ -64,7 +64,7 @@ static int build_rows(nr_menu_bridge *b)
             rows[n].choice_count = choices;
             rows[n].choice_index = nr_menu_bridge_knob_choice_index(b, i);
             for (int c = 0; c < choices; ++c) {
-                nr_menu_bridge_knob_choice_name(i, c, storage[n][c], sizeof storage[n][c]);
+                nr_menu_bridge_knob_choice_name(i, c, NR_LANG_EN, storage[n][c], sizeof storage[n][c]);
                 names[n][c] = storage[n][c];
             }
             rows[n].choices = (const char *const *)names[n];

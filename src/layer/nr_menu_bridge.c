@@ -305,12 +305,48 @@ static int choice_count(const nr_knob_def *k)
     return count;
 }
 
+/* What the panel SHOWS for a choice value, as opposed to what it WRITES.
+ *
+ * `b->choice[i]` holds the raw name - `ht`, `cc_small_fp8`, `standard` - because that is what the
+ * daemon resolves and what the settings file stores. Showing it meant the Network row read
+ * `ht` while the setup window beside it said "A: HT, the model this project reproduces", and the
+ * row's own hint already explained both names. The value is what the row is FOR; it should not
+ * require reading a tooltip to understand.
+ *
+ * So this maps the raw name to a translated label through the same generated table every other
+ * string in the panel comes from, and returns the raw name when there is no label - which is the
+ * case for every other choice knob today, and the case for this one in a language that has not
+ * been given the strings. Falling back to the raw name is right: it is what the daemon will be
+ * given, and it is never wrong, only terse.
+ *
+ * **Nothing here may change what is written.** The write paths read `b->choice[i]`
+ * (`nr_menu_bridge_set`, the settings writer, the reset path) and must keep receiving the raw
+ * name. This function is for `format_row`'s `shown` and for the choice list the layer draws,
+ * exactly as `label_for` is display-only for a row's name. */
+static const char *choice_label(const nr_knob_def *k, int index, int language)
+{
+    static char raw[NR_KNOB_CHOICE_NAME_SIZE];
+    choice_name(k, index, raw, sizeof raw);
+    if (!raw[0]) return raw;
+
+    /* `Choice.<knob>.<value>`, the same key the setup window's table uses - so the two UIs read
+     * one translation and cannot drift, which is the generator's whole purpose. */
+    char key[96];
+    int n = snprintf(key, sizeof key, "choice_%s_%s", k->key, raw);
+    if (n <= 0 || (size_t)n >= sizeof key) return raw;
+    int slot = nr_menu_extra_key_for(key);
+    if (slot < 0) return raw;
+    const char *text = nr_menu_text(language, slot);
+    return (text && *text) ? text : raw;
+}
+
 static void format_row(nr_menu_bridge *b, int i)
 {
     const nr_knob_def *k = &knobs[i];
     if (k->kind == 1) {
         if (!b->choice[i][0]) choice_name(k, 0, b->choice[i], sizeof b->choice[i]);
-        snprintf(b->shown[i], sizeof b->shown[i], "%s", b->choice[i]);
+        snprintf(b->shown[i], sizeof b->shown[i], "%s",
+                 choice_label(k, choice_index(k, b->choice[i]), b->language));
     } else {
         snprintf(b->shown[i], sizeof b->shown[i], "%g", (double)b->values[i]);
     }
@@ -1644,7 +1680,7 @@ int nr_menu_bridge_knob_choice_count(int index)
     return choice_count(k);
 }
 
-void nr_menu_bridge_knob_choice_name(int index, int which, char *out, size_t size)
+void nr_menu_bridge_knob_choice_name(int index, int which, int language, char *out, size_t size)
 {
     if (!out || size == 0) return;
     out[0] = '\0';
@@ -1657,6 +1693,13 @@ void nr_menu_bridge_knob_choice_name(int index, int which, char *out, size_t siz
      * storage, so an array of names would end up holding the last option repeated - valid pointers,
      * all pointing at one string. */
     choice_name(k, which, out, size);
+    /* The label, not the raw name, when there is one: the layer fills the choice list the panel
+     * draws, and a list reading `ht` / `cc_small_fp8` is what this whole change is about. The
+     * caller passes the bridge's language; the raw name is still what gets written, and
+     * `choice_label` never touches it. */
+    const char *label = choice_label(k, which, language);
+    if (label && *label)
+        snprintf(out, size, "%s", label);
 }
 
 int nr_menu_bridge_knob_choice_index(const nr_menu_bridge *bridge, int index)

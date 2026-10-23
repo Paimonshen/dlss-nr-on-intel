@@ -16,7 +16,7 @@
 #define NR_MENU_STRINGS_H
 
 #define NR_MENU_LANG_COUNT 4
-#define NR_MENU_KEY_COUNT 35
+#define NR_MENU_KEY_COUNT 37
 #define NR_MENU_COMPARE_COUNT 3
 /* The hints are one per KNOB, which is fewer than the keys: a key like `title` or `on` is
  * a string the menu shows, not a knob it explains. Declaring them with the key count left
@@ -68,9 +68,11 @@ enum {
     NR_STR_EVERY_FRAME = 29,
     NR_STR_EVERY_NTH_FEW = 30,
     NR_STR_EVERY_NTH_MANY = 31,
-    NR_STR_GPU_BLOCKED_BOTH = 32,
-    NR_STR_GPU_BLOCKED_DETAIL = 33,
-    NR_STR_GPU_BLOCKED_COLOUR = 34,
+    NR_STR_CHOICE_WEIGHTS_HT = 32,
+    NR_STR_CHOICE_WEIGHTS_CC_SMALL_FP8 = 33,
+    NR_STR_GPU_BLOCKED_BOTH = 34,
+    NR_STR_GPU_BLOCKED_DETAIL = 35,
+    NR_STR_GPU_BLOCKED_COLOUR = 36,
 };
 
 /* [language][key] */
@@ -92,6 +94,10 @@ const char *nr_menu_text(int language, int key);
 /* Which key index a knob name maps to, or -1. The names are nr_knobs.py's, so the knob
  * list joins to this table without a mapping that could itself drift. */
 int nr_menu_key_for(const char *knob_name);
+
+/* The keys that are not knobs - a title, a pacing row, a choice value's label. They sit after the
+ * knob rows in the generated table, so their index is `NR_MENU_KNOB_COUNT + position`. */
+int nr_menu_extra_key_for(const char *name);
 
 #ifdef __cplusplus
 }

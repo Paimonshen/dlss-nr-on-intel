@@ -2297,7 +2297,7 @@ static int menu_ui_rows(struct device_data *data, nrex_row *out, int capacity)
 			 * alongside: a single shared array would be overwritten by the next choice row, and a
 			 * shared name buffer would make every entry the same string. */
 			for (int c = 0; c < choice_count && c < MENU_UI_MAX_CHOICES; ++c) {
-				nr_menu_bridge_knob_choice_name(i, c, name_storage[i][c],
+				nr_menu_bridge_knob_choice_name(i, c, language, name_storage[i][c],
 								sizeof name_storage[i][c]);
 				names[i][c] = name_storage[i][c];
 			}

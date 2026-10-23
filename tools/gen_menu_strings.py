@@ -80,6 +80,14 @@ EXTRA = {
     # it takes the number, so a language with a different word order needs no C.
     "every_nth_few":  (None,           "every {} frames"),
     "every_nth_many": (None,           "every {} frames"),
+    # What a choice knob's VALUES read as, rather than the raw name the daemon resolves. The
+    # panel used to show `ht` / `cc_small_fp8` on the Network row while the setup window beside it
+    # said "A: HT, the model this project reproduces" - and the row's own hint explained both.
+    # The key is `Choice.<knob>.<value>`, the same spelling the window's table uses, so the two UIs
+    # read one translation and cannot drift. A value with no key falls back to the raw name, which
+    # is never wrong, only terse.
+    "choice_weights_ht":          ("Choice.weights.ht",          "A: HT, the model this project reproduces"),
+    "choice_weights_cc_small_fp8": ("Choice.weights.cc_small_fp8", "B: CC small FP8, the faster model"),
     # Why the GPU image path is not running while its row says it is on: the daemon's own
     # `fallback_reason` for this case, said in the panel's language. One key per case.
     "gpu_blocked_both": (None,         "Detail and colour strength are both not 1, which GPU "
@@ -129,6 +137,8 @@ OWN = {
         "every_frame":   "every frame",
         "every_nth_few":  "every {} frames",
         "every_nth_many": "every {} frames",
+        "choice_weights_ht": "A: HT, the model this project reproduces",
+        "choice_weights_cc_small_fp8": "B: CC small FP8, the faster model",
         "gpu_blocked_both": "Detail and colour strength are both not 1, which GPU composition does "
                             "not accept: the picture is still processed, on the CPU path. Set both "
                             "to 1 to use the GPU path.",
@@ -163,6 +173,8 @@ OWN = {
         "every_frame":   "\u6bcf\u5e27",
         "every_nth_few":  "\u6bcf {} \u5e27",
         "every_nth_many": "\u6bcf {} \u5e27",
+        "choice_weights_ht": "A\uff1aHT\uff08\u672c\u9879\u76ee\u590d\u73b0\u7684\u6a21\u578b\uff09",
+        "choice_weights_cc_small_fp8": "B\uff1aCC small FP8\uff08\u66f4\u5feb\u7684\u6a21\u578b\uff09",
         "gpu_blocked_both": "\u7ec6\u8282\u5f3a\u5ea6\u548c\u8272\u5f69\u5f3a\u5ea6\u90fd\u4e0d\u4e3a 1\uff0cGPU \u5408\u6210\u4e0d\u63a5\u53d7\u8fd9\u5bf9\u53d6\u503c\uff1a"
                             "\u753b\u9762\u4ecd\u5728\u5904\u7406\uff0c\u4f46\u8d70\u7684\u662f CPU \u8def\u5f84\u3002"
                             "\u628a\u4e24\u9879\u90fd\u8c03\u56de 1 \u518d\u7528 GPU \u8def\u5f84\u3002",
@@ -213,6 +225,8 @@ OWN = {
         # 2-4 takes кадра and 5 and up takes кадров: Russian inflects, and one `{}` cannot choose.
         "every_nth_few":  "\u043a\u0430\u0436\u0434\u044b\u0435 {} \u043a\u0430\u0434\u0440\u0430",
         "every_nth_many": "\u043a\u0430\u0436\u0434\u044b\u0435 {} \u043a\u0430\u0434\u0440\u043e\u0432",
+        "choice_weights_ht": "A: HT, \u043c\u043e\u0434\u0435\u043b\u044c, \u043a\u043e\u0442\u043e\u0440\u0443\u044e \u0432\u043e\u0441\u043f\u0440\u043e\u0438\u0437\u0432\u043e\u0434\u0438\u0442 \u043f\u0440\u043e\u0435\u043a\u0442",
+        "choice_weights_cc_small_fp8": "B: CC small FP8, \u0431\u044b\u0441\u0442\u0440\u0430\u044f \u043c\u043e\u0434\u0435\u043b\u044c",
         "gpu_blocked_both": "\u0421\u0438\u043b\u0430 \u0434\u0435\u0442\u0430\u043b\u0435\u0439 \u0438 \u0441\u0438\u043b\u0430 \u0446\u0432\u0435\u0442\u0430 "
                             "\u043e\u0431\u0435 \u043d\u0435 \u0440\u0430\u0432\u043d\u044b 1, \u0430 GPU-\u043a\u043e\u043c\u043f\u043e\u0437\u0438\u0446\u0438\u044f "
                             "\u0442\u0430\u043a\u0438\u0435 \u0437\u043d\u0430\u0447\u0435\u043d\u0438\u044f \u043d\u0435 \u043f\u0440\u0438\u043d\u0438\u043c\u0430\u0435\u0442: "
@@ -256,6 +270,8 @@ OWN = {
         "every_frame":   "cada fotograma",
         "every_nth_few":  "cada {} fotogramas",
         "every_nth_many": "cada {} fotogramas",
+        "choice_weights_ht": "A: HT, el modelo que reproduce este proyecto",
+        "choice_weights_cc_small_fp8": "B: CC small FP8, el modelo r\u00e1pido",
         "gpu_blocked_both": "Ni la fuerza del detalle ni la del color son 1, y la composici\u00f3n por "
                             "GPU no acepta esa pareja: la imagen se sigue procesando, en la ruta "
                             "de CPU. Pon las dos en 1 para usar la ruta de GPU.",
