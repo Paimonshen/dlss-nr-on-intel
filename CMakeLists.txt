@@ -238,16 +238,11 @@ if(NR_BUILD_LAYER)
     # layer's every symbol - including the menu's - and must compile the menu sources themselves.
     # This is the whole of the MinGW/Linux undefined-reference failure: the fixtures inherited
     # `nr_layer.c`'s menu calls and were given no menu sources to satisfy them.
-    # `test_settled` and `test_exchange` are built above, with the layer's own flags; only these
-    # three are new here. All five `#include "nr_layer.c"` and so all five need the menu sources,
-    # but the two above do not get them - which is the other half of the same bug, fixed by adding
-    # the menu sources to them too (see the `NR_LAYER_FIXTURES` list below).
-    #   test_transfer_resources                    (portable, built above)
-    #   test_device_teardown, test_gpu_only        (Windows, built above)
+    # `test_settled` and `test_exchange` are built above, with the layer's own flags; only this
+    # one is new here. `test_device_teardown` and `test_gpu_only` are built in the `if(WIN32)`
+    # block below, next to the registration that names them - a target and its CTest entry belong
+    # behind the same switch, and these two were the reason the default configure used to stop.
     set(NR_LAYER_FIXTURES test_transfer_resources)
-    if(WIN32)
-      list(APPEND NR_LAYER_FIXTURES test_device_teardown test_gpu_only)
-    endif()
     foreach(test ${NR_LAYER_FIXTURES})
       add_executable(${test} src/layer/${test}.c ${NR_MENU_SOURCES} ${NR_IMGUI_SOURCES})
       target_include_directories(${test} PRIVATE third_party/imgui)
@@ -280,6 +275,21 @@ if(NR_BUILD_TESTS)
       add_executable(${test} src/layer/${test}.c)
       target_link_libraries(${test} PRIVATE nr_vulkan)
       target_compile_options(${test} PRIVATE -O2 -UNDEBUG)
+      nr_output(${test})
+    endforeach()
+    # `test_device_teardown` and `test_gpu_only` `#include "nr_layer.c"`, so they need the menu
+    # sources like the other layer fixtures, and they are registered below under `if(WIN32)`.
+    # They were moved out of this block and into `NR_LAYER_FIXTURES` (inside `NR_BUILD_LAYER`,
+    # which is OFF by default on Windows) while their registration stayed here - so a default
+    # configure stopped with `Error evaluating generator expression: No target
+    # "test_device_teardown"`. That is the same error fixed for `test_transfer_resources` one
+    # stage earlier, missed for these two. Built here, unconditionally on Windows, so the
+    # configure and the coverage both come back.
+    foreach(test test_device_teardown test_gpu_only)
+      add_executable(${test} src/layer/${test}.c ${NR_MENU_SOURCES} ${NR_IMGUI_SOURCES})
+      target_include_directories(${test} PRIVATE third_party/imgui)
+      target_compile_options(${test} PRIVATE -O2 -UNDEBUG -DIMGUI_DEFINE_MATH_OPERATORS)
+      target_link_libraries(${test} PRIVATE nr_vulkan user32 gdi32)
       nr_output(${test})
     endforeach()
     # These executables are owned diagnostic fixtures, never installed games.

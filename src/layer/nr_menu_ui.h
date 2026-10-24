@@ -112,11 +112,19 @@ nrex_ui *nrex_create(void *device, void *physical, void *instance, void *queue,
 
 void nrex_destroy(nrex_ui *ui);
 
-/* The frame's window. Call between nrex_new_frame and nrex_render. */
-void nrex_begin_panel(nrex_ui *ui, const char *title, int language);
+/* The frame's window. Call between nrex_new_frame and nrex_render.
+ *
+ * `hint` is the panel-level line the footer shows - the panel's own keys, and the fact that the
+ * game still receives them. NULL or empty draws nothing. It was not here at all, which is why the
+ * answer to "the keys also reach the game" never reached a player: the sentence lives in
+ * `NR_STR_HINT`, and only the hand-drawn menu is handed it. */
+void nrex_begin_panel(nrex_ui *ui, const char *title, int language, const char *hint);
 /* The language the panel's selector is on. The caller compares it with the branch's own and, when
  * they differ, asks for the new one through the menu - the same flag the L key sets. */
 int nrex_panel_language(nrex_ui *ui);
+/* The hint the footer was last handed, or 0 when there is none. A test asks for this to know the
+ * string reached the panel at all; the drawing of it is the compositor's business. */
+int nrex_last_footer_text(char *out, size_t size);
 /* Fills the panel from the rows. The C side keeps the arrays; the UI only reads. */
 void nrex_rows(nrex_ui *ui, const nrex_row *rows, int count, int selected);
 

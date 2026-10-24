@@ -121,9 +121,12 @@ int main(void)
     check(find(lsource, "nr_menu_inject_reset(data->menu)"),
           "the layer raises Reset for the ImGui build",
           find(lsource, "nr_menu_inject_reset(data->menu)") ? "present" : "MISSING");
-    check(find(lsource, "GetAsyncKeyState(0x24)"),
+    /* `nr_key_down(0x24)`, not `GetAsyncKeyState(0x24)`: the six hotkey reads now go through the
+     * macro that carries the platform gate, and on Windows it expands to exactly the call this
+     * assertion has always wanted to see. */
+    check(find(lsource, "nr_key_down(0x24)"),
           "and reads Home itself (0x24)",
-          find(lsource, "GetAsyncKeyState(0x24)") ? "0x24" : "MISSING");
+          find(lsource, "nr_key_down(0x24)") ? "0x24" : "MISSING");
 
     /* ---- the bridge must not consume the toggle ----
      *

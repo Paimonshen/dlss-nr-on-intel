@@ -1636,8 +1636,13 @@ def run_owned(args):
     # assumes. libxmx chooses one that can run the network (XMX_DEVICE names another).
     print(f"model ready in {time.perf_counter() - started:.1f}s"
           f" on {xmx.device_name()}", flush=True)
-    print(f"network preset {nr_frame.PRESET}, {backend.topology.block_count} blocks,"
-          f" history ceiling {backend.blend_scale}", flush=True)
+    # The preset the install was chosen as, and the weights actually loaded - two different things
+    # since the panel's `weights` knob arrived, and saying only the preset read as a contradiction:
+    # "network preset A" beside a B model, which is exactly what a MK11 save of B followed by a
+    # DoA5 launch produced. The preset is where the choice CAME from; the model is what is running.
+    print(f"network preset {nr_frame.PRESET} ({name}, {weights_path.name}),"
+          f" {backend.topology.block_count} blocks, history ceiling {backend.blend_scale}",
+          flush=True)
     if nr_image is None or nr_image.library() is None:
         # Silent otherwise, and slow: the history a client's motion carries is resampled in
         # MLX-DLSS's NumPy then, 1.1 s a frame at 835x522 against 51 ms in C (2026-10-18).

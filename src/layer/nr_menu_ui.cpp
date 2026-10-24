@@ -586,6 +586,11 @@ extern "C" NREX_API void nrex_new_frame(nrex_ui *ui, float w, float h, float dt)
  * the change - the same flag the L key sets. */
 static int g_language = 0;
 
+/* The panel-level line the caller hands in each frame: the panel's keys, and the fact that the game
+ * still receives them. Empty draws nothing. 256 is the longest of the four languages' hint plus
+ * room - the Chinese is the longest and it wraps in the footer rather than being cut. */
+static char g_panel_hint[256] = "";
+
 static nrex_ui *g_ui = nullptr;
 static int g_actions = 0;
 /* The effect's state, as the layer reported it for this frame, and what the user asked for by
@@ -1041,19 +1046,40 @@ static void nrex_draw_panel(nrex_ui *u, const char *title, int language,
         g_actions |= NREX_ACT_LANGUAGE;
     }
 
+    /* The panel-level hint, on the footer under the controls.
+     *
+     * This is where the sentence "the game also sees these keys" belongs. It lived only in
+     * `NR_STR_HINT`, and only the hand-drawn menu was handed it - so the ImGui panel, which is
+     * what every game actually loads, showed no key list and no warning at all. A player reading
+     * the panel had no way to learn that walking its rows also walks the game's menus, which is
+     * what the MK11 title-screen report was.
+     *
+     * `TextWrapped`, because the Chinese and Russian lines are long and a cut sentence is worse
+     * than a wrapped one: the footer is the only place the panel has for prose. */
+    if (g_panel_hint[0]) {
+        ImGui::Spacing();
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.62f, 0.62f, 0.62f, 1.0f));
+        ImGui::TextWrapped("%s", g_panel_hint);
+        ImGui::PopStyleColor();
+    }
+
     ImGui::End();
     ImGui::PopStyleVar();
 }
 
-extern "C" NREX_API void nrex_begin_panel(nrex_ui *ui, const char *title, int language)
-{
-    g_ui = ui;
+extern "C" NREX_API void nrex_begin_panel(nrex_ui *ui, const char *title, int language,
+                                          const char *hint)
+{    g_ui = ui;
     g_actions = 0;
     /* Cleared here, not in `nrex_rows`: the checkbox is drawn in the footer, after the rows, and a
      * request from the PREVIOUS frame must not be read twice. */
     g_nr_request = -1;
     (void)title;
     if (language >= 0 && language < 4) g_language = language;
+    /* The footer line, kept for the draw below. Copied rather than remembered: the caller's string
+     * is the generated table's, which lives for the process, but a pointer that outlives its owner
+     * is the kind of thing that works until it does not. */
+    snprintf(g_panel_hint, sizeof g_panel_hint, "%s", hint ? hint : "");
 }
 
 extern "C" NREX_API void nrex_set_nr_enabled(nrex_ui *ui, int on)
@@ -1087,6 +1113,22 @@ extern "C" NREX_API int nrex_end_panel(nrex_ui *ui)
 {
     (void)ui;
     return g_actions;
+}
+
+/* The hint the footer was last handed, for a test that wants to know it was drawn.
+ *
+ * The draw itself is the only real evidence, and this is deliberately NOT that: it answers "was the
+ * string here", not "did the compositor emit vertices for it". The fixture pairs it with the
+ * panel's actions being unchanged, which is the half that could regress silently - a hint that
+ * swallowed a click, say. Returning 0 for an empty hint means "nothing to draw", which is what an
+ * empty string means to the drawer too. */
+extern "C" NREX_API int nrex_last_footer_text(char *out, size_t size)
+{
+    if (!out || size == 0) return 0;
+    out[0] = '\0';
+    if (!g_panel_hint[0]) return 0;
+    int n = snprintf(out, size, "%s", g_panel_hint);
+    return n > 0 ? 1 : 0;
 }
 
 /* ------------------------------------------------------------------ verification dump */

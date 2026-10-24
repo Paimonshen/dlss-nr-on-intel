@@ -137,7 +137,7 @@ int main(void)
         io.DisplaySize = ImVec2(800.0f, 600.0f);                            \
         io.DeltaTime = 1.0f / 60.0f;                                        \
         ImGui::NewFrame();                                                  \
-        nrex_begin_panel(nullptr, "DLSS-NR on Intel", nr_menu_bridge_language(bridge)); \
+        nrex_begin_panel(nullptr, "DLSS-NR on Intel", nr_menu_bridge_language(bridge), NULL); \
         nrex_rows(nullptr, rows, count, 0);                                 \
         int acted = nrex_end_panel(nullptr);                                \
         for (int i = 0; i < count; ++i)                                     \

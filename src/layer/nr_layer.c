@@ -113,6 +113,25 @@ typedef pthread_mutex_t nr_mutex_t;
 #define nr_mutex_unlock(m)    pthread_mutex_unlock(m)
 #define nr_mutex_destroy(m)   pthread_mutex_destroy(m)
 #endif
+
+/* Whether a virtual key is down, on whichever platform has a keyboard.
+ *
+ * `GetAsyncKeyState` is Windows-only, and six call sites in this file used it directly - the six
+ * hotkeys and the panel's left button - with no `#if` around them. `nr_layer.c` compiled on Linux
+ * before this branch because `windows.h` sits inside the `#ifdef _WIN32` below with a pthread arm
+ * beside it; those six lines (and the window helpers) undid that, so `make` stopped here.
+ *
+ * Off Windows the answer is "not down" for every key, which is the same thing a platform backend
+ * with no input reports: ImGui derives its own edges from the levels it is handed, so all-up
+ * leaves every widget idle rather than latched. Nothing on Linux reads the result today - the
+ * ImGui backend is a stub there - but a layer that stops compiling is worse than one that stops
+ * responding. */
+#ifdef _WIN32
+#define nr_key_down(vk) ((GetAsyncKeyState(vk) & 0x8000) != 0)
+#else
+#define nr_key_down(vk) (0)
+#endif
+
 #ifdef _WIN32
 #include <windows.h>
 #include <process.h>
@@ -269,7 +288,15 @@ struct device_data {
 	float menu_ui_pointer_x;
 	float menu_ui_pointer_y;
 	int menu_ui_have_pointer;
-	POINT menu_ui_last_cursor;          /* the OS position the last delta was measured from */
+	/* The OS position the last delta was measured from.
+	 *
+	 * Two `long`s, not a `POINT`: this struct is declared in every translation unit that includes
+	 * the layer's header, `POINT` exists only under `windows.h`, and a Windows type here made the
+	 * Linux build fail at a place nothing to do with the window code - the field is used only by
+	 * `menu_ui_mouse`, which is itself Windows-only now. Plain integers are portable and the
+	 * conversion happens in the one place that reads them. */
+	long menu_ui_last_cursor_x;
+	long menu_ui_last_cursor_y;
 	/* When this device's panel was last drawn, in seconds from the same clock `nrex_repeat`
 	 * uses, so ImGui's keyboard repeat is timed on the real interval between presents.
 	 *
@@ -2473,8 +2500,13 @@ static int menu_ui_rows(struct device_data *data, nrex_row *out, int capacity)
 static void menu_ui_keys(struct device_data *data)
 {
 	if (!data->menu_ui) return;
+#ifdef _WIN32
 	for (int vk = 0; vk < 256; ++vk)
 		nrex_key(data->menu_ui, vk, (GetAsyncKeyState(vk) & 0x8000) != 0);
+#endif
+	/* Off Windows there is no key state to read, and `nrex_key` with a zero level for every key
+	 * is what a platform backend does with no input - ImGui derives its own edges from the
+	 * levels it is given, so all-up leaves every widget idle rather than stuck. */
 }
 
 /* Whether the game's window is the one the user is actually working in.
@@ -2494,11 +2526,15 @@ static void menu_ui_keys(struct device_data *data)
  * the same reason the key reading uses `GetAsyncKeyState`.
  *
  * The comparison is by process, not by handle, because a game can present from a child or a
- * sibling window - the same reason `window_is_ours` exists. */
-static int window_is_foreground(HWND hwnd)
-{
-	return nr_window_is_foreground((void *)hwnd);
-}
+ * sibling window - the same reason `window_is_ours` exists.
+ *
+ * **No wrapper, and no `HWND` in the signature.** It was a `static int window_is_foreground(HWND)`
+ * that forwarded to `nr_window_is_ours`, which put an unguarded Windows type in this file and
+ * broke the Linux build: `nr_layer.c` compiled on Linux before this branch because `windows.h`
+ * sat inside `#ifdef _WIN32` with a pthread arm beside it, and 27 lines of bare Win32 undid that.
+ * `nr_focus.c` already answers the question with a `void *` and its own no-op arm, so it is called
+ * directly - one less indirection, and one less type that only exists on one platform. */
+#define window_is_foreground(hwnd) nr_window_is_foreground((void *)(hwnd))
 
 /* The game's window, for the pointer conversion.
  *
@@ -2512,11 +2548,17 @@ static int window_is_foreground(HWND hwnd)
  * thread the game created it on. Almost every game has those be different, so every window was
  * rejected and the panel never received a pointer position. The question the check means to ask is
  * "is this our process's window", which is a process comparison. */
-static int window_is_ours(HWND h)
-{
-	return nr_window_is_ours((void *)h);
-}
+#define window_is_ours(h) nr_window_is_ours((void *)(h))
 
+#ifdef _WIN32
+/* The window handle this file's Win32 calls want. A typedef rather than `HWND` spelled out, so
+ * the declaration below reads the same on both platforms and no call site casts. */
+typedef HWND nr_ui_window;
+#else
+typedef void *nr_ui_window;
+#endif
+
+#ifdef _WIN32
 /* Enumerate this process's own top-level windows, for the fallback below. */
 static BOOL CALLBACK nr_window_enum_proc(HWND h, LPARAM param)
 {
@@ -2547,12 +2589,11 @@ static BOOL CALLBACK nr_window_enum_proc(HWND h, LPARAM param)
 	return TRUE;
 }
 
-static HWND window_for_thread_for_ui(void)
+static nr_ui_window window_for_thread_for_ui(void)
 {
 	/* The window the user is looking at, if it is ours. */
 	HWND h = GetForegroundWindow();
 	if (window_is_ours(h)) return GetAncestor(h, GA_ROOT);
-
 	/* Ours but unfocused: still the game's window, and the panel still wants the pointer. */
 	h = GetActiveWindow();
 	if (window_is_ours(h)) return GetAncestor(h, GA_ROOT);
@@ -2584,6 +2625,22 @@ static HWND window_for_thread_for_ui(void)
 	}
 	return NULL;
 }
+#else
+/* No window of ours to find, so no pointer to convert.
+ *
+ * This is not "the panel loses its mouse" so much as "there is no panel on this platform": the
+ * ImGui backend (`nr_menu_ui.cpp`) compiles to a stub off Windows, `data->menu_ui` is NULL, and
+ * `menu_ui_mouse` returns at its first guard before it ever asks for a window. The two callers
+ * that survive are the quad menu's own cursor, which has no window either.
+ *
+ * Returning NULL rather than a fake window matters: the caller's `if (!hwnd)` reports "no window
+ * for this process" once and returns, which is the honest thing to say. A fabricated handle would
+ * make it convert screen coordinates against a window that does not exist. */
+static nr_ui_window window_for_thread_for_ui(void)
+{
+	return NULL;
+}
+#endif
 
 /* The mouse, in the menu's own coordinate space.
  *
@@ -2593,7 +2650,19 @@ static HWND window_for_thread_for_ui(void)
  * the game's window and the game keeps its input.
  *
  * `io.AddMouse*` rather than assigning the fields: ImGui consumes queued input once a frame, and
- * writing the fields directly is documented as wrong for anything but a fixed test harness. */
+ * writing the fields directly is documented as wrong for anything but a fixed test harness.
+ *
+ * **The whole function is Windows-only, and that is not a workaround.** Every step of it asks the
+ * OS something only Windows answers - `GetCursorPos`, `ClientToScreen`, `GetClientRect`,
+ * `GetWindowThreadProcessId`, and the cursor ownership it takes while the panel is open - so there
+ * is no partial port to make. It is guarded as a whole rather than line by line because a partial
+ * guard is how 27 bare lines got in here in the first place: each one compiles on Windows, none of
+ * them does on Linux, and nothing complained until someone ran `make`.
+ *
+ * Off Windows the ImGui backend is a stub, `data->menu_ui` is NULL, and the function returns at
+ * its first guard (`if (!data->menu_ui)`) before it asks for a window - so the empty arm below is
+ * unreachable in practice and exists to keep the translation unit valid. */
+#ifdef _WIN32
 static void menu_ui_mouse(struct device_data *data, struct swapchain_data *chain)
 {
 	/* Each guard reports itself once. Four silent returns and one trace line on the far side of
@@ -2619,7 +2688,8 @@ static void menu_ui_mouse(struct device_data *data, struct swapchain_data *chain
 	 * runs every frame whether the panel is open or shut. */
 	int panel_open = data->menu && nr_menu_is_open(data->menu);
 
-	HWND hwnd = window_for_thread_for_ui();
+	/* `nr_ui_window`, so the declaration serves both platforms and no call site casts. */
+	nr_ui_window hwnd = window_for_thread_for_ui();
 	if (!hwnd) UI_MOUSE_STOP(2, "no window for this process");
 	if (!window_is_foreground(hwnd)) {
 		/* "No position" rather than the last one: leaving a stale position would let a click that
@@ -2735,7 +2805,8 @@ static void menu_ui_mouse(struct device_data *data, struct swapchain_data *chain
 			 * start listening for raw movement before the first delta is asked for. */
 			data->menu_ui_pointer_x = ((float)screen.x - (float)origin.x) * sx;
 			data->menu_ui_pointer_y = ((float)screen.y - (float)origin.y) * sy;
-			data->menu_ui_last_cursor = screen;
+			data->menu_ui_last_cursor_x = screen.x;
+			data->menu_ui_last_cursor_y = screen.y;
 			data->menu_ui_have_pointer = 1;
 			nr_raw_mouse_start();
 		}
@@ -2799,9 +2870,10 @@ static void menu_ui_mouse(struct device_data *data, struct swapchain_data *chain
 		x = ((float)screen.x - (float)origin.x) * sx;
 		y = ((float)screen.y - (float)origin.y) * sy;
 	}
-	data->menu_ui_last_cursor = screen;
+	data->menu_ui_last_cursor_x = screen.x;
+	data->menu_ui_last_cursor_y = screen.y;
 
-	int down = (GetAsyncKeyState(0x01) & 0x8000) != 0;
+	int down = nr_key_down(0x01);
 	nrex_mouse(data->menu_ui, x, y, down);
 
 	/* And whether the menu has to draw the pointer itself.
@@ -2830,6 +2902,15 @@ static void menu_ui_mouse(struct device_data *data, struct swapchain_data *chain
 	if (panel_open)
 		nrex_cursor_hint(data->menu_ui, x, y);
 }
+#else
+/* Nothing to feed: no platform cursor, no platform window, and no ImGui backend to feed it to.
+ * The caller already guards on `data->menu_ui`, which is NULL wherever this arm is built. */
+static void menu_ui_mouse(struct device_data *data, struct swapchain_data *chain)
+{
+	(void)data;
+	(void)chain;
+}
+#endif
 
 /* Turn the effect on or off, by creating or removing the trigger file the present path reads.
  *
@@ -2918,7 +2999,7 @@ static int menu_read_keys(struct device_data *data)
 	 * settings action: it belongs behind the same two gates as S and R. The panel's own combo in
 	 * the footer still cycles the language, so nothing is lost by gating the key. */
 	if (data->menu && data->menu_ui && foreground && nr_menu_is_open(data->menu)) {
-		int down = (GetAsyncKeyState('L') & 0x8000) != 0;
+		int down = nr_key_down('L');
 		if (down && !data->menu_ui_l_was_down)
 			nr_menu_inject_language(data->menu,
 						(nr_menu_language(data->menu) + 1) % NR_MENU_LANG_COUNT);
@@ -2942,7 +3023,7 @@ static int menu_read_keys(struct device_data *data)
 	 * already in front, so the gate costs nothing - and it stops INS closing the panel, or opening
 	 * and re-closing it, while the user is typing in another window. */
 	if (data->menu_ui && foreground) {
-		int down = (GetAsyncKeyState(0x2D) & 0x8000) != 0;
+		int down = nr_key_down(0x2D);
 		if (down && !data->menu_ui_ins_was_down)
 			nr_menu_inject_open(data->menu, !nr_menu_is_open(data->menu));
 		data->menu_ui_ins_was_down = down;
@@ -2981,7 +3062,7 @@ static int menu_read_keys(struct device_data *data)
 	 * only when the game is what they are looking at. S and R keep their panel-open rule, now
 	 * with the focus gate on top of it. */
 	if (data->menu_ui && foreground) {
-		int toggle = (GetAsyncKeyState(0x24) & 0x8000) != 0;
+		int toggle = nr_key_down(0x24);
 		if (toggle && !data->menu_ui_toggle_was_down)
 			nr_menu_inject_toggle(data->menu);
 		data->menu_ui_toggle_was_down = toggle;
@@ -2990,12 +3071,12 @@ static int menu_read_keys(struct device_data *data)
 	}
 
 	if (data->menu_ui && foreground && nr_menu_is_open(data->menu)) {
-		int save = (GetAsyncKeyState('S') & 0x8000) != 0;
+		int save = nr_key_down('S');
 		if (save && !data->menu_ui_save_was_down)
 			nr_menu_inject_save(data->menu);
 		data->menu_ui_save_was_down = save;
 
-		int reset = (GetAsyncKeyState('R') & 0x8000) != 0;
+		int reset = nr_key_down('R');
 		if (reset && !data->menu_ui_reset_was_down)
 			nr_menu_inject_reset(data->menu);
 		data->menu_ui_reset_was_down = reset;
@@ -3058,6 +3139,23 @@ static int menu_read_keys(struct device_data *data)
 	/* Tell the menu whether NR is on, so its status line is the truth rather than a guess. */
 	nr_menu_set_nr_enabled(data->menu,
 			       trigger_path && access(trigger_path, F_OK) == 0);
+
+	/* And keep Save's memory of it honest.
+	 *
+	 * The trigger is the only truth about whether the effect is on - the Home key, the panel's
+	 * checkbox and the setup window's button all move it - but `nr_enabled_saved` is what a later
+	 * Save writes, and only the first two told it about their change. The setup window's Enable NR
+	 * went through the trigger alone, so a Save afterwards wrote "nr_enabled": 0 with NR running:
+	 * the file recording the opposite of the screen, and the next launch starting with the effect
+	 * off for no reason the user could see.
+	 *
+	 * Comparing against the trigger every frame is what makes it right whichever way in was used,
+	 * and it costs one `access` on a file the line above has already asked about. */
+	if (trigger_path && *trigger_path && data->menu_bridge) {
+		int live = access(trigger_path, F_OK) == 0;
+		if ((nr_menu_bridge_nr_saved(data->menu_bridge) ? 1 : 0) != live)
+			nr_menu_bridge_set_nr_saved(data->menu_bridge, live);
+	}
 
 	{
 		int need = nr_menu_needs_composite(data->menu);
@@ -3287,7 +3385,13 @@ static int menu_composite(struct device_data *data, struct swapchain_data *chain
 		 *
 		 * `nr_menu_language` is the same accessor the L key reads to step the value, so the two
 		 * cannot disagree about which language is showing. */
-		nrex_begin_panel(data->menu_ui, "DLSS-NR on Intel", nr_menu_language(data->menu));
+		/* The panel-level hint - its own keys, and the fact that the game still receives them.
+		 * It was not passed at all, so the ImGui panel (the one every game loads) showed no key
+		 * list while the hand-drawn one did, and the answer to "the keys also reach the game"
+		 * never reached a player. `NR_STR_HINT` is the same string the hand-drawn path sets, so
+		 * the two cannot drift. */
+		nrex_begin_panel(data->menu_ui, "DLSS-NR on Intel", nr_menu_language(data->menu),
+				 nr_menu_text(nr_menu_language(data->menu), NR_STR_HINT));
 		/* The effect, as the layer sees it. -1 when this install has no trigger path, so the
 		 * checkbox can show "unknown" instead of claiming the effect is off. */
 		nrex_set_nr_enabled(data->menu_ui,

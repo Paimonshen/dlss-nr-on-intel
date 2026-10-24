@@ -124,6 +124,40 @@ int main(void)
         check(nr_menu_bridge_language(b) == 1, "Reset leaves the language alone", detail);
     }
 
+    /* ---- the layer keeps nr_enabled_saved honest against the trigger ----
+     *
+     * The trigger is the only truth about whether the effect runs: the Home key, the panel's
+     * checkbox and the setup window's Enable NR button all move it. But a later Save writes
+     * `nr_enabled_saved`, and only the first two told the bridge about their change - the window
+     * went through the trigger alone, so a Save afterwards wrote "nr_enabled": 0 with NR running,
+     * which is what was seen in MK11 and DoA5.
+     *
+     * The fix is in `nr_layer.c`'s per-frame path, which this fixture cannot drive - the bridge
+     * here has no trigger file and no layer. So this reads the source the way
+     * `test_menu_keys.cpp` does: the check is that the sync exists, and that it compares against
+     * the live state rather than assuming. */
+    {
+        FILE *layer = fopen("src/layer/nr_layer.c", "rb");
+        if (!layer) {
+            printf("  FAIL  nr_layer.c was not readable (run from the repository root)\n");
+            return 1;
+        }
+        static char lsource[600000];
+        size_t ln = fread(lsource, 1, sizeof lsource - 1, layer);
+        lsource[ln] = '\0';
+        fclose(layer);
+        int syncs = strstr(lsource, "nr_menu_bridge_nr_saved(data->menu_bridge) ? 1 : 0) != live")
+                    != NULL;
+        check(syncs, "the layer syncs nr_enabled_saved against the live trigger",
+              syncs ? "compared every frame"
+                    : "MISSING - the window's Enable NR writes the opposite of the screen");
+        /* And it is gated on there being a trigger path, so an install without one is not polled
+         * every frame for a file that does not exist. */
+        int gated = strstr(lsource, "if (trigger_path && *trigger_path && data->menu_bridge)") != NULL;
+        check(gated, "and only when this install has a trigger path",
+              gated ? "guarded" : "MISSING - polled every frame regardless");
+    }
+
     /* ---- Save writes the effect's state beside the knobs ---- */
     {
         nr_menu_bridge_set_nr_saved(b, 1);

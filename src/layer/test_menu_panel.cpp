@@ -87,11 +87,48 @@ static int frame(int selected = 0)
     io.DisplaySize = ImVec2(800.0f, 600.0f);
     io.DeltaTime = 1.0f / 60.0f;
     ImGui::NewFrame();
-    nrex_begin_panel(nullptr, "DLSS-NR on Intel", 0);
+    nrex_begin_panel(nullptr, "DLSS-NR on Intel", 0, NULL);
     nrex_rows(nullptr, rows, ROWS, selected);
     int acted = nrex_end_panel(nullptr);
     ImGui::Render();
     return acted;
+}
+
+/* One frame through the same calls the layer makes, with a hint. `selected` is the row the C side
+ * says is selected, which is what a nav-less fallback would highlight. */
+static int frame_with_hint(const char *hint, int selected = 0)
+{
+    ImGuiIO &io = ImGui::GetIO();
+    io.DisplaySize = ImVec2(800.0f, 600.0f);
+    io.DeltaTime = 1.0f / 60.0f;
+    ImGui::NewFrame();
+    nrex_begin_panel(nullptr, "DLSS-NR on Intel", 0, hint);
+    nrex_rows(nullptr, rows, ROWS, selected);
+    int acted = nrex_end_panel(nullptr);
+    ImGui::Render();
+    return acted;
+}
+
+/* How much geometry the panel emitted for this frame. ImGui accumulates a draw list per frame, and
+ * the footer's wrapped text is part of it - so a hint that is drawn adds vertices and one that is
+ * merely stored does not. This is what makes the hint check a check of DRAWING rather than of a
+ * string being remembered. */
+static int frame_vertex_count(const char *hint)
+{
+    ImGuiIO &io = ImGui::GetIO();
+    io.DisplaySize = ImVec2(800.0f, 600.0f);
+    io.DeltaTime = 1.0f / 60.0f;
+    ImGui::NewFrame();
+    nrex_begin_panel(nullptr, "DLSS-NR on Intel", 0, hint);
+    nrex_rows(nullptr, rows, ROWS, 0);
+    nrex_end_panel(nullptr);
+    ImGui::Render();
+    ImDrawData *dd = ImGui::GetDrawData();
+    int total = 0;
+    if (dd)
+        for (int i = 0; i < dd->CmdListsCount; ++i)
+            total += dd->CmdLists[i]->VtxBuffer.Size;
+    return total;
 }
 
 /* A press for one frame and a release for the next: the edge ImGui derives its press from. */
@@ -110,7 +147,7 @@ static int tap(int vk, int selected = 0)
 static int nav_row(void)
 {
     ImGui::NewFrame();
-    nrex_begin_panel(nullptr, "DLSS-NR on Intel", 0);
+    nrex_begin_panel(nullptr, "DLSS-NR on Intel", 0, NULL);
     nrex_rows(nullptr, rows, ROWS, 0);
     int found = -1;
     ImGuiWindow *w = ImGui::FindWindowByName("DLSS-NR on Intel");
@@ -132,7 +169,7 @@ static int nav_row(void)
 static void nav_debug(const char *when)
 {
     ImGui::NewFrame();
-    nrex_begin_panel(nullptr, "DLSS-NR on Intel", 0);
+    nrex_begin_panel(nullptr, "DLSS-NR on Intel", 0, NULL);
     nrex_rows(nullptr, rows, ROWS, 0);
     ImGuiWindow *w = ImGui::FindWindowByName("DLSS-NR on Intel");
     ImGuiContext &g = *ImGui::GetCurrentContext();
@@ -190,13 +227,13 @@ int main(void)
          * than by guessing an ID: `ImGui::GetCurrentContext()->NavId` is the item nav is on, asked while a frame
          * is open. */
         ImGui::NewFrame();
-        nrex_begin_panel(nullptr, "DLSS-NR on Intel", 0);
+        nrex_begin_panel(nullptr, "DLSS-NR on Intel", 0, NULL);
         nrex_rows(nullptr, rows, ROWS, 0);
         ImGuiID before = ImGui::GetCurrentContext()->NavId;
         ImGui::Render();
         tap(0x28);
         ImGui::NewFrame();
-        nrex_begin_panel(nullptr, "DLSS-NR on Intel", 0);
+        nrex_begin_panel(nullptr, "DLSS-NR on Intel", 0, NULL);
         nrex_rows(nullptr, rows, ROWS, 0);
         ImGuiID after = ImGui::GetCurrentContext()->NavId;
         ImGui::Render();
@@ -219,7 +256,7 @@ int main(void)
                 /* Exactly what the layer feeds it: a fixed 1/60, whatever the real rate. */
                 io.DeltaTime = 1.0f / 60.0f;
                 ImGui::NewFrame();
-                nrex_begin_panel(nullptr, "DLSS-NR on Intel", 0);
+                nrex_begin_panel(nullptr, "DLSS-NR on Intel", 0, NULL);
                 nrex_rows(nullptr, rows, ROWS, 0);
                 ImGuiID now = ImGui::GetCurrentContext()->NavId;
                 int acted = nrex_end_panel(nullptr);
@@ -317,7 +354,7 @@ int main(void)
             for (int f = 0; f < 60; ++f) {
                 clear_edits();
                 ImGui::NewFrame();
-                nrex_begin_panel(nullptr, "DLSS-NR on Intel", 0);
+                nrex_begin_panel(nullptr, "DLSS-NR on Intel", 0, NULL);
                 nrex_rows(nullptr, rows, ROWS, 0);
                 int acted = nrex_end_panel(nullptr);
                 ImGui::Render();
@@ -383,12 +420,55 @@ int main(void)
          * Driven with the mouse: a click on the combo opens it, and the next click picks an entry -
          * that is a popup, so this checks the simpler half instead: that the panel starts in the
          * language it was given and reports that same number back. */
-        nrex_begin_panel(nullptr, "DLSS-NR on Intel", 2);
+        nrex_begin_panel(nullptr, "DLSS-NR on Intel", 2, NULL);
         int reported = nrex_panel_language(nullptr);
         char detail[64];
         snprintf(detail, sizeof detail, "began with 2, panel says %d", reported);
         check(reported == 2, "the panel keeps the language it was handed", detail);
         frame(0);
+    }
+
+    /* ---- 6. the panel-level hint is drawn ---- */
+    {
+        /* The sentence "the game also sees these keys" was never passed to the ImGui panel, so the
+         * panel every game loads showed no key list and no warning, while the hand-drawn menu did.
+         *
+         * **The evidence is the draw list, not the string that was handed in.** The first version of
+         * this check asked the panel what it had been given, which passes with the drawing deleted:
+         * the mutation that replaced `TextWrapped` with an empty label still passed. A string kept
+         * in a static and never emitted is exactly the bug being fixed, so what is counted is
+         * vertices - a footer with the hint emits more geometry than one without. */
+        /* Compare first: a hint is prose, not a control, and the panel's own actions must be
+         * unchanged by its presence. */
+        int with_hint = frame_with_hint("the game also sees these keys", 0);
+        int without = frame(0);
+        check(with_hint == without, "the hint changes nothing the panel reports",
+              "identical actions with and without it");
+
+        int verts_with = frame_vertex_count("the game also sees these keys");
+        int verts_without = frame_vertex_count(nullptr);
+        char detail[96];
+        snprintf(detail, sizeof detail, "%d vertices with the hint, %d without",
+                 verts_with, verts_without);
+        check(verts_with > verts_without, "the footer emits geometry for the hint", detail);
+
+        /* And the string reaches the panel at all - the other half, which the vertices do not
+         * prove: more geometry could come from anything. Read AFTER the comparison, because
+         * `frame` hands the panel a NULL hint and would leave nothing to read. */
+        frame_with_hint("the game also sees these keys", 0);
+        char drawn[256] = "";
+        int got = nrex_last_footer_text(drawn, sizeof drawn);
+        snprintf(detail, sizeof detail, "footer text: '%s'", got ? drawn : "(none)");
+        check(got && strstr(drawn, "the game also sees these keys") != nullptr,
+              "and the footer holds the hint it was handed", detail);
+
+        /* A NULL or empty hint holds nothing rather than an empty line. */
+        char empty[64] = "";
+        nrex_begin_panel(nullptr, "DLSS-NR on Intel", 0, "");
+        nrex_rows(nullptr, rows, ROWS, 0);
+        nrex_end_panel(nullptr);
+        int none = nrex_last_footer_text(empty, sizeof empty);
+        check(none == 0, "an empty hint holds nothing", none ? "held something" : "nothing");
     }
 
     printf("\n%s: %d failure(s)\n", failures ? "FAILED" : "ok", failures);
