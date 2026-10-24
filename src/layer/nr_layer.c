@@ -33,6 +33,11 @@
 #include <string.h>
 #include <stdarg.h>
 #include <errno.h>
+#ifndef _WIN32
+/* `CLOCK_MONOTONIC`, for the frame timer's non-Windows arm. Windows reaches the same clock
+ * through QPC, which `nr_now_seconds` below keeps to its own side of the `#ifdef`. */
+#  include <time.h>
+#endif
 #include <vulkan/vulkan.h>
 #include <vulkan/vk_layer.h>
 #include "nr_transport.h"
@@ -131,6 +136,36 @@ typedef pthread_mutex_t nr_mutex_t;
 #else
 #define nr_key_down(vk) (0)
 #endif
+
+/* A monotonic clock in seconds, for the panel's frame timer.
+ *
+ * The QPC calls this file used directly were the last of the Win32 leak: `LARGE_INTEGER` is a
+ * Windows type, so a Linux compile reached three lines of it in the middle of `menu_composite`.
+ * `nr_menu_ui.cpp` already answers the same question off Windows with `clock_gettime` and
+ * `CLOCK_MONOTONIC`, and this is the same question.
+ *
+ * 0.0 means "no clock", which is what the caller falls back on: a machine without one keeps the
+ * fixed 1/60 step rather than moving nothing. */
+static double nr_now_seconds(void)
+{
+#ifdef _WIN32
+	static int have_frequency;
+	static LARGE_INTEGER cached;
+	LARGE_INTEGER counter;
+	if (!have_frequency) {
+		QueryPerformanceFrequency(&cached);
+		have_frequency = 1;
+	}
+	if (QueryPerformanceCounter(&counter) && cached.QuadPart > 0)
+		return (double)counter.QuadPart / (double)cached.QuadPart;
+	return 0.0;
+#else
+	struct timespec ts;
+	if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0)
+		return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+	return 0.0;
+#endif
+}
 
 #ifdef _WIN32
 #include <windows.h>
@@ -2947,9 +2982,11 @@ static void menu_cursor_release(struct device_data *data)
 	if (!data) return;
 	if (data->menu && nr_menu_is_open(data->menu)) return;   /* still the panel's */
 	if (!data->menu_ui_cursor_hidden) return;
+#ifdef _WIN32
 	ShowCursor(TRUE);
-	data->menu_ui_cursor_hidden = 0;
 	ClipCursor(NULL);
+#endif
+	data->menu_ui_cursor_hidden = 0;
 	data->menu_ui_have_pointer = 0;
 	nr_raw_mouse_stop();
 }
@@ -3353,24 +3390,15 @@ static int menu_composite(struct device_data *data, struct swapchain_data *chain
 		 * panel away. */
 		float dt = 1.0f / 60.0f;
 		{
-			static int have_frequency;
-			static LARGE_INTEGER cached;
-			LARGE_INTEGER counter;
-			double now = 0.0;
-			if (!have_frequency) {
-				QueryPerformanceFrequency(&cached);
-				have_frequency = 1;
-			}
-			if (QueryPerformanceCounter(&counter) && cached.QuadPart > 0)
-				now = (double)counter.QuadPart / (double)cached.QuadPart;
+			/* Held across frames, and left alone when the clock is unavailable so a machine
+			 * without one falls back to the fixed step above rather than moving nothing. */
+			double now = nr_now_seconds();
 			if (data->menu_ui_last_draw != 0.0 && now > data->menu_ui_last_draw) {
 				double elapsed = now - data->menu_ui_last_draw;
 				if (elapsed < 0.000001) elapsed = 0.000001;
 				if (elapsed > 0.25) elapsed = 0.25;
 				dt = (float)elapsed;
 			}
-			/* Held across frames, and left alone when the counter is unavailable so a machine without
-			 * one falls back to the fixed step above rather than moving nothing. */
 			data->menu_ui_last_draw = now;
 		}
 		nrex_new_frame(data->menu_ui, (float)chain->extent.width,

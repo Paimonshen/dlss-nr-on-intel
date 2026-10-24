@@ -179,6 +179,36 @@ int main(void)
           claims_home ? "claimed"
                       : "not claimed - Home will move the selection instead of toggling the effect");
 
+    /* ---- and the Win32 the layer needs is gated, so Linux still builds ----
+     *
+     * `nr_layer.c` compiled on Linux before this branch: `windows.h` sat inside `#ifdef _WIN32`
+     * with a pthread arm beside it. This branch added the input path - window helpers, six
+     * `GetAsyncKeyState` reads, the cursor release, the frame timer - and 27 lines of it were bare,
+     * so `make` stopped at `nr_layer.c`. The author found four of them left after the first pass.
+     *
+     * A running test cannot see this: the defect is "this file does not compile on a platform this
+     * machine has no compiler for". So the check reads the source the way the ABI ones do, and
+     * asserts the SHAPES rather than the line numbers - the gate being `#ifdef _WIN32` around the
+     * body, and `nr_key_down` being how a key is read. */
+    {
+        int cursor_gated = find(lsource, "#ifdef _WIN32\n\tShowCursor(TRUE);")
+                           && find(lsource, "ClipCursor(NULL);\n#endif");
+        check(cursor_gated, "the cursor release is gated",
+              cursor_gated ? "ShowCursor and ClipCursor inside #ifdef _WIN32"
+                           : "MISSING - a Linux build reaches ShowCursor");
+        int timer_shared = find(lsource, "static double nr_now_seconds(void)")
+                           && find(lsource, "clock_gettime(CLOCK_MONOTONIC, &ts)");
+        check(timer_shared, "the frame timer has a non-Windows arm",
+              timer_shared ? "nr_now_seconds, with CLOCK_MONOTONIC beside QPC"
+                           : "MISSING - LARGE_INTEGER and QueryPerformance* unguarded");
+        /* And the key reads go through the gate rather than around it. */
+        int keys_gated = find(lsource, "#define nr_key_down(vk) ((GetAsyncKeyState(vk) & 0x8000) != 0)")
+                         && find(lsource, "#define nr_key_down(vk) (0)");
+        check(keys_gated, "every key read goes through the platform gate",
+              keys_gated ? "nr_key_down, with a no-op arm off Windows"
+                         : "MISSING - bare GetAsyncKeyState somewhere");
+    }
+
     /* ---- the C/C++ boundary is 32-bit safe ----
      *
      * Dead or Alive 5 is a 32-bit DirectX 9 game, and it crashed with the panel open about four
