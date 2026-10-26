@@ -181,8 +181,11 @@ class Settings:
     writes the file; anything may, it is one flat object.
     """
 
+    # The panel's knobs. **`preset` is not one of them**: the network is chosen in the setup window
+    # (PresetChoice writes `NR_PRESET`) and switched live by the panel's Network row, and it is not
+    # a settings-file knob with a default a Reset would restore. It is read in `__init__` below.
     KNOBS = ("profile", "intensity", "detail_strength", "colour_strength", "render_scale",
-             "temporal", "cut_limit", "hold", "release", "min_extent", "weights")
+             "temporal", "cut_limit", "hold", "release", "min_extent")
 
     def __init__(self, args):
         self.path = args.settings
@@ -208,12 +211,20 @@ class Settings:
         self.saved_values = {}
         for knob in self.KNOBS:
             setattr(self, knob, getattr(args, knob, None))
-        # What this daemon came up running: a Reset of `weights` returns to it, not to a
-        # constant - the start-up choice already folded in the installer's network decision.
-        self.weights_at_start = self.weights
-        # `weights` came from `--weights` through the loop above, like every other knob. It is a
-        # name rather than a number; `_apply` validates it against what this build knows and
-        # `serve` swaps the model when it changes.
+        # **The network is one setting, and it is this one.**
+        #
+        # `preset` is A or B. It starts from `--preset`, which the proxy fills from `NR_PRESET`;
+        # the setup window writes that, and the panel's Network row switches it live through the
+        # preview file. There was a `weights` knob beside it that named a MODEL FILE and resolved
+        # it through a manifest - two settings for one fact, which is how `NR_PRESET=B` came to run
+        # A and how "network preset A" got logged for a B model. Both are gone; see
+        # `nr_weight_models` for what replaced them.
+        if not getattr(self, "preset", None):
+            self.preset = nr_weight_models.preset_of(os.environ.get("NR_PRESET"))
+        else:
+            self.preset = nr_weight_models.preset_of(self.preset)
+        # Whether the `weights`-is-gone notice has been printed. Once, not every refresh.
+        self._said_weights_gone = False
 
     def _apply(self, given, source):
         """The knob values in `given`, validated. Returns the names it changed."""
@@ -227,22 +238,18 @@ class Settings:
                     print(f"settings: no profile {value!r}", flush=True)
                     continue
             elif knob == "weights":
-                # A name, not a number. An install that carries only one model still has to accept
-                # the name of the other - the settings file may have been written where both exist -
-                # and `nr_weight_models.resolve` is what falls back to the model that IS here.
-                # None is the reset state: the knob stops overriding and the installer's network
-                # choice (`NR_PRESET`) decides again, which is what a Reset of this knob means.
-                if value is None:
-                    if getattr(self, "weights", None) != self.weights_at_start:
-                        self.weights = self.weights_at_start
-                        changed.append(f"weights={self.weights_at_start} (reset)")
-                    continue
-                if value not in nr_weight_models.names():
-                    print(f"settings: no weights model {value!r}", flush=True)
-                    continue
-                if getattr(self, "weights", None) != value:
-                    self.weights = value
-                    changed.append(f"weights={value}")
+                # **Gone as a knob.** It named a model file (`ht`, `cc_small_fp8`) and resolved it
+                # through a manifest; the network is `NR_PRESET` now, one setting, chosen in the
+                # setup window and switched live by the panel's Network row.
+                #
+                # A settings file written before that still carries this key. Skipping it is what
+                # keeps such a file starting a daemon: the preset the author chose in the setup
+                # window is what runs, and it names the same network. Saying so once is worth it -
+                # silence would leave someone editing a knob that does nothing.
+                if not getattr(self, "_said_weights_gone", False):
+                    self._said_weights_gone = True
+                    print(f"settings: 'weights' is no longer a knob; {self.preset} runs "
+                          f"(NR_PRESET decides)", flush=True)
                 continue
             else:
                 try:
@@ -862,17 +869,18 @@ def refresh_model(args, backend):
     live = getattr(args, "live", None)
     if not isinstance(model, dict) or live is None:
         return backend
-    want = getattr(live, "weights", None)
-    if not want or want == model.get("requested"):
+    want = nr_weight_models.preset_of(getattr(live, "preset", None))
+    if want == model.get("requested"):
         return backend
     model["requested"] = want
-    name, path = nr_weight_models.resolve(ROOT / "work", want)
-    if path is None:
-        print(f"weights: nothing on disk answers {want!r}; keeping {model.get('name')}", flush=True)
+    path = nr_weight_models.weights_path(ROOT / "work", want)
+    if not path.is_file():
+        # **Refused, not answered with the other network.** The old table fell back to A here,
+        # which is how `NR_PRESET=B` came to run A silently on an install whose B had never been
+        # extracted. The panel asked for B; the honest reply is that B is not here.
+        print(nr_weight_models.missing_message(ROOT / "work", want), flush=True)
         return backend
-    if name == model.get("name"):
-        if want != name:
-            print(f"weights: {want} is not loadable here ({name} is); keeping {name}", flush=True)
+    if want == model.get("preset"):
         return backend
     # The engine follows the model; the transport's imports are the game's and stay.
     close_gpu_images(args, keep_sessions=True)
@@ -885,14 +893,14 @@ def refresh_model(args, backend):
             print(f"weights: closing {model.get('name')} failed: {error}", flush=True)
     started = time.perf_counter()
     fresh = nr_frame.ResidentBackend(path)
-    model.update(backend=fresh, name=name, path=path)
+    model.update(backend=fresh, name=path.name, path=path, preset=want)
     # The transport keeps the game's imports but must follow the model: its engine is rebuilt
     # from `self.backend` on the next frame, so without this it would rebuild on the model it
     # just replaced. `rebind_backend` drops only the engine, never the contexts.
     shared = getattr(args, "gpu_transport", None)
     if shared is not None:
         shared.rebind_backend(fresh)
-    print(f"weights: {want} -> {name} ({path.name}) in {time.perf_counter() - started:.1f}s",
+    print(f"preset: {want} ({path.name}) in {time.perf_counter() - started:.1f}s",
           flush=True)
     return fresh
 
@@ -1524,7 +1532,8 @@ def main():
     # mapping is one line below the parse - preset B's weights and the panel's `cc_small_fp8` are
     # the same file - so an install chosen as B starts on B without the two selection paths
     # disagreeing. An explicit --weights, and a settings file's `weights` knob, still win.
-    parser.add_argument("--weights", default=None, choices=nr_weight_models.names())
+    parser.add_argument("--preset", default=None, choices=nr_weight_models.PRESETS,
+                        help="which network to run; NR_PRESET also sets this")
     parser.add_argument("--intensity", type=float, default=1.0)
     parser.add_argument("--detail-strength", type=float, default=1.0)
     parser.add_argument("--colour-strength", type=float, default=1.0)
@@ -1598,7 +1607,7 @@ def run_owned(args):
         try:
             if args.settings and pathlib.Path(args.settings).is_file():
                 saved = json.loads(pathlib.Path(args.settings).read_text(encoding="utf-8-sig"))
-                if isinstance(saved, dict) and saved.get("weights") in nr_weight_models.names():
+                if isinstance(saved, dict) and saved.get("preset") in nr_weight_models.PRESETS:
                     args.weights = saved["weights"]
         except (OSError, ValueError):
             pass
@@ -1609,7 +1618,9 @@ def run_owned(args):
     args.letterbox = Letterbox()
     args.meter = Meter() if args.meter else None
 
-    name, weights_path = nr_weight_models.resolve(ROOT / "work", args.live.weights)
+    preset = nr_weight_models.preset_of(getattr(args.live, "preset", None))
+    weights_path = nr_weight_models.weights_path(ROOT / "work", preset)
+    name = weights_path.name
     if weights_path is None or not weights_path.exists():
         # The first thing a new clone hits, and a traceback is a poor way to say it.
         how = ("as the README's Build section describes" if nr_frame.PRESET == "A" else
@@ -1628,19 +1639,22 @@ def run_owned(args):
     # told apart from a repeat. `refresh_model` swaps it; the panel's knob is the only writer.
     args.model = {"backend": backend, "name": name, "path": weights_path,
                   "requested": name}
-    if name != nr_weight_models.default_name() or \
-            len(nr_weight_models.available(ROOT / "work")) > 1:
-        print(f"weights: {name} ({weights_path.name}), installed: "
-              f"{nr_weight_models.describe_available(ROOT / 'work')}", flush=True)
+    # Which presets this install could run, so "B is not extracted here" is visible without
+    # trying B first. One line, and only when the answer is not "A is all there is".
+    _run = nr_weight_models.describe(ROOT / "work")
+    if len(_run) > 1:
+        print(f"weights: {weights_path.name}, installed presets: "
+              + ", ".join(f"{k}={'yes' if v else 'no'}" for k, v in _run.items()), flush=True)
     # which GPU: a machine can have more than one, or a different one than the person
     # assumes. libxmx chooses one that can run the network (XMX_DEVICE names another).
     print(f"model ready in {time.perf_counter() - started:.1f}s"
           f" on {xmx.device_name()}", flush=True)
-    # The preset the install was chosen as, and the weights actually loaded - two different things
-    # since the panel's `weights` knob arrived, and saying only the preset read as a contradiction:
-    # "network preset A" beside a B model, which is exactly what a MK11 save of B followed by a
-    # DoA5 launch produced. The preset is where the choice CAME from; the model is what is running.
-    print(f"network preset {nr_frame.PRESET} ({name}, {weights_path.name}),"
+    # **Neither half can disagree with the other any more.** This used to print
+    # `nr_frame.PRESET` - a module constant - beside the model the table had chosen, so an install
+    # running B on a settings file's `weights` printed "network preset A". There is one setting
+    # now: `preset` is what was asked for, `weights_path` is the file that answers it, and a
+    # mismatch is not expressible.
+    print(f"network preset {preset} ({weights_path.name}),"
           f" {backend.topology.block_count} blocks, history ceiling {backend.blend_scale}",
           flush=True)
     if nr_image is None or nr_image.library() is None:

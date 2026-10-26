@@ -191,6 +191,35 @@ under that date. When an item is done, strike it through here and name the commi
 
 ---
 
+## PR #20 narrowed to the panel: one Windows-only file, one keyboard reader (2026-10-26, branch `menu-on-e4m3`)
+
+The maintainer looked at five rounds of fixes and proposed the opposite of a sixth: shrink the PR.
+Nearly every defect had come from four parts a keyboard-driven panel does not need, so those went.
+
+- **One panel, keyboard only.** The hand-drawn renderer is deleted - `nr_menu.c`'s font, glyph
+  atlas, composite pass and cursor - and so is the mouse path and the cursor pin. What stays is the
+  state machine the ImGui panel's input goes through, and `nr_menu_draw_overlay`, which is how the
+  ImGui image reaches the frame. `nr_menu.c` 1756 -> 1395 lines.
+- **One keyboard reader.** Keys were read in `nr_layer.c`, `nr_menu.c` and `nr_menu_ui.cpp`, so the
+  focus gate had to be remembered in three places and two of them forgot. `nr_layer.c` now sweeps
+  256 levels once per frame behind one gate; `nr_menu_set_key_levels` hands them to the state
+  machine and `nrex_key` to ImGui. Zero `GetAsyncKeyState` outside one macro.
+- **Windows only.** The menu's glue (`menu_composite`, `menu_read_keys`, `menu_build`, the mouse)
+  moved to `nr_menu_layer.c`, built only on Windows; `nr_menu_layer.h` gives the layer three empty
+  hooks elsewhere and `nr_layer_state.h` holds the two structs both files need. `nr_layer.c`
+  3920 -> 2255 lines, against 2102 on `newnr`. Linux gets no ImGui, no `libstdc++`, no STORAGE on
+  a swapchain - verified by configuring with `WIN32` off: zero menu sources in every `build.make`.
+- **One network setting.** The `weights` knob, its model table and the manifest are gone;
+  `NR_PRESET` maps to one file per preset. This is what fixed `NR_PRESET=B` running A on an install
+  whose B had never been extracted, and "network preset A" logged beside a B model.
+
+The architecture is in `docs/MENU-ARCHITECTURE.md`; this is the state and the traps. The one worth
+carrying forward: **a check that cannot see the file the defect lived in is not a check.** An
+assertion for "exactly one keyboard reader" read three files and not `nr_menu.c`, and the mutation
+that put a reader back there passed.
+
+---
+
 ## PR #20: the maintainer's review answered, the menu in a real Windows game (2026-10-18, branch `menu-on-e4m3`)
 
 The maintainer reviewed the in-game menu on 10-18 with four asks before merging #20. All four are

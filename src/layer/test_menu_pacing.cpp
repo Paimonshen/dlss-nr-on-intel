@@ -404,31 +404,24 @@ int main(void)
             if (strcmp(name, "detail_strength") == 0) detail_row = i;
         }
         snprintf(detail, sizeof detail, "weights=%d detail=%d", network, detail_row);
-        check(network >= 0 && detail_row >= 0, "the two knobs this is about are in the table", detail);
+        /* **`weights` must NOT be in the table.** It was a `choice` row naming a model file, and
+         * it gave the project two settings for one fact: `NR_PRESET` in the environment and this
+         * row in the panel. The two disagreed in the games - a B chosen here logged as "network
+         * preset A" - and `NR_PRESET=B` loaded A on an install whose manifest the row's own
+         * extractor had not written. The network is one setting now, chosen in the setup window;
+         * this fails if a second path comes back. */
+        check(network < 0, "the network is not a knob any more", detail);
+        check(detail_row >= 0, "the picture knobs are still there", detail);
 
-        /* Choose the second network, as a user would from the combo. */
-        int options = nr_menu_bridge_knob_choice_count(network);
-        snprintf(detail, sizeof detail, "%d options", options);
-        check(options >= 2, "the network knob offers more than one", detail);
-        nr_menu_bridge_set(b, network, 1.0f);
-        char chosen[32] = "";
-        nr_menu_bridge_knob_choice_name(network, 1, NR_LANG_EN, chosen, sizeof chosen);
-        snprintf(detail, sizeof detail, "chose %s, row shows %s",
-                 chosen, nr_menu_bridge_row_value(b, network));
-        check(nr_menu_bridge_knob_choice_index(b, network) == 1, "the second network is chosen", detail);
-
-        /* And a picture parameter off its default, so the Reset has something to put back. */
+        /* Reset is a plain reset now: a picture parameter goes back to its default, and there is
+         * no network index for it to preserve. The old special case existed so a Reset would not
+         * move a user off B; with no row, that cannot happen. */
         nr_menu_bridge_set(b, detail_row, 1.75f);
-
         nr_menu_bridge_reset(b);
-        int after = nr_menu_bridge_knob_choice_index(b, network);
-        snprintf(detail, sizeof detail, "network after Reset = index %d (%s)", after,
-                 nr_menu_bridge_row_value(b, network));
-        check(after == 1, "Reset keeps the network the user chose", detail);
         snprintf(detail, sizeof detail, "detail after Reset = %s",
                  nr_menu_bridge_row_value(b, detail_row));
         check(strcmp(nr_menu_bridge_row_value(b, detail_row), "1") == 0,
-              "and still returns a picture parameter to its default", detail);
+              "Reset returns a picture parameter to its default", detail);
     }
 
     /* ---- what the four variables mean, and one of them is NOT the panel's ---- */

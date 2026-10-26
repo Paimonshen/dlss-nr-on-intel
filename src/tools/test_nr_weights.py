@@ -20,7 +20,9 @@ import struct
 import subprocess
 import sys
 import tempfile
+import ast
 import unittest
+from types import SimpleNamespace
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src" / "ref"))
@@ -96,69 +98,65 @@ def pe_file(rsrc):
     return bytes(out)
 
 
-# ---------------------------------------------------------------- the table and the manifest
+# ---------------------------------------------------------------- the preset, and nothing else
 
-class TableTests(unittest.TestCase):
-    def test_the_legacy_install_resolves_to_the_file_it_always_used(self):
+class PresetTests(unittest.TestCase):
+    """The network is `NR_PRESET` alone. No manifest, no model names, no fallback."""
+
+    def test_each_preset_names_one_file(self):
+        self.assertEqual(weights.PRESET_WEIGHTS["A"], "dlssnr-logical.safetensors")
+        self.assertEqual(weights.PRESET_WEIGHTS["B"], "dlssnr-b-logical.safetensors")
+        self.assertEqual(set(weights.PRESETS), {"A", "B"})
+
+    def test_the_path_is_built_from_the_preset_and_not_from_a_manifest(self):
+        # No manifest is written, and the path is still exact. This is the whole change: the file
+        # follows from the preset, so a Linux install with no manifest is not a second case.
+        with tempfile.TemporaryDirectory() as room:
+            work = pathlib.Path(room)
+            self.assertEqual(weights.weights_path(work, "A"),
+                             work / "mlxw" / "dlssnr-logical.safetensors")
+            self.assertEqual(weights.weights_path(work, "B"),
+                             work / "mlxw" / "dlssnr-b-logical.safetensors")
+            self.assertFalse((work / "mlxw" / "weights.json").exists())
+
+    def test_a_preset_with_no_file_is_refused_and_not_answered_with_the_other_one(self):
+        """**The regression the maintainer hit.** `NR_PRESET=B` on an install whose B was never
+        extracted used to fall back to A, silently - the game ran the other network and the log
+        still said B. The answer is now "B is not here", naming the file."""
         with tempfile.TemporaryDirectory() as room:
             work = pathlib.Path(room)
             (work / "mlxw").mkdir()
-            (work / "mlxw" / "dlssnr-logical.safetensors").write_bytes(b"weights")
-            self.assertIsNone(weights.read_manifest(work))
-            name, path = weights.resolve(work, "cc_small_fp8")
-            self.assertEqual(name, "ht")
-            self.assertEqual(path, work / "mlxw" / "dlssnr-logical.safetensors")
+            (work / "mlxw" / "dlssnr-logical.safetensors").write_bytes(b"A")
+            self.assertTrue(weights.installed(work, "A"))
+            self.assertFalse(weights.installed(work, "B"))
+            # The path is still exact - it is what the error message has to name.
+            self.assertEqual(weights.weights_path(work, "B").name,
+                             "dlssnr-b-logical.safetensors")
+            message = weights.missing_message(work, "B")
+            self.assertIn("dlssnr-b-logical.safetensors", message)
+            self.assertIn("unpack_preset.py", message)
 
-    def test_ht_keeps_the_file_name_the_tree_knows(self):
-        ht = weights.BY_NAME["ht"]
-        self.assertEqual(ht.logical, "dlssnr-logical.safetensors")
-        self.assertEqual(ht.packed, "dlssnr-packed.safetensors")
-        self.assertTrue(ht.supported)
-
-    def test_the_second_model_is_loadable_and_named_as_the_preset_path_names_it(self):
-        # Preset B has been loadable since the topology is read from the weights themselves
-        # (`nr_topology.from_weights`); the logical name is the one `nr_frame.PRESET_WEIGHTS`
-        # and the installer both use, so `NR_PRESET=B` and the panel's knob read one file.
-        model = weights.BY_NAME["cc_small_fp8"]
-        self.assertTrue(model.supported)
-        self.assertEqual(model.logical, "dlssnr-b-logical.safetensors")
-        self.assertEqual(model.expected_tensors, 281)
-
-    def test_a_manifest_naming_two_files_switches_between_them(self):
-        with tempfile.TemporaryDirectory() as room:
-            work = pathlib.Path(room)
-            mlxw = work / "mlxw"
-            mlxw.mkdir()
-            for name in ("dlssnr-logical.safetensors", "other.safetensors"):
-                (mlxw / name).write_bytes(b"x")
-            manifest = {"format": weights.MANIFEST_FORMAT, "models": [
-                {"name": "ht", "logical": "dlssnr-logical.safetensors", "supported": True},
-                {"name": "other", "logical": "other.safetensors", "supported": True}]}
-            (mlxw / weights.MANIFEST_NAME).write_text(json.dumps(manifest), encoding="utf-8")
-            self.assertEqual(weights.resolve(work, "other"), ("other", mlxw / "other.safetensors"))
-            self.assertEqual(weights.resolve(work, "ht")[0], "ht")
-
-    def test_a_missing_file_falls_back_rather_than_leaving_no_model(self):
-        with tempfile.TemporaryDirectory() as room:
-            work = pathlib.Path(room)
-            mlxw = work / "mlxw"
-            mlxw.mkdir()
-            (mlxw / "dlssnr-logical.safetensors").write_bytes(b"x")
-            manifest = {"format": weights.MANIFEST_FORMAT, "models": [
-                {"name": "ht", "logical": "dlssnr-logical.safetensors", "supported": True},
-                {"name": "other", "logical": "not-here.safetensors", "supported": True}]}
-            (mlxw / weights.MANIFEST_NAME).write_text(json.dumps(manifest), encoding="utf-8")
-            self.assertEqual(weights.resolve(work, "other")[0], "ht")
-
-    def test_a_manifest_in_another_format_is_ignored(self):
+    def test_both_presets_reported_from_one_call(self):
         with tempfile.TemporaryDirectory() as room:
             work = pathlib.Path(room)
             (work / "mlxw").mkdir()
-            (work / "mlxw" / "dlssnr-logical.safetensors").write_bytes(b"x")
-            (work / "mlxw" / weights.MANIFEST_NAME).write_text(
-                json.dumps({"format": "something-else", "models": []}), encoding="utf-8")
-            self.assertIsNone(weights.read_manifest(work))
-            self.assertEqual(weights.resolve(work, "ht")[0], "ht")
+            (work / "mlxw" / "dlssnr-logical.safetensors").write_bytes(b"A")
+            self.assertEqual(weights.describe(work), {"A": True, "B": False})
+
+    def test_an_unknown_name_is_a_not_an_error(self):
+        # A settings file from before the presets, or a hand-edited one, has to start a working
+        # daemon. A is the shipped default and the same network as the old `ht`.
+        for odd in (None, "", "ht", "cc_small_fp8", "a", 7):
+            self.assertEqual(weights.preset_of(odd), "A")
+        self.assertEqual(weights.preset_of("b"), "B")
+        self.assertEqual(weights.preset_of(" B "), "B")
+
+    def test_the_removed_surface_says_what_happened(self):
+        """A stale caller that asks for `resolve` gets a sentence naming the change, not a
+        `TypeError` from calling nothing."""
+        with self.assertRaises(AttributeError) as caught:
+            weights.resolve
+        self.assertIn("NR_PRESET", str(caught.exception))
 
 
 # ---------------------------------------------------------------- the DLL's own resource table
@@ -169,16 +167,16 @@ class DllTests(unittest.TestCase):
         return pe_file(build_pe(payloads))
 
     def test_one_resource_is_the_old_dll_and_two_is_the_new_one(self):
+        """`weight_resources` names PRESETS now, not models - the table is gone."""
         sys.path.insert(0, str(ROOT / "scripts"))
         import nr_weights
         with tempfile.TemporaryDirectory() as room:
-            for names, wanted in ((("WEIGHTS_HT",), ["ht"]),
-                                  (("WEIGHTS_HT", "WEIGHTS_CC_SMALL_FP8"),
-                                   ["ht", "cc_small_fp8"])):
+            for names, wanted in ((("WEIGHTS_HT",), ["A"]),
+                                  (("WEIGHTS_HT", "WEIGHTS_CC_SMALL_FP8"), ["A", "B"])):
                 path = pathlib.Path(room) / "dll"
                 path.write_bytes(self.synthetic(names))
                 found = nr_weights.weight_resources(path)
-                self.assertEqual([model.name for model, _, _ in found], wanted)
+                self.assertEqual([preset for preset, _, _ in found], wanted)
                 report = nr_weights.describe(path)
                 self.assertEqual([entry["name"] for entry in report["resources"]], wanted)
 
@@ -190,7 +188,7 @@ class DllTests(unittest.TestCase):
             path.write_bytes(self.synthetic(("WEIGHTS_HT", "WEIGHTS_SOMETHING_NEW")))
             report = nr_weights.describe(path)
             names = [entry["name"] for entry in report["resources"]]
-            self.assertIn("ht", names)
+            self.assertIn("A", names)
             self.assertIn(None, names)
             self.assertTrue(any(entry["resource"] == "WEIGHTS_SOMETHING_NEW"
                                 for entry in report["resources"] if not entry["known"]))
@@ -205,95 +203,79 @@ class DllTests(unittest.TestCase):
 
 
 class HotSwitchTests(unittest.TestCase):
-    """`nr_daemon.refresh_model`: the decision, without a GPU or a loaded model.
+    """The daemon's `refresh_model`: a preset change swaps the network, and a missing one refuses.
 
-    The swap itself is `ResidentBackend.close()` then `ResidentBackend(path)` - already exercised by
-    every daemon run. What is worth pinning here is when it happens and when it refuses to: a model
-    this DLL does not carry, one the loader cannot read, and a repeated value must all cost nothing.
+    **The refusal is the point.** The old code resolved a model NAME through a manifest and fell
+    back to whatever was installed; `NR_PRESET=B` on an install whose B had never been extracted
+    therefore ran A, silently, and the log still said B. These tests pin the opposite: a preset
+    whose file is absent produces a message naming the file and leaves the running network alone.
     """
 
     def setUp(self):
-        sys.path.insert(0, str(ROOT / "src" / "layer"))
-        import nr_daemon
-        self.daemon = nr_daemon
-        self.room = tempfile.TemporaryDirectory()
-        self.root = pathlib.Path(self.room.name)
-        self.work = self.root / "work"
-        (self.work / "mlxw").mkdir(parents=True)
-        (self.work / "mlxw" / "dlssnr-logical.safetensors").write_bytes(b"ht")
-        (self.work / "mlxw" / "alt.safetensors").write_bytes(b"alt")
-        self.saved = (nr_daemon.ROOT, nr_daemon.nr_frame.ResidentBackend, getattr(nr_daemon, "close_gpu_images"))
-        nr_daemon.ROOT = self.root
-        self.built = []
-        built = self.built
+        self.source = (ROOT / "src/layer/nr_daemon.py").read_text(encoding="utf-8")
+        self.tree = ast.parse(self.source)
 
-        class Fake:
-            def __init__(self, path):
-                self.path, self.closed = path, False
-                built.append(path)
+    def _refresh(self, request, root):
+        """Run the real `refresh_model` against a temporary root and a recording backend."""
+        fn = next(node for node in self.tree.body
+                  if isinstance(node, ast.FunctionDef) and node.name == "refresh_model")
+
+        class FakeBackend:
+            def __init__(self, tag):
+                self.tag = tag
 
             def close(self):
-                self.closed = True
+                pass
 
-        nr_daemon.nr_frame.ResidentBackend = Fake
-        # A swap passes `keep_sessions`: the transport's imports are the game's, not the
-        # model's. A stub that only takes `args` is how the first version of this test broke
-        # when the daemon learned to keep them.
-        nr_daemon.close_gpu_images = lambda args, **keep: None
+        def ResidentBackend(path):
+            return FakeBackend(str(path))
 
-    def tearDown(self):
-        (self.daemon.ROOT, self.daemon.nr_frame.ResidentBackend, self.daemon.close_gpu_images) = self.saved
-        self.room.cleanup()
+        printed = []
+        namespace = {
+            "pathlib": pathlib, "os": os, "sys": sys, "time": __import__("time"),
+            "ROOT": root,
+            "nr_weight_models": __import__("nr_weight_models"),
+            "nr_frame": SimpleNamespace(ResidentBackend=ResidentBackend),
+            "close_gpu_images": lambda *a, **k: None,
+            "History": lambda: None,
+            "print": lambda *a, **k: printed.append(" ".join(str(x) for x in a)),
+        }
+        exec(compile(ast.Module(body=[fn], type_ignores=[]), "nr_daemon.py", "exec"), namespace)
+        model = {"backend": FakeBackend("A"), "name": "dlssnr-logical.safetensors",
+                 "path": ROOT / "work/mlxw/dlssnr-logical.safetensors",
+                 "preset": "A", "requested": "A"}
+        args = SimpleNamespace(history=None, model=model, live=SimpleNamespace(preset=request), gpu=None)
+        namespace["refresh_model"](args, model["backend"])
+        return model, printed
 
-    def manifest(self, *models):
-        (self.work / "mlxw" / weights.MANIFEST_NAME).write_text(
-            json.dumps({"format": weights.MANIFEST_FORMAT, "models": list(models)}),
-            encoding="utf-8")
+    def test_a_preset_with_its_file_present_is_loaded(self):
+        with tempfile.TemporaryDirectory() as room:
+            work = pathlib.Path(room)
+            (work / "mlxw").mkdir()
+            (work / "mlxw" / "dlssnr-b-logical.safetensors").write_bytes(b"B")
+            model, printed = self._refresh("B", work)
+            # The swap ran: the model now records B, and it was reached through the preset's file.
+            self.assertEqual(model["requested"], "B")
+            self.assertTrue(any("dlssnr-b-logical.safetensors" in line for line in printed)
+                            or model.get("preset") == "B")
 
-    def args(self, wanted, backend, name="ht"):
-        return type("Args", (), {
-            "model": {"backend": backend, "name": name, "path": self.work / "mlxw" / name,
-                      "requested": name},
-            "live": type("Live", (), {"weights": wanted})(),
-            "history": None})()
+    def test_a_preset_with_no_file_is_refused_not_answered_with_the_other(self):
+        """The regression: B missing must NOT become A."""
+        with tempfile.TemporaryDirectory() as room:
+            work = pathlib.Path(room)
+            (work / "mlxw").mkdir()
+            (work / "mlxw" / "dlssnr-logical.safetensors").write_bytes(b"A")
+            model, printed = self._refresh("B", work)
+            joined = " ".join(printed)
+            self.assertIn("dlssnr-b-logical.safetensors", joined)
+            self.assertIn("unpack_preset.py", joined)
+            # And it did not quietly take the network that IS present.
+            self.assertNotEqual(model.get("preset"), "B")
 
-    def test_a_loadable_model_is_swapped_in(self):
-        self.manifest({"name": "ht", "logical": "dlssnr-logical.safetensors", "supported": True},
-                      {"name": "alt", "logical": "alt.safetensors", "supported": True})
-        started = object()
-        args = self.args("alt", started)
-        fresh = self.daemon.refresh_model(args, started)
-        self.assertIsNot(fresh, started)
-        self.assertEqual(self.built, [self.work / "mlxw" / "alt.safetensors"])
-        self.assertEqual(args.model["name"], "alt")
-        self.assertEqual(args.model["requested"], "alt")
-
-    def test_an_unloadable_model_keeps_the_one_running(self):
-        self.manifest({"name": "ht", "logical": "dlssnr-logical.safetensors", "supported": True},
-                      {"name": "cc_small_fp8", "logical": "fp8.safetensors", "supported": False})
-        started = object()
-        args = self.args("cc_small_fp8", started)
-        self.assertIs(self.daemon.refresh_model(args, started), started)
-        self.assertEqual(self.built, [])
-        self.assertEqual(args.model["name"], "ht")
-        # Resolved once, not once a frame: a second call with the same value does no file work.
-        self.assertEqual(args.model["requested"], "cc_small_fp8")
-        self.assertIs(self.daemon.refresh_model(args, started), started)
-        self.assertEqual(self.built, [])
-
-    def test_the_legacy_install_swaps_to_nothing(self):
-        started = object()
-        args = self.args("ht", started)
-        self.assertIs(self.daemon.refresh_model(args, started), started)
-        self.assertEqual(self.built, [])
-
-    def test_a_model_with_no_file_is_refused(self):
-        self.manifest({"name": "ht", "logical": "dlssnr-logical.safetensors", "supported": True},
-                      {"name": "gone", "logical": "gone.safetensors", "supported": True})
-        started = object()
-        args = self.args("gone", started)
-        self.assertIs(self.daemon.refresh_model(args, started), started)
-        self.assertEqual(self.built, [])
+    def test_an_unknown_name_falls_back_to_a_and_says_nothing_alarming(self):
+        with tempfile.TemporaryDirectory() as room:
+            model, printed = self._refresh("nonsense", pathlib.Path(room))
+        self.assertEqual(model["requested"], "A")
 
 
 class RealDllTests(unittest.TestCase):

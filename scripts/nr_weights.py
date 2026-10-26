@@ -34,11 +34,14 @@ sys.path.insert(0, str(ROOT / "src" / "ref"))
 import nr_weight_models as weights  # noqa: E402  - the table, manifest and resolution, once
 
 RCDATA = 10                 # the resource type every weight resource is filed under
-MANIFEST_FORMAT = weights.MANIFEST_FORMAT
-MANIFEST_NAME = weights.MANIFEST_NAME
-MODELS = weights.MODELS
-BY_RESOURCE = weights.BY_RESOURCE
-BY_NAME = weights.BY_NAME
+
+# **There is no manifest and no model table.** They gave the project two ways to choose the
+# network - `NR_PRESET` in the environment, and a `weights` name resolved through a manifest - and
+# the two disagreed in the games. The preset maps to a file by name now; see
+# `src/ref/nr_weight_models.py`.
+PRESETS = weights.PRESETS
+PRESET_WEIGHTS = weights.PRESET_WEIGHTS
+BY_RESOURCE = {"WEIGHTS_HT": "A", "WEIGHTS_CC_SMALL_FP8": "B"}
 
 
 # ---------------------------------------------------------------- the DLL's resource directory
@@ -108,7 +111,7 @@ def resource_entries(dll):
 
 
 def weight_resources(dll):
-    """[(Model or None, resource_name, size)] for each RCDATA entry that looks like weights.
+    """[(preset or None, resource_name, size)] for each RCDATA entry that looks like weights.
 
     An unknown WEIGHTS_* entry is reported with `None` rather than ignored: a future version that
     renames the resource should read as "there is a weight resource this build does not know",
@@ -130,9 +133,9 @@ def describe(dll):
     dll = pathlib.Path(dll)
     return {"dll": str(dll), "sha256": hashlib.sha256(dll.read_bytes()).hexdigest(),
             "bytes": dll.stat().st_size,
-            "resources": [{"resource": name, "known": model is not None,
-                           "name": None if model is None else model.name, "bytes": size}
-                          for model, name, size in weight_resources(dll)]}
+            "resources": [{"resource": name, "known": preset is not None,
+                           "name": preset, "bytes": size}
+                          for preset, name, size in weight_resources(dll)]}
 
 
 # ---------------------------------------------------------------- extraction through MLX-DLSS
@@ -180,11 +183,12 @@ def _run_tool(path, argv, resource_name=None):
         raise SystemExit(f"{path.name} failed with {code}")
 
 
-def extract(dll, work_dir, tools=None, *, all_models=True, quiet=False):
-    """Extract every weight model `dll` carries into `work_dir/mlxw`, and write the manifest.
+def extract(dll, work_dir, tools=None, *, preset=None, quiet=False):
+    """Extract one preset's weights from `dll` into `work_dir/mlxw`.
 
-    Returns the manifest dict. `work_dir` is the tree's `work/` - the same directory the installer
-    and the daemon use, so a caller never has to know the layout.
+    `preset` is "A" or "B"; None means "every resource this DLL carries, as long as it maps to a
+    preset". There is no manifest to write: the file name follows from the preset, so the daemon
+    finds it without one. Returns the list of files this call produced.
     """
     work = pathlib.Path(work_dir)
     mlxw = work / "mlxw"
@@ -200,93 +204,58 @@ def extract(dll, work_dir, tools=None, *, all_models=True, quiet=False):
     if not found:
         raise SystemExit(f"{dll} carries no weight resource this build knows")
 
-    entries = []
-    for model, resource, size in found:
-        if model is None:
-            if not all_models:
-                continue
-            packed = mlxw / f"{resource.lower()}-packed.safetensors"
-            if not quiet:
-                print(f"  {resource}: unknown model, extracting to {packed.name} only", flush=True)
-            _run_tool(extractor, [dll, packed], resource_name=resource)
-            entries.append({"name": None, "resource": resource, "logical": None,
-                            "supported": False, "resource_bytes": size,
-                            "packed": packed.name})
-            continue
-        if not all_models and not model.supported:
-            continue
-        packed = mlxw / model.packed
-        record = model.as_dict() | {"packed": packed.name, "resource_bytes": size}
-        if model.name == "cc_small_fp8":
-            # Preset B goes through `unpack_preset.py`, not the plain unpacker: its records
-            # are named by B's own block indices, and only the role-renaming decoder there
-            # knows which preset A block each one decodes as (notes/phase72-preset-b.md).
-            # The tool does its own extraction from the DLL, so B has no packed intermediate.
-            logical = mlxw / model.logical
-            fresh = logical.with_name(logical.name + ".new")
-            fresh.unlink(missing_ok=True)
-            if not quiet:
-                print(f"  {model.resource}: unpacking via unpack_preset to {logical.name}",
-                      flush=True)
-            result = subprocess.run(
-                [sys.executable, "-I", str(ROOT / "src" / "tools" / "unpack_preset.py"),
-                 str(dll), str(fresh), "--preset", "B",
-                 "--mlx-dlss", str(work / "mlx-dlss")],
-                cwd=str(ROOT))
-            if result.returncode != 0 or not fresh.is_file():
-                fresh.unlink(missing_ok=True)
-                raise SystemExit(f"{model.resource}: unpack_preset failed; "
-                                 "see its output above")
-            os.replace(fresh, logical)
-            record["logical_bytes"] = logical.stat().st_size
-        elif model.supported:
-            logical = mlxw / model.logical
-            if not quiet:
-                print(f"  {model.resource}: extracting to {packed.name}", flush=True)
-            _run_tool(extractor, [dll, packed], resource_name=model.resource)
-            if not quiet:
-                print(f"  {model.resource}: unpacking to {logical.name}", flush=True)
-            _run_tool(unpacker, [packed, logical])
-            if not logical.is_file():
-                raise SystemExit(f"{model.resource} unpacked to nothing at {logical}")
-            record["logical_bytes"] = logical.stat().st_size
-        else:
-            if not quiet:
-                print(f"  {model.resource}: extracting to {packed.name} (not loadable yet)",
-                      flush=True)
-            _run_tool(extractor, [dll, packed], resource_name=model.resource)
-        entries.append(record)
+    wanted = [preset] if preset else [name for name, _, _ in found if name]
+    if not wanted:
+        raise SystemExit(f"{dll} carries no resource that maps to a preset this build knows")
 
-    manifest = {"format": MANIFEST_FORMAT,
-                "source": describe(dll),
-                "models": entries,
-                "default": next((e["name"] for e in entries
-                                 if e.get("name") and e.get("supported")), None)}
-    (mlxw / MANIFEST_NAME).write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
-    return manifest
+    written = []
+    for target in wanted:
+        resource = next((r for p, r, _ in found if p == target), None)
+        if resource is None:
+            continue
+        logical = weights.weights_path(work, target)
+        fresh = logical.with_name(logical.name + ".new")
+        fresh.unlink(missing_ok=True)
+        if not quiet:
+            print(f"  {resource}: unpacking preset {target} to {logical.name}", flush=True)
+        # `unpack_preset.py` is the tool that knows both: it extracts from the DLL and applies the
+        # role-renaming decoder B's records need. Using it for A too keeps one path.
+        result = subprocess.run(
+            [sys.executable, "-I", str(ROOT / "src" / "tools" / "unpack_preset.py"),
+             str(dll), str(fresh), "--preset", target,
+             "--mlx-dlss", str(work / "mlx-dlss")],
+            cwd=str(ROOT))
+        if result.returncode != 0 or not fresh.is_file():
+            fresh.unlink(missing_ok=True)
+            raise SystemExit(f"{resource}: unpack_preset failed for preset {target}; "
+                             "see its output above")
+        os.replace(fresh, logical)
+        written.append(logical)
+        if not quiet:
+            print(f"  {resource}: wrote {logical.name} ({logical.stat().st_size} bytes)",
+                  flush=True)
+    return written
 
 
 # ---------------------------------------------------------------- reading what is installed
 #
-# The manifest format, the model table and the "which file does a settings value load" answer live
-# in `src/ref/nr_weight_models.py`, because the daemon and the panel need exactly the same answers
-# and a second copy of them here is how the two would start disagreeing. These are the names this
-# script uses for them.
-
-read_manifest = weights.read_manifest
-available = weights.available
-resolve = weights.resolve
-
+# What an install has is one question with two possible answers per preset, and
+# `nr_weight_models.describe` is what the daemon and the setup window both read. No manifest.
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--inspect", metavar="DLL", help="report the weight resources a DLL carries")
-    parser.add_argument("--extract", metavar="DLL", help="extract every model the DLL carries")
+    parser.add_argument("--extract", metavar="DLL",
+                        help="extract the weights for --preset from this DLL")
+    parser.add_argument("--preset", choices=PRESETS,
+                        help="which preset to extract; default is every one the DLL carries")
     parser.add_argument("--work-dir", type=pathlib.Path, default=pathlib.Path("work"))
     parser.add_argument("--tools", type=pathlib.Path,
-                        help="the MLX-DLSS tools directory; defaults to <work-dir>/mlx-dlss/python/mlxdlss/tools")
-    parser.add_argument("--list", action="store_true", help="what an install has, from the manifest")
+                        help="the MLX-DLSS tools directory; defaults to "
+                             "<work-dir>/mlx-dlss/python/mlxdlss/tools")
+    parser.add_argument("--list", action="store_true",
+                        help="which preset files this install has")
     parser.add_argument("--json", action="store_true", help="machine-readable output")
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
@@ -296,37 +265,31 @@ def main() -> int:
         if args.json:
             print(json.dumps(report, indent=2))
         else:
-            print(f"{report['dll']}  {report['bytes']:,} bytes  sha256 {report['sha256'][:16]}…")
+            print(f"{report['dll']}  {report['bytes']:,} bytes  "
+                  f"sha256 {report['sha256'][:16]}")
             for entry in report["resources"]:
                 known = entry["name"] or "unknown to this build"
                 print(f"  {entry['resource']:<24} {entry['bytes']:>12,} B   {known}")
         return 0
 
     if args.extract:
-        manifest = extract(args.extract, args.work_dir, args.tools, quiet=args.quiet)
+        written = extract(args.extract, args.work_dir, args.tools,
+                          preset=args.preset, quiet=args.quiet)
         if args.json:
-            print(json.dumps(manifest, indent=2))
+            print(json.dumps([str(p) for p in written], indent=2))
         else:
-            print(f"manifest: {args.work_dir / 'mlxw' / MANIFEST_NAME}")
-            for entry in manifest["models"]:
-                if not entry.get("name"):
-                    continue
-                state = "loadable" if entry.get("supported") else "not loadable yet"
-                print(f"  {entry['name']:<14} {entry['resource']:<24} {state}")
+            for path in written:
+                print(f"  {path.relative_to(args.work_dir)}")
         return 0
 
     if args.list:
-        manifest = read_manifest(args.work_dir)
-        models = available(args.work_dir)
+        report = weights.describe(args.work_dir)
         if args.json:
-            print(json.dumps({"manifest": manifest, "models": models}, indent=2))
+            print(json.dumps(report, indent=2))
             return 0
-        if manifest:
-            print(f"source: {manifest['source']['dll']} ({manifest['source']['sha256'][:16]}…)")
-        for entry in models:
-            state = "loadable" if entry["supported"] else "not loadable yet"
-            present = "" if entry["present"] else "  (missing file)"
-            print(f"  {entry['name']:<14} {state}{present}")
+        for name, here in report.items():
+            print(f"  preset {name:<2} {weights.PRESET_WEIGHTS[name]:<32} "
+                  f"{'present' if here else 'missing'}")
         return 0
 
     parser.print_help()

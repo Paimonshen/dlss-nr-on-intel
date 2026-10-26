@@ -185,11 +185,17 @@ static const nr_knob_def knobs[] = {
     { "hold",            0, 0.0f, 1.0f,     0.05f, 1.0f,  NULL },
     { "release",         0, 0.0f, 64.0f,    1.0f,  24.0f, NULL },
     { "cut_limit",       0, 0.0f, 1.0f,     0.01f, 0.15f, NULL },
-    /* Which weight model the daemon runs. The choices are `nr_knobs.py`'s CHOICES entry; the
-     * daemon resolves the name against what the install actually carries and keeps the running
-     * model when the name cannot be honoured, so the list here is what MAY be chosen, not what
-     * this machine has. */
-    { "weights",         1, 0.0f, 1.0f,     1.0f,  0.0f,  "ht,cc_small_fp8" },
+    /* **`weights` used to be here, and its absence is the point.**
+     *
+     * It was a `choice` row naming a model file (`ht`, `cc_small_fp8`), resolved through a
+     * manifest by the daemon. That gave the project two settings for one fact - `NR_PRESET` in the
+     * environment and this row in the panel - and the two disagreed: a B chosen here logged as
+     * "network preset A", and `NR_PRESET=B` loaded A on an install whose manifest the row's own
+     * extractor had not written.
+     *
+     * The network is one setting now, `NR_PRESET`, chosen in the setup window. The panel still
+     * switches it live, through the pacing path rather than a knob - `nr_env` is where the layer
+     * reads it and `nr-env.txt` is where the next start finds it. */
 };
 
 #define NR_KNOBS_COUNT ((int)(sizeof knobs / sizeof knobs[0]))
@@ -714,37 +720,20 @@ static void load_defaults(nr_menu_bridge *b)
     }
 }
 
-/* Reset's defaults, which are not quite `load_defaults`: the NETWORK survives.
+/* Reset's defaults.
  *
- * Reset means "give me the defaults back" for the things that shape the picture - intensity, the
- * two strengths, the temporal knobs. The network is not one of those. `weights` chooses between
- * two SETS OF WEIGHTS, `ht` (A, 71 blocks) and `cc_small_fp8` (B, 31 blocks, about half the time),
- * and the first of those is the default only because the table lists it first. Resetting therefore
- * moved a user who had chosen B back onto A - a slower model they had not asked to go back to -
- * with no message and no way to tell, because the row simply showed the other name.
+ * **This used to be `load_reset_defaults`, and the extra word was a special case for `weights`.**
+ * Reset means "give me the defaults back" for the things that shape the picture; the network is
+ * not one of those, so a Reset had to put `weights` back afterwards - otherwise choosing B and
+ * pressing Reset moved the user onto A, a slower model they had not asked to go back to, with the
+ * row simply showing the other name.
  *
- * Reset leaves it alone. Anything that is genuinely a picture parameter still goes back to its
- * default; a model is a choice about what runs, not how much of it is applied, and the panel has
- * no business undoing it as a side effect.
- *
- * A Reset on an install with only one network behaves exactly as before, since the only name it
- * could show is the one already there. */
+ * That row is gone and the network is `NR_PRESET`, which a Reset has no business touching at all.
+ * So this is `load_defaults`, and the preservation loop is deleted rather than left guarding an
+ * index that can no longer exist. */
 static void load_reset_defaults(nr_menu_bridge *b)
 {
-    int network = -1;
-    char keep[32] = "";
-    for (int i = 0; i < NR_KNOBS_COUNT; ++i)
-        if (strcmp(knobs[i].key, "weights") == 0) {
-            network = i;
-            snprintf(keep, sizeof keep, "%s", b->choice[i]);
-        }
     load_defaults(b);
-    if (network >= 0 && keep[0]) {
-        snprintf(b->choice[network], sizeof b->choice[network], "%s", keep);
-        int here = choice_index(&knobs[network], keep);
-        b->values[network] = (float)(here < 0 ? 0 : here);
-        format_row(b, network);
-    }
 }
 
 static int load_settings(nr_menu_bridge *b)

@@ -965,10 +965,12 @@ class WizardFixture(unittest.TestCase):
         catalogue = core._runtime_knobs()
         self.assertEqual([knob["name"] for knob in catalogue], [
             "render_scale", "min_extent", "profile", "intensity", "detail_strength",
-            "colour_strength", "temporal", "hold", "release", "cut_limit", "weights"])
+            "colour_strength", "temporal", "hold", "release", "cut_limit"])
         names = {knob["name"]: knob for knob in catalogue}
         self.assertEqual(names["profile"]["choices"], ["standard", "natural", "cinematic"])
-        self.assertEqual(names["weights"]["choices"], ["ht", "cc_small_fp8"])
+        # `weights` is gone: the network is `NR_PRESET`, one setting, not a knob with a list of
+        # model names. A catalogue that still offered it would be the second selection path back.
+        self.assertNotIn("weights", names)
         self.assertEqual((names["min_extent"]["high"], names["min_extent"]["runtime_high"]), (320, 4096))
         self.assertEqual((names["release"]["high"], names["release"]["runtime_high"]), (64, 255))
         daemon_source = (Path(core.__file__).resolve().parent.parent / "layer/nr_daemon.py").read_text(encoding="utf-8")
@@ -1093,10 +1095,14 @@ class WizardFixture(unittest.TestCase):
         # what the engine can run, not against what the UI lists, so a hand-edited file naming
         # `neutral` is still accepted. `nr_knobs.PROFILES` is the list the menu shows.
         namespace = {"os": os, "math": math, "json": json,
-                     # The class asks which weight models this build knows; a stub is enough here -
-                     # the table itself is `src/tools/test_nr_weights.py`'s subject.
+                     # The class asks which preset this install runs. A stub is enough here - the
+                     # real module is `src/tools/test_nr_weights.py`'s subject, and the network is
+                     # `NR_PRESET` alone now rather than a table of model names.
                      "nr_weight_models": SimpleNamespace(
-                         default_name=lambda: "ht", names=lambda: ["ht", "cc_small_fp8"]),
+                         PRESETS=("A", "B"),
+                         preset_of=lambda value: (str(value or "").strip().upper()
+                                                  if str(value or "").strip().upper() in ("A", "B")
+                                                  else "A")),
                      "nr_frame": SimpleNamespace(PROFILES={choice: {} for choice in ("standard", "natural", "cinematic", "neutral")})}
         exec(compile(ast.Module(body=[actual_class], type_ignores=[]), "nr_daemon.py", "exec"), namespace)
         path = self.root / "work/nr_settings.json"

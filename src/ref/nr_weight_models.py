@@ -1,158 +1,97 @@
-"""Which weight models an install has, and which one a setting selects.
+"""Which weight file the daemon should load, decided by `NR_PRESET` and nothing else.
 
-One place for the model table, the manifest format and the file layout, because four callers need
-the same answers and disagreeing copies of this would be the whole feature failing quietly:
+**This replaced a model table, a manifest and a name-based lookup, and the reason is a bug the
+maintainer hit.** The tree used to carry two ways to choose the network:
 
-  scripts/get_weights.py   installs: detect in the DLL, extract, write the manifest
-  scripts/nr_weights.py    the CLI over the same
-  src/layer/nr_daemon.py   picks the file to load, and the panel's `weights` knob is validated here
-  src/layer/nr_menu_bridge.c  offers the same names in the panel (as text; this is the authority)
+  - `NR_PRESET` (A or B), written beside the game by the setup window, read by the daemon;
+  - a `weights` knob in the panel, which named a MODEL (`ht`, `cc_small_fp8`) and resolved it
+    through `work/mlxw/weights.json` - a manifest that only this project's own extractor wrote.
 
-Nothing here imports numpy or Vulkan: the installer reaches it before any runtime is ready, and the
-daemon reaches it on every settings change.
+Two selection paths for one fact is what produced "network preset A" logged beside a B model, and
+what made `NR_PRESET=B` run A on Linux, where nothing writes that manifest: `resolve()` found no
+manifest, listed HT alone, and silently fell back. Silent, because a fallback is a legitimate
+outcome for "the model you named is not installed".
 
-A model is one weight resource inside a user-supplied `nvngx_dlssnr.dll`:
+There is one choice now, it is `NR_PRESET`, and it maps to a file by name:
 
-  name          what the settings file and the panel call it
-  resource      the PE resource it comes from
-  logical       the file under `work/mlxw/` this tree loads
-  supported     whether the loader can read it - not a preference, see the block contracts
+    A -> work/mlxw/dlssnr-logical.safetensors        (the model this project reproduces)
+    B -> work/mlxw/dlssnr-b-logical.safetensors      (310.9.16's second network, 31 blocks)
 
-Compatibility is the point of the fallbacks: an install with no manifest (every install before this
-file existed) resolves to the single `dlssnr-logical.safetensors` the project has always used, and a
-settings file naming a model that is not here falls back to the one that is.
+Both are produced by `src/tools/unpack_preset.py`, which is what the installer runs. No manifest, no
+model names, and nothing to fall back to: if the file for the preset is not there, the daemon says
+which file it wanted and how to make it, rather than quietly running the other network.
 """
-from __future__ import annotations
-
-import json
 import pathlib
 
-MANIFEST_FORMAT = "nr-weights-manifest-v1"
-MANIFEST_NAME = "weights.json"
-LEGACY_LOGICAL = "dlssnr-logical.safetensors"
+#: The preset names, as `NR_PRESET` spells them.
+PRESETS = ("A", "B")
+
+#: The logical weight file each preset runs. Both live in `work/mlxw/`, both are extracted by
+#: `src/tools/unpack_preset.py`, and neither is renamed by this module.
+PRESET_WEIGHTS = {
+    "A": "dlssnr-logical.safetensors",
+    "B": "dlssnr-b-logical.safetensors",
+}
+
+#: What each one is, for the line the daemon logs and for the setup window's description.
+PRESET_NOTES = {
+    "A": "the model this project reproduces",
+    "B": "the faster model a 310.9.16-or-later DLL also carries",
+}
+
+#: The manifest and the model table are gone. Kept as names so a stale import fails with a sentence
+#: that names the change rather than with a TypeError from calling nothing.
+REMOVED = ("MANIFEST_NAME", "MODELS", "BY_NAME", "BY_RESOURCE", "resolve", "available",
+           "default_name", "names", "describe_available", "manifest_path", "read_manifest",
+           "Model", "LEGACY_LOGICAL", "MANIFEST_FORMAT")
 
 
-class Model:
-    """One weight resource: its resource name, the file it becomes, and whether we can load it."""
+def preset_of(value):
+    """The preset `value` names, or "A".
 
-    def __init__(self, name, resource, logical, *, supported, expected_tensors=0, note="",
-                 packed=None):
-        self.name = name
-        self.resource = resource
-        self.logical = logical
-        self.supported = supported
-        self.expected_tensors = expected_tensors
-        self.note = note
-        # The intermediate file. HT keeps the name it has always had, so an install that only ever
-        # had `work/mlxw/dlssnr-packed.safetensors` keeps working, `--skip-extract` included.
-        self.packed = packed or f"{name}-packed.safetensors"
-
-    def as_dict(self):
-        return {"name": self.name, "resource": self.resource, "logical": self.logical,
-                "packed": self.packed, "supported": self.supported,
-                "expected_tensors": self.expected_tensors, "note": self.note}
-
-    def __repr__(self):
-        return f"Model({self.name!r}, {self.resource!r}, supported={self.supported})"
-
-
-MODELS = (
-    # The model this project is built around, and the only file name the rest of the tree knows
-    # (`nr_frame.WEIGHTS`). It keeps that name so an install with one model is unchanged.
-    Model("ht", "WEIGHTS_HT", LEGACY_LOGICAL, supported=True, expected_tensors=649,
-          packed="dlssnr-packed.safetensors"),
-    # 310.9.16's second network: 31 blocks at depths {2,2,2,2,2} with A's bottleneck, the
-    # preset B of notes/phase72-preset-b.md. Loadable since the topology is read from the
-    # weights themselves (`nr_topology.from_weights`); unpacked through
-    # `src/tools/unpack_preset.py`, whose role-renaming decoder the plain MLX unpacker does
-    # not have, so it has no packed intermediate. The logical name is the one
-    # `nr_frame.PRESET_WEIGHTS["B"]` and the installer both use, so the two selection paths
-    # - `NR_PRESET` at start-up, the panel's `weights` knob at run time - read one file.
-    Model("cc_small_fp8", "WEIGHTS_CC_SMALL_FP8", "dlssnr-b-logical.safetensors",
-          supported=True, expected_tensors=281,
-          note="preset B; unpacked through unpack_preset.py"),
-)
-BY_NAME = {model.name: model for model in MODELS}
-BY_RESOURCE = {model.resource: model for model in MODELS}
-
-
-def default_name():
-    return next((model.name for model in MODELS if model.supported), MODELS[0].name)
-
-
-def names():
-    """Every model name this build knows, supported or not - what a combo can offer."""
-    return [model.name for model in MODELS]
-
-
-def manifest_path(work_dir):
-    return pathlib.Path(work_dir) / "mlxw" / MANIFEST_NAME
-
-
-def read_manifest(work_dir):
-    path = manifest_path(work_dir)
-    if not path.is_file():
-        return None
-    try:
-        manifest = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    if manifest.get("format") != MANIFEST_FORMAT:
-        return None
-    return manifest
-
-
-def available(work_dir):
-    """[{name, logical, supported, present, note}] - what this install can run, best first.
-
-    The manifest is the authority when there is one. Without it - an install that predates this
-    file, which is most of them - the answer is the single HT file the project has always used, so
-    nothing that works today starts reporting itself as missing.
+    Anything unrecognised is A, which is the shipped default: a settings file from before the
+    presets, or a hand-edited one, must start a working daemon rather than refuse to start.
     """
-    work = pathlib.Path(work_dir)
-    manifest = read_manifest(work)
-    models = []
-    if manifest:
-        for entry in manifest.get("models", []):
-            name = entry.get("name")
-            if not name:
-                continue
-            logical = entry.get("logical")
-            models.append({"name": name, "logical": logical,
-                           "supported": bool(entry.get("supported")),
-                           "note": entry.get("note", ""),
-                           "present": bool(logical) and (work / "mlxw" / logical).is_file()})
-    if not models:
-        legacy = work / "mlxw" / LEGACY_LOGICAL
-        models = [{"name": "ht", "logical": LEGACY_LOGICAL, "supported": True,
-                   "note": "", "present": legacy.is_file()}]
-    return models
+    text = str(value or "").strip().upper()
+    return text if text in PRESETS else "A"
 
 
-def resolve(work_dir, name):
-    """(name, path) of the model a caller should load, or (None, None).
+def weights_path(work_dir, preset):
+    """The logical weight file for `preset`, whether or not it exists.
 
-    `name` is what the settings file says. An unknown, unsupported or absent one falls back to the
-    default supported model: a settings file written where two models exist has to load where one
-    does, rather than leave the game with no model at all.
+    Returning the path even when the file is absent is deliberate: the caller's error message names
+    the exact file it wanted, and "work/mlxw/dlssnr-b-logical.safetensors is missing" is a better
+    sentence than "no weights".
     """
-    work = pathlib.Path(work_dir)
-    models = {entry["name"]: entry for entry in available(work)}
-    chosen = models.get(name) if name else None
-    if chosen is None or not chosen.get("supported") or not chosen.get("present"):
-        chosen = next((entry for entry in models.values()
-                       if entry.get("supported") and entry.get("present")), None)
-    if chosen is None:
-        return None, None
-    return chosen["name"], work / "mlxw" / chosen["logical"]
+    return pathlib.Path(work_dir) / "mlxw" / PRESET_WEIGHTS[preset_of(preset)]
 
 
-def describe_available(work_dir):
-    """One line per model, for a log line or the panel's tooltip."""
-    parts = []
-    for entry in available(work_dir):
-        state = "loadable" if entry["supported"] else "not loadable"
-        if not entry["present"]:
-            state += ", file missing"
-        parts.append(f"{entry['name']} ({state})")
-    return ", ".join(parts)
+def installed(work_dir, preset):
+    """Whether the file for `preset` is there."""
+    return weights_path(work_dir, preset).is_file()
+
+
+def describe(work_dir):
+    """Which presets this install can run, for the setup window's check and the daemon's log.
+
+    A dict of preset -> bool in `PRESETS` order, so both readers say "B is not extracted" with the
+    same words.
+    """
+    return {name: installed(work_dir, name) for name in PRESETS}
+
+
+def missing_message(work_dir, preset):
+    """What to tell someone whose install has no file for the preset they asked for."""
+    preset = preset_of(preset)
+    path = weights_path(work_dir, preset)
+    return (f"preset {preset} needs {path.name}, which is not in {path.parent}. "
+            f"Run src/tools/unpack_preset.py on a 310.9.16-or-later nvngx_dlssnr.dll to extract "
+            f"it - the installer does this when it is given one.")
+
+
+def __getattr__(name):
+    if name in REMOVED:
+        raise AttributeError(
+            f"nr_weight_models.{name} was removed: the network is chosen by NR_PRESET alone now "
+            f"(see this module's docstring). Use preset_of/weights_path/installed instead.")
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

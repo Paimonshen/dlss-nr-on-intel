@@ -194,55 +194,61 @@ int main(void)
          * name through the public accessors rather than by index, so a knob added later does not
          * silently move what this checks. */
         {
-            int weights = -1;
+            int weights = -1, profile = -1;
             for (int i = 0; i < nr_menu_bridge_row_count(b); ++i) {
                 const char *key = nr_menu_bridge_knob_name(i);
-                if (key && strcmp(key, "weights") == 0) { weights = i; break; }
+                if (key && strcmp(key, "weights") == 0) weights = i;
+                if (key && strcmp(key, "profile") == 0) profile = i;
             }
-            check(weights >= 0, "the weights knob is in the table",
-                  weights >= 0 ? "found" : "MISSING");
-            if (weights >= 0 && nr_menu_bridge_knob_choice_count(weights) == 2) {
-                char first[160] = "", second[160] = "";
-                nr_menu_bridge_knob_choice_name(weights, 0, NR_LANG_EN, first, sizeof first);
-                nr_menu_bridge_knob_choice_name(weights, 1, NR_LANG_EN, second, sizeof second);
-                int about_a = strstr(first, "HT") != NULL;
-                int about_b = strstr(second, "FP8") != NULL || strstr(second, "small") != NULL;
-                char detail[320];
-                snprintf(detail, sizeof detail, "A reads '%.70s' and B reads '%.70s'",
-                         first, second);
-                check(about_a && about_b, "the network row's options are about the network", detail);
-                /* And in every language, because a label present in English and absent elsewhere
-                 * is the shape of the four-language bugs this project has already had. */
+            char detail[320];
+            snprintf(detail, sizeof detail, "weights=%d profile=%d", weights, profile);
+            /* **The network is no longer a knob.** It named a model file and gave the project two
+             * settings for one fact; `NR_PRESET` is the one setting now, chosen in the setup
+             * window. This fails if a second path comes back. */
+            check(weights < 0, "the network is not a choice knob any more", detail);
+            check(profile >= 0, "and the profile knob is", detail);
+
+            if (profile >= 0) {
+                int count = nr_menu_bridge_knob_choice_count(profile);
+                snprintf(detail, sizeof detail, "%d options", count);
+                check(count >= 2, "the profile knob offers more than one", detail);
+
+                /* Every option is labelled, in all four languages. A label present in English and
+                 * blank elsewhere is the shape of the four-language bugs this project has had. */
                 int blank = 0;
                 for (int lang = 0; lang < NR_MENU_LANG_COUNT; ++lang) {
-                    char a[160] = "", c[160] = "";
-                    nr_menu_bridge_knob_choice_name(weights, 0, lang, a, sizeof a);
-                    nr_menu_bridge_knob_choice_name(weights, 1, lang, c, sizeof c);
-                    if (!a[0] || !c[0]) ++blank;
+                    for (int which = 0; which < count; ++which) {
+                        char a[256] = "";
+                        nr_menu_bridge_knob_choice_name(profile, which, lang, a, sizeof a);
+                        if (!a[0]) ++blank;
+                    }
                 }
-                check(blank == 0, "and both are labelled in all four languages",
-                      blank ? "one or more blank" : "four of four");
+                snprintf(detail, sizeof detail, "%d blank of %d", blank,
+                         NR_MENU_LANG_COUNT * count);
+                check(blank == 0, "every profile option is labelled in all four languages",
+                      detail);
 
                 /* ---- and the store the layer copies them into is wide enough ----
                  *
-                 * `nr_layer.c` fills `name_storage[..][NR_KNOB_CHOICE_NAME_SIZE]` and hands those
-                 * to ImGui. That was 32 bytes, sized for the raw names (`cc_small_fp8` is 12), and
-                 * the labels are 33 to 75 bytes - so every one of the eight was cut, and the
-                 * Chinese one was cut inside a 3-byte character and rendered as a replacement
-                 * glyph. Nothing failed: a truncated label is still a label.
+                 * `nr_menu_layer.c` fills `name_storage[..][NR_KNOB_CHOICE_NAME_SIZE]` and hands
+                 * those to ImGui. That was 32 bytes, sized for the raw names (`cc_small_fp8` is
+                 * 12), and the network's labels were 33 to 75 - so every one of the eight was cut,
+                 * and the Chinese one was cut inside a 3-byte character and rendered as a
+                 * replacement glyph. Nothing failed: a truncated label is still a label.
                  *
-                 * Measured in bytes, because the character count is what hides it: the English
-                 * label is 41 characters and 40 bytes, the Russian 43 and 75. */
+                 * Measured in bytes, because the character count is what hides it. */
                 int worst = 0;
                 const char *worst_text = "";
                 for (int lang = 0; lang < NR_MENU_LANG_COUNT; ++lang) {
-                    for (int which = 0; which < 2; ++which) {
+                    for (int which = 0; which < count; ++which) {
                         char a[256] = "";
-                        nr_menu_bridge_knob_choice_name(weights, which, lang, a, sizeof a);
+                        nr_menu_bridge_knob_choice_name(profile, which, lang, a, sizeof a);
                         int n = (int)strlen(a);
-                        if (n > worst) { worst = n; worst_text = lang == 0 ? "en" :
-                                                       lang == 1 ? "zh" :
-                                                       lang == 2 ? "ru" : "es"; }
+                        if (n > worst) {
+                            worst = n;
+                            worst_text = lang == 0 ? "en" : lang == 1 ? "zh" :
+                                         lang == 2 ? "ru" : "es";
+                        }
                     }
                 }
                 snprintf(detail, sizeof detail, "longest label %d bytes (%s), store holds %d",
