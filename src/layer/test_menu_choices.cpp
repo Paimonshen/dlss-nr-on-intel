@@ -94,15 +94,27 @@ int main(void)
      * the honest check is that the branch exists and still guards on the string rather than the
      * index. `nr_layer.c` is read as text, the way `test_menu_keys.cpp` already checks call sites. */
     {
-        FILE *layer = fopen("src/layer/nr_layer.c", "rb");
-        if (!layer) {
-            printf("  FAIL  nr_layer.c was not readable (run from the repository root)\n");
-            return 1;
+        /* Both files: the cadence row is built in `nr_menu_layer.c` since the menu's glue moved
+         * there. See test_menu_keys.cpp for why the read is a concatenation. */
+        static char lsrc[900000];
+        size_t ln = 0;
+        {
+            static const char *const files[] = {
+                "src/layer/nr_layer.c", "src/layer/nr_menu_layer.c",
+            };
+            for (int fi = 0; fi < (int)(sizeof files / sizeof files[0]); ++fi) {
+                FILE *layer = fopen(files[fi], "rb");
+                if (!layer) {
+                    printf("  FAIL  %s was not readable (run from the repository root)\n",
+                           files[fi]);
+                    return 1;
+                }
+                ln += fread(lsrc + ln, 1, sizeof lsrc - 1 - ln, layer);
+                fclose(layer);
+                if (ln + 1 < sizeof lsrc) lsrc[ln++] = '\n';
+            }
+            lsrc[ln] = '\0';
         }
-        static char lsrc[600000];
-        size_t ln = fread(lsrc, 1, sizeof lsrc - 1, layer);
-        lsrc[ln] = '\0';
-        fclose(layer);
 
         int has_first = strstr(lsrc, "c == 0 && !strstr(nr_menu_text(language, NR_STR_EVERY_FRAME)") != NULL;
         check(has_first, "the first cadence option is copied, not numbered",

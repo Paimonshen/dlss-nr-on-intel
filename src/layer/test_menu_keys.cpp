@@ -102,15 +102,34 @@ int main(void)
           find(source, "if (key_pressed(m, NR_KEY_C))") ? "NR_KEY_C still handled" : "removed");
 
     /* The layer reads Home, S and R itself for the ImGui build, next to INS and L. */
-    FILE *layer = fopen("src/layer/nr_layer.c", "rb");
-    if (!layer) {
-        printf("  FAIL  nr_layer.c was not readable\n");
-        return 1;
+    /* Both files, concatenated. The menu's glue moved to `nr_menu_layer.c`, and these checks are
+     * about a SHAPE being present in the layer's code - which is now two files. Naming one would
+     * fail the next time a function moved, which is a worse test than one that says "somewhere in
+     * the layer". */
+    static char lsource[1600000];
+    size_t ln = 0;
+    {
+        /* **Every file a key reader could hide in.** `nr_menu.c` is the one that used to hold
+         * one - the state machine read `GetAsyncKeyState` itself until this round - and it was not
+         * in this list, so the mutation that put a reader back there was not seen. A text scan
+         * that cannot see the file the defect lived in is not a check. */
+        static const char *const files[] = {
+            "src/layer/nr_layer.c", "src/layer/nr_menu_layer.c", "src/layer/nr_layer_state.h",
+            "src/layer/nr_menu.c", "src/layer/nr_menu_font.c", "src/layer/nr_menu_bridge.c",
+        };
+        for (int fi = 0; fi < (int)(sizeof files / sizeof files[0]); ++fi) {
+            FILE *layer = fopen(files[fi], "rb");
+            if (!layer) {
+                printf("  FAIL  %s was not readable (run from the repository root)\n", files[fi]);
+                return 1;
+            }
+            size_t got = fread(lsource + ln, 1, sizeof lsource - 1 - ln, layer);
+            ln += got;
+            fclose(layer);
+            if (ln + 1 < sizeof lsource) lsource[ln++] = '\n';
+        }
+        lsource[ln] = '\0';
     }
-    static char lsource[400000];
-    size_t ln = fread(lsource, 1, sizeof lsource - 1, layer);
-    lsource[ln] = '\0';
-    fclose(layer);
 
     check(find(lsource, "nr_menu_inject_toggle(data->menu)"),
           "the layer raises the toggle for the ImGui build",
@@ -121,12 +140,24 @@ int main(void)
     check(find(lsource, "nr_menu_inject_reset(data->menu)"),
           "the layer raises Reset for the ImGui build",
           find(lsource, "nr_menu_inject_reset(data->menu)") ? "present" : "MISSING");
-    /* `nr_key_down(0x24)`, not `GetAsyncKeyState(0x24)`: the six hotkey reads now go through the
-     * macro that carries the platform gate, and on Windows it expands to exactly the call this
-     * assertion has always wanted to see. */
-    check(find(lsource, "nr_key_down(0x24)"),
-          "and reads Home itself (0x24)",
-          find(lsource, "nr_key_down(0x24)") ? "0x24" : "MISSING");
+    /* **`keys[0x24]`, and that is the point of the whole change.**
+     *
+     * Three files used to call `GetAsyncKeyState` on their own - this layer, `nr_menu.c` and
+     * `nr_menu_ui.cpp` - so the focus gate had to be remembered in each, and two of them forgot it
+     * at least once. The keyboard is now swept ONCE in `nr_menu_layer_present`, behind one gate,
+     * and every consumer reads the swept array. This asserts the Home key is still read there, in
+     * that shape: a `GetAsyncKeyState(0x24)` anywhere would mean a fourth reader had appeared. */
+    check(find(lsource, "keys[0x24]"),
+          "and reads Home itself (0x24), from the one swept array",
+          find(lsource, "keys[0x24]") ? "keys[0x24]" : "MISSING - a second reader came back");
+    /* And the reading really is in one place: the sweep is the only `GetAsyncKeyState` left. */
+    {
+        int sweeps = 0;
+        for (const char *p = lsource; (p = strstr(p, "GetAsyncKeyState(")) != NULL; ++p) ++sweeps;
+        char detail[128];
+        snprintf(detail, sizeof detail, "%d GetAsyncKeyState call(s) in the layer's sources", sweeps);
+        check(sweeps == 1, "the keyboard is read in exactly one place", detail);
+    }
 
     /* ---- the bridge must not consume the toggle ----
      *

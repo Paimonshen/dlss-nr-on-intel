@@ -76,7 +76,15 @@ def read_c_table():
 
     Returns None when there is no compiler to build it with, which the caller reports as a skip
     rather than a pass - a check that cannot run is not a check that succeeded.
+
+    The probe is built with the Visual Studio compiler through `vcvars64.bat`, which is the only
+    way this table is read: the accessors at the bottom of `nr_menu_bridge.h` are what the menu
+    itself uses, and asking a compiled object is asking the same table. Off Windows there is no
+    MSVC and no `vcvars64.bat`, so this cannot run - which is why the build systems register it
+    on Windows only rather than let it exit 1 on every Linux CTest run.
     """
+    if sys.platform != "win32":
+        return None
     vc = vcvars()
     if vc is None:
         return None

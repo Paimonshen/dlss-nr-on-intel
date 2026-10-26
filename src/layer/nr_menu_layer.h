@@ -1,0 +1,70 @@
+/* The in-game menu's glue, as one Windows-only translation unit.
+ *
+ * **Why this file exists.** The menu's composite pass, its key reading, its row building and its
+ * mouse all need `struct device_data` and `struct swapchain_data`, and they are the part of the
+ * layer that is Windows by construction: the ImGui panel needs a font from the Windows font
+ * directory, keys through `GetAsyncKeyState`, and the STORAGE usage its blend pass writes through.
+ * None of that exists off Windows.
+ *
+ * Keeping them inside `nr_layer.c` meant either 88 generated no-op declarations or a layer that
+ * always carries a menu it can never show. The maintainer's answer was better: move the glue into
+ * one file, built only on Windows, and let `nr_layer.c` reach it through three hooks that are
+ * empty elsewhere. Linux then compiles none of the menu and `nr_layer.c` comes back to the size it
+ * has on `newnr`.
+ *
+ * **The hooks.** Three, matching the three moments the layer needs the menu:
+ *
+ *   nr_menu_layer_create_swapchain  a swapchain was created - remember whether it took STORAGE
+ *   nr_menu_layer_present           a frame is about to present - build, read keys, draw
+ *   nr_menu_layer_destroy_device    the device is going - release the pool, fence and menu
+ *
+ * Off Windows all three are `static inline` no-ops in this header, so `nr_layer.c` calls them with
+ * no `#ifdef` of its own and there is exactly one place that decides whether a menu exists.
+ */
+#ifndef NR_MENU_LAYER_H
+#define NR_MENU_LAYER_H
+
+#include <vulkan/vulkan.h>
+
+struct device_data;
+struct swapchain_data;
+
+#ifdef _WIN32
+
+/* The swapchain accepted STORAGE, so the menu may write into its images. Called from the
+ * swapchain-creation path once the flags are settled; a surface that refused STORAGE leaves
+ * `storage_ok` at 0 and the menu is then never built. */
+void nr_menu_layer_note_storage(struct device_data *data, struct swapchain_data *chain);
+
+/* Build the menu on the first present that can carry it, read its keys, and draw it.
+ *
+ * Returns 1 when it drew into the frame, 0 otherwise. Never fails a present: a menu that cannot be
+ * built sets a reason and the frame goes out without one. */
+int nr_menu_layer_present(struct device_data *data, VkQueue queue,
+                          const VkPresentInfoKHR *info);
+
+/* Release what the menu owns. Safe to call on a device that never built one. */
+void nr_menu_layer_destroy(struct device_data *data);
+
+/* Turn the effect on or off by creating or removing the trigger file, and keep the bridge's idea
+ * of the saved state in step. The panel's checkbox, the Home key and the setup window all move the
+ * same file, so this is the one place that writes it from inside the game. */
+void nr_menu_layer_set_trigger(struct device_data *data, int on);
+
+#else /* !_WIN32 */
+
+/* Nothing to do, and nothing to include: off Windows the menu does not exist, so these are the
+ * whole of the layer's contact with it. The `(void)` casts are what keep a build with `-Wunused`
+ * quiet about the parameters a real implementation would use. */
+static inline void nr_menu_layer_note_storage(struct device_data *data, struct swapchain_data *chain)
+{ (void)data; (void)chain; }
+static inline int nr_menu_layer_present(struct device_data *data, VkQueue queue,
+                                        const VkPresentInfoKHR *info)
+{ (void)data; (void)queue; (void)info; return 0; }
+static inline void nr_menu_layer_destroy(struct device_data *data) { (void)data; }
+static inline void nr_menu_layer_set_trigger(struct device_data *data, int on)
+{ (void)data; (void)on; }
+
+#endif /* _WIN32 */
+
+#endif /* NR_MENU_LAYER_H */

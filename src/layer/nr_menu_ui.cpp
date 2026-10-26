@@ -177,7 +177,7 @@ static bool nrex_find_memory(nrex_ui *u, VkMemoryRequirements reqs, VkFlags want
 /* The intermediate: colour attachment for ImGui, transfer source for the blend-copy. */
 static bool nrex_make_target(nrex_ui *u, uint32_t w, uint32_t h, const char **why)
 {
-    VkImageCreateInfo ici = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    VkImageCreateInfo ici = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, 0};
     ici.imageType = VK_IMAGE_TYPE_2D;
     ici.format = (VkFormat)u->format;
     ici.extent = {w, h, 1};
@@ -205,7 +205,7 @@ static bool nrex_make_target(nrex_ui *u, uint32_t w, uint32_t h, const char **wh
         *why = "no device-local memory for the menu UI";
         return false;
     }
-    VkMemoryAllocateInfo mai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    VkMemoryAllocateInfo mai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, 0};
     mai.allocationSize = reqs.size;
     mai.memoryTypeIndex = type;
     if (u->vk.alloc_mem(u->device, &mai, nullptr, &u->image_mem) != VK_SUCCESS ||
@@ -214,7 +214,7 @@ static bool nrex_make_target(nrex_ui *u, uint32_t w, uint32_t h, const char **wh
         return false;
     }
 
-    VkImageViewCreateInfo vci = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    VkImageViewCreateInfo vci = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, 0};
     vci.image = u->image;
     vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
     vci.format = (VkFormat)u->format;
@@ -247,7 +247,7 @@ static bool nrex_make_target(nrex_ui *u, uint32_t w, uint32_t h, const char **wh
     sub.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
     sub.colorAttachmentCount = 1;
     sub.pColorAttachments = &ref;
-    VkRenderPassCreateInfo pci = {VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
+    VkRenderPassCreateInfo pci = {VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO, 0};
     pci.attachmentCount = 1;
     pci.pAttachments = &att;
     pci.subpassCount = 1;
@@ -257,7 +257,7 @@ static bool nrex_make_target(nrex_ui *u, uint32_t w, uint32_t h, const char **wh
         return false;
     }
 
-    VkFramebufferCreateInfo fci = {VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+    VkFramebufferCreateInfo fci = {VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO, 0};
     fci.renderPass = u->pass;
     fci.attachmentCount = 1;
     fci.pAttachments = &u->image_view;
@@ -1142,18 +1142,18 @@ extern "C" NREX_API int nrex_last_footer_text(char *out, size_t size)
  * touching anything the running frame owns. */
 static bool nrex_oneshot_begin(nrex_ui *u, VkCommandPool *pool, VkCommandBuffer *cmd)
 {
-    VkCommandPoolCreateInfo pci = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+    VkCommandPoolCreateInfo pci = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, 0};
     pci.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
     pci.queueFamilyIndex = u->queue_family;
     if (u->vk.create_pool(u->device, &pci, nullptr, pool) != VK_SUCCESS) return false;
 
-    VkCommandBufferAllocateInfo ai = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+    VkCommandBufferAllocateInfo ai = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, 0};
     ai.commandPool = *pool;
     ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     ai.commandBufferCount = 1;
     if (u->vk.alloc_cmds(u->device, &ai, cmd) != VK_SUCCESS) return false;
 
-    VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, 0};
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     return u->vk.begin_cmd(*cmd, &bi) == VK_SUCCESS;
 }
@@ -1161,7 +1161,7 @@ static bool nrex_oneshot_begin(nrex_ui *u, VkCommandPool *pool, VkCommandBuffer 
 static bool nrex_oneshot_submit(nrex_ui *u, VkCommandBuffer cmd, VkFence fence)
 {
     if (u->vk.end_cmd(cmd) != VK_SUCCESS) return false;
-    VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO, 0};
     si.commandBufferCount = 1;
     si.pCommandBuffers = &cmd;
     if (u->vk.submit(u->vk.queue, 1, &si, fence) != VK_SUCCESS) return false;
@@ -1202,7 +1202,7 @@ static void nrex_dump_ui(nrex_ui *u)
         return;
 
     const VkDeviceSize bytes = (VkDeviceSize)u->width * u->height * 4;
-    VkBufferCreateInfo bci = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    VkBufferCreateInfo bci = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, 0};
     bci.size = bytes;
     bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
     bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
@@ -1223,7 +1223,7 @@ static void nrex_dump_ui(nrex_ui *u)
     }
     if (type == UINT32_MAX) { u->vk.destroy_buffer(u->device, buf, nullptr); return; }
 
-    VkMemoryAllocateInfo mai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    VkMemoryAllocateInfo mai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, 0};
     mai.allocationSize = req.size;
     mai.memoryTypeIndex = type;
     VkDeviceMemory mem = VK_NULL_HANDLE;
@@ -1233,7 +1233,7 @@ static void nrex_dump_ui(nrex_ui *u)
     }
     if (u->vk.bind_buffer(u->device, buf, mem, 0) != VK_SUCCESS) return;
 
-    VkFenceCreateInfo fci = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+    VkFenceCreateInfo fci = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, 0};
     VkFence fence = VK_NULL_HANDLE;
     if (u->vk.create_fence(u->device, &fci, nullptr, &fence) != VK_SUCCESS) return;
 
@@ -1243,7 +1243,7 @@ static void nrex_dump_ui(nrex_ui *u)
     if (cmd) {
         /* The image is in COLOR_ATTACHMENT_OPTIMAL when `nrex_render` returns; the task below
          * migrates it to TRANSFER_SRC and back, leaving it exactly as the next frame expects. */
-        VkImageMemoryBarrier b = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+        VkImageMemoryBarrier b = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, 0};
         b.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
         b.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
         b.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
@@ -1332,7 +1332,7 @@ extern "C" NREX_API void nrex_render(nrex_ui *ui, uint64_t cmd_handle)
      * invisible over the game. */
     VkClearValue clear = {};
     clear.color = {{0.f, 0.f, 0.f, 0.f}};
-    VkRenderPassBeginInfo bi = {VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+    VkRenderPassBeginInfo bi = {VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, 0};
     bi.renderPass = ui->pass;
     bi.framebuffer = ui->fb;
     bi.renderArea = {{0, 0}, {ui->width, ui->height}};

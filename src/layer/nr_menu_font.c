@@ -24,14 +24,17 @@
 /* The cell size comes from the header, so the menu's layout and the atlas cannot disagree about
  * it. Both files need the number; one of them owns it. */
 
+#ifdef _WIN32
+
+/* Sorted by codepoint so the draw path can binary-search rather than scan. Called only from
+ * `nr_font_build`'s Windows arm, so off Windows it is a function nothing uses - which the
+ * `-Wunused-function` build rightly complains about. */
 static int cell_compare(const void *a, const void *b)
 {
     const struct nr_font_cell *ca = (const struct nr_font_cell *)a;
     const struct nr_font_cell *cb = (const struct nr_font_cell *)b;
     return ca->codepoint - cb->codepoint;
 }
-
-#ifdef _WIN32
 
 /* The font the menu uses. Segoe UI is on every Windows since Vista; the fallback is the
  * system's own, which is what a stripped install has. */
@@ -100,17 +103,18 @@ static int glyph_bitmap(HDC dc, UINT cp, int cell_w, int cell_h, uint8_t *cell)
     return 1;
 }
 
-/* Nothing built in: the caller passes the menu's own string tables, so the atlas covers exactly\n * what the menu prints. See the note on 
-r_font_build in the header. */
+/* Nothing built in: the caller passes the menu's own string tables, so the atlas covers exactly\n * what the menu prints. See the note on nr_font_build in the header. */
 
 #else
 
-static int glyph_bitmap(void *dc, unsigned cp, int cell_w, int cell_h, uint8_t *cell)
-{
-    (void)dc; (void)cp; (void)cell_w; (void)cell_h; (void)cell;
-    return 0;
-}
-
+/* No glyph rasteriser off Windows, and nothing that could ask for one: the whole atlas is behind
+ * the gate in `nr_font_build`, so a definition here is a function no one calls. Kept as a comment
+ * rather than a body because the `-Wunused-function` build refuses a body it cannot reach. */
+/* static int glyph_bitmap(void *dc, unsigned cp, int cell_w, int cell_h, uint8_t *cell)
+ * {
+ *     (void)dc; (void)cp; (void)cell_w; (void)cell_h; (void)cell;
+ *     return 0;
+ * } */
 
 #endif
 

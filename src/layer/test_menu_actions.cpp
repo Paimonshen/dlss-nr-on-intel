@@ -137,15 +137,26 @@ int main(void)
      * `test_menu_keys.cpp` does: the check is that the sync exists, and that it compares against
      * the live state rather than assuming. */
     {
-        FILE *layer = fopen("src/layer/nr_layer.c", "rb");
-        if (!layer) {
-            printf("  FAIL  nr_layer.c was not readable (run from the repository root)\n");
-            return 1;
+        /* Both files: the menu's glue moved to `nr_menu_layer.c`. See test_menu_keys.cpp. */
+        static char lsource[900000];
+        size_t ln = 0;
+        {
+            static const char *const files[] = {
+                "src/layer/nr_layer.c", "src/layer/nr_menu_layer.c",
+            };
+            for (int fi = 0; fi < (int)(sizeof files / sizeof files[0]); ++fi) {
+                FILE *layer = fopen(files[fi], "rb");
+                if (!layer) {
+                    printf("  FAIL  %s was not readable (run from the repository root)\n",
+                           files[fi]);
+                    return 1;
+                }
+                ln += fread(lsource + ln, 1, sizeof lsource - 1 - ln, layer);
+                fclose(layer);
+                if (ln + 1 < sizeof lsource) lsource[ln++] = '\n';
+            }
+            lsource[ln] = '\0';
         }
-        static char lsource[600000];
-        size_t ln = fread(lsource, 1, sizeof lsource - 1, layer);
-        lsource[ln] = '\0';
-        fclose(layer);
         int syncs = strstr(lsource, "nr_menu_bridge_nr_saved(data->menu_bridge) ? 1 : 0) != live")
                     != NULL;
         check(syncs, "the layer syncs nr_enabled_saved against the live trigger",

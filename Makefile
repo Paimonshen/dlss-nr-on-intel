@@ -9,6 +9,11 @@ CFLAGS  := -O2 -fPIC -Wall -Wextra -Wno-unused-parameter -Iwork/vulkan-headers/i
 CXX     ?= c++
 CXXFLAGS := -O2 -fPIC -Wall -Wextra -Wno-unused-parameter -fno-exceptions \
             -Iwork/vulkan-headers/include
+# The rules that compile a C translation unit with the C++ driver: g++ compiles a `.c` as C++,
+# which is a language error rather than a dialect difference, and the ~200 errors it produces
+# have nothing to do with the source. This forces the C files back to C and leaves the C++ ones
+# alone; `-x none` puts the driver back to its suffix rule for what follows the sources.
+AS_C = $(foreach source,$(1),-x c $(source)) -x c++
 # The CPU the host passes are built for, here and in a release alike: x86-64-v3, every CPU
 # since Haswell and Zen 1. F16C makes each `_Float16` conversion one instruction; without it
 # each is a call into libgcc, and a frame was 5-13 % slower. On Lunar Lake v3 is as fast as
@@ -84,29 +89,52 @@ ifeq ($(OS),Windows_NT)
 MENU_LIBS := -luser32 -lgdi32
 endif
 
-# The in-game menu, as sources the layer links. `nr_layer.c` calls into it unconditionally, so a
-# target that compiles `nr_layer.c` needs these or it does not link - which is the whole of the
-# undefined-reference failure on Linux and MinGW, where five fixtures `#include "nr_layer.c"`
-# and inherited the layer's menu calls with no menu sources to answer them.
-MENU_SOURCES := src/layer/nr_menu.c src/layer/nr_menu_font.c src/layer/nr_menu_strings.c \
-                src/layer/nr_menu_strings_lookup.c src/layer/nr_menu_bridge.c src/layer/nr_file.c \
+# `test_focus_gate.c` includes windows.h, so it builds only on Windows - while `make test` runs
+# the same script on every platform. An empty target name on the other side of the switch, which
+# is what keeps the rule from being asked for where it cannot be built.
+FOCUS_GATE :=
+ifeq ($(OS),Windows_NT)
+FOCUS_GATE := work/test_focus_gate
+endif
+
+# The in-game menu, as sources the layer links - **Windows only**.
+#
+# The menu is a Windows feature by construction: the ImGui panel needs a font from the Windows font
+# directory, keys read through `GetAsyncKeyState`, and the STORAGE usage its blend pass writes
+# through. Its glue lives in `nr_menu_layer.c`, and `nr_menu_layer.h` gives the layer empty hooks
+# where it does not exist - so on Linux `nr_layer.c` compiles with none of this, links with none of
+# it, and the layer is `newnr`'s layer again: C only, no ImGui, no `libstdc++`.
+#
+# Before this split the sources were listed unconditionally and every Linux build carried a menu it
+# could never show, which is what the maintainer's item 2 asked to be undone.
+MENU_SOURCES :=
+IMGUI_SOURCES :=
+ifeq ($(OS),Windows_NT)
+MENU_SOURCES := src/layer/nr_menu_layer.c src/layer/nr_menu.c src/layer/nr_menu_font.c \
+                src/layer/nr_menu_strings.c src/layer/nr_menu_strings_lookup.c \
+                src/layer/nr_menu_bridge.c src/layer/nr_file.c \
                 src/layer/nr_raw_mouse.c src/layer/nr_focus.c
 # The ImGui panel behind it, including the C++ translation unit behind a plain-C interface. The
 # vendored sources want IMGUI_DEFINE_MATH_OPERATORS and nothing else defines it.
 IMGUI_SOURCES := third_party/imgui/imgui.cpp third_party/imgui/imgui_draw.cpp \
                  third_party/imgui/imgui_tables.cpp third_party/imgui/imgui_widgets.cpp \
                  third_party/imgui/imgui_impl_vulkan.cpp src/layer/nr_menu_ui.cpp
+endif
 
-work/libnr_layer.so: src/layer/nr_layer.c $(MENU_SOURCES) $(IMGUI_SOURCES) $(LAYER_HEADERS)
-	$(CXX) $(CXXFLAGS) -Ithird_party/imgui -Isrc/layer -shared -o $@ src/layer/nr_layer.c \
-	       $(MENU_SOURCES) $(IMGUI_SOURCES) -lvulkan
+# `nr_file.c` and `nr_focus.c` are not menu code and the layer uses them on both platforms: the
+# first is the atomic file write the settings and the log share, the second answers "is the game in
+# front" with a no-op arm off Windows. They are listed apart from MENU_SOURCES so a Linux link still
+# has them.
+LAYER_SUPPORT := src/layer/nr_file.c src/layer/nr_focus.c
+
+work/libnr_layer.so: src/layer/nr_layer.c $(MENU_SOURCES) $(IMGUI_SOURCES) $(LAYER_SUPPORT) $(LAYER_HEADERS)
+	$(CXX) $(CXXFLAGS) -Ithird_party/imgui -Isrc/layer -shared -o $@ \
+	       $(call AS_C,src/layer/nr_layer.c $(MENU_SOURCES) $(LAYER_SUPPORT)) $(IMGUI_SOURCES) -x none -lvulkan
 
 # The knob table against `nr_knobs.py`, which is the definition. The author asked for this after
 # `render_scale`'s default drifted between three copies of the same fact.
-work/test_menu_rows: src/layer/test_menu_rows.c src/layer/nr_menu_bridge.c \
-                     src/layer/nr_menu_strings.c src/layer/nr_menu_strings_lookup.c
-	$(CC) $(CFLAGS) -o $@ src/layer/test_menu_rows.c src/layer/nr_menu_bridge.c \
-	      src/layer/nr_menu_strings.c src/layer/nr_menu_strings_lookup.c $(MENU_LIBS)
+work/test_menu_rows: src/layer/test_menu_rows.c $(MENU_SOURCES)
+	$(CC) $(CFLAGS) -o $@ src/layer/test_menu_rows.c $(MENU_SOURCES) -lm $(MENU_LIBS)
 
 # What the settings file does when the menu touches it: unrelated fields survive, opening changes
 # nothing, render scale is not reset, a moved knob survives a reopen, and the result is valid JSON.
@@ -145,11 +173,11 @@ work/test_raw_mouse: src/layer/test_raw_mouse.c src/layer/nr_raw_mouse.c
 
 work/test_soft_cursor: src/layer/test_soft_cursor.cpp $(IMGUI_SOURCES)
 	$(CXX) $(CXXFLAGS) -Ithird_party/imgui -Isrc/layer -o $@ src/layer/test_soft_cursor.cpp \
-	       $(IMGUI_SOURCES) $(MENU_LIBS)
+	       $(IMGUI_SOURCES) -lvulkan $(MENU_LIBS)
 
-work/libnr_layer32.so: src/layer/nr_layer.c $(MENU_SOURCES) $(IMGUI_SOURCES) $(LAYER_HEADERS)
-	$(CXX) $(CXXFLAGS) -m32 -Ithird_party/imgui -Isrc/layer -shared -o $@ src/layer/nr_layer.c \
-	       $(MENU_SOURCES) $(IMGUI_SOURCES) -lvulkan
+work/libnr_layer32.so: src/layer/nr_layer.c $(MENU_SOURCES) $(IMGUI_SOURCES) $(LAYER_SUPPORT) $(LAYER_HEADERS)
+	$(CXX) $(CXXFLAGS) -m32 -Ithird_party/imgui -Isrc/layer -shared -o $@ \
+	       $(call AS_C,src/layer/nr_layer.c $(MENU_SOURCES) $(LAYER_SUPPORT)) $(IMGUI_SOURCES) -x none -lvulkan
 
 work/test_layer_loader: src/layer/test_layer_loader.c
 	$(CC) $(CFLAGS) -o $@ $< -lvulkan
@@ -162,17 +190,20 @@ work/test_layer_loader32: src/layer/test_layer_loader.c
 
 # The three that `#include "nr_layer.c"` rather than link the library, so they compile the menu
 # sources themselves - exactly as the CMake build now does, and as `tools/build_win.bat` always did.
-work/test_settled: src/layer/test_settled.c src/layer/nr_layer.c $(MENU_SOURCES) $(IMGUI_SOURCES) $(LAYER_HEADERS)
-	$(CXX) $(CXXFLAGS) -Ithird_party/imgui -Isrc/layer -o $@ $< $(MENU_SOURCES) $(IMGUI_SOURCES) -lvulkan
+work/test_settled: src/layer/test_settled.c src/layer/nr_layer.c $(MENU_SOURCES) $(IMGUI_SOURCES) $(LAYER_SUPPORT) $(LAYER_HEADERS)
+	$(CXX) $(CXXFLAGS) -Ithird_party/imgui -Isrc/layer -o $@ \
+	       $(call AS_C,$< $(MENU_SOURCES) $(LAYER_SUPPORT)) $(IMGUI_SOURCES) -x none -lvulkan
 
-work/test_exchange: src/layer/test_exchange.c src/layer/nr_layer.c $(MENU_SOURCES) $(IMGUI_SOURCES) $(LAYER_HEADERS)
-	$(CXX) $(CXXFLAGS) -Ithird_party/imgui -Isrc/layer -o $@ $< $(MENU_SOURCES) $(IMGUI_SOURCES) -lvulkan -lpthread
+work/test_exchange: src/layer/test_exchange.c src/layer/nr_layer.c $(MENU_SOURCES) $(IMGUI_SOURCES) $(LAYER_SUPPORT) $(LAYER_HEADERS)
+	$(CXX) $(CXXFLAGS) -Ithird_party/imgui -Isrc/layer -o $@ \
+	       $(call AS_C,$< $(MENU_SOURCES) $(LAYER_SUPPORT)) $(IMGUI_SOURCES) -x none -lvulkan -lpthread
 
 work/test_surface_policy: src/layer/test_surface_policy.c src/layer/nr_surface_policy.h
 	$(CC) $(CFLAGS) -UNDEBUG -o $@ $<
 
-work/test_transfer_resources: src/layer/test_transfer_resources.c src/layer/nr_layer.c $(MENU_SOURCES) $(IMGUI_SOURCES) $(LAYER_HEADERS)
-	$(CXX) $(CXXFLAGS) -Ithird_party/imgui -Isrc/layer -o $@ $< $(MENU_SOURCES) $(IMGUI_SOURCES) -lvulkan -lpthread
+work/test_transfer_resources: src/layer/test_transfer_resources.c src/layer/nr_layer.c $(MENU_SOURCES) $(IMGUI_SOURCES) $(LAYER_SUPPORT) $(LAYER_HEADERS)
+	$(CXX) $(CXXFLAGS) -Ithird_party/imgui -Isrc/layer -o $@ \
+	       $(call AS_C,$< $(MENU_SOURCES) $(LAYER_SUPPORT)) $(IMGUI_SOURCES) -x none -lvulkan -lpthread
 
 GEMM_GLSL := src/gpu/publish.glsl src/gpu/specialize.glsl src/gpu/residual_epilogue.glsl \
              src/gpu/cosine_tree.glsl src/gpu/qkv_epilogue.glsl
@@ -249,7 +280,7 @@ bench: all work/half_probe.spv
 	python3 src/bench/half_probe.py
 	python3 src/bench/split_cost.py
 
-test: all work/attention_ab.spv work/test_exchange work/test_settled work/test_present work/test_surface_policy work/test_transfer_resources work/test_menu_rows work/test_menu_persist work/test_soft_cursor work/test_focus_gate work/test_menu_hints
+test: all work/attention_ab.spv work/test_exchange work/test_settled work/test_present work/test_surface_policy work/test_transfer_resources work/test_menu_rows work/test_menu_persist work/test_soft_cursor $(FOCUS_GATE) work/test_menu_hints work/test_settings_writer
 	python3 src/gpu/test_ffn_batch.py --gpu
 	python3 src/gpu/test_device_pick.py
 	python3 src/gpu/test_gemm_contract.py
@@ -258,7 +289,9 @@ test: all work/attention_ab.spv work/test_exchange work/test_settled work/test_p
 	python3 src/gpu/test_compact_head.py
 	python3 src/gpu/test_joint_qkv.py
 	work/test_soft_cursor
+ifeq ($(OS),Windows_NT)
 	work/test_focus_gate
+endif
 	work/test_settings_writer
 	work/test_menu_hints
 	python3 src/layer/test_daemon.py
@@ -269,7 +302,9 @@ test: all work/attention_ab.spv work/test_exchange work/test_settled work/test_p
 	work/test_transfer_resources
 	work/test_settled
 	work/test_menu_rows
+ifeq ($(OS),Windows_NT)
 	python3 src/layer/test_menu_rows.py
+endif
 	work/test_menu_persist
 	python3 src/layer/test_ui_mask.py
 	python3 src/layer/test_present.py

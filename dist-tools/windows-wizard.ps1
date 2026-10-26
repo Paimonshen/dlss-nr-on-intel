@@ -355,6 +355,13 @@ $script:SettingsStateKey = 'SettingsLoading'
         <TextBlock x:Name="PacingNote" Style="{StaticResource Note}" Margin="0,8,0,0"/>
        </StackPanel>
       </Border>
+      <Border Style="{StaticResource CardBox}">
+       <StackPanel>
+        <TextBlock x:Name="PresetHeading" Style="{StaticResource Heading}"/>
+        <ComboBox x:Name="PresetChoice" SelectedIndex="0" ToolTip=""><ComboBoxItem x:Name="PresetA" Tag="A" Content=""/><ComboBoxItem x:Name="PresetB" Tag="B" Content=""/></ComboBox>
+        <TextBlock x:Name="PresetNote" Style="{StaticResource Note}" Margin="0,8,0,0"/>
+       </StackPanel>
+      </Border>
      </StackPanel>
     </ScrollViewer>
    </TabItem>
@@ -372,7 +379,7 @@ foreach($name in @('DllPath','GamePath','PythonPath','BrowseDll','BrowseGame','B
 # knob, which names the model file directly and hot-swaps). A second chooser here
 # answered the same question with a second value and the two disagreed; NR_PRESET
 # stays what the profile says (A) and the saved settings decide the rest.
-foreach($name in @('Pages','SetupTab','ControlsTab','ControlsHeading','ControlsToggle','ControlsLaunch','ResetSettings','ControlsEffectState','ControlsRuntimeState','FrameReadout','SettingsState','KnobRows','MoreSettings','MoreKnobRows','PacingHeading','AsyncMode','GpuImagePath','GpuImageNote','EveryLabel','EveryFrame','Every1','Every2','Every3','Every4','PacingNote')) {
+foreach($name in @('Pages','SetupTab','ControlsTab','ControlsHeading','ControlsToggle','ControlsLaunch','ResetSettings','ControlsEffectState','ControlsRuntimeState','FrameReadout','SettingsState','KnobRows','MoreSettings','MoreKnobRows','PacingHeading','AsyncMode','GpuImagePath','GpuImageNote','EveryLabel','EveryFrame','Every1','Every2','Every3','Every4','PacingNote','PresetHeading','PresetChoice','PresetA','PresetB','PresetNote')) {
     $script:Ui[$name]=$script:Window.FindName($name)
     if($null -eq $script:Ui[$name]) { throw "Missing control $name" }
 }
@@ -500,6 +507,9 @@ $script:Strings=@{
   Every1='every frame'; Every2='every 2nd frame'; Every3='every 3rd frame'; Every4='every 4th frame'
   'Loading.pacing'='Saving frame pacing…'; 'Done.pacing'='Frame pacing saved; it takes effect when the game starts next.'
   'Done.pacing-later'='Frame pacing saved; Install NR gives it to the game.'
+  PresetHeading='Network'; PresetA='A: the model NR has always run'; PresetB='B: the faster model of nvngx_dlssnr.dll 310.9.16'
+  PresetTip='nvngx_dlssnr.dll 310.9.16 carries two networks: A, the model NR has always run, and B, a smaller one NVIDIA added, which takes about half of A''s time on this GPU. Install NR takes B out of that DLL beside A.'
+  PresetNote='B needs nvngx_dlssnr.dll 310.9.16 or later, chosen on Setup when you press Install NR. Takes effect when the game starts next.'
   'Loading.preset'='Saving the network…'; 'Done.preset'='Network saved; it takes effect when the game starts next.'
   'Done.preset-later'='Network saved; Install NR gives it to the game.'
   SpeedPreset='{0}, network {1}'
@@ -603,6 +613,9 @@ $script:Strings=@{
   Every1='каждом кадре'; Every2='каждом 2-м кадре'; Every3='каждом 3-м кадре'; Every4='каждом 4-м кадре'
   'Loading.pacing'='Сохраняем подачу кадров…'; 'Done.pacing'='Подача кадров сохранена и применится при следующем запуске игры.'
   'Done.pacing-later'='Подача кадров сохранена; «Установить NR» передаст её игре.'
+  PresetHeading='Нейросеть'; PresetA='A: модель, с которой NR работал всегда'; PresetB='B: быстрая модель из nvngx_dlssnr.dll 310.9.16'
+  PresetTip='В nvngx_dlssnr.dll 310.9.16 две сети: A — модель, с которой NR работал всегда, и B — меньшая, добавленная NVIDIA; на этой видеокарте она тратит примерно половину времени A. «Установить NR» извлекает B из этой DLL рядом с A.'
+  PresetNote='Для B нужна nvngx_dlssnr.dll 310.9.16 или новее, выбранная на вкладке «Установка» при нажатии «Установить NR». Применится при следующем запуске игры.'
   'Loading.preset'='Сохраняем выбор нейросети…'; 'Done.preset'='Нейросеть сохранена и применится при следующем запуске игры.'
   'Done.preset-later'='Нейросеть сохранена; «Установить NR» передаст её игре.'
   SpeedPreset='{0}, сеть {1}'
@@ -706,6 +719,9 @@ $script:Strings=@{
   Every1='cada fotograma'; Every2='uno de cada 2 fotogramas'; Every3='uno de cada 3 fotogramas'; Every4='uno de cada 4 fotogramas'
   'Loading.pacing'='Guardando el ritmo de fotogramas…'; 'Done.pacing'='Ritmo de fotogramas guardado; se aplica la próxima vez que se inicie el juego.'
   'Done.pacing-later'='Ritmo de fotogramas guardado; Instalar NR se lo pasa al juego.'
+  PresetHeading='Red neuronal'; PresetA='A: el modelo con el que NR funciona desde siempre'; PresetB='B: el modelo rápido de nvngx_dlssnr.dll 310.9.16'
+  PresetTip='nvngx_dlssnr.dll 310.9.16 trae dos redes: A, el modelo con el que NR funciona desde siempre, y B, uno más pequeño que añadió NVIDIA, que en esta GPU tarda más o menos la mitad que A. Instalar NR extrae B de esa DLL junto a A.'
+  PresetNote='B necesita nvngx_dlssnr.dll 310.9.16 o posterior, elegida en Instalación al pulsar Instalar NR. Se aplica la próxima vez que se inicie el juego.'
   'Loading.preset'='Guardando la red neuronal…'; 'Done.preset'='Red neuronal guardada; se aplica la próxima vez que se inicie el juego.'
   'Done.preset-later'='Red neuronal guardada; Instalar NR se la pasa al juego.'
   SpeedPreset='{0}, red {1}'
@@ -805,6 +821,9 @@ $script:Strings=@{
    GpuImagePath='实验性：帧保留在 GPU 上'
    GpuImagePathTip='帧保留在 GPU 上，从捕获到屏幕都不经过 CPU 拷贝。需要游戏与网络在同一块 Arc 上，且游戏使用 Vulkan 1.1 或更高版本（DirectX 游戏经 DXVK 即属于此）。如果不能如此，NR 会走常规路径，保存报告会说明原因。'
    GpuImageNote='在下次游戏启动时生效。异步模式或非每帧处理会在该模式下跳过效果。'
+   PresetHeading='网络'; PresetA='A：NR 一直运行的模型'; PresetB='B：nvngx_dlssnr.dll 310.9.16 中的更快模型'
+   PresetTip='nvngx_dlssnr.dll 310.9.16 携带两个网络：A，NR 一直运行的模型；B，NVIDIA 后来加入的更小网络，在这块 GPU 上耗时约为 A 的一半。「安装 NR」会把 B 从该 DLL 中提取出来，与 A 并存。'
+   PresetNote='B 需要 310.9.16 或更新版的 nvngx_dlssnr.dll，在「安装」页选择，按「安装 NR」时生效。在游戏下次启动时生效。'
    'Loading.preset'='正在保存网络…'; 'Done.preset'='网络已保存；在游戏下次启动时生效。'
    'Done.preset-later'='网络已保存；安装 NR 会把它交给游戏。'
    SpeedPreset='{0}, 网络 {1}'
@@ -845,6 +864,7 @@ $script:TextBindings=@{
  ArgsLabel='ArgsLabel'; FirstTestHint='FirstTestHint'; CompareHeading='CompareHeading'
  FpsHint='FpsHint'; ControlsHeading='ControlsHeading'
  PacingHeading='PacingHeading'; EveryLabel='EveryLabel'; PacingNote='PacingNote'; GpuImageNote='GpuImageNote'
+ PresetHeading='PresetHeading'; PresetNote='PresetNote'
 }
 $script:ContentBindings=@{
  BrowseDll='Browse'; BrowseGame='Browse'; BrowsePython='Browse'; FindPython='FindPython'; GetPython='GetPython'
@@ -852,11 +872,13 @@ $script:ContentBindings=@{
  Check='Check'; Dependencies='Dependencies'; Install='Install'; Uninstall='Uninstall'; Launch='Launch'
  Report='Report'; ControlsLaunch='Launch'; ResetSettings='ResetSettings'; SpeedTest='SpeedTest'
  AsyncMode='AsyncMode'; GpuImagePath='GpuImagePath'; Every1='Every1'; Every2='Every2'; Every3='Every3'; Every4='Every4'
+ PresetA='PresetA'; PresetB='PresetB'
 }
 $script:HeaderBindings=@{LaunchOptions='LaunchOptions'; CheckDetails='CheckDetails';SetupTab='SetupTab';ControlsTab='ControlsTab';MoreSettings='MoreSettings'}
 $script:TipBindings=@{DllPath='DllTip'; GamePath='GameTip'; PythonPath='PythonTip'; GameArgs='ArgsTip'; Fossilize='FossilizeTip'; Language='LanguageTip'
  PythonLabel='PythonHint'; ControlsHeading='ControlsHint'; Theme='ThemeTip'; SpeedTest='SpeedTestTip'
- AsyncMode='AsyncModeTip'; GpuImagePath='GpuImagePathTip'; EveryLabel='EveryTip'; EveryFrame='EveryTip'}
+ AsyncMode='AsyncModeTip'; GpuImagePath='GpuImagePathTip'; EveryLabel='EveryTip'; EveryFrame='EveryTip'
+ PresetChoice='PresetTip'}
 function T([string]$Key) {
     if(-not $script:Strings[$script:Language].ContainsKey($Key)) { throw "Missing translation: $Key" }
     return [string]$script:Strings[$script:Language][$Key]
@@ -1081,7 +1103,7 @@ function Profile-FromWindow {
     $dll = $script:Ui.DllPath.Text.Trim()
     return [ordered]@{root=$script:Root; python=$script:Ui.PythonPath.Text.Trim(); game_exe=$script:Ui.GamePath.Text.Trim(); dll=$(if($dll){$dll}else{$null}); api=$(if($script:Ui.Api.SelectedIndex -eq 1){'dxvk'}else{'vulkan'}); game_args_raw=$script:Ui.GameArgs.Text; disable_fossilize=[bool]$script:Ui.Fossilize.IsChecked
         nr_async=[bool]$script:Ui.AsyncMode.IsChecked; nr_every=[int]$script:Ui.EveryFrame.SelectedItem.Tag;
-        gpu_image_path=[bool]$script:Ui.GpuImagePath.IsChecked}
+        gpu_image_path=[bool]$script:Ui.GpuImagePath.IsChecked; preset=[string]$script:Ui.PresetChoice.SelectedItem.Tag}
 }
 function Apply-Profile($Profile) {
     if($null -eq $Profile) { return }
@@ -1099,8 +1121,20 @@ function Apply-Profile($Profile) {
         $script:Ui.GpuImagePath.IsChecked=[bool]$Profile.gpu_image_path
         $every=[int]$Profile.nr_every
         $script:Ui.EveryFrame.SelectedIndex=$(if($every -ge 1 -and $every -le $script:Ui.EveryFrame.Items.Count){$every-1}else{0})
+        # A profile from before the presets ran A, the only network there was.
+        $script:Ui.PresetChoice.SelectedItem=$(if([string]$Profile.preset -eq 'B'){$script:Ui.PresetB}else{$script:Ui.PresetA})
         Update-PacingState
     } finally { $script:ApplyingProfile=$false }
+}
+# The networks this release has weights for, from the backend: Install NR takes B out of a 310.9.16
+# DLL beside A. One without them is not offered, and a choice of it shows A again, saving nothing.
+function Show-Presets($Presets) {
+    if($null -eq $Presets) { return }
+    $script:Ui.PresetB.IsEnabled=[bool]$Presets.B
+    if(-not $Presets.B -and $script:Ui.PresetChoice.SelectedItem -eq $script:Ui.PresetB) {
+        $script:ApplyingProfile=$true
+        try { $script:Ui.PresetChoice.SelectedItem=$script:Ui.PresetA } finally { $script:ApplyingProfile=$false }
+    }
 }
 # The speed test's own choice of network, beside its button. It asks which network to MEASURE,
 # which is not the question the `weights` knob asks (which network a GAME runs): a tester
@@ -1195,7 +1229,7 @@ function Request-Pacing([string]$Action='pacing') {
     if($script:Busy) { $script:PacingDue=$Action } else { $script:PacingDue=$null; Start-Bridge $Action }
 }
 function Set-Busy([bool]$Busy) {
-    foreach($name in @('DllPath','GamePath','PythonPath','Api','GameArgs','Fossilize','BrowseDll','BrowseGame','BrowsePython','FindPython','Check','Dependencies','Install','Uninstall','Launch','Toggle','SpeedTest','SpeedNetwork','Report','ControlsToggle','ControlsLaunch','ResetSettings','GpuImagePath')) { $script:Ui[$name].IsEnabled=-not $Busy }
+    foreach($name in @('DllPath','GamePath','PythonPath','Api','GameArgs','Fossilize','BrowseDll','BrowseGame','BrowsePython','FindPython','Check','Dependencies','Install','Uninstall','Launch','Toggle','SpeedTest','SpeedNetwork','Report','ControlsToggle','ControlsLaunch','ResetSettings','GpuImagePath','PresetChoice')) { $script:Ui[$name].IsEnabled=-not $Busy }
     Update-PacingState $Busy
     $script:Ui.KnobRows.IsEnabled=(-not $Busy -or ($script:Busy -and $script:Busy.Action -eq 'settings-save'))
     # An indeterminate ProgressBar animates while collapsed too: 6 % of a core, the window idle.
@@ -1296,6 +1330,7 @@ function Show-Status($Value) {
         Set-RuntimeText 'Historical' @($count,$refused)
     } else { Set-RuntimeText 'WaitingFrames' }
     if($Value.PSObject.Properties['speed_test']) { Show-Speed $Value.speed_test }
+    if($Value.PSObject.Properties['presets']) { Show-Presets $Value.presets }
     $script:Ui.FrameReadout.Text=''
     if($Value.last_frame -and $Value.network_shape -and $Value.network_shape.Count -eq 2) {
         $frame=$Value.last_frame
@@ -1324,12 +1359,13 @@ function Finish-Bridge($Job,[bool]$Quiet) {
         $script:Ui.Details.Text=$(if(Test-Path -LiteralPath $Job.Stderr){[IO.File]::ReadAllText($Job.Stderr)}else{T 'ResultMissing'})
     } else {
         $script:Ui.Details.Text=($value | ConvertTo-Json -Depth 10)
+        if($value.PSObject.Properties['presets']) { Show-Presets $value.presets }
         if($value.ok) {
             Set-Progress ('Done.'+$Job.Action)
             if($Job.Action -in @('install','uninstall') -and $value.steam_restored) { Set-Progress ('Done.'+$Job.Action+'-steam') }
             if($Job.Action -eq 'on' -and $value.warning -eq 'game_without_nr') { Set-Progress 'GameWithoutNr' }
             if($Job.Action -eq 'on' -and $value.warning -eq 'game_elevated') { Set-Progress $(if($value.uac_enabled -eq $false){'GameElevatedUacOff'}else{'GameElevated'}) }
-            if($Job.Action -eq 'pacing' -and -not $value.applied) { Set-Progress ('Done.pacing-later') }
+            if($Job.Action -in @('pacing','preset') -and -not $value.applied) { Set-Progress ('Done.'+$Job.Action+'-later') }
             if($Job.Action -eq 'speedtest') {
                 Show-Speed $value.speed_test
                 $script:Ui.Progress.Text=(T 'Done.speedtest')+"`n"+$script:Ui.SpeedState.Text
@@ -1524,6 +1560,20 @@ if($SelfTest) {
         Request-Pacing
         if($script:PacingDue -or $script:ProgressKey -ne 'PythonMissing') { throw 'Frame pacing was not saved when free' }
         foreach($item in $script:Ui.EveryFrame.Items) { if(-not $item.Content) { throw 'Untranslated frame pacing choice' } }
+        # The network reaches the profile; a profile from before the presets runs A; one this
+        # release has no weights for is not offered, and is not left chosen.
+        Apply-Profile ([pscustomobject]@{python='fixture';game_exe='fixture.exe';api='vulkan';disable_fossilize=$true;preset='B'})
+        if((Profile-FromWindow).preset -ne 'B' -or $script:PacingDue) { throw 'The network did not reach the profile' }
+        Show-Presets ([pscustomobject]@{A=$true;B=$false})
+        if((Profile-FromWindow).preset -ne 'A' -or $script:Ui.PresetB.IsEnabled -or $script:PacingDue) { throw 'A network without its weights stayed chosen or offered' }
+        Show-Presets ([pscustomobject]@{A=$true;B=$true})
+        if(-not $script:Ui.PresetB.IsEnabled) { throw 'Network B was not offered with its weights' }
+        Apply-Profile ([pscustomobject]@{python='fixture';game_exe='fixture.exe';api='vulkan';disable_fossilize=$true})
+        if((Profile-FromWindow).preset -ne 'A') { throw 'An older profile did not run network A' }
+        Set-Busy $true
+        if($script:Ui.PresetChoice.IsEnabled) { throw 'The network could be changed during an action' }
+        Set-Busy $false
+        foreach($item in $script:Ui.PresetChoice.Items) { if(-not $item.Content) { throw "Untranslated network choice $($item.Tag)" } }
         Set-Language $(if($language -eq 'en'){'ru'}else{'en'})
         if($script:Ui.Toggle.Content -ne (T 'Disable')) { throw 'Language switch changed the displayed effect state' }
         Show-Status ([pscustomobject]@{trigger_exists=$false;processed=12;rejected=1;fresh_frames=$false})
@@ -1599,6 +1649,7 @@ $script:Ui.AsyncMode.Add_Unchecked({ Request-Pacing })
 $script:Ui.GpuImagePath.Add_Checked({ Update-PacingState; Request-Pacing })
 $script:Ui.GpuImagePath.Add_Unchecked({ Update-PacingState; Request-Pacing })
 $script:Ui.EveryFrame.Add_SelectionChanged({ Request-Pacing })
+$script:Ui.PresetChoice.Add_SelectionChanged({ Request-Pacing 'preset' })
 $script:Ui.Theme.Add_Click({
     Set-Theme $(if($script:Theme -eq 'dark'){'light'}else{'dark'})
     try { [IO.Directory]::CreateDirectory($script:Work) | Out-Null; Write-Json $script:UiPrefs @{theme=$script:Theme} } catch { }

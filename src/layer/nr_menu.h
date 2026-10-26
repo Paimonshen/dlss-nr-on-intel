@@ -232,6 +232,14 @@ void nr_menu_inject_toggle(nr_menu *menu);
  * readers would otherwise both act on INS, the arrows and Enter, which is one keypress processed
  * twice. The always-on hotkeys (NR on/off, the comparison) are unaffected - they are read by the
  * bridge and act with the panel closed. */
+/* The layer's one call per frame: the level of every virtual key, 0..255, behind one focus check.
+ *
+ * This file used to read `GetAsyncKeyState` itself, which made it the third place keys were read
+ * from. Now `nr_layer.c` is the only reader - it polls once, gates once, and hands the levels in
+ * here. A 256-byte array rather than a list of the keys the menu uses: the state machine names its
+ * own keys, and a list would be a second place to keep in step with it. NULL means "every key up". */
+void nr_menu_set_key_levels(nr_menu *menu, const unsigned char *levels);
+
 void nr_menu_set_key_reading(nr_menu *menu, int on);
 
 /* Forget which keys are held, so the next press is an edge again.

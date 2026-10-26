@@ -234,7 +234,12 @@ gb10a2, which changes how a colour constant is packed -
     float split_step;
     int nr_enabled;
 
+    /* The latch: the level each key had on the last frame, which is what turns a level into an
+     * edge. `key_level` is the level the LAYER set for this frame - this file no longer reads the
+     * keyboard, because three readers each had to remember the focus gate and two of them did not.
+     * See `nr_menu_set_key_levels`. */
     uint8_t key_down[256];
+    uint8_t key_level[256];
     /* 1 while this file reads the panel's keys itself; 0 when ImGui owns the panel and this file
      * must keep its hands off them. Set once at creation by the layer. */
     int read_keys;
@@ -270,30 +275,43 @@ gb10a2, which changes how a colour constant is packed -
  * at", and turning the effect on and off is that. */
 #define NR_KEY_TOGGLE  0x24
 
+/* **The edge, derived from a level the layer set - not read here.**
+ *
+ * This used to call `GetAsyncKeyState` itself, which made this file the third place keys were read
+ * from: `nr_menu.c`, `nr_menu_ui.cpp` and `nr_layer.c` each asked the OS, and each had to remember
+ * the focus gate on its own. Two of the three forgot it at least once, and the reports were "an L
+ * typed in a chat window changed the panel's language" and "Home in an editor turned NR off in the
+ * game behind it".
+ *
+ * So the reading moved out. `nr_layer.c` polls once per frame, behind one focus check, and hands
+ * the levels in through `nr_menu_set_key_levels`. This keeps only the latch: `key_down` holds the
+ * level from the last frame, which is what turns a level into an edge.
+ *
+ * A menu nobody has fed sees every key up, so `key_pressed` returns 0 - which is what an install
+ * with no keyboard input should do, rather than a menu that acts on nothing.
+ */
 static int key_pressed(nr_menu *m, int vk)
 {
-#ifdef _WIN32
-    /* The high bit means "down now". The low bit means "pressed since the last call" and is
-     * documented as unreliable across input stacks, so the edge is derived here instead. */
-    int down = (GetAsyncKeyState(vk) & 0x8000) != 0;
+    int down = m->key_level[vk & 0xFF] ? 1 : 0;
     int was = m->key_down[vk & 0xFF];
     m->key_down[vk & 0xFF] = (uint8_t)down;
     return down && !was;
-#else
-    (void)m; (void)vk;
-    return 0;
-#endif
 }
 
-static int key_down(nr_menu *m, int vk)
+/* The layer's one call per frame: the level of every virtual key, 0..255.
+ *
+ * `nr_key_down` in `nr_layer.c` is the only thing that asks the OS, and it asks behind the focus
+ * check. A 256-byte array rather than a list of the keys the menu happens to use: the state
+ * machine names its own keys, and a list here would be a second place to keep in step with it.
+ */
+void nr_menu_set_key_levels(nr_menu *m, const unsigned char *levels)
 {
-#ifdef _WIN32
-    (void)m;
-    return (GetAsyncKeyState(vk) & 0x8000) != 0;
-#else
-    (void)m; (void)vk;
-    return 0;
-#endif
+    if (!m) return;
+    if (!levels) {
+        memset(m->key_level, 0, sizeof m->key_level);
+        return;
+    }
+    memcpy(m->key_level, levels, sizeof m->key_level);
 }
 
 /* ------------------------------------------------------------------ colour and memory */
@@ -1296,268 +1314,9 @@ static int utf8_next(const char **p, int *codepoint)
     return n;
 }
 
-static void text_push(nr_menu *m, uint32_t *used, float x, float y, const char *s,
-                      nr_colour colour, int scale)
-{
-    if (!s) return;
-    float cx = x;
-    while (*s) {
-        int cp;
-        utf8_next(&s, &cp);
-        if (cp == '\n') continue;
-        const struct nr_font_cell *cell = nr_font_cell_for(&m->font, cp);
-        if (!cell) { cx += 4 * scale; continue; }   /* a space, or a glyph we do not have */
-        quad_push(m, used, cx, y,
-                  (float)cell->w * scale, (float)cell->h * scale,
-                  (float)cell->x / (float)m->font.width,
-                  (float)cell->y / (float)m->font.height,
-                  (float)(cell->x + cell->w) / (float)m->font.width,
-                  (float)(cell->y + cell->h) / (float)m->font.height,
-                  colour, 0u);
-        cx += (float)cell->w * scale;
-    }
-}
-
-static float text_width(const nr_menu *m, const char *s, int scale)
-{
-    if (!s) return 0;
-    float w = 0;
-    while (*s) {
-        int cp;
-        utf8_next(&s, &cp);
-        const struct nr_font_cell *cell = nr_font_cell_for(&m->font, cp);
-        w += (cell ? (float)cell->w : 4.0f) * scale;
-    }
-    return w;
-}
-
-/* Wrapped text, three lines at most. The widths come from the atlas, so a line breaks where the
- * glyphs actually end rather than where a count of characters guesses - which matters most for
- * Chinese, where every character is a different width from every Latin one. */
-static void text_push_wrapped(nr_menu *m, uint32_t *used, float x, float y, float max_width,
-                              const char *s, nr_colour colour)
-{
-    if (!s) return;
-    char line[512];
-    size_t n = 0;
-    float cx = x, cy = y;
-    const float line_height = (float)NR_FONT_CELL_H + 2.0f;
-
-    line[0] = '\0';
-    while (*s) {
-        int cp;
-        const char *start = s;
-        utf8_next(&s, &cp);
-        size_t bytes = (size_t)(s - start);
-
-        float glyph = text_width(m, start, 1);
-        if (cx > x + max_width || (cp == ' ' && cx + glyph > x + max_width)) {
-            text_push(m, used, x, cy, line, colour, 1);
-            n = 0;
-            line[0] = '\0';
-            cx = x;
-            cy += line_height;
-            if (cy > y + line_height * 2) return;   /* three lines is enough */
-            if (cp == ' ') continue;                /* do not start a line with the break */
-        }
-        if (n + bytes < sizeof line - 1) {
-            memcpy(line + n, start, bytes);
-            n += bytes;
-            line[n] = '\0';
-            cx += glyph;
-        }
-    }
-    if (n) text_push(m, used, x, cy, line, colour, 1);
-}
-
-/* Lay the frame out into the quad buffer and dispatch. The layout is here rather than in the
- * shader because the shader has no table: positions and colours are decided once, on the host, and
- * the shader is a rectangle test. */
-void nr_menu_draw(nr_menu *m, uint64_t cmd_handle, uint64_t image_handle,
-                  uint32_t width, uint32_t height)
-{
-    if (!m || !m->open || !m->pipeline || !m->rows) return;
-
-    /* The handles are integers, not pointers - see the note in nr_menu.h. Casting here rather than
-     * at every call site keeps the mismatch from being a thing each caller has to remember. */
-    VkCommandBuffer cmd = (VkCommandBuffer)(uintptr_t)cmd_handle;
-    VkImage image = (VkImage)image_handle;
-
-    uint32_t used = 0;
-
-    /* The panel fits the image, and is centred in it.
-     *
-     * `NR_PANEL_W`/`NR_PANEL_H` are what the layout wants; the image is what it gets. A swapchain
-     * can be any size - 640x360 on the first run that tested this, 1920x1080 on a full screen -
-     * and a panel taller than the image means the dispatch covers rows that do not exist.
-     * `imageStore` past the end of an image is undefined, and the quiet end of "undefined" is
-     * that nothing appears, which is exactly what happened: 323 quads built, submitted, waited,
-     * and not one pixel on screen.
-     *
-     * The margin keeps a border of game visible, so it is obvious the panel is an overlay. */
-    float panel_w = (float)NR_PANEL_W;
-    float panel_h = (float)NR_PANEL_H;
-    if (panel_w > (float)width  - 8.0f) panel_w = (float)width  - 8.0f;
-    if (panel_h > (float)height - 8.0f) panel_h = (float)height - 8.0f;
-    if (panel_w < 64.0f) panel_w = 64.0f;
-    if (panel_h < 64.0f) panel_h = 64.0f;
-
-    float px = ((float)width  - panel_w) / 2.0f;
-    float py = ((float)height - panel_h) / 2.0f;
-    if (px < 0) px = 0;
-    if (py < 0) py = 0;
-
-    const nr_colour bg      = COLOUR(0x10, 0x12, 0x16, 0xF2);
-    const nr_colour border  = COLOUR(0x4A, 0x52, 0x60, 0xFF);
-    const nr_colour title_c = COLOUR(0xEA, 0xEE, 0xF4, 0xFF);
-    const nr_colour label_c = COLOUR(0xC6, 0xCC, 0xD6, 0xFF);
-    const nr_colour value_c = COLOUR(0x7F, 0xD1, 0xFF, 0xFF);
-    const nr_colour sel_c   = COLOUR(0x2A, 0x38, 0x4C, 0xFF);
-    const nr_colour hint_c  = COLOUR(0x8A, 0x92, 0x9E, 0xFF);
-    const nr_colour note_c  = COLOUR(0x8C, 0xD9, 0x7A, 0xFF);
-    const nr_colour off_c   = COLOUR(0xE0, 0x6C, 0x6C, 0xFF);
-
-    /* The border first, so the fill sits inside it: two solid quads, no outline primitive. */
-    quad_push(m, &used, px - 1, py - 1, panel_w + 2, panel_h + 2,
-              0, 0, 0, 0, border, NR_QUAD_SOLID);
-    quad_push(m, &used, px, py, panel_w, panel_h,
-              0, 0, 0, 0, bg, NR_QUAD_SOLID);
-
-    float y = py + 10;
-    if (m->title) {
-        text_push(m, &used, px + NR_TEXT_PAD, y, m->title, title_c, NR_TITLE_SCALE);
-        y += (float)NR_FONT_CELL_H * NR_TITLE_SCALE + 6.0f;
-    }
-
-    /* NR's own state, on its own line: the toggle key changes it with the menu closed, so the one
-     * thing a user needs to see is whether the effect is on. */
-    {
-        char state[192];
-        snprintf(state, sizeof state, "%s: %s",
-                 nr_menu_text(m->language, NR_STR_TOGGLE_NR),
-                 nr_menu_text(m->language, m->nr_enabled ? NR_STR_ON : NR_STR_OFF));
-        text_push(m, &used, px + NR_TEXT_PAD, y, state, m->nr_enabled ? note_c : off_c, 1);
-        y += NR_ROW_H;
-    }
-
-    for (int i = 0; i < m->row_count; ++i) {
-        const nr_menu_row *r = &m->rows[i];
-        if (i == m->selected)
-            quad_push(m, &used, px + 4, y - 2, panel_w - 8, (float)NR_ROW_H,
-                      0, 0, 0, 0, sel_c, NR_QUAD_SOLID);
-
-        text_push(m, &used, px + NR_TEXT_PAD, y, r->label, label_c, 1);
-        if (r->value) {
-            /* Right-aligned, so a column of values reads as a column. A choice gets the arrows
-             * that say it cycles, which is the only hint the widget itself gives. */
-            char shown[128];
-            if (r->is_choice) snprintf(shown, sizeof shown, "< %s >", r->value);
-            else              snprintf(shown, sizeof shown, "%s", r->value);
-            float w = text_width(m, shown, 1);
-            text_push(m, &used, px + panel_w - NR_TEXT_PAD - w, y, shown, value_c, 1);
-        }
-        y += NR_ROW_H;
-    }
-
-    /* The comparison's own settings, so the split is adjustable from inside the menu. */
-    if (m->compare_mode != NR_MENU_COMPARE_OFF) {
-        y += 4;
-        char line[224];
-        snprintf(line, sizeof line, "%s: %s   %s: %.2f   (Shift+Left/Right)",
-                 nr_menu_text(m->language, NR_STR_COMPARE),
-                 nr_menu_compare_names[m->language][m->compare_mode],
-                 nr_menu_text(m->language, NR_STR_COMPARE_SPLIT), (double)m->compare_split);
-        text_push(m, &used, px + NR_TEXT_PAD, y, line, value_c, 1);
-        y += NR_ROW_H;
-    }
-
-    if (m->note && m->elapsed < m->note_until) {
-        y += 2;
-        text_push(m, &used, px + NR_TEXT_PAD, y, m->note, note_c, 1);
-    }
-
-    /* The selected row's own hint, above the key list: a knob's explanation is longer than the row
-     * is wide and this is the only place it is ever shown. */
-    if (m->selected < m->row_count && m->rows[m->selected].hint) {
-        float hy = py + panel_h - NR_FONT_CELL_H - 6
-                 - ((float)NR_FONT_CELL_H + 2.0f) * 3.0f - 2.0f;
-        text_push_wrapped(m, &used, px + NR_TEXT_PAD, hy,
-                          panel_w - NR_TEXT_PAD * 2,
-                          m->rows[m->selected].hint, hint_c);
-    }
-
-    if (m->hint)
-        text_push(m, &used, px + NR_TEXT_PAD, py + panel_h - NR_FONT_CELL_H - 6,
-                  m->hint, hint_c, 1);
-
-    if (used == 0) return;
 
 
-    /* Point the descriptors at this frame's image, so the menu writes where the game was about to
-     * hand the driver. Re-pointed every frame because a swapchain has several images and the layer
-     * presents whichever the driver gave it. */
-    VkImageView view = image_view_for(m, image);
-    if (view == VK_NULL_HANDLE) {
-        return;
-    }
 
-    VkDescriptorImageInfo dii[2] = {{0}, {0}};
-    dii[0].imageView = view;
-    dii[0].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-    /* The reference slot gets the image itself when there is nothing to compare, so the shader
-     * never reads an unbound descriptor - which on a validation layer is an error and on a driver
-     * is undefined. The panel pass does not read it, but binding it costs nothing. */
-    dii[1].imageView = m->reference_view ? m->reference_view : view;
-    dii[1].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-
-    /* The two buffers the shader reads its quads and its glyphs from. */
-    VkDescriptorBufferInfo buffers[2] = {{0}, {0}};
-    buffers[0].buffer = m->quad_buffer;
-    buffers[0].offset = 0;
-    buffers[0].range = VK_WHOLE_SIZE;
-    buffers[1].buffer = m->atlas_buffer;
-    buffers[1].offset = 0;
-    buffers[1].range = VK_WHOLE_SIZE;
-
-    VkWriteDescriptorSet writes[4] = {{0}, {0}, {0}, {0}};
-    for (int i = 0; i < 4; ++i) {
-        writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[i].dstSet = m->set;
-        writes[i].dstBinding = (uint32_t)i;
-        writes[i].descriptorCount = 1;
-        if (i < 2) {
-            writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-            writes[i].pImageInfo = &dii[i];
-        } else {
-            writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            writes[i].pBufferInfo = &buffers[i - 2];
-        }
-    }
-    m->update_descriptor_sets(m->device, 4, writes, 0, NULL);
-
-    /* `cmd` is the caller's, already recording. The menu never begins, ends or submits one: the
-     * submit is where the semaphore contract lives and the caller owns it. */
-    m->cmd_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m->pipeline);
-    m->cmd_bind_descriptor(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m->layout, 0, 1, &m->set, 0, NULL);
-
-    nr_menu_push push;
-    memset(&push, 0, sizeof push);
-    push.count = used;
-    push.panel_x = px;
-    push.panel_y = py;
-    push.panel_w = panel_w;
-    push.panel_h = panel_h;
-    push.atlas_w = m->font.width;
-    push.atlas_h = m->font.height;
-    push.compare_split = m->compare_split;
-    push.compare_swap = (uint32_t)m->compare_swap;
-    push.compare_mode = 0;   /* the panel pass draws no comparison */
-    m->cmd_push_constants(cmd, m->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof push, &push);
-
-    /* Exactly the panel, so the cost is the menu's size and not the game's resolution. */
-    m->cmd_dispatch(cmd, ((uint32_t)panel_w + 7) / 8, ((uint32_t)panel_h + 7) / 8, 1);
-
-}
 
 /* The ImGui overlay: mode 3 of the menu shader, over the whole image.
  *
@@ -1634,123 +1393,3 @@ void nr_menu_draw_overlay(nr_menu *m, uint64_t cmd_handle, uint64_t target_handl
     m->cmd_dispatch(cmd, (width + 7) / 8, (height + 7) / 8, 1);
 }
 
-void nr_menu_draw_compare(nr_menu *m, uint64_t cmd_handle, uint64_t image_handle,
-                          uint64_t reference_handle, uint32_t width, uint32_t height)
-{
-    if (!m || !m->pipeline) return;
-    if (m->compare_mode == NR_MENU_COMPARE_OFF) return;
-    if (!reference_handle) return;          /* nothing to compare against this frame */
-
-    const char *why = NULL;
-    if (!ensure_reference(m, width, height, &why)) {
-        static int announced = 0;
-        if (!announced) {
-            fprintf(stderr, "[nr_layer] comparison off: %s\n", why ? why : "unknown");
-            announced = 1;
-        }
-        m->compare_mode = NR_MENU_COMPARE_OFF;
-        return;
-    }
-
-    VkCommandBuffer cmd = (VkCommandBuffer)(uintptr_t)cmd_handle;
-    VkImage image = (VkImage)image_handle;
-    uint32_t used = 0;
-
-    /* The game's own frame is in the caller's staging buffer - it is what the layer copies the
-     * swapchain into - and the copy into the reference image is GPU to GPU, so nothing is read
-     * back. The barriers are on this command buffer, which the caller is already recording. */
-    VkImageMemoryBarrier into = {0};
-    into.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    into.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    into.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    into.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    into.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    into.image = m->reference;
-    into.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    into.subresourceRange.levelCount = 1;
-    into.subresourceRange.layerCount = 1;
-    into.srcAccessMask = 0;
-    into.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    m->cmd_pipeline_barrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                            VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &into);
-
-    VkBufferImageCopy region = {0};
-    region.imageSubresource = (VkImageSubresourceLayers){ VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-    region.imageExtent = (VkExtent3D){ width, height, 1 };
-    /* `VkBuffer` is non-dispatchable too: direct from the 64-bit parameter, not through
-     * `uintptr_t`. See the note on `ui_view` above. */
-    m->cmd_copy_buffer_to_image(cmd, (VkBuffer)reference_handle, m->reference,
-                                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
-
-    VkImageMemoryBarrier to_general = into;
-    to_general.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    to_general.newLayout = VK_IMAGE_LAYOUT_GENERAL;
-    to_general.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    to_general.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    m->cmd_pipeline_barrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, NULL, 0, NULL, 1,
-                            &to_general);
-
-    /* One quad over the whole image, drawn from the reference, which the shader cuts at the split
-     * against the image itself. The mode decides whether that is a wipe or a squeeze. */
-    quad_push(m, &used, 0, 0, (float)width, (float)height, 0, 0, 1, 1,
-              COLOUR(0xFF, 0xFF, 0xFF, 0xFF), NR_QUAD_REFERENCE);
-
-    VkImageView target = image_view_for(m, image);
-    if (target == VK_NULL_HANDLE) return;
-
-    VkDescriptorImageInfo dii[2] = {{0}, {0}};
-    dii[0].imageView = target;
-    dii[0].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-    dii[1].imageView = m->reference_view;
-    dii[1].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-
-    /* The comparison reads no quads and no glyphs, but the descriptor set is the same layout, so
-     * the two buffer bindings have to be filled - an unbound binding in a set that is bound is
-     * undefined behaviour even when the shader path does not reach it. */
-    VkDescriptorBufferInfo buffers[2] = {{0}, {0}};
-    buffers[0].buffer = m->quad_buffer;
-    buffers[0].offset = 0;
-    buffers[0].range = VK_WHOLE_SIZE;
-    buffers[1].buffer = m->atlas_buffer;
-    buffers[1].offset = 0;
-    buffers[1].range = VK_WHOLE_SIZE;
-
-    VkWriteDescriptorSet writes[4] = {{0}, {0}, {0}, {0}};
-    for (int i = 0; i < 4; ++i) {
-        writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[i].dstSet = m->compare_set;
-        writes[i].dstBinding = (uint32_t)i;
-        writes[i].descriptorCount = 1;
-        if (i < 2) {
-            writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-            writes[i].pImageInfo = &dii[i];
-        } else {
-            writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            writes[i].pBufferInfo = &buffers[i - 2];
-        }
-    }
-    m->update_descriptor_sets(m->device, 4, writes, 0, NULL);
-
-    m->cmd_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m->pipeline);
-    m->cmd_bind_descriptor(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m->layout, 0, 1,
-                           &m->compare_set, 0, NULL);
-
-    nr_menu_push push;
-    memset(&push, 0, sizeof push);
-    push.count = used;
-    push.panel_x = 0;
-    push.panel_y = 0;
-    push.panel_w = (float)width;
-    push.panel_h = (float)height;
-    push.atlas_w = m->font.width;
-    push.atlas_h = m->font.height;
-    push.compare_split = m->compare_split;
-    push.compare_swap = (uint32_t)m->compare_swap;
-    push.compare_mode = (uint32_t)m->compare_mode;
-    m->cmd_push_constants(cmd, m->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof push, &push);
-
-    /* The whole image: (width+7)/8 by (height+7)/8 groups. At 1280x720 that is 160x90, or
-     * 115 200 invocations - a few tenths of a millisecond against a frame that costs tens. */
-    m->cmd_dispatch(cmd, (width + 7) / 8, (height + 7) / 8, 1);
-}
