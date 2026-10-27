@@ -236,6 +236,9 @@ struct nr_menu_bridge {
     int pacing_async;
     int pacing_gpu_image;
     int pacing_every;
+    /* A is 0, B is 1: `NR_PRESET` in the same file as the pacing rows, for the same reason - the
+     * layer reads it at start-up, so writing it is how a change reaches the next run. */
+    int pacing_preset;
     char env_path[1088];
     /* `NR_ROOT` from the same file: where the release lives, and so where the setup window's
      * profile is. Empty when the line is absent, and then nothing is written back. */
@@ -378,6 +381,11 @@ static void format_row(nr_menu_bridge *b, int i)
  * and the socket, and losing a line of it breaks the installation. */
 static const char *const pacing_keys[] = {
     "NR_LAYER_ASYNC", "NR_GPU_IMAGE", "NR_GPU_TRANSPORT", "NR_GPU_ONLY", "NR_LAYER_LIVE",
+    /* **The network, not pacing, and here for a mechanical reason.** It lives in the same file, it
+     * is read once by the layer at start-up, and the panel is one of its two writers - so the
+     * rewrite has to drop the old line whether or not the user touched the Network row, or a stale
+     * value would survive beside the new one and win by position. */
+    "NR_PRESET",
 };
 #define NR_PACING_KEYS (sizeof pacing_keys / sizeof pacing_keys[0])
 
@@ -458,6 +466,7 @@ static void read_pacing(nr_menu_bridge *b)
     b->pacing_async = 0;
     b->pacing_gpu_image = 0;
     b->pacing_every = 1;
+    b->pacing_preset = 0;
     b->release_root[0] = 0;
     char path[1088];
     if (!env_file_path(b, path, sizeof path)) return;
@@ -489,6 +498,11 @@ static void read_pacing(nr_menu_bridge *b)
                            strncmp(at, "NR_LAYER_LIVE", name_len) == 0) {
                     int every = atoi(value);
                     b->pacing_every = (every >= 1 && every <= 4) ? every : 1;
+                } else if (name_len == strlen("NR_PRESET") &&
+                           strncmp(at, "NR_PRESET", name_len) == 0) {
+                    /* A is 0, B is 1. Anything else reads as A, which is what the daemon does
+                     * with an unrecognised value too - one rule, in one place each. */
+                    b->pacing_preset = (value_len == 1 && (value[0] == 'B' || value[0] == 'b')) ? 1 : 0;
                 } else if (name_len == strlen("NR_ROOT") &&
                            strncmp(at, "NR_ROOT", name_len) == 0) {
                     /* Where the release lives: the setup window's profile is under it. This is
@@ -553,11 +567,14 @@ static int write_pacing(nr_menu_bridge *b)
                          "NR_GPU_IMAGE=%d\n"
                          "NR_GPU_TRANSPORT=%d\n"
                          "NR_GPU_ONLY=0\n"
-                         "NR_LAYER_LIVE=%d\n",
+                         "NR_LAYER_LIVE=%d\n"
+                         /* The one line here whose value is a letter. */
+                         "NR_PRESET=%s\n",
                          b->pacing_async ? 1 : 0,
                          b->pacing_gpu_image ? 1 : 0,
                          b->pacing_gpu_image ? 1 : 0,
-                         b->pacing_every);
+                         b->pacing_every,
+                         b->pacing_preset ? "B" : "A");
     if (added < 0 || used + (size_t)added >= sizeof out) return 0;
     used += (size_t)added;
     return nr_write_file_atomic(b->env_path, out, used);
@@ -604,11 +621,14 @@ static int write_profile_pacing(const nr_menu_bridge *b)
 
     /* One key per line in the file, so each is replaced where it stands and everything else is
      * copied through untouched. A key that is absent is appended before the closing brace. */
-    static const char *const keys[3] = {"nr_async", "nr_every", "gpu_image_path"};
-    char values[3][16];
+    static const char *const keys[4] = {"nr_async", "nr_every", "gpu_image_path", "preset"};
+    char values[4][16];
     snprintf(values[0], sizeof values[0], "%s", b->pacing_async ? "true" : "false");
     snprintf(values[1], sizeof values[1], "%d", b->pacing_every);
     snprintf(values[2], sizeof values[2], "%s", b->pacing_gpu_image ? "true" : "false");
+    /* The one value here that is a JSON STRING. `preset` is "A" or "B" in the profile - the setup
+     * window's PresetChoice writes it that way - so it carries its own quotes. */
+    snprintf(values[3], sizeof values[3], "\"%s\"", b->pacing_preset ? "B" : "A");
 
     char out[16384];
     size_t used = 0;
@@ -619,7 +639,7 @@ static int write_profile_pacing(const nr_menu_bridge *b)
         while (*end && *end != '\n' && *end != '\r') ++end;
         size_t len = (size_t)(end - at);
         int replaced = 0;
-        for (int i = 0; i < 3; ++i) {
+        for (int i = 0; i < 4; ++i) {
             /* `  "nr_every": 4,` - the quote is what distinguishes the key from a value. */
             char quoted[32];
             int n = snprintf(quoted, sizeof quoted, "\"%s\"", keys[i]);
@@ -667,7 +687,7 @@ static int write_profile_pacing(const nr_menu_bridge *b)
      * The comma TRAILS the line before it rather than leading the new one. Both are valid JSON,
      * but every other line in this file ends in its comma and a file written half one way and
      * half the other is hard to read - and reading it by eye is how the last bug here was found. */
-    if (seen != 7) {
+    if (seen != 15) {   /* 2^4 - 1: every key present */
         size_t close = used;
         while (close > 0 && out[close - 1] != '}') --close;
         if (close == 0) return 0;               /* no object to add to */
@@ -678,7 +698,7 @@ static int write_profile_pacing(const nr_menu_bridge *b)
         char added[512];
         size_t n = 0;
         int first = 1;
-        for (int i = 0; i < 3; ++i) {
+        for (int i = 0; i < 4; ++i) {
             if (seen & (1 << i)) continue;
             int step = snprintf(added + n, sizeof added - n, "%s  \"%s\": %s",
                                 first ? "" : ",\n", keys[i], values[i]);
@@ -1431,7 +1451,6 @@ int nr_menu_bridge_update(nr_menu_bridge *b, float frame_seconds)
         }
         return 0;
     }
-
     int state = nr_menu_update(b->menu, frame_seconds);
 
     /* The toggle request is NOT taken here, and taking it was the whole reason END, and then
@@ -1599,6 +1618,11 @@ const char *nr_menu_bridge_selected_key(const nr_menu_bridge *b)
  * parsing the C. */
 /* ------------------------------------------------------------------ the layer's pacing, to the panel */
 
+int nr_menu_bridge_preset(const nr_menu_bridge *b)
+{
+    return b ? b->pacing_preset : 0;
+}
+
 int nr_menu_bridge_pacing_available(const nr_menu_bridge *b)
 {
     return b && b->pacing_ok;
@@ -1638,6 +1662,9 @@ int nr_menu_bridge_set_pacing(nr_menu_bridge *b, int what, int value)
         if (every > 1) b->pacing_gpu_image = 0;
         break;
     }
+    case NR_PACING_PRESET:
+        b->pacing_preset = value ? 1 : 0;
+        break;
     default:
         return 0;
     }

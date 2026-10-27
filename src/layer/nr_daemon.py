@@ -1598,21 +1598,27 @@ def main():
 def run_owned(args):
     # Before the model loads: a game that is closed during the load takes the daemon with it.
     end_with_game()
-    if args.weights is None:
-        # No model named on the command line: the settings file's `weights` knob decides, and
-        # behind it the installer's network choice (`NR_PRESET`). Reading the file here rather
-        # than letting the first refresh swap is what keeps one model load: the daemon comes up
-        # on the network the user last saved instead of loading A and hot-swapping to B.
-        args.weights = None
+    if getattr(args, "preset", None) is None:
+        # No preset on the command line. The settings file may name one - the panel's Network row
+        # writes it there when it switches the network live - and behind that is `NR_PRESET`, which
+        # the installer wrote into `nr-env.txt`.
+        #
+        # Reading the file here rather than letting the first refresh swap is what keeps ONE model
+        # load: the daemon comes up on the network the user last chose instead of loading A and
+        # hot-swapping to B a moment later. The old code did this for the `weights` knob; the
+        # reason survived the knob.
+        args.preset = None
         try:
             if args.settings and pathlib.Path(args.settings).is_file():
                 saved = json.loads(pathlib.Path(args.settings).read_text(encoding="utf-8-sig"))
                 if isinstance(saved, dict) and saved.get("preset") in nr_weight_models.PRESETS:
-                    args.weights = saved["weights"]
+                    args.preset = saved["preset"]
         except (OSError, ValueError):
             pass
-        if args.weights is None:
-            args.weights = "cc_small_fp8" if nr_frame.PRESET == "B" else "ht"
+        if args.preset is None:
+            # `NR_PRESET` in the environment, which is what the proxy sets in the game's process
+            # and the daemon inherits. Anything unrecognised is A, the shipped default.
+            args.preset = nr_weight_models.preset_of(os.environ.get("NR_PRESET"))
     args.live = Settings(args)
     args.history = History()
     args.letterbox = Letterbox()

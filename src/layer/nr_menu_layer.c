@@ -21,6 +21,13 @@ r_layer.c
 #ifndef F_OK
 #define F_OK 0
 #endif
+#ifdef _WIN32
+#  include <io.h>
+/* `access` and `_access` are the same function on MSVC, but only the underscore one is declared by
+ * <io.h>; without this the call is an implicit declaration and the link finds a CRT symbol of that
+ * name by luck. The layer's own translation unit spells this out for the same reason. */
+#  define access(p, m) _access(p, m)
+#endif
 
 /* First, because it sets the Vulkan platform define that 
 r_gpu_bridge.h needs and includes
@@ -441,6 +448,39 @@ static int menu_ui_rows(struct device_data *data, nrex_row *out, int capacity)
 			n++;
 		}
 	}
+	/* The network, A or B, after the pacing rows.
+	 *
+	 * **Not a knob any more, and this row is what replaced one.** `weights` named a model file and
+	 * resolved it through a manifest, which gave the project two settings for one fact; the
+	 * maintainer's item 3 removed it. But the panel still has to be able to switch the network -
+	 * he kept that half - so the row survives as a value that changes `NR_PRESET` itself.
+	 *
+	 * It is drawn from the bridge's own read of `nr-env.txt`, so what the panel shows is what the
+	 * layer will load at the next start. Changing it writes that file immediately, through the
+	 * same `set_pacing` path the three rows above use.
+	 *
+	 * Only offered when the file could be read: an install whose `nr-env.txt` this bridge cannot
+	 * identify has no value to show, and a row that draws "A" without knowing is a claim. */
+	if (nr_menu_bridge_pacing_available(data->menu_bridge)) {
+		if (n < capacity && n < MENU_UI_MAX_ROWS) {
+			nrex_row *r = &out[n];
+			memset(r, 0, sizeof *r);
+			r->label = nr_menu_text(language, NR_STR_WEIGHTS);
+			/* No dedicated hint key: the row IS the choice, and the two option labels already say
+			 * what A and B are. An empty hint draws nothing. */
+			r->hint = NULL;
+			r->kind = NREX_KIND_FLAG;
+			int preset = nr_menu_bridge_preset(data->menu_bridge);
+			r->choice_index = preset ? 1 : 0;
+			/* The option's own label from the table, so the row reads what the value IS rather
+			 * than a bare letter. `choice_weights_*` are the two names the installer uses for the
+			 * same choice, and they are translated in all four languages. */
+			r->value = nr_menu_text(language, preset ? NR_STR_CHOICE_WEIGHTS_CC_SMALL_FP8
+								 : NR_STR_CHOICE_WEIGHTS_HT);
+			n++;
+		}
+	}
+
 	return n;
 }
 #define window_is_foreground(hwnd) nr_window_is_foreground((void *)(hwnd))
@@ -971,6 +1011,7 @@ static int menu_read_keys(struct device_data *data, const unsigned char *keys)
 
 	if (data->menu_bridge) {
 		int state = nr_menu_bridge_update(data->menu_bridge, 1.0f / 60.0f);
+		(void)state;
 		if (state == 2)
 			fprintf(stderr, "[nr_layer] settings menu %s\n",
 				nr_menu_is_open(data->menu) ? "open" : "closed");
@@ -989,8 +1030,13 @@ static int menu_read_keys(struct device_data *data, const unsigned char *keys)
 	}
 
 	/* Tell the menu whether NR is on, so its status line is the truth rather than a guess. */
+	/* ***trigger_path as well as 	rigger_path.** NR_LAYER_TRIGGER can be the empty string,
+	 * which is not NULL, and _access("") on Windows is not a defined failure. */
 	nr_menu_set_nr_enabled(data->menu,
-			       trigger_path && access(trigger_path, F_OK) == 0);
+			       trigger_path && *trigger_path && access(trigger_path, F_OK) == 0);
+	return nr_menu_needs_composite(data->menu);
+	nr_menu_set_nr_enabled(data->menu,
+			       trigger_path && *trigger_path && access(trigger_path, F_OK) == 0);
 
 	/* And keep Save's memory of it honest.
 	 *
@@ -1264,6 +1310,8 @@ static int menu_composite(struct device_data *data, struct swapchain_data *chain
 				int value = (int)v;
 				if (i == knobs + 1) what = NR_PACING_GPU_IMAGE;
 				else if (i == knobs + 2) { what = NR_PACING_EVERY; value += 1; }
+				/* The Network row: a flag, so `value` is 0 or 1 and means A or B directly. */
+				else if (i == knobs + 3) what = NR_PACING_PRESET;
 				nr_menu_bridge_set_pacing(data->menu_bridge, what, value);
 				continue;
 			}

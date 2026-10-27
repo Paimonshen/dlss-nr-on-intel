@@ -503,6 +503,62 @@ int main(void)
         nr_menu_bridge_set_pacing(b, NR_PACING_GPU_IMAGE, 0);
         nr_menu_bridge_set_pacing(b, NR_PACING_EVERY, 3);
 
+    /* ---- the Network row: A or B, read from the file and written back as a letter ---- */
+    {
+        /* **This row is what replaced the `weights` knob**, and the difference matters: that knob
+         * named a model file and needed a manifest to resolve it, which is how `NR_PRESET=B` came
+         * to run A on an install whose manifest was missing. This one changes `NR_PRESET` itself,
+         * so there is one setting and no lookup. */
+        snprintf(detail, sizeof detail, "preset=%d (0=A 1=B)", nr_menu_bridge_preset(b));
+        check(nr_menu_bridge_preset(b) == 0, "the Network row reads A from the file", detail);
+
+        int set_ok = nr_menu_bridge_set_pacing(b, NR_PACING_PRESET, 1);
+        snprintf(detail, sizeof detail, "set_pacing returned %d, preset now %d",
+                 set_ok, nr_menu_bridge_preset(b));
+        check(set_ok, "the Network row can be set", detail);
+        snprintf(detail, sizeof detail, "preset=%d", nr_menu_bridge_preset(b));
+        check(nr_menu_bridge_preset(b) == 1, "and the bridge now reports B", detail);
+
+        /* Read the whole file once: both questions below are about the same bytes. */
+        static char env_text[65536];
+        size_t env_len = 0;
+        {
+            FILE *f = fopen(env_path, "rb");
+            if (f) {
+                env_len = fread(env_text, 1, sizeof env_text - 1, f);
+                env_text[env_len] = '\0';
+                fclose(f);
+            } else {
+                env_text[0] = '\0';
+            }
+        }
+
+        /* **The file says the LETTER.** The layer reads `NR_PRESET` as "A" or "B"; a `1` there
+         * would read as A and the switch would silently do nothing at the next start. */
+        const char *line = strstr(env_text, "NR_PRESET=");
+        snprintf(detail, sizeof detail, "%s", line ? line : "(no NR_PRESET line)");
+        check(line && line[10] == 'B', "and the file holds the letter B, not a number", detail);
+
+        /* One line, not two: the rewrite drops the old key before appending, or the stale value
+         * beside the new one would win by position. */
+        int occurrences = 0;
+        for (const char *q = env_text; (q = strstr(q, "NR_PRESET=")) != NULL; ++q) ++occurrences;
+        snprintf(detail, sizeof detail, "%d NR_PRESET line(s)", occurrences);
+        check(occurrences == 1, "and there is exactly one NR_PRESET line", detail);
+
+        /* Back to A, so the fixture leaves the file as it found it. */
+        nr_menu_bridge_set_pacing(b, NR_PACING_PRESET, 0);
+        {
+            FILE *f = fopen(env_path, "rb");
+            env_len = f ? fread(env_text, 1, sizeof env_text - 1, f) : 0;
+            env_text[env_len] = '\0';
+            if (f) fclose(f);
+        }
+        line = strstr(env_text, "NR_PRESET=");
+        snprintf(detail, sizeof detail, "%s", line ? line : "(no NR_PRESET line)");
+        check(line && line[10] == 'A', "switching back writes A", detail);
+    }
+
         nr_menu_bridge_destroy(b);
         b = nr_menu_bridge_create_headless(settings, 0);
         if (!b) { printf("  FAIL  no bridge on the restart\n"); return 1; }

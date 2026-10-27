@@ -106,7 +106,13 @@ void nr_menu_bridge_set_nr_saved(nr_menu_bridge *bridge, int on);
  *
  * `available` is 0 when the installation is not shaped the way the panel expects, in which case it
  * must offer none of them rather than edit a file it cannot identify. */
-enum { NR_PACING_ASYNC = 0, NR_PACING_GPU_IMAGE = 1, NR_PACING_EVERY = 2 };
+/* The three pacing rows, and then the network.
+ *
+ * `NR_PACING_PRESET` is not pacing: it is `NR_PRESET`, A or B. It shares this entry point because
+ * it shares the plumbing - a value that lives in `nr-env.txt` beside the game, written the moment
+ * it changes and read by the layer at the next start - and because a second entry point that did
+ * the same writes would be a second place for them to disagree. */
+enum { NR_PACING_ASYNC = 0, NR_PACING_GPU_IMAGE = 1, NR_PACING_EVERY = 2, NR_PACING_PRESET = 3 };
 
 /* Name the proxy's environment file instead of taking it from beside this library.
  *
@@ -116,6 +122,10 @@ enum { NR_PACING_ASYNC = 0, NR_PACING_GPU_IMAGE = 1, NR_PACING_EVERY = 2 };
 void nr_menu_bridge_use_env_file(const char *path);
 
 int nr_menu_bridge_pacing_available(const nr_menu_bridge *bridge);
+
+/* Which network runs: 0 for A, 1 for B. Read from `nr-env.txt` with the pacing rows, so the panel
+ * shows what the layer will actually load rather than what the settings file happens to say. */
+int nr_menu_bridge_preset(const nr_menu_bridge *bridge);
 int nr_menu_bridge_pacing_async(const nr_menu_bridge *bridge);
 int nr_menu_bridge_pacing_gpu_image(const nr_menu_bridge *bridge);
 int nr_menu_bridge_pacing_every(const nr_menu_bridge *bridge);

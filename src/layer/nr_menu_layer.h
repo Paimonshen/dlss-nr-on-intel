@@ -51,6 +51,22 @@ void nr_menu_layer_destroy(struct device_data *data);
  * same file, so this is the one place that writes it from inside the game. */
 void nr_menu_layer_set_trigger(struct device_data *data, int on);
 
+/* ------------------------------------------------ what `nr_layer.c` lends this file
+ *
+ * **These four have to be declared, and the reason is a real crash.** Without a prototype C assumes
+ * a function returns `int`, so `nr_layer_trigger_path()` - a `const char *` - came back as a
+ * 32-bit value with the top half of the address gone. The probe printed `0000000069E2E7E1` on a
+ * 64-bit process, and `access()` on that address faulted the game a few frames in. It looked like
+ * an unrelated crash because the truncation happens silently at the call.
+ *
+ * `nr_layer.c` exports them and includes this header, so a change to one of these signatures is a
+ * compile error on both sides rather than a value that quietly loses its top half.
+ */
+void nr_layer_menu_globals(VkInstance *instance, PFN_vkGetInstanceProcAddr *next_proc);
+struct swapchain_data *nr_layer_find_swapchain(VkSwapchainKHR swapchain);
+void nr_layer_set_trigger_file(const char *path, int on);
+const char *nr_layer_trigger_path(void);
+
 #else /* !_WIN32 */
 
 /* Nothing to do, and nothing to include: off Windows the menu does not exist, so these are the
