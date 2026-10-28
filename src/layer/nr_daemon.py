@@ -356,6 +356,24 @@ class Settings:
             merged.update(preview)
         self._apply(merged, "preview" if preview else "saved")
 
+        # **The network, which is not a knob and so is not in `KNOBS`.**
+        #
+        # `_apply` walks that tuple and this key is deliberately outside it - the network is not a
+        # picture parameter and a Reset must not move it. Leaving the read to `_apply` meant the
+        # merged value was dropped on the floor: the panel switched, the preview file said so, and
+        # `refresh_model` kept comparing against a `live.preset` that never changed.
+        #
+        # Anything unrecognised leaves the running network alone. That is the same rule the daemon
+        # applies at start-up (`NR_PRESET` decides), and it is the safe direction: a typo in a file
+        # must not load a network nobody asked for.
+        if "preset" in merged:
+            wanted = nr_weight_models.preset_of(merged.get("preset"))
+            if wanted != self.preset:
+                self.preset = wanted
+                print(f"settings: network preset {wanted} "
+                      f"(from the {'preview' if preview else 'saved'})",
+                      flush=True)
+
     @staticmethod
     def _confirmed(preview):
         """Whether a Save confirmed the values this preview shows.

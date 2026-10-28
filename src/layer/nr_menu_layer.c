@@ -509,12 +509,26 @@ static int menu_ui_rows(struct device_data *data, nrex_row *out, int capacity)
 			/* No dedicated hint key: the row IS the choice, and the two option labels already say
 			 * what A and B are. An empty hint draws nothing. */
 			r->hint = NULL;
-			r->kind = NREX_KIND_FLAG;
+			/* **CHOICE, not FLAG.** A FLAG draws a checkbox and its label and never renders
+			 * `r->value`, so this row showed an empty box labelled "network" with no way to see
+			 * which model was running and no key that changed it. That is what the game showed
+			 * before this was fixed. A CHOICE draws a combo over `r->choices`, which is what a
+			 * two-valued setting wants, and it is the control the `profile` row already uses. */
+			r->kind = NREX_KIND_CHOICE;
 			int preset = nr_menu_bridge_preset(data->menu_bridge);
 			r->choice_index = preset ? 1 : 0;
-			/* The option's own label from the table, so the row reads what the value IS rather
-			 * than a bare letter. `choice_weights_*` are the two names the installer uses for the
-			 * same choice, and they are translated in all four languages. */
+			/* The same two labels the installer offers for the same choice, so the panel and the
+			 * setup window name the networks identically - and both are translated in all four
+			 * languages because they come from the table. */
+			snprintf(name_storage[n][0], sizeof name_storage[n][0], "%s",
+				 nr_menu_text(language, NR_STR_CHOICE_WEIGHTS_HT));
+			snprintf(name_storage[n][1], sizeof name_storage[n][1], "%s",
+				 nr_menu_text(language, NR_STR_CHOICE_WEIGHTS_CC_SMALL_FP8));
+			names[n][0] = name_storage[n][0];
+			names[n][1] = name_storage[n][1];
+			names[n][2] = NULL;
+			r->choices = (const char *const *)names[n];
+			r->choice_count = 2;
 			r->value = nr_menu_text(language, preset ? NR_STR_CHOICE_WEIGHTS_CC_SMALL_FP8
 								 : NR_STR_CHOICE_WEIGHTS_HT);
 			n++;

@@ -246,6 +246,10 @@ int main(void)
         "NR_GPU_TRANSPORT=0\n"
         "NR_GPU_ONLY=0\n"
         "NR_LAYER_LIVE=1\n"
+        /* The network, as the installer writes it. The row seeds its value from
+         * this line, and two assertions below require the line to survive the panel
+         * switching - which it can only do if it is here. */
+        "NR_PRESET=A\n"
         "NR_PYTHON=C:\\python.exe\n", root);
     if (!make_installation(root, body)) { printf("  FAIL  could not build the fixture\n"); return 1; }
 
@@ -503,60 +507,88 @@ int main(void)
         nr_menu_bridge_set_pacing(b, NR_PACING_GPU_IMAGE, 0);
         nr_menu_bridge_set_pacing(b, NR_PACING_EVERY, 3);
 
-    /* ---- the Network row: A or B, read from the file and written back as a letter ---- */
+    /* ---- the Network row: live in the game, saved only on Save ---- */
     {
-        /* **This row is what replaced the `weights` knob**, and the difference matters: that knob
-         * named a model file and needed a manifest to resolve it, which is how `NR_PRESET=B` came
-         * to run A on an install whose manifest was missing. This one changes `NR_PRESET` itself,
-         * so there is one setting and no lookup. */
+        /* **This row is what replaced the `weights` knob**, and its contract is the one the owner
+         * asked for: switching it changes the picture now, and commits nothing.
+         *
+         * That is why it is NOT a pacing write any more. The three pacing rows go into
+         * `nr-env.txt` the moment they change, because the layer reads that file once at start-up
+         * and there is no Save for them. The network is a choice the user may be trying, so it
+         * goes into the live preview - which the daemon polls - and only Save writes it down. */
         snprintf(detail, sizeof detail, "preset=%d (0=A 1=B)", nr_menu_bridge_preset(b));
-        check(nr_menu_bridge_preset(b) == 0, "the Network row reads A from the file", detail);
+        check(nr_menu_bridge_preset(b) == 0, "the Network row starts on A, from the layer's file",
+              detail);
 
         int set_ok = nr_menu_bridge_set_pacing(b, NR_PACING_PRESET, 1);
-        snprintf(detail, sizeof detail, "set_pacing returned %d, preset now %d",
+        snprintf(detail, sizeof detail, "returned %d, preset now %d",
                  set_ok, nr_menu_bridge_preset(b));
-        check(set_ok, "the Network row can be set", detail);
-        snprintf(detail, sizeof detail, "preset=%d", nr_menu_bridge_preset(b));
-        check(nr_menu_bridge_preset(b) == 1, "and the bridge now reports B", detail);
+        check(set_ok && nr_menu_bridge_preset(b) == 1, "the row can be switched to B", detail);
 
-        /* Read the whole file once: both questions below are about the same bytes. */
-        static char env_text[65536];
-        size_t env_len = 0;
+        /* ---- 1. the live preview carries it: this is the swap the user sees ---- */
+        char live_path[1200];
+        snprintf(live_path, sizeof live_path, "%s.live", settings);
+        static char text[65536];
+        long got = -1;
+        {
+            FILE *f = fopen(live_path, "rb");
+            if (f) { got = (long)fread(text, 1, sizeof text - 1, f); text[got] = '\0'; fclose(f); }
+            else text[0] = '\0';
+        }
+        snprintf(detail, sizeof detail, "%s", got > 0 ? text : "(no live file)");
+        check(got > 0 && strstr(text, "\"preset\": \"B\""),
+              "the live preview carries the network, which is what the daemon polls", detail);
+
+        /* ---- 2. the layer's file is untouched: a later start still loads A ---- */
+        got = -1;
         {
             FILE *f = fopen(env_path, "rb");
-            if (f) {
-                env_len = fread(env_text, 1, sizeof env_text - 1, f);
-                env_text[env_len] = '\0';
-                fclose(f);
-            } else {
-                env_text[0] = '\0';
-            }
+            if (f) { got = (long)fread(text, 1, sizeof text - 1, f); text[got] = '\0'; fclose(f); }
+            else text[0] = '\0';
         }
+        snprintf(detail, sizeof detail, "%s", got > 0 ? text : "(missing)");
+        check(got > 0 && strstr(text, "NR_PRESET=A") && !strstr(text, "NR_PRESET=B"),
+              "and the layer's file is NOT rewritten, so a later start still loads A", detail);
 
-        /* **The file says the LETTER.** The layer reads `NR_PRESET` as "A" or "B"; a `1` there
-         * would read as A and the switch would silently do nothing at the next start. */
-        const char *line = strstr(env_text, "NR_PRESET=");
-        snprintf(detail, sizeof detail, "%s", line ? line : "(no NR_PRESET line)");
-        check(line && line[10] == 'B', "and the file holds the letter B, not a number", detail);
+        /* ---- 3. the settings file is untouched: nothing is remembered yet ---- */
+        got = -1;
+        {
+            FILE *f = fopen(settings, "rb");
+            if (f) { got = (long)fread(text, 1, sizeof text - 1, f); text[got] = '\0'; fclose(f); }
+            else text[0] = '\0';
+        }
+        snprintf(detail, sizeof detail, "%s", got > 0 ? text : "(missing)");
+        check(got > 0 && !strstr(text, "preset"),
+              "and the settings file is NOT written, so nothing is committed", detail);
 
-        /* One line, not two: the rewrite drops the old key before appending, or the stale value
-         * beside the new one would win by position. */
+        /* ---- 4. Save commits it ---- */
+        nr_menu_bridge_save(b);
+        got = -1;
+        {
+            FILE *f = fopen(settings, "rb");
+            if (f) { got = (long)fread(text, 1, sizeof text - 1, f); text[got] = '\0'; fclose(f); }
+            else text[0] = '\0';
+        }
+        snprintf(detail, sizeof detail, "%s", got > 0 ? text : "(missing)");
+        check(got > 0 && strstr(text, "\"preset\": \"B\""),
+              "Save writes it, and that is what a later start reads", detail);
+
+        /* One entry, or a parser takes whichever it sees last. */
         int occurrences = 0;
-        for (const char *q = env_text; (q = strstr(q, "NR_PRESET=")) != NULL; ++q) ++occurrences;
-        snprintf(detail, sizeof detail, "%d NR_PRESET line(s)", occurrences);
-        check(occurrences == 1, "and there is exactly one NR_PRESET line", detail);
+        for (const char *q = text; (q = strstr(q, "\"preset\"")) != NULL; ++q) ++occurrences;
+        snprintf(detail, sizeof detail, "%d preset key(s)", occurrences);
+        check(occurrences == 1, "and there is exactly one preset key", detail);
 
-        /* Back to A, so the fixture leaves the file as it found it. */
-        nr_menu_bridge_set_pacing(b, NR_PACING_PRESET, 0);
+        /* ---- 5. and Save still leaves the layer's file to the setup window ---- */
+        got = -1;
         {
             FILE *f = fopen(env_path, "rb");
-            env_len = f ? fread(env_text, 1, sizeof env_text - 1, f) : 0;
-            env_text[env_len] = '\0';
-            if (f) fclose(f);
+            if (f) { got = (long)fread(text, 1, sizeof text - 1, f); text[got] = '\0'; fclose(f); }
+            else text[0] = '\0';
         }
-        line = strstr(env_text, "NR_PRESET=");
-        snprintf(detail, sizeof detail, "%s", line ? line : "(no NR_PRESET line)");
-        check(line && line[10] == 'A', "switching back writes A", detail);
+        snprintf(detail, sizeof detail, "%s", got > 0 ? text : "(missing)");
+        check(got > 0 && strstr(text, "NR_PRESET=A"),
+              "and Save leaves the layer's file alone; the setup window owns it", detail);
     }
 
         nr_menu_bridge_destroy(b);

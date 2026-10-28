@@ -236,9 +236,15 @@ struct nr_menu_bridge {
     int pacing_async;
     int pacing_gpu_image;
     int pacing_every;
-    /* A is 0, B is 1: `NR_PRESET` in the same file as the pacing rows, for the same reason - the
-     * layer reads it at start-up, so writing it is how a change reaches the next run. */
-    int pacing_preset;
+    /* **A is 0, B is 1, and this is PREVIEWED state, not a pacing write.**
+     *
+     * It is seeded from `NR_PRESET` in `nr-env.txt` at load, because that is what the layer will
+     * load and the panel has to show the truth. Changing it in the panel does NOT rewrite that
+     * file: the live preview carries `"preset"` to the daemon, which swaps the model within a frame
+     * or two. Only Save writes the settings file, and only a later start reads `NR_PRESET` again -
+     * so closing the game without saving leaves the network as it was. That is what a preview is. */
+    int preset;
+    int preset_moved;
     char env_path[1088];
     /* `NR_ROOT` from the same file: where the release lives, and so where the setup window's
      * profile is. Empty when the line is absent, and then nothing is written back. */
@@ -381,11 +387,10 @@ static void format_row(nr_menu_bridge *b, int i)
  * and the socket, and losing a line of it breaks the installation. */
 static const char *const pacing_keys[] = {
     "NR_LAYER_ASYNC", "NR_GPU_IMAGE", "NR_GPU_TRANSPORT", "NR_GPU_ONLY", "NR_LAYER_LIVE",
-    /* **The network, not pacing, and here for a mechanical reason.** It lives in the same file, it
-     * is read once by the layer at start-up, and the panel is one of its two writers - so the
-     * rewrite has to drop the old line whether or not the user touched the Network row, or a stale
-     * value would survive beside the new one and win by position. */
-    "NR_PRESET",
+    /* **`NR_PRESET` is deliberately NOT here.** It was, when the Network row wrote the file the
+     * moment it changed. It is previewed state now: this rewrite copies the line through untouched,
+     * so the layer's start-up answer survives a pacing change, and only Save or the setup window
+     * changes it. */
 };
 #define NR_PACING_KEYS (sizeof pacing_keys / sizeof pacing_keys[0])
 
@@ -466,7 +471,7 @@ static void read_pacing(nr_menu_bridge *b)
     b->pacing_async = 0;
     b->pacing_gpu_image = 0;
     b->pacing_every = 1;
-    b->pacing_preset = 0;
+    b->preset = 0;
     b->release_root[0] = 0;
     char path[1088];
     if (!env_file_path(b, path, sizeof path)) return;
@@ -502,7 +507,7 @@ static void read_pacing(nr_menu_bridge *b)
                            strncmp(at, "NR_PRESET", name_len) == 0) {
                     /* A is 0, B is 1. Anything else reads as A, which is what the daemon does
                      * with an unrecognised value too - one rule, in one place each. */
-                    b->pacing_preset = (value_len == 1 && (value[0] == 'B' || value[0] == 'b')) ? 1 : 0;
+                    b->preset = (value_len == 1 && (value[0] == 'B' || value[0] == 'b')) ? 1 : 0;
                 } else if (name_len == strlen("NR_ROOT") &&
                            strncmp(at, "NR_ROOT", name_len) == 0) {
                     /* Where the release lives: the setup window's profile is under it. This is
@@ -567,14 +572,11 @@ static int write_pacing(nr_menu_bridge *b)
                          "NR_GPU_IMAGE=%d\n"
                          "NR_GPU_TRANSPORT=%d\n"
                          "NR_GPU_ONLY=0\n"
-                         "NR_LAYER_LIVE=%d\n"
-                         /* The one line here whose value is a letter. */
-                         "NR_PRESET=%s\n",
+                         "NR_LAYER_LIVE=%d\n",
                          b->pacing_async ? 1 : 0,
                          b->pacing_gpu_image ? 1 : 0,
                          b->pacing_gpu_image ? 1 : 0,
-                         b->pacing_every,
-                         b->pacing_preset ? "B" : "A");
+                         b->pacing_every);
     if (added < 0 || used + (size_t)added >= sizeof out) return 0;
     used += (size_t)added;
     return nr_write_file_atomic(b->env_path, out, used);
@@ -628,7 +630,10 @@ static int write_profile_pacing(const nr_menu_bridge *b)
     snprintf(values[2], sizeof values[2], "%s", b->pacing_gpu_image ? "true" : "false");
     /* The one value here that is a JSON STRING. `preset` is "A" or "B" in the profile - the setup
      * window's PresetChoice writes it that way - so it carries its own quotes. */
-    snprintf(values[3], sizeof values[3], "\"%s\"", b->pacing_preset ? "B" : "A");
+    /* The setup window's PresetChoice reads this, so the profile keeps following the panel - and
+     * `set_pacing` in `windows_wizard_core` writes the same key back. It is not a save of the
+     * running choice; it is the two surfaces agreeing on what is selected. */
+    snprintf(values[3], sizeof values[3], "\"%s\"", b->preset ? "B" : "A");
 
     char out[16384];
     size_t used = 0;
@@ -938,6 +943,11 @@ static int write_live_settings(nr_menu_bridge *b)
      * after a Save has put the same values in the settings file; a preview that is not confirmed is
      * the user mid-edit, and the daemon ignores it on a fresh start. */
     NR_EMIT("  \"menu_confirmed\": %d", b->preview_confirmed);
+    /* The network, when the panel changed it. `preset` is not in `knobs[]` - it is not a picture
+     * parameter and a Reset must not move it - so it is emitted here by hand. The daemon reads it
+     * as `live.preset` and swaps the model on the next frame, which is the live half of the
+     * switch; the saved half is `save_settings` below. */
+    if (b->preset_moved) NR_EMIT("  \"preset\": \"%s\"", b->preset ? "B" : "A");
     for (int i = 0; i < NR_KNOBS_COUNT; ++i) {
         if (!b->moved[i]) continue;
         const nr_knob_def *k = &knobs[i];
@@ -1025,6 +1035,7 @@ static int save_settings(nr_menu_bridge *b)
     memset(written, 0, sizeof written);
     int wrote_language = 0;
     int wrote_nr = 0;
+    int wrote_preset = 0;
 
     /* Whether a field has already been emitted, so the comma goes BEFORE a field rather than after
      * it. Writing `"key": value,\n` for every field and closing with `}` leaves a trailing comma
@@ -1071,6 +1082,15 @@ static int save_settings(nr_menu_bridge *b)
                 continue;
             }
 
+            /* And the network, same shape. It is written only when the panel changed it: a Save
+             * that never touched the Network row must not invent this key, or every Save would
+             * start recording a choice the user never made here. */
+            if (strcmp(name, "preset") == 0 && b->preset_moved) {
+                NR_EMIT("  \"%s\": \"%s\"", name, b->preset ? "B" : "A");
+                wrote_preset = 1;
+                continue;
+            }
+
             if (index >= 0 && b->moved[index]) {
                 const nr_knob_def *k = &knobs[index];
                 if (k->kind == 1) {
@@ -1096,6 +1116,12 @@ static int save_settings(nr_menu_bridge *b)
     /* And the effect's saved state. Appended when the file did not carry it, so the first Save
      * after this change adds it and every later Save substitutes in place. */
     if (!wrote_nr) NR_EMIT("  \"nr_enabled\": %d", b->nr_enabled_saved > 0 ? 1 : 0);
+
+    /* **And the network, which is the only one of these that is a previewed choice.** The live file
+     * already told the daemon; this is what a later start reads, and it is why Save is the only
+     * thing that makes the switch survive the session. */
+    if (!wrote_preset && b->preset_moved)
+        NR_EMIT("  \"preset\": \"%s\"", b->preset ? "B" : "A");
 
     /* Append the keys the user moved that were not already there. */
     for (int i = 0; i < NR_KNOBS_COUNT; ++i) {
@@ -1620,7 +1646,7 @@ const char *nr_menu_bridge_selected_key(const nr_menu_bridge *b)
 
 int nr_menu_bridge_preset(const nr_menu_bridge *b)
 {
-    return b ? b->pacing_preset : 0;
+    return b ? b->preset : 0;
 }
 
 int nr_menu_bridge_pacing_available(const nr_menu_bridge *b)
@@ -1663,8 +1689,15 @@ int nr_menu_bridge_set_pacing(nr_menu_bridge *b, int what, int value)
         break;
     }
     case NR_PACING_PRESET:
-        b->pacing_preset = value ? 1 : 0;
-        break;
+        /* **A preview, not a pacing write, and the early return is what says so.** The panel calls
+         * this entry point because the Network row sits among the pacing rows, but nothing in
+         * `nr-env.txt` changes: the live file carries the value to the daemon, and Save commits it.
+         * Returning here keeps it out of `write_pacing` below, which is the whole difference. */
+        b->preset = value ? 1 : 0;
+        b->preset_moved = 1;
+        b->preview_confirmed = 0;
+        b->dirty = 1;
+        return write_live_settings(b);
     default:
         return 0;
     }
