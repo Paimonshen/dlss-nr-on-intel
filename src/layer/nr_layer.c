@@ -61,6 +61,15 @@
 /* `struct device_data` and `struct swapchain_data`, which the menu's own file needs too. They used
  * to be defined below; they live in a header now so the Windows-only glue can see them. */
 #include "nr_layer_state.h"
+/* The three hooks this file calls into the menu's own translation unit.
+ *
+ * **Including this is not optional, and leaving it out was a real defect.** `nr_menu_layer_present`
+ * was called without a declaration, so C assumed it returned `int` - and MSVC, whose C4013 is a
+ * level-3 warning, said nothing at its default level. GCC refuses the file outright, which is what
+ * the maintainer's MinGW and Linux runs hit. The same mistake in a different file truncated a
+ * 64-bit pointer and crashed a game one round earlier; `build_win.bat` now passes `/we4013`, so
+ * MSVC makes it an error rather than relying on anyone noticing. */
+#include "nr_menu_layer.h"
 
 /* ------------------------------------------------------------------ diagnostics
  *
@@ -1073,8 +1082,13 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateSwapchainKHR(VkDevice device,
 		entry->extent = info->imageExtent;
 		/* Whether this surface took VK_IMAGE_USAGE_STORAGE_BIT, so the menu knows whether it
 		 * may write into these images. A surface that took transfer and not storage keeps
-		 * capture and loses the menu - see the comment above nr_CreateSwapchainKHR. */
-		entry->storage_ok = storage_ok;
+		 * capture and loses the menu - see the comment above nr_CreateSwapchainKHR.
+		 *
+		 * **Through the hook, not written here.** Assigning the field inline is why
+		 * `nr_menu_layer_note_storage` was dead code and the header's "three hooks" was really
+		 * one. Off Windows the hook is a no-op and the flag stays 0, which is correct: there is
+		 * no menu to read it. */
+		nr_menu_layer_note_storage(data, entry);
 		entry->surface.handle = (uint64_t)*swapchain;
 		entry->surface.width = info->imageExtent.width;
 		entry->surface.height = info->imageExtent.height;
@@ -1410,33 +1424,19 @@ VKAPI_ATTR void VKAPI_CALL nr_DestroyDevice(VkDevice device,
 			if (queues[i].device == device)
 				memset(&queues[i], 0, sizeof queues[i]);
 		nr_mutex_unlock(&lock);
-		/* Before the memset, which would otherwise drop the pointer and leak the menu.
+		/* **One call, and it is a hook.** This block used to call `nr_menu_bridge_destroy`,
+		 * `nrex_destroy` and `nr_menu_destroy` itself, which had three consequences:
 		 *
-		 * `nr_menu_bridge_destroy` is what removes the live preview, and the preview is the
-		 * daemon's view of what the user is trying RIGHT NOW - it has no meaning once this process
-		 * is gone. Leaving it behind is what made a Save look like it had not happened: a Reset
-		 * wrote the defaults there, the game exited with the panel open, and the next launch
-		 * overrode the saved settings with those stale defaults. The destroy call was reachable
-		 * only from the tests, so none of that cleanup ran in a real game - and the zeroing below
-		 * threw the pointer away, so nothing could have run it afterwards either. */
-		if (data->menu_bridge) {
-			nr_menu_bridge_destroy(data->menu_bridge);
-			data->menu_bridge = NULL;
-		}
-		/* The panel's Vulkan objects belong to this device and outlive every swapchain: its image,
-		 * view and memory, the atlas and quad buffers with theirs, the backend's command buffer,
-		 * and the two shader modules. NOTHING destroyed them - `nr_menu_create` and `nrex_create`
-		 * had no matching call in the tree, and the `memset` below dropped both pointers - so
-		 * validation's Object Tracking listed all fifteen at vkDestroyDevice. The bridge goes
-		 * first because the panel reads its rows through it. */
-		if (data->menu_ui) {
-			nrex_destroy(data->menu_ui);
-			data->menu_ui = NULL;
-		}
-		if (data->menu) {
-			nr_menu_destroy(data->menu);
-			data->menu = NULL;
-		}
+		 *   - off Windows those three have no definition at all, so the layer could not link
+		 *     there - the no-op arm of `nr_menu_layer.h` was never seen;
+		 *   - the menu's command pool and fence, which only the hook knows about, were never
+		 *     destroyed. Validation's Object Tracking reports them at vkDestroyDevice;
+		 *   - it left `nr_menu_layer_destroy` dead code, so "three hooks" was really one.
+		 *
+		 * The hook does the same three calls in the same order - bridge first, because the panel
+		 * reads its rows through it - plus the pool and the fence. It must run before the memset
+		 * below, which would otherwise drop the pointers and leak everything. */
+		nr_menu_layer_destroy(data);
 		memset(data, 0, sizeof *data);
 	}
 	if (next) next(device, allocator);

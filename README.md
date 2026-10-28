@@ -466,12 +466,6 @@ The other side of `hold`. Where the game's own pixel changed by this many levels
 
 The average change between two frames above which the scene is taken to have cut — a camera cut, a menu, a replay — and the previous frame is dropped entirely instead of pixel by pixel. Lower cuts more readily; 1 never cuts.
 
-### `weights` — which weight model the daemon runs
-
-`standard` / `natural` / `cinematic`
-
-Which model the network runs, by name. Unset, the installer's network choice (`NR_PRESET`) decides: A runs `ht`, the model this project reproduces, and B runs `cc_small_fp8`, the smaller network a 310.9.16-or-later DLL also carries, extracted by the installer when it is there. Naming one here overrides that, and a change reloads the model in the daemon without restarting the game; expect one present to wait for that load. A name whose file is missing falls back to the one that is here.
-
 <!-- knobs:end -->
 
 ## What to expect

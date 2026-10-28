@@ -161,7 +161,14 @@ for %%F in (imgui.obj imgui_draw.obj imgui_tables.obj imgui_widgets.obj imgui_im
     echo ERROR: %%F was not produced by the compile & exit /b 1
   )
 )
-cl /nologo /O2 /TC /utf-8 /D_WIN32 /I"%VULKAN_SDK%\Include" /I"%REPO%\third_party\imgui" /I"%REPO%\src\layer" /c "%REPO%\src\layer\nr_layer.c" "%REPO%\src\layer\nr_menu_layer.c" "%REPO%\src\layer\nr_menu.c" "%REPO%\src\layer\nr_menu_font.c" "%REPO%\src\layer\nr_menu_strings.c" "%REPO%\src\layer\nr_menu_strings_lookup.c" "%REPO%\src\layer\nr_menu_bridge.c" "%REPO%\src\layer\nr_file.c" "%REPO%\src\layer\nr_focus.c" "%REPO%\src\layer\nr_raw_mouse.c" "%REPO%\src\layer\test_exchange.c"
+rem /we4013: an implicit declaration is an ERROR, not a level-3 warning.
+rem
+rem Two rounds running, the same defect got through because MSVC is silent by default: a call to a
+rem function with no prototype, C assuming it returns `int`, and a 64-bit pointer coming back with
+rem its top half gone. The first one crashed a game inside a frame; the second stopped MinGW and
+rem Linux from compiling the layer at all. GCC treats it as an error already (14 made it one), so
+rem this is only bringing MSVC up to the standard the other two compilers hold.
+cl /nologo /O2 /TC /utf-8 /we4013 /D_WIN32 /I"%VULKAN_SDK%\Include" /I"%REPO%\third_party\imgui" /I"%REPO%\src\layer" /c "%REPO%\src\layer\nr_layer.c" "%REPO%\src\layer\nr_menu_layer.c" "%REPO%\src\layer\nr_menu.c" "%REPO%\src\layer\nr_menu_font.c" "%REPO%\src\layer\nr_menu_strings.c" "%REPO%\src\layer\nr_menu_strings_lookup.c" "%REPO%\src\layer\nr_menu_bridge.c" "%REPO%\src\layer\nr_file.c" "%REPO%\src\layer\nr_focus.c" "%REPO%\src\layer\nr_raw_mouse.c" "%REPO%\src\layer\test_exchange.c"
 if errorlevel 1 ( echo ERROR: layer C objects failed & exit /b 1 )
 rem link.exe, not cl, for the mixed C/C++ link: cl with /TC recompiles .obj inputs it is handed
 rem on the same command line (C2018, reading the binary as source), which is not a link at all.

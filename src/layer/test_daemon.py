@@ -389,16 +389,23 @@ def model_swap_gpu_tests():
     from pathlib import Path
 
     work = ROOT / 'work'
-    name, path = nr_weight_models.resolve(work, 'cc_small_fp8')
+    # **`weights_path`, not `resolve`.** There is no model table to resolve through: the network is
+    # a preset, and its file follows from the letter by name. This test asks the same question -
+    # where is B - with the one call that still exists.
+    path = nr_weight_models.weights_path(work, 'B')
     assert path and path.is_file(), 'both networks must be on disk to test a swap'
+    name = path.name
 
     shared = nr_gpu_transport.GPUSharedTransport(SimpleNamespace(runtime=SimpleNamespace(lib=None)))
     # One import, as the layer's HELLO leaves it: the context that must survive the swap.
     shared.contexts[(42, 7)] = SimpleNamespace(close=lambda: None, usable=True)
-    args = SimpleNamespace(model={"name": "ht", "requested": "ht", "backend": None},
-                           live=SimpleNamespace(weights=name), history=None,
+    # `requested` is the PRESET the daemon last settled on - "A" here - because that is what
+    # `refresh_model` compares `live.preset` against. Asking for "B" is what makes it swap.
+    args = SimpleNamespace(model={"name": "dlssnr-logical.safetensors", "preset": "A",
+                                  "requested": "A", "backend": None},
+                           live=SimpleNamespace(preset="B"), history=None,
                            gpu_images=SimpleNamespace(close=lambda: None), gpu_transport=shared)
-    backend = SimpleNamespace(name='ht')
+    backend = SimpleNamespace(name='dlssnr-logical.safetensors')
 
     with mock.patch('nr_daemon.nr_frame') as frame:
         fresh = SimpleNamespace(name=name, runtime=SimpleNamespace(lib=None))

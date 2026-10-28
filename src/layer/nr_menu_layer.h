@@ -14,9 +14,13 @@
  *
  * **The hooks.** Three, matching the three moments the layer needs the menu:
  *
- *   nr_menu_layer_create_swapchain  a swapchain was created - remember whether it took STORAGE
- *   nr_menu_layer_present           a frame is about to present - build, read keys, draw
- *   nr_menu_layer_destroy_device    the device is going - release the pool, fence and menu
+ *   nr_menu_layer_note_storage  a swapchain was created - remember whether it took STORAGE
+ *   nr_menu_layer_present       a frame is about to present - build, read keys, draw
+ *   nr_menu_layer_destroy       the device is going - release the bridge, panel, pool and fence
+ *
+ * The names are these, and the comment used to say create_swapchain and destroy_device, which
+ * is what the code does NOT call them. A header that names functions nobody can find is worse than
+ * no comment: it reads as documentation of an API that does not exist.
  *
  * Off Windows all three are `static inline` no-ops in this header, so `nr_layer.c` calls them with
  * no `#ifdef` of its own and there is exactly one place that decides whether a menu exists.
