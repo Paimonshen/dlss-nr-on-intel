@@ -876,6 +876,41 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateInstance(const VkInstanceCreateInfo *inf
 	return r;
 }
 
+#ifdef _WIN32
+/* Why the in-game panel cannot be built on the device `info` made, or NULL when it can.
+ *
+ * The panel's blend pass takes its two buffers by device address and is a SPIR-V 1.6 module, so
+ * the device must run Vulkan 1.3 and have bufferDeviceAddress ENABLED. What the GPU supports is
+ * not the question: the Arc supports the feature, vkcube's device enables nothing, and building
+ * the panel there was invalid usage. The feature is on when the GPU path's patch put it there
+ * (`gpu_enabled`), or when the game asked for it itself, as DXVK does. Decided here because only
+ * vkCreateDevice sees what was enabled. */
+static const char *menu_device_reason(VkPhysicalDevice physical, const VkDeviceCreateInfo *info,
+				      int gpu_enabled)
+{
+	PFN_vkGetPhysicalDeviceProperties properties = (PFN_vkGetPhysicalDeviceProperties)
+		next_instance_proc(layer_instance, "vkGetPhysicalDeviceProperties");
+	VkPhysicalDeviceProperties props;
+	memset(&props, 0, sizeof props);
+	if (properties) properties(physical, &props);
+	uint32_t version = layer_api_version < props.apiVersion ? layer_api_version : props.apiVersion;
+	if (version < VK_API_VERSION_1_3)
+		return "the device runs Vulkan below 1.3, and the panel's shader needs 1.3";
+	if (gpu_enabled) return NULL;
+	int steps = 0;
+	for (const VkBaseInStructure *p = (const VkBaseInStructure *)info->pNext;
+	     p && ++steps <= 128; p = p->pNext) {
+		if (p->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES
+		    && ((const VkPhysicalDeviceVulkan12Features *)p)->bufferDeviceAddress)
+			return NULL;
+		if (p->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES
+		    && ((const VkPhysicalDeviceBufferDeviceAddressFeatures *)p)->bufferDeviceAddress)
+			return NULL;
+	}
+	return "the game's device does not enable bufferDeviceAddress, which the panel needs";
+}
+#endif
+
 VKAPI_ATTR VkResult VKAPI_CALL nr_CreateDevice(VkPhysicalDevice physical,
 					       const VkDeviceCreateInfo *info,
 					       const VkAllocationCallbacks *allocator,
@@ -947,6 +982,7 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateDevice(VkPhysicalDevice physical,
 #ifdef _WIN32
 		data->gpu_enabled = gpu_enabled;
 		memcpy(data->gpu_note, gpu_note, sizeof data->gpu_note);
+		data->menu_device_reason = menu_device_reason(physical, info, gpu_enabled);
 #endif
 		data->present = (PFN_vkQueuePresentKHR)next_device(*device, "vkQueuePresentKHR");
 		data->get_device_queue =
@@ -1010,6 +1046,14 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateSwapchainKHR(VkDevice device,
 	 * transfer flags too and turn capture off. So STORAGE is only requested when the caps offer
 	 * it, and the menu is only built when it was.
 	 *
+	 * **The caps are not enough: the format must take it too.** A surface's caps are the same
+	 * for every format it offers, and Intel's Windows driver offers STORAGE on a surface whose
+	 * B8G8R8A8_SRGB images cannot be storage images. A swapchain asked for that is invalid
+	 * usage (VUID-VkSwapchainCreateInfoKHR-imageFormat-01778), which a driver may answer by
+	 * failing the creation - and then the fallback turns capture off for the whole game. The
+	 * menu's own `format_supports_storage` asks the same question, so a format that fails it
+	 * never had a menu to lose.
+	 *
 	 * **And only on Windows, because that is the only place the menu exists.** The ImGui panel is
 	 * the whole of what draws it: it needs a font from the Windows font directory, keys read
 	 * through `GetAsyncKeyState`, and the STORAGE usage its blend pass writes through. Off Windows
@@ -1026,11 +1070,18 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateSwapchainKHR(VkDevice device,
 		PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR caps_fn =
 			(PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR)
 			next_instance_proc(layer_instance, "vkGetPhysicalDeviceSurfaceCapabilitiesKHR");
-		if (caps_fn && data->physical) {
+		PFN_vkGetPhysicalDeviceFormatProperties format_fn =
+			(PFN_vkGetPhysicalDeviceFormatProperties)
+			next_instance_proc(layer_instance, "vkGetPhysicalDeviceFormatProperties");
+		if (caps_fn && format_fn && data->physical) {
 			VkSurfaceCapabilitiesKHR caps;
 			memset(&caps, 0, sizeof caps);
+			VkFormatProperties props;
+			memset(&props, 0, sizeof props);
+			format_fn(data->physical, info->imageFormat, &props);
 			if (caps_fn(data->physical, info->surface, &caps) == VK_SUCCESS
-			    && (caps.supportedUsageFlags & VK_IMAGE_USAGE_STORAGE_BIT)) {
+			    && (caps.supportedUsageFlags & VK_IMAGE_USAGE_STORAGE_BIT)
+			    && (props.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)) {
 				patched.imageUsage |= VK_IMAGE_USAGE_STORAGE_BIT;
 				storage_ok = 1;
 			}
@@ -1084,11 +1135,12 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateSwapchainKHR(VkDevice device,
 		 * may write into these images. A surface that took transfer and not storage keeps
 		 * capture and loses the menu - see the comment above nr_CreateSwapchainKHR.
 		 *
-		 * **Through the hook, not written here.** Assigning the field inline is why
-		 * `nr_menu_layer_note_storage` was dead code and the header's "three hooks" was really
-		 * one. Off Windows the hook is a no-op and the flag stays 0, which is correct: there is
-		 * no menu to read it. */
-		nr_menu_layer_note_storage(data, entry);
+		 * **Through the hook, and only when `storage_ok` says so.** The hook sets the flag
+		 * without looking, as its header says. A surface that refused STORAGE, or a swapchain
+		 * made on the fallback path, must keep the 0 the memset gave it, or the panel writes
+		 * into images that cannot hold it. Off Windows the hook is a no-op and the flag stays
+		 * 0, which is correct: there is no menu to read it. */
+		if (storage_ok) nr_menu_layer_note_storage(data, entry);
 		entry->surface.handle = (uint64_t)*swapchain;
 		entry->surface.width = info->imageExtent.width;
 		entry->surface.height = info->imageExtent.height;

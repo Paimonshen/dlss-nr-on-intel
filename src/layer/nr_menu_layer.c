@@ -164,36 +164,6 @@ static int menu_ui_collect_codepoints(int *out, int max)
 		if (i == 0 || out[i] != out[i - 1]) out[unique++] = out[i];
 	return unique;
 }
-/* Whether this device can give a buffer an address.
- *
- * The panel's shader takes its two buffers' addresses in a push constant, so both the buffer usage
- * and the memory allocation need `VK_KHR_buffer_device_address` and the feature behind it. On a
- * Vulkan 1.0 device without the extension the whole path is invalid, and validation says so before
- * a single frame is drawn.
- *
- * **Asked through the instance-level query, and "cannot tell" means NO.** Being wrong towards "no"
- * costs a missing panel; being wrong the other way costs invalid usage and, on vkcube, an
- * 0xC0000409 exit. */
-static int menu_can_address_buffers(struct device_data *data)
-{
-	VkInstance instance = VK_NULL_HANDLE;
-	PFN_vkGetInstanceProcAddr next_proc = NULL;
-	nr_layer_menu_globals(&instance, &next_proc);
-	if (!next_proc || !instance) return 0;
-	PFN_vkGetPhysicalDeviceFeatures2 get_features =
-		(PFN_vkGetPhysicalDeviceFeatures2)next_proc(instance,
-							    "vkGetPhysicalDeviceFeatures2");
-	if (!get_features || !data->physical) return 0;
-
-	VkPhysicalDeviceBufferDeviceAddressFeatures bda = {0};
-	bda.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES;
-	VkPhysicalDeviceFeatures2 query = {0};
-	query.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
-	query.pNext = &bda;
-	get_features(data->physical, &query);
-	return bda.bufferDeviceAddress == VK_TRUE;
-}
-
 static void menu_build(struct device_data *data, struct swapchain_data *chain)
 {
 	if (data->menu_state) return;
@@ -206,13 +176,14 @@ static void menu_build(struct device_data *data, struct swapchain_data *chain)
 		fprintf(stderr, "[nr_layer] no settings menu: %s\n", data->menu_reason);
 		return;
 	}
-	/* **And a device that cannot address a buffer gets no menu either.** The panel's shader takes
-	 * both of its buffers by device address, which needs `VK_KHR_buffer_device_address` and the
-	 * feature. A Vulkan 1.0 title - DOOM (2016) among them - does not have it, and building the
-	 * panel anyway is invalid usage: validation reported it on vkcube before a frame was drawn.
-	 * Standing aside is what the GPU path already does for the same reason. */
-	if (!menu_can_address_buffers(data)) {
-		data->menu_reason = "this device cannot address buffers, which the panel needs";
+	/* **And a device that cannot carry the panel gets none.** The panel's shader takes both of its
+	 * buffers by device address and is SPIR-V 1.6, so the device must have bufferDeviceAddress
+	 * enabled and run Vulkan 1.3. A Vulkan 1.0 title - DOOM (2016) among them - has neither, and
+	 * building the panel anyway is invalid usage: validation reported it on vkcube before a frame
+	 * was drawn. What the GPU supports is not the question, so vkCreateDevice recorded what the
+	 * game enabled (`menu_device_reason` in nr_layer.c). */
+	if (data->menu_device_reason) {
+		data->menu_reason = data->menu_device_reason;
 		fprintf(stderr, "[nr_layer] no settings menu: %s\n", data->menu_reason);
 		return;
 	}

@@ -184,6 +184,9 @@ struct device_data {
 	nr_menu_bridge *menu_bridge;
 	int menu_state;
 	const char *menu_reason;
+	/* Why this device cannot carry the panel at all, decided at vkCreateDevice from what the game
+	 * enabled (see `menu_device_reason` in nr_layer.c); NULL when it can. */
+	const char *menu_device_reason;
 	int menu_language;
 	/* The menu's own recording, reused like `transfer_commands`. The fence is what makes reuse
 	 * safe: the wait completes the previous frame's menu before the next resets the buffer. */
