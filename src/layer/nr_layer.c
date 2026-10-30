@@ -1918,46 +1918,6 @@ static int process_frame_async(struct device_data *data, struct swapchain_data *
 	return 0;
 }
 
-
-
-/* The chain this device is presenting on. A device has one or two; the first is the one the
- * game is drawing to, and the menu only ever needs the extent and the image to write.
- *
- * **Nothing calls this, and that is the point of keeping it.** `find_swapchain` answers the same
- * question from the present path and took over; this was the first spelling of it. Deleted, a
- * Linux build warns about nothing - but the next person who needs "the chain for this device"
- * writes a third one, and `find_swapchain`'s signature (a handle, not a device) is not obviously
- * the same question. So it stays, marked, until something wants it. */
-static struct swapchain_data *chain_for(struct device_data *data)
-{
-	for (int i = 0; i < MAX_SWAPCHAINS; ++i)
-		if (swapchains[i].swapchain && swapchains[i].device == data->device)
-			return &swapchains[i];
-	return NULL;
-}
-/* Referenced so the compiler does not call it unused: the address is taken and dropped, which is
- * the one way to keep a function that nothing calls without a warning on either compiler. */
-static struct swapchain_data *(*const chain_for_keep)(struct device_data *) = chain_for;
-
-
-/* Build the menu and its bridge, on the first present that can carry them.
- *
- * Fails soft in every direction: a swapchain that did not take STORAGE, a format that cannot be a
- * storage image, no font, no shader - each sets `menu_state` to -1 with a reason, the message goes
- * to stderr once, and every later call returns on the first branch. A game with no menu is the
- * game it was. */
-
-/* The image count the UI's backend wants. A swapchain's minimum is not tracked separately - the
- * actual count is always >= it - so the one number this file has is the one it hands over. */
-static void *g_instance_for_ui(void) { return (void *)layer_instance; }
-/* Kept for the same reason as `chain_for_keep`: `nrex_create` takes the instance through a
- * parameter, so nothing calls this - but the menu's backend wants it again the moment a second
- * entry point is added, and a `void *` holding a `VkInstance` is not a thing to reinvent. */
-static void *(*const g_instance_for_ui_keep)(void) = g_instance_for_ui;
-
-
-
-
 /* Turn the effect on or off, by creating or removing the trigger file the present path reads.
  *
  * One function because there are now three ways in - the Home key, the panel's checkbox, and

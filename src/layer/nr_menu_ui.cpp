@@ -968,7 +968,24 @@ static void nrex_draw_panel(nrex_ui *u, const char *title, int language,
             int idx = r.choice_index;
             ImGui::SetNextItemWidth(kSliderWidth + kFieldWidth +
                                     ImGui::GetStyle().ItemSpacing.x);
-            if (ImGui::Combo("##c", &idx, r.choices, r.choice_count)) {
+            bool picked = ImGui::Combo("##c", &idx, r.choices, r.choice_count);
+            /* Left/Right step the choice, as the hint says they change a row. ImGui gives a combo
+             * no arrow tweak - only Enter opens it - so Right on the Network row did nothing and
+             * the hint was wrong there. The keys are claimed the way the slider rows above claim
+             * them, so nav does not take Right as a move to another item. One step a press, no
+             * repeat, and no wrap: the ends of a list stay ends. */
+            if (!picked && ImGui::IsItemFocused()) {
+                const ImGuiID row_id = ImGui::GetItemID();
+                ImGui::SetKeyOwner(ImGuiKey_LeftArrow,  row_id);
+                ImGui::SetKeyOwner(ImGuiKey_RightArrow, row_id);
+                const int step = ImGui::IsKeyPressed(ImGuiKey_RightArrow, false) ? 1
+                               : ImGui::IsKeyPressed(ImGuiKey_LeftArrow,  false) ? -1 : 0;
+                if (step != 0 && idx + step >= 0 && idx + step < r.choice_count) {
+                    idx += step;
+                    picked = true;
+                }
+            }
+            if (picked) {
                 g_actions |= NREX_ACT_CHANGED;
                 if (g_rows) { g_rows[i].changed = 1; g_rows[i].value_i = idx; }
             }

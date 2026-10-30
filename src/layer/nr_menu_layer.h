@@ -50,11 +50,6 @@ int nr_menu_layer_present(struct device_data *data, VkQueue queue,
 /* Release what the menu owns. Safe to call on a device that never built one. */
 void nr_menu_layer_destroy(struct device_data *data);
 
-/* Turn the effect on or off by creating or removing the trigger file, and keep the bridge's idea
- * of the saved state in step. The panel's checkbox, the Home key and the setup window all move the
- * same file, so this is the one place that writes it from inside the game. */
-void nr_menu_layer_set_trigger(struct device_data *data, int on);
-
 /* ------------------------------------------------ what `nr_layer.c` lends this file
  *
  * **These four have to be declared, and the reason is a real crash.** Without a prototype C assumes
@@ -82,8 +77,6 @@ static inline int nr_menu_layer_present(struct device_data *data, VkQueue queue,
                                         const VkPresentInfoKHR *info)
 { (void)data; (void)queue; (void)info; return 0; }
 static inline void nr_menu_layer_destroy(struct device_data *data) { (void)data; }
-static inline void nr_menu_layer_set_trigger(struct device_data *data, int on)
-{ (void)data; (void)on; }
 
 #endif /* _WIN32 */
 

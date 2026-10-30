@@ -246,8 +246,8 @@ static void menu_build(struct device_data *data, struct swapchain_data *chain)
 		 * moment a font was supplied. Ownership transferred, so the pointer is not touched again;
 		 * if the UI never asked for it, the buffer is freed here instead. */
 		if (!data->menu_ui) free(font);
-		/* next_instance_proc needs the instance; g_instance_for_ui hands it over inside the
-		 * resolver the UI was given, so the two together reach the instance-level commands. */
+		/* next_instance_proc needs the instance; `nrex_create` was given it beside the resolver
+		 * above, so the two together reach the instance-level commands. */
 		if (data->menu_ui) {
 			/* ImGui owns the panel now, so this file stops reading the panel's keys. Leaving both
 			 * readers on is what made one keypress act twice - Enter opening a combo while the
@@ -1054,12 +1054,9 @@ static int menu_read_keys(struct device_data *data, const unsigned char *keys)
 		nr_menu_bridge_set_nr_saved(data->menu_bridge, on);
 	}
 
-	/* Tell the menu whether NR is on, so its status line is the truth rather than a guess. */
-	/* ***trigger_path as well as 	rigger_path.** NR_LAYER_TRIGGER can be the empty string,
+	/* Tell the menu whether NR is on, so its status line is the truth rather than a guess.
+	 * **`*trigger_path` as well as `trigger_path`.** NR_LAYER_TRIGGER can be the empty string,
 	 * which is not NULL, and _access("") on Windows is not a defined failure. */
-	nr_menu_set_nr_enabled(data->menu,
-			       trigger_path && *trigger_path && access(trigger_path, F_OK) == 0);
-	return nr_menu_needs_composite(data->menu);
 	nr_menu_set_nr_enabled(data->menu,
 			       trigger_path && *trigger_path && access(trigger_path, F_OK) == 0);
 
@@ -1073,17 +1070,17 @@ static int menu_read_keys(struct device_data *data, const unsigned char *keys)
 	 * off for no reason the user could see.
 	 *
 	 * Comparing against the trigger every frame is what makes it right whichever way in was used,
-	 * and it costs one `access` on a file the line above has already asked about. */
+	 * and it costs one `access` on a file the line above has already asked about.
+	 *
+	 * **It was unreachable from round seven to round ten:** a `return` above it, left when this
+	 * moved out of nr_layer.c, so a Save with NR on wrote "nr_enabled": 0 again. */
 	if (trigger_path && *trigger_path && data->menu_bridge) {
 		int live = access(trigger_path, F_OK) == 0;
 		if ((nr_menu_bridge_nr_saved(data->menu_bridge) ? 1 : 0) != live)
 			nr_menu_bridge_set_nr_saved(data->menu_bridge, live);
 	}
 
-	{
-		int need = nr_menu_needs_composite(data->menu);
-		return need;
-	}
+	return nr_menu_needs_composite(data->menu);
 }
 /* The menu's own command buffer, its fence, and one submit. See the note above on why it owns no
  * semaphores.
@@ -1629,22 +1626,4 @@ void nr_menu_layer_destroy(struct device_data *data)
 		if (destroy_pool) destroy_pool(data->device, data->menu_pool, NULL);
 		data->menu_pool = VK_NULL_HANDLE;
 	}
-}
-
-void nr_menu_layer_set_trigger(struct device_data *data, int on)
-{
-	if (!data) return;
-	const char *trigger_path = NULL;
-	{
-		VkInstance instance = VK_NULL_HANDLE;
-		PFN_vkGetInstanceProcAddr next_proc = NULL;
-		nr_layer_menu_globals(&instance, &next_proc);
-		(void)instance;
-		(void)next_proc;
-	}
-	/* The trigger path is the layer's own; it resolves it once and hands it over. */
-	trigger_path = nr_layer_trigger_path();
-	if (!trigger_path || !*trigger_path) return;
-	nr_layer_set_trigger_file(trigger_path, on);
-	nr_menu_bridge_set_nr_saved(data->menu_bridge, on);
 }
