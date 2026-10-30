@@ -71,7 +71,7 @@ typedef pthread_mutex_t nr_mutex_t;
 #define nr_key_down(vk) (0)
 #endif
 
-static double nr_now_seconds(void)
+static inline double nr_now_seconds(void)
 {
 #ifdef _WIN32
 	static int have_frequency;

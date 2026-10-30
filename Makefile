@@ -97,6 +97,14 @@ ifeq ($(OS),Windows_NT)
 FOCUS_GATE := work/test_focus_gate
 endif
 
+# The menu's own test programs link the menu, which is compiled on Windows only (MENU_SOURCES
+# below), so they are built and run there only, by the same switch.
+MENU_TESTS :=
+ifeq ($(OS),Windows_NT)
+MENU_TESTS := work/test_menu_rows work/test_menu_persist work/test_soft_cursor \
+              work/test_menu_hints work/test_settings_writer
+endif
+
 # The in-game menu, as sources the layer links - **Windows only**.
 #
 # The menu is a Windows feature by construction: the ImGui panel needs a font from the Windows font
@@ -127,8 +135,13 @@ endif
 # has them.
 LAYER_SUPPORT := src/layer/nr_file.c src/layer/nr_focus.c
 
+# The driver that compiles and links the layer and the tests that include it. ImGui is the only
+# C++ in it, and only on Windows; elsewhere the C compiler links it, since g++ links libstdc++
+# into a layer with no C++ in it.
+LAYER_LD = $(if $(IMGUI_SOURCES),$(CXX) $(CXXFLAGS),$(CC) $(CFLAGS))
+
 work/libnr_layer.so: src/layer/nr_layer.c $(MENU_SOURCES) $(IMGUI_SOURCES) $(LAYER_SUPPORT) $(LAYER_HEADERS)
-	$(CXX) $(CXXFLAGS) -Ithird_party/imgui -Isrc/layer -shared -o $@ \
+	$(LAYER_LD) -Ithird_party/imgui -Isrc/layer -shared -o $@ \
 	       $(call AS_C,src/layer/nr_layer.c $(MENU_SOURCES) $(LAYER_SUPPORT)) $(IMGUI_SOURCES) -x none -lvulkan
 
 # The knob table against `nr_knobs.py`, which is the definition. The author asked for this after
@@ -176,7 +189,7 @@ work/test_soft_cursor: src/layer/test_soft_cursor.cpp $(IMGUI_SOURCES)
 	       $(IMGUI_SOURCES) -lvulkan $(MENU_LIBS)
 
 work/libnr_layer32.so: src/layer/nr_layer.c $(MENU_SOURCES) $(IMGUI_SOURCES) $(LAYER_SUPPORT) $(LAYER_HEADERS)
-	$(CXX) $(CXXFLAGS) -m32 -Ithird_party/imgui -Isrc/layer -shared -o $@ \
+	$(LAYER_LD) -m32 -Ithird_party/imgui -Isrc/layer -shared -o $@ \
 	       $(call AS_C,src/layer/nr_layer.c $(MENU_SOURCES) $(LAYER_SUPPORT)) $(IMGUI_SOURCES) -x none -lvulkan
 
 work/test_layer_loader: src/layer/test_layer_loader.c
@@ -191,18 +204,18 @@ work/test_layer_loader32: src/layer/test_layer_loader.c
 # The three that `#include "nr_layer.c"` rather than link the library, so they compile the menu
 # sources themselves - exactly as the CMake build now does, and as `tools/build_win.bat` always did.
 work/test_settled: src/layer/test_settled.c src/layer/nr_layer.c $(MENU_SOURCES) $(IMGUI_SOURCES) $(LAYER_SUPPORT) $(LAYER_HEADERS)
-	$(CXX) $(CXXFLAGS) -Ithird_party/imgui -Isrc/layer -o $@ \
+	$(LAYER_LD) -Ithird_party/imgui -Isrc/layer -o $@ \
 	       $(call AS_C,$< $(MENU_SOURCES) $(LAYER_SUPPORT)) $(IMGUI_SOURCES) -x none -lvulkan
 
 work/test_exchange: src/layer/test_exchange.c src/layer/nr_layer.c $(MENU_SOURCES) $(IMGUI_SOURCES) $(LAYER_SUPPORT) $(LAYER_HEADERS)
-	$(CXX) $(CXXFLAGS) -Ithird_party/imgui -Isrc/layer -o $@ \
+	$(LAYER_LD) -Ithird_party/imgui -Isrc/layer -o $@ \
 	       $(call AS_C,$< $(MENU_SOURCES) $(LAYER_SUPPORT)) $(IMGUI_SOURCES) -x none -lvulkan -lpthread
 
 work/test_surface_policy: src/layer/test_surface_policy.c src/layer/nr_surface_policy.h
 	$(CC) $(CFLAGS) -UNDEBUG -o $@ $<
 
 work/test_transfer_resources: src/layer/test_transfer_resources.c src/layer/nr_layer.c $(MENU_SOURCES) $(IMGUI_SOURCES) $(LAYER_SUPPORT) $(LAYER_HEADERS)
-	$(CXX) $(CXXFLAGS) -Ithird_party/imgui -Isrc/layer -o $@ \
+	$(LAYER_LD) -Ithird_party/imgui -Isrc/layer -o $@ \
 	       $(call AS_C,$< $(MENU_SOURCES) $(LAYER_SUPPORT)) $(IMGUI_SOURCES) -x none -lvulkan -lpthread
 
 GEMM_GLSL := src/gpu/publish.glsl src/gpu/specialize.glsl src/gpu/residual_epilogue.glsl \
@@ -280,7 +293,7 @@ bench: all work/half_probe.spv
 	python3 src/bench/half_probe.py
 	python3 src/bench/split_cost.py
 
-test: all work/attention_ab.spv work/test_exchange work/test_settled work/test_present work/test_surface_policy work/test_transfer_resources work/test_menu_rows work/test_menu_persist work/test_soft_cursor $(FOCUS_GATE) work/test_menu_hints work/test_settings_writer
+test: all work/attention_ab.spv work/test_exchange work/test_settled work/test_present work/test_surface_policy work/test_transfer_resources $(MENU_TESTS) $(FOCUS_GATE)
 	python3 src/gpu/test_ffn_batch.py --gpu
 	python3 src/gpu/test_device_pick.py
 	python3 src/gpu/test_gemm_contract.py
@@ -288,12 +301,12 @@ test: all work/attention_ab.spv work/test_exchange work/test_settled work/test_p
 	python3 src/gpu/test_input_fp16.py
 	python3 src/gpu/test_compact_head.py
 	python3 src/gpu/test_joint_qkv.py
-	work/test_soft_cursor
 ifeq ($(OS),Windows_NT)
+	work/test_soft_cursor
 	work/test_focus_gate
-endif
 	work/test_settings_writer
 	work/test_menu_hints
+endif
 	python3 src/layer/test_daemon.py
 	python3 src/layer/test_daemon_owner.py
 	python3 src/layer/test_gpu_only.py
@@ -301,11 +314,11 @@ endif
 	work/test_surface_policy
 	work/test_transfer_resources
 	work/test_settled
-	work/test_menu_rows
 ifeq ($(OS),Windows_NT)
+	work/test_menu_rows
 	python3 src/layer/test_menu_rows.py
-endif
 	work/test_menu_persist
+endif
 	python3 src/layer/test_ui_mask.py
 	python3 src/layer/test_present.py
 	python3 src/layer/test_temporal.py

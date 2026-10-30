@@ -227,7 +227,7 @@ int main(void)
         check(cursor_gated, "the cursor release is gated",
               cursor_gated ? "ShowCursor and ClipCursor inside #ifdef _WIN32"
                            : "MISSING - a Linux build reaches ShowCursor");
-        int timer_shared = find(lsource, "static double nr_now_seconds(void)")
+        int timer_shared = find(lsource, "double nr_now_seconds(void)")
                            && find(lsource, "clock_gettime(CLOCK_MONOTONIC, &ts)");
         check(timer_shared, "the frame timer has a non-Windows arm",
               timer_shared ? "nr_now_seconds, with CLOCK_MONOTONIC beside QPC"

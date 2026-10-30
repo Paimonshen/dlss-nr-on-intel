@@ -147,6 +147,12 @@
 #endif
 
 
+#else
+#include <dlfcn.h>   /* dladdr: the layer's own path */
+#include <spawn.h>
+#include <fcntl.h>
+#endif
+
 /* A line appended whole to the daemon's log, which the daemon has open for appending and
  * shares. On Windows a game's stderr reaches nobody, and the setup window's status and
  * Save report read this log: the GPU path's reasons go there too (issue #17). */
@@ -175,12 +181,6 @@ static void append_daemon_log(const char *line)
 	close(fd);
 #endif
 }
-
-#else
-#include <dlfcn.h>   /* dladdr: the layer's own path */
-#include <spawn.h>
-#include <fcntl.h>
-#endif
 
 
 
@@ -1922,7 +1922,10 @@ static int process_frame_async(struct device_data *data, struct swapchain_data *
  *
  * One function because there are now three ways in - the Home key, the panel's checkbox, and
  * whatever comes next - and they must not each spell the file handling out. A zero-byte file is
- * "on" and its absence is "off"; nothing else is written, so nothing can go stale. */
+ * "on" and its absence is "off"; nothing else is written, so nothing can go stale.
+ *
+ * Windows only, as its one caller below is: off Windows it would be a function with no caller. */
+#ifdef _WIN32
 static void set_trigger(const char *path, int on)
 {
 	if (!path || !*path) return;
@@ -1933,6 +1936,7 @@ static void set_trigger(const char *path, int on)
 		if (access(path, F_OK) == 0) remove(path);
 	}
 }
+#endif
 
 /* ------------------------------------------------------------------ what the menu's file needs
  *
