@@ -561,25 +561,8 @@ int main(void)
         check(got > 0 && !strstr(text, "preset"),
               "and the settings file is NOT written, so nothing is committed", detail);
 
-        /* ---- 4. Save commits it ---- */
-        nr_menu_bridge_save(b);
-        got = -1;
-        {
-            FILE *f = fopen(settings, "rb");
-            if (f) { got = (long)fread(text, 1, sizeof text - 1, f); text[got] = '\0'; fclose(f); }
-            else text[0] = '\0';
-        }
-        snprintf(detail, sizeof detail, "%s", got > 0 ? text : "(missing)");
-        check(got > 0 && strstr(text, "\"preset\": \"B\""),
-              "Save writes it, and that is what a later start reads", detail);
-
-        /* One entry, or a parser takes whichever it sees last. */
-        int occurrences = 0;
-        for (const char *q = text; (q = strstr(q, "\"preset\"")) != NULL; ++q) ++occurrences;
-        snprintf(detail, sizeof detail, "%d preset key(s)", occurrences);
-        check(occurrences == 1, "and there is exactly one preset key", detail);
-
-        /* ---- 5. and Save still leaves the layer's file to the setup window ---- */
+        /* ---- 4. a pacing change before Save writes the SAVED letter, not the previewed one ---- */
+        nr_menu_bridge_set_pacing(b, NR_PACING_EVERY, 3);
         got = -1;
         {
             FILE *f = fopen(env_path, "rb");
@@ -587,8 +570,55 @@ int main(void)
             else text[0] = '\0';
         }
         snprintf(detail, sizeof detail, "%s", got > 0 ? text : "(missing)");
-        check(got > 0 && strstr(text, "NR_PRESET=A"),
-              "and Save leaves the layer's file alone; the setup window owns it", detail);
+        check(got > 0 && strstr(text, "NR_PRESET=A") && !strstr(text, "NR_PRESET=B"),
+              "a pacing change keeps the layer's file on A", detail);
+        char raw[64];
+        int have = profile_raw(root, "preset", raw, sizeof raw);
+        snprintf(detail, sizeof detail, "profile preset=%s", have ? raw : "ABSENT");
+        check(have && strcmp(raw, "\"A\"") == 0,
+              "and the profile on A: an unsaved switch is not the setup window's choice", detail);
+
+        /* ---- 5. Save commits it where the setup window keeps it ---- */
+        nr_menu_bridge_save(b);
+        got = -1;
+        {
+            FILE *f = fopen(env_path, "rb");
+            if (f) { got = (long)fread(text, 1, sizeof text - 1, f); text[got] = '\0'; fclose(f); }
+            else text[0] = '\0';
+        }
+        int lines = 0;
+        for (const char *q = text; (q = strstr(q, "NR_PRESET=")) != NULL; ++q) ++lines;
+        snprintf(detail, sizeof detail, "%d NR_PRESET line(s): %s", lines,
+                 got > 0 ? text : "(missing)");
+        check(got > 0 && strstr(text, "NR_PRESET=B") && lines == 1,
+              "Save writes NR_PRESET=B, once, which is what a later start reads", detail);
+        have = profile_raw(root, "preset", raw, sizeof raw);
+        snprintf(detail, sizeof detail, "profile preset=%s", have ? raw : "ABSENT");
+        check(have && strcmp(raw, "\"B\"") == 0, "and the profile follows it", detail);
+        got = -1;
+        {
+            FILE *f = fopen(settings, "rb");
+            if (f) { got = (long)fread(text, 1, sizeof text - 1, f); text[got] = '\0'; fclose(f); }
+            else text[0] = '\0';
+        }
+        snprintf(detail, sizeof detail, "%s", got > 0 ? text : "(missing)");
+        check(got > 0 && !strstr(text, "preset"),
+              "and the settings file carries no network: one setting, one place", detail);
+
+        /* ---- 6. and back to A the same way, which later checks here rely on ---- */
+        nr_menu_bridge_set_pacing(b, NR_PACING_PRESET, 0);
+        nr_menu_bridge_save(b);
+        got = -1;
+        {
+            FILE *f = fopen(env_path, "rb");
+            if (f) { got = (long)fread(text, 1, sizeof text - 1, f); text[got] = '\0'; fclose(f); }
+            else text[0] = '\0';
+        }
+        have = profile_raw(root, "preset", raw, sizeof raw);
+        snprintf(detail, sizeof detail, "profile preset=%s; %s", have ? raw : "ABSENT",
+                 got > 0 ? text : "(missing)");
+        check(got > 0 && strstr(text, "NR_PRESET=A") && have && strcmp(raw, "\"A\"") == 0,
+              "a Save of A puts both back", detail);
     }
 
         nr_menu_bridge_destroy(b);

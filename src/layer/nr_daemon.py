@@ -363,16 +363,19 @@ class Settings:
         # merged value was dropped on the floor: the panel switched, the preview file said so, and
         # `refresh_model` kept comparing against a `live.preset` that never changed.
         #
-        # Anything unrecognised leaves the running network alone. That is the same rule the daemon
-        # applies at start-up (`NR_PRESET` decides), and it is the safe direction: a typo in a file
-        # must not load a network nobody asked for.
-        if "preset" in merged:
-            wanted = nr_weight_models.preset_of(merged.get("preset"))
-            if wanted != self.preset:
-                self.preset = wanted
-                print(f"settings: network preset {wanted} "
-                      f"(from the {'preview' if preview else 'saved'})",
-                      flush=True)
+        # **Only from the preview, and only while the game that wrote it runs.** The durable choice
+        # is `NR_PRESET`, which the setup window and the panel's Save both write into `nr-env.txt`
+        # and the daemon starts on. A `preset` in the saved file - round ten's Save wrote one - is
+        # ignored: the setup window never sees that file, so it would win over the window's own
+        # choice. A preview left behind by a game that has ended is ignored too, even a confirmed
+        # one, because its Save already went into `NR_PRESET` and a later choice must win over it.
+        #
+        # Anything but A or B leaves the running network alone: a typo in a file must not load a
+        # network nobody asked for.
+        wanted = preview.get("preset") if preview and self._owner_alive(preview) else None
+        if wanted in nr_weight_models.PRESETS and wanted != self.preset:
+            self.preset = wanted
+            print(f"settings: network preset {wanted} (from the panel)", flush=True)
 
     @staticmethod
     def _confirmed(preview):
@@ -1617,26 +1620,16 @@ def run_owned(args):
     # Before the model loads: a game that is closed during the load takes the daemon with it.
     end_with_game()
     if getattr(args, "preset", None) is None:
-        # No preset on the command line. The settings file may name one - the panel's Network row
-        # writes it there when it switches the network live - and behind that is `NR_PRESET`, which
-        # the installer wrote into `nr-env.txt`.
+        # No preset on the command line, so `NR_PRESET`: the proxy sets it in the game's process from
+        # `nr-env.txt`, and the daemon inherits it. That file is the one place the network is kept -
+        # the setup window writes it, and so does the panel's Save - so the daemon comes up on the
+        # network the user last chose, with one model load. Anything unrecognised is A, the shipped
+        # default.
         #
-        # Reading the file here rather than letting the first refresh swap is what keeps ONE model
-        # load: the daemon comes up on the network the user last chose instead of loading A and
-        # hot-swapping to B a moment later. The old code did this for the `weights` knob; the
-        # reason survived the knob.
-        args.preset = None
-        try:
-            if args.settings and pathlib.Path(args.settings).is_file():
-                saved = json.loads(pathlib.Path(args.settings).read_text(encoding="utf-8-sig"))
-                if isinstance(saved, dict) and saved.get("preset") in nr_weight_models.PRESETS:
-                    args.preset = saved["preset"]
-        except (OSError, ValueError):
-            pass
-        if args.preset is None:
-            # `NR_PRESET` in the environment, which is what the proxy sets in the game's process
-            # and the daemon inherits. Anything unrecognised is A, the shipped default.
-            args.preset = nr_weight_models.preset_of(os.environ.get("NR_PRESET"))
+        # **Not the settings file.** Round ten read a `preset` key there first, which the panel's
+        # Save wrote and the setup window never touched: after a panel Save of B, the window's A
+        # changed nothing. A file from that round still carries the key, and it is ignored.
+        args.preset = nr_weight_models.preset_of(os.environ.get("NR_PRESET"))
     args.live = Settings(args)
     args.history = History()
     args.letterbox = Letterbox()

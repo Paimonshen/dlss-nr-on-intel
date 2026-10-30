@@ -219,6 +219,26 @@ def main():
         checks.append(("a flagless preview from an older layer is refused",
                        stale_ok, "saved values kept"))
 
+        # The network. It is not a knob: the durable choice is `NR_PRESET`, which the setup window
+        # and the panel's Save both write into `nr-env.txt`. What these files may carry is the
+        # panel's live switch, in the preview, while the game that wrote it runs.
+        os.environ.pop("NR_PRESET", None)
+        live.unlink(missing_ok=True)
+        write(settings, {"render_scale": 0.8, "preset": "B"})
+        net = make()
+        checks.append(("a preset in the saved file does not choose the network",
+                       net.preset == "A", f"preset={net.preset}"))
+        write_preview({"preset": "B"}, pid="live", confirmed=False)
+        net.refresh()
+        checks.append(("the panel's live switch moves the network",
+                       net.preset == "B", f"preset={net.preset}"))
+        # Left behind by a game that has ended, even confirmed: its Save already went into
+        # `NR_PRESET`, and a later choice in the setup window must win over it.
+        write_preview({"preset": "B"}, confirmed=True)
+        net = make()
+        checks.append(("a left-behind preview does not move the network",
+                       net.preset == "A", f"preset={net.preset}"))
+
     width = max(len(name) for name, _, _ in checks)
     failed = 0
     print()
